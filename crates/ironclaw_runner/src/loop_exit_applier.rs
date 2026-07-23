@@ -1,7 +1,7 @@
-//! Trusted `LoopExit` applier adapters for the Reborn turn-runner composition.
+//! Trusted `LoopExit` applier adapters for the IronClaw turn-runner composition.
 //!
 //! `ironclaw_turns` owns the trusted applier and the private validation policy.
-//! This module provides Reborn-specific evidence adapters.
+//! This module provides IronClaw-specific evidence adapters.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -151,7 +151,7 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
     }
 }
 
-/// Durable text/checkpoint-backed evidence adapter for the current Reborn host.
+/// Durable text/checkpoint-backed evidence adapter for the current IronClaw host.
 ///
 /// Completions are trusted only when every reported reply ref and result ref is
 /// backed by same-run finalized thread evidence. Result-ref-only completions
@@ -596,7 +596,7 @@ where
 
 fn thread_scope_from_turn_scope(scope: &TurnScope) -> Result<ThreadScope, TurnError> {
     // `ironclaw_threads::ThreadScope` is currently agent-scoped. Reject
-    // agentless Reborn turns explicitly until the thread store grows an
+    // agentless IronClaw turns explicitly until the thread store grows an
     // agentless scope representation.
     let Some(agent_id) = scope.agent_id.clone() else {
         return Err(TurnError::InvalidRequest {

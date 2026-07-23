@@ -19,20 +19,20 @@
 //! install→activate arm is pinned in phase 5, after the full remove.
 //! (Scenarios 8 and 9 run later but touch only slack/notion state.)
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 1: activate the existing install; tools get published ─────────
     let lifecycle = g
         .thread("gh-lifecycle-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::text("github ready"),
+            IronClawScriptedReply::text("github ready"),
         ])
         .build()
         .await?;
@@ -60,23 +60,23 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let caller = g
         .thread("gh-lifecycle-caller")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 json!({"owner": "octocat", "repo": "hello-world"}),
             ),
-            RebornScriptedReply::text("looked up repo"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("looked up repo"),
+            IronClawScriptedReply::tool_call(
                 "github.create_issue",
                 json!({"owner": "octocat", "repo": "hello-world",
                        "title": "after remove?", "body": "should not dispatch"}),
             ),
-            RebornScriptedReply::text("github unavailable"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("github unavailable"),
+            IronClawScriptedReply::tool_call(
                 "github.create_issue",
                 json!({"owner": "octocat", "repo": "hello-world",
                        "title": "after restore", "body": "should dispatch"}),
             ),
-            RebornScriptedReply::text("filed the issue"),
+            IronClawScriptedReply::text("filed the issue"),
         ])
         .build()
         .await?;
@@ -88,11 +88,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let remover = g
         .thread("gh-lifecycle-remove")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_remove",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::text("github removed"),
+            IronClawScriptedReply::text("github removed"),
         ])
         .build()
         .await?;
@@ -109,8 +109,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let viewer = g
         .thread("gh-lifecycle-viewer-after-remove")
         .script([
-            RebornScriptedReply::tool_call("builtin.extension_search", json!({"query": "github"})),
-            RebornScriptedReply::text("searched catalog"),
+            IronClawScriptedReply::tool_call(
+                "builtin.extension_search",
+                json!({"query": "github"}),
+            ),
+            IronClawScriptedReply::text("searched catalog"),
         ])
         .build()
         .await?;
@@ -151,15 +154,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let restorer = g
         .thread("gh-lifecycle-restore")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::text("github restored"),
+            IronClawScriptedReply::text("github restored"),
         ])
         .build()
         .await?;

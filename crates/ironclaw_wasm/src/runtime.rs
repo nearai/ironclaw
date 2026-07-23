@@ -11,7 +11,7 @@ use crate::store::StoreData;
 use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
 use crate::wasm_sandbox_core::SandboxLimits;
 
-/// Reborn WIT-compatible WASM tool runtime.
+/// IronClaw WIT-compatible WASM tool runtime.
 ///
 /// Cloning is cheap: [`Engine`] is internally reference-counted and
 /// [`WitToolRuntimeConfig`] is a small `Clone` value. A clone shares the same
@@ -164,7 +164,7 @@ impl std::fmt::Debug for WitToolRuntime {
 
 fn spawn_epoch_ticker(engine: Engine) -> Result<(), WasmError> {
     std::thread::Builder::new()
-        .name("reborn-wasm-epoch-ticker".into())
+        .name("ironclaw-wasm-epoch-ticker".into())
         .spawn(move || {
             loop {
                 std::thread::sleep(EPOCH_TICK_INTERVAL);

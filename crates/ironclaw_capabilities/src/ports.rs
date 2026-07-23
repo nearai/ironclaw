@@ -12,14 +12,14 @@
 //! - an active persistent grant → a re-authorize with that grant injected.
 //!
 //! Keeping *decisions* in the kernel and *mechanism* behind this port is the
-//! §5.3.2 security milestone (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`):
+//! §5.3.2 security milestone (`docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`):
 //! it makes the `Authorized` seal's guarantee real instead of vacuous. A port
 //! that returned decisions would recreate the four-layer authority smear behind
 //! a single trait — the exact failure this milestone exists to remove.
 //!
 //! **Boundary:** the sole consumer is `CapabilityHost::authorize`; the sole
 //! production implementor is `ironclaw_host_runtime::DefaultHostRuntime` (the
-//! `reborn_dependency_boundaries` architecture test keeps the impl up-layer).
+//! `ironclaw_dependency_boundaries` architecture test keeps the impl up-layer).
 //! The port references only `ironclaw_host_api` vocabulary plus the kernel-local
 //! [`PolicyAction`], so it adds no dependency edge to the kernel crate.
 

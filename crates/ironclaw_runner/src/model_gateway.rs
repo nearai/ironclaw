@@ -1,8 +1,8 @@
 // arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
-//! LLM provider-backed Reborn model gateway wiring.
+//! LLM provider-backed IronClaw model gateway wiring.
 //!
 //! The loop-host crate owns the host-facing model gateway contract. This
-//! adapter lives in the standalone Reborn composition crate because it bridges
+//! adapter lives in the standalone IronClaw composition crate because it bridges
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
 use std::{
@@ -71,7 +71,7 @@ const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
-const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
+const CONTEXT_SHADOW_TARGET: &str = "ironclaw::context_shadow";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
 fn trace_model_latency_ok(
@@ -110,7 +110,7 @@ fn trace_model_latency_error<E: ?Sized>(
     );
 }
 
-/// Fail-closed routing policy from resolved Reborn model profile ids to the
+/// Fail-closed routing policy from resolved IronClaw model profile ids to the
 /// host-selected provider/model envelope.
 #[derive(Debug, Clone, Default)]
 pub struct LlmModelProfilePolicy {
@@ -171,7 +171,7 @@ struct LlmModelProfileRoute {
     model_override: Option<String>,
 }
 
-/// Production Reborn model gateway backed by durable session-thread context.
+/// Production IronClaw model gateway backed by durable session-thread context.
 ///
 /// This is the concrete adapter intended to sit behind
 /// [`HostManagedLoopModelPort`](ironclaw_turns::run_profile::HostManagedLoopModelPort):
@@ -1205,7 +1205,7 @@ where
             debug!(
                 tool_definition_count = tool_definitions.len(),
                 tool_name_sample = ?tool_name_sample,
-                "reborn model gateway resolved provider tool definitions"
+                "IronClaw model gateway resolved provider tool definitions"
             );
         }
         if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
@@ -1214,7 +1214,7 @@ where
                 target: CONTEXT_SHADOW_TARGET,
                 tool_definition_count = tool_definitions.len(),
                 est_tool_schema_tokens,
-                "reborn tool surface shadow measurement"
+                "IronClaw tool surface shadow measurement"
             );
         }
         if !tool_definitions.is_empty() {
@@ -1231,7 +1231,7 @@ where
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
-            debug!("reborn model gateway dispatching tool-capable provider request");
+            debug!("IronClaw model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
                 provider
@@ -1303,7 +1303,7 @@ where
                     );
                     debug!(
                         safe_summary = error.safe_summary.as_str(),
-                        "reborn model gateway retrying after repairable provider tool output"
+                        "IronClaw model gateway retrying after repairable provider tool output"
                     );
                     let mut repair_request = tool_request;
                     repair_request
@@ -1388,11 +1388,11 @@ where
             }
         }
         debug!(
-            "reborn model gateway falling back to text-only provider request because no provider tool definitions were available"
+            "IronClaw model gateway falling back to text-only provider request because no provider tool definitions were available"
         );
     } else {
         debug!(
-            "reborn model gateway dispatching text-only provider request because no capability port was supplied"
+            "IronClaw model gateway dispatching text-only provider request because no capability port was supplied"
         );
     }
 
@@ -1437,7 +1437,7 @@ where
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),
-        "reborn model gateway received text-only provider response"
+        "IronClaw model gateway received text-only provider response"
     );
     response_to_host_reply(response)
 }
@@ -1473,7 +1473,7 @@ fn recover_textual_tool_calls_from_tool_response(
     let recovered_tool_calls = recover_codex_text_tool_calls_from_tool_names(content, tool_names);
     if recovered_tool_calls.is_empty() {
         if contains_codex_text_tool_call_syntax(content) {
-            debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
+            debug!("IronClaw model gateway rejected unrecovered textual provider tool-call syntax");
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
                 InvalidOutputReason::TextualToolCallSyntax.safe_summary(),
@@ -1484,7 +1484,7 @@ fn recover_textual_tool_calls_from_tool_response(
 
     debug!(
         recovered_tool_call_count = recovered_tool_calls.len(),
-        "reborn model gateway recovered capability calls from textual provider response"
+        "IronClaw model gateway recovered capability calls from textual provider response"
     );
     Ok(ToolCompletionResponse {
         content: Some(clean_response(content)),
@@ -1546,7 +1546,7 @@ async fn tool_response_to_host(
             tool_call_count = response.tool_calls.len(),
             tool_call_name_sample = ?tool_call_name_sample,
             content_bytes = response.content.as_ref().map(|content| content.len()).unwrap_or(0),
-            "reborn model gateway received tool-capable provider response"
+            "IronClaw model gateway received tool-capable provider response"
         );
     }
     if !response.tool_calls.is_empty()
@@ -1559,7 +1559,7 @@ async fn tool_response_to_host(
             debug!(
                 requested_capability_id = %guard.capability_id,
                 tool_call_count = response.tool_calls.len(),
-                "reborn model gateway suppressed provider tool calls after unavailable named capability request"
+                "IronClaw model gateway suppressed provider tool calls after unavailable named capability request"
             );
             return Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 UNAVAILABLE_CAPABILITY_REPLY,
@@ -1616,7 +1616,7 @@ async fn tool_response_to_host(
                     // disabled capability" = deny filter, etc.), so it names which
                     // port in the chain rejected the call.
                     reason = error.safe_summary.as_str(),
-                    "reborn model gateway rejected provider tool call during validation"
+                    "IronClaw model gateway rejected provider tool call during validation"
                 );
                 return Err(map_provider_tool_output_error(error));
             }
@@ -1635,7 +1635,7 @@ async fn tool_response_to_host(
                         provider_call_id = rejected_provider_call_id.as_str(),
                         error_kind = ?error.kind,
                         reason = error.safe_summary.as_str(),
-                        "reborn model gateway rejected provider tool call during registration"
+                        "IronClaw model gateway rejected provider tool call during registration"
                     );
                     return Err(map_provider_tool_output_error(error));
                 }
@@ -1643,7 +1643,7 @@ async fn tool_response_to_host(
         }
         debug!(
             capability_call_count = candidates.len(),
-            "reborn model gateway classified provider response as capability calls"
+            "IronClaw model gateway classified provider response as capability calls"
         );
         return Ok(HostManagedModelResponse::capability_calls_with_reasoning(
             candidates,
@@ -1669,7 +1669,7 @@ async fn tool_response_to_host(
             }
             debug!(
                 content_bytes = content.len(),
-                "reborn model gateway classified tool-capable provider response as assistant reply"
+                "IronClaw model gateway classified tool-capable provider response as assistant reply"
             );
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
@@ -1715,14 +1715,14 @@ fn provider_calls_are_advertised_or_resolvable(
                 debug!(
                     tool_name = provider_call.name.as_str(),
                     provider_capability_id = ids.provider_capability_id.as_str(),
-                    "reborn model gateway accepted resolvable unadvertised provider tool call"
+                    "IronClaw model gateway accepted resolvable unadvertised provider tool call"
                 );
             }
             Err(error) => {
                 debug!(
                     tool_name = provider_call.name.as_str(),
                     safe_summary = error.safe_summary.as_str(),
-                    "reborn model gateway rejected unresolved unadvertised provider tool call"
+                    "IronClaw model gateway rejected unresolved unadvertised provider tool call"
                 );
                 return false;
             }
@@ -1927,7 +1927,7 @@ fn provider_tool_call_from_llm(
             provider_call_id = tool_call.id.as_str(),
             tool_name = tool_call.name.as_str(),
             safe_summary = safe_summary.as_str(),
-            "reborn model gateway rejected malformed provider tool arguments"
+            "IronClaw model gateway rejected malformed provider tool arguments"
         );
         return Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
@@ -1935,7 +1935,7 @@ fn provider_tool_call_from_llm(
         ));
     }
     let name = ProviderToolName::new(tool_call.name).map_err(|error| {
-        debug!(%error, "reborn model gateway rejected invalid provider tool name");
+        debug!(%error, "IronClaw model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
             InvalidOutputReason::InvalidReturnedToolName.safe_summary(),
@@ -2178,13 +2178,17 @@ fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
 ///
 /// Defaults **off**: unset / empty / unrecognized leaves the replayed context
 /// byte-identical to the pre-feature path. An operator opts in with `on`, `1`,
-/// or `true`. Kept as a separate knob from `REBORN_TOOL_DISCLOSURE` because this
+/// or `true`. Kept as a separate knob from `IRONCLAW_TOOL_DISCLOSURE` because this
 /// context-dedup pass runs in the shared `convert_messages` path independently of
 /// tool disclosure.
-pub const REBORN_COLLAPSE_REPEATED_FAILURES_ENV: &str = "REBORN_COLLAPSE_REPEATED_FAILURES";
+pub const IRONCLAW_COLLAPSE_REPEATED_FAILURES_ENV: &str = "IRONCLAW_COLLAPSE_REPEATED_FAILURES";
+const LEGACY_COLLAPSE_REPEATED_FAILURES_ENV: &str = "REBORN_COLLAPSE_REPEATED_FAILURES";
 
 fn collapse_repeated_failures_enabled() -> bool {
-    collapse_repeated_failures_from_raw(std::env::var(REBORN_COLLAPSE_REPEATED_FAILURES_ENV).ok())
+    let value = std::env::var(IRONCLAW_COLLAPSE_REPEATED_FAILURES_ENV)
+        .ok()
+        .or_else(|| std::env::var(LEGACY_COLLAPSE_REPEATED_FAILURES_ENV).ok());
+    collapse_repeated_failures_from_raw(value)
 }
 
 /// Pure resolution of the collapse flag from a raw env value, so the default-off
@@ -2242,7 +2246,7 @@ fn convert_messages(
     mut messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<Vec<ChatMessage>, HostManagedModelError> {
-    // Off by default (see REBORN_COLLAPSE_REPEATED_FAILURES_ENV): only collapse
+    // Off by default (see IRONCLAW_COLLAPSE_REPEATED_FAILURES_ENV): only collapse
     // interior duplicate error observations when an operator opts in, so the
     // replayed context is otherwise byte-identical to the pre-feature path.
     if collapse_repeated_failures_enabled() {
@@ -2494,7 +2498,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         operation = "complete",
         error = %error,
         error_debug = ?error,
-        "reborn model provider error mapped to safe summary"
+        "IronClaw model provider error mapped to safe summary"
     );
     // Tier 2b: carry the provider's real message (status line + body snippet)
     // on the model-visible detail channel so the failure explainer can describe

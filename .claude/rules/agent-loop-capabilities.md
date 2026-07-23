@@ -1,6 +1,6 @@
 ---
 paths:
-  - "crates/ironclaw_reborn_composition/**/*.rs"
+  - "crates/ironclaw_composition/**/*.rs"
   - "crates/ironclaw_loop_host/**/*.rs"
   - "crates/ironclaw_agent_loop/**/*.rs"
   - "crates/ironclaw_runner/**/*.rs"
@@ -51,7 +51,7 @@ Pattern: don't `?` / `map_err(into_host_error)` a whole error enum
 straight into `Err`. Match it and route the recoverable arms to
 `Ok(CapabilityOutcome::Failed(..))`. See
 `skill_activation_selection_outcome` and `project_service_outcome` in
-`crates/ironclaw_reborn_composition/src/runtime/local_dev/` for the
+`crates/ironclaw_composition/src/runtime/local_dev/` for the
 shape.
 
 **Review flag:** a handler doing `.map_err(<to AgentLoopHostError>)?`
@@ -126,4 +126,4 @@ past the helper:
 - Safe-summary validation: `crates/ironclaw_loop_host/src/lib.rs`
   (`append_capability_result_ref`),
   `crates/ironclaw_threads/src/tool_result_reference.rs`.
-- Exemplar handlers: `crates/ironclaw_reborn_composition/src/runtime/local_dev/{skill_activation,project_create,outbound_delivery}.rs`.
+- Exemplar handlers: `crates/ironclaw_composition/src/runtime/local_dev/{skill_activation,project_create,outbound_delivery}.rs`.

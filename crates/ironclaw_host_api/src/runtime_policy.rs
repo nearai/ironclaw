@@ -1,4 +1,4 @@
-//! Runtime policy vocabulary for IronClaw Reborn.
+//! Runtime policy vocabulary for IronClaw.
 //!
 //! This module is the contract vocabulary for runtime presets. It defines the
 //! enums and the resolved-policy aggregate type, but it does not implement the

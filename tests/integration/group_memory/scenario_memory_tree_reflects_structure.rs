@@ -7,18 +7,18 @@
 //! intermediate directories and then listing the root proves the tree surface
 //! materializes the real structure end to end at int tier.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: writer ────────────────────────────────────────────────────
     // Write to a nested path so the tree must materialize an intermediate
     // directory (`atlas/`) and the leaf file (`runbook.md`).
     let writer = g
         .thread("conv-memory-tree-writer")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.memory_write",
                 json!({
                     "target": "projects/atlas/runbook.md",
@@ -26,7 +26,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "append": false
                 }),
             ),
-            RebornScriptedReply::text("seeded"),
+            IronClawScriptedReply::text("seeded"),
         ])
         .build()
         .await?;
@@ -39,8 +39,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lister = g
         .thread("conv-memory-tree-lister")
         .script([
-            RebornScriptedReply::tool_call("builtin.memory_tree", json!({"path": "", "depth": 3})),
-            RebornScriptedReply::text("listed"),
+            IronClawScriptedReply::tool_call(
+                "builtin.memory_tree",
+                json!({"path": "", "depth": 3}),
+            ),
+            IronClawScriptedReply::text("listed"),
         ])
         .build()
         .await?;

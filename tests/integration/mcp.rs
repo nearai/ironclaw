@@ -1,4 +1,4 @@
-//! Reborn integration-test framework — slice 6: MCP mock.
+//! IronClaw integration-test framework — slice 6: MCP mock.
 //!
 //! Proves the MCP tool path end-to-end with a real in-process HTTP server:
 //! scripted model emits a `mock-mcp.search` tool call → the real MCP runtime
@@ -8,14 +8,14 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
 
 /// Asserts the mock MCP server actually received a `tools/call` request naming
@@ -59,13 +59,13 @@ async fn mcp_tool_call_reaches_mock_server() {
     }])
     .await;
 
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "mock-mcp.search",
                 serde_json::json!({"query": "needle-xyz-42"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .with_mock_mcp(server.mcp_url())
         .build()
@@ -103,13 +103,13 @@ async fn mcp_tool_call_over_sse_framed_responses() {
     .await;
     server.enable_sse_framing();
 
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "mock-mcp.search",
                 serde_json::json!({"query": "needle-sse-99"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .with_mock_mcp(server.mcp_url())
         .build()
@@ -152,8 +152,8 @@ async fn mcp_tool_call_over_sse_framed_responses() {
 /// (plain echo turn on the default backend), the assertion must return `Err`.
 #[tokio::test]
 async fn assert_mcp_tool_called_fails_when_no_mcp_call_ran() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("no mcp")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("no mcp")])
         .build()
         .await
         .expect("harness builds");
@@ -176,10 +176,10 @@ async fn mcp_tool_call_error_cause_reaches_next_model_request() {
     .await;
     server.set_tool_call_error(-32602, "distinctive-mcp-cause-5965");
 
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            IronClawScriptedReply::text("done"),
         ])
         .with_mock_mcp(server.mcp_url())
         .build()
@@ -215,10 +215,10 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
     .await;
     server.force_http_status(500);
 
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            IronClawScriptedReply::text("done"),
         ])
         .with_mock_mcp(server.mcp_url())
         .build()
@@ -260,10 +260,10 @@ async fn mcp_tool_call_output_too_large_surfaces_failed() {
     }])
     .await;
 
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            IronClawScriptedReply::text("done"),
         ])
         .with_mock_mcp(server.mcp_url())
         .build()
@@ -287,4 +287,4 @@ async fn mcp_tool_call_output_too_large_surfaces_failed() {
 // the cases above, a 401/403 maps to `McpClientError::AuthRequired` — an auth
 // *gate*, not a model-visible tool error — and requires a capability-backend
 // credential stub this tier lacks. Same deferred "live-401 re-auth arm" as
-// `reborn_integration_auth_failure.rs`.
+// `ironclaw_integration_auth_failure.rs`.

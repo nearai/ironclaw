@@ -59,11 +59,11 @@ jobs:
       - name: Extract version from the ironclaw CLI Cargo.toml
         id: version
         run: |
-          # The shipped image is the Reborn CLI (`ironclaw`), so the release
+          # The shipped image is the IronClaw CLI (`ironclaw`), so the release
           # version is that package's version — NOT the root workspace manifest,
-          # which is the test-only `ironclaw_reborn_integration_tests` package
+          # which is the test-only `ironclaw_integration_tests` package
           # pinned at 0.1.0 since Tier B deleted the v1 monolith.
-          VERSION=$(grep '^version' crates/ironclaw_reborn_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep '^version' crates/ironclaw_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
@@ -108,7 +108,7 @@ jobs:
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
-          # The Reborn Dockerfile has a single `runtime` stage — WASM
+          # The IronClaw Dockerfile has a single `runtime` stage — WASM
           # extensions are compiled into the binary via
           # `ironclaw_first_party_extensions`, so there is no separate
           # pre-bundled staging image target.

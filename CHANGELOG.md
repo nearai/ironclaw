@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Product identity:** present the shipping CLI, WebUI, health responses, and
-  built-in capability descriptions as IronClaw without the former “Reborn”
+  built-in capability descriptions as IronClaw without the former “IronClaw”
   qualifier.
 - **Default contracts:** prefer neutral `IRONCLAW_*` configuration,
   `~/.ironclaw` state, `/api/product-auth/*` routes, and neutral OS service
@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Internal-name migration compatibility:** keep initialized legacy Docker
+  volumes visible when the canonical directory is only an empty image default,
+  accept former bundled-config and entrypoint paths, and mirror the former CI
+  check and live-canary artifact contracts during the external migration.
 - **Model recovery:** preserve typed, sanitized context-overflow,
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider
@@ -44,12 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0-rc.1] - 2026-07-20
 
 First release candidate of the rearchitected IronClaw, internally called
-**Reborn**. This is not an increment on the 0.29.x line — it is a ground-up
+**IronClaw**. This is not an increment on the 0.29.x line — it is a ground-up
 rebuild of the agent runtime, storage, extension host, and web UI.
 
-**The `ironclaw` binary is now the Reborn CLI.** The v1 monolith now builds as
+**The `ironclaw` binary is now the IronClaw CLI.** The v1 monolith now builds as
 the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1 publishes
-the Reborn `ironclaw` binary only.
+the IronClaw `ironclaw` binary only.
 
 ### This is not an in-place upgrade from 0.29.x
 
@@ -93,7 +97,7 @@ it at a v1 data directory.
 - `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
   return an explicit "not implemented yet" error.
 - `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
-  Reborn equivalent; MCP servers and memory are reached through extensions and
+  IronClaw equivalent; MCP servers and memory are reached through extensions and
   the WebUI instead.
 - `onboard --import-history` parses but does nothing.
 - `skills` is list-only from the CLI.
@@ -111,7 +115,7 @@ The itemized changes since 0.29.1 follow.
 ### Added
 
 - *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
-- *(reborn)* `ironclaw service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
+- *(reborn)* `ironclaw service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone IronClaw binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
 
 ### Fixed
 
@@ -137,7 +141,7 @@ The itemized changes since 0.29.1 follow.
 
 - *(reborn-extensions)* every first-party integration (GitHub, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Telegram, Web Access) now ships as a self-contained module under `ironclaw_first_party_extensions::packages`, carrying its manifest/WASM embeds, onboarding copy, OAuth-setup credential, and host trust effects as opaque bundle data. Composition builds them via `bundled_packages()` and the built-in trust policy iterates the inventory generically — generic host code no longer names a concrete extension for package machinery (P7b, DEL-8 lane A).
 - *(reborn)* move product-neutral channel delivery into its own crate and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
-- *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
+- *(webui-v2)* serve the IronClaw WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
@@ -148,7 +152,7 @@ The itemized changes since 0.29.1 follow.
 
 ### CI / Release
 
-- *(release)* publish the canonical Reborn `ironclaw` package from `ironclaw-v*` tags with cargo-dist across seven OS/CPU targets, including archives, checksums, shell and PowerShell installers, and MSI, while excluding legacy v1, WASM, Docker, npm publishing, and the old registry-update/announcement path ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+- *(release)* publish the canonical IronClaw `ironclaw` package from `ironclaw-v*` tags with cargo-dist across seven OS/CPU targets, including archives, checksums, shell and PowerShell installers, and MSI, while excluding legacy v1, WASM, Docker, npm publishing, and the old registry-update/announcement path ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
 
 ### Removed
 

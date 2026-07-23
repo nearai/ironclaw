@@ -51,7 +51,7 @@ export function useThreads() {
       try {
         const data = await createThreadRequest(projectId ? { projectId } : undefined);
         upsertThreadInCache(data?.thread);
-        // RebornCreateThreadResponse → { thread: SessionThreadRecord }.
+        // IronClawCreateThreadResponse → { thread: SessionThreadRecord }.
         // SessionThreadRecord uses `thread_id`, not `id`.
         const threadId = data?.thread?.thread_id;
         if (threadId) setActiveThreadId(threadId);

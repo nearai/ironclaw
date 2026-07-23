@@ -1,4 +1,4 @@
-//! Resource reservation governor for IronClaw Reborn.
+//! Resource reservation governor for IronClaw.
 //!
 //! `ironclaw_resources` enforces the host-level reservation protocol used by
 //! runtime lanes before they spend money or consume scarce sandbox capacity:
@@ -1560,7 +1560,7 @@ where
     }
 }
 
-/// In-memory governor used by early Reborn contract tests.
+/// In-memory governor used by early IronClaw contract tests.
 #[derive(Debug)]
 pub struct InMemoryResourceGovernor {
     state: Mutex<ResourceState>,

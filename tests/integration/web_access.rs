@@ -7,14 +7,14 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 const MCP_INIT_BODY: &[u8] =
@@ -60,7 +60,7 @@ fn mcp_tool_call_result_body(content_text: &str) -> Vec<u8> {
 /// the model as a tool result.
 #[tokio::test]
 async fn web_search_dispatches_through_scripted_exa_mcp() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -70,11 +70,11 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.search",
                 json!({"query": "rust async runtimes"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -115,7 +115,7 @@ async fn web_search_dispatches_through_scripted_exa_mcp() {
 /// (the `web_fetch_exa` MCP tool) over the same scripted handshake shape.
 #[tokio::test]
 async fn get_content_dispatches_through_scripted_exa_mcp() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -125,11 +125,11 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.get_content",
                 json!({"url": "https://example.com"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -170,7 +170,7 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
 /// `search_accepts_sse_framed_initialize_response`.
 #[tokio::test]
 async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY_SSE.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -180,11 +180,11 @@ async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.search",
                 json!({"query": "rust async runtimes"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -216,7 +216,7 @@ async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
 /// inherits the other's framing matrix rather than only the tested one.
 #[tokio::test]
 async fn web_access_handshake_over_sse_framed_both_legs() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY_SSE.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -226,11 +226,11 @@ async fn web_access_handshake_over_sse_framed_both_legs() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.get_content",
                 json!({"url": "https://example.com"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -260,7 +260,7 @@ async fn web_access_handshake_over_sse_framed_both_legs() {
 /// the matching URL, the assertion must return `Err`, not silently succeed.
 #[tokio::test]
 async fn assert_egress_body_contains_any_fails_when_substring_absent() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -270,11 +270,11 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.search",
                 json!({"query": "rust async runtimes"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -303,7 +303,7 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
 /// but missing the body substring, covered by the sibling test above).
 #[tokio::test]
 async fn assert_egress_body_contains_any_fails_when_url_absent() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -313,11 +313,11 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.search",
                 json!({"query": "rust async runtimes"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -350,7 +350,7 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
 /// only then finalizes the run rather than terminalizing it.
 #[tokio::test]
 async fn get_content_fetch_error_surfaces_recoverable_failed() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_web_access_tools([
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
@@ -362,12 +362,15 @@ async fn get_content_fetch_error_surfaces_recoverable_failed() {
             ),
         ])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "web-access.get_content",
                 json!({"url": "https://example.com"}),
             ),
-            RebornScriptedReply::tool_call("web-access.search", json!({"query": "Example Domain"})),
-            RebornScriptedReply::text("Recovered with the fallback search result."),
+            IronClawScriptedReply::tool_call(
+                "web-access.search",
+                json!({"query": "Example Domain"}),
+            ),
+            IronClawScriptedReply::text("Recovered with the fallback search result."),
         ])
         .build()
         .await

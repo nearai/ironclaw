@@ -11,7 +11,7 @@
 //! These tests need a reachable Postgres. Set
 //! `IRONCLAW_HOOKS_POSTGRES_URL` (or `DATABASE_URL`) to a libpq URL. With
 //! no URL the tests print a skip notice and pass, matching the
-//! env-gated-skip pattern used by `ironclaw_reborn_event_store` and
+//! env-gated-skip pattern used by `ironclaw_event_store` and
 //! `ironclaw_filesystem` (no testcontainers dependency).
 //!
 //! # Isolation

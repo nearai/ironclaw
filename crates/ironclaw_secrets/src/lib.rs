@@ -1,5 +1,5 @@
 // arch-exempt: large_file, §4.3 secrets consolidation — this PR deletes ~660 lines (adapter + InMemorySecretStore); remaining size is pre-existing, plan #6168
-//! Tenant-scoped secret service boundary for IronClaw Reborn.
+//! Tenant-scoped secret service boundary for IronClaw.
 //!
 //! This crate stores and leases secret material behind opaque
 //! [`SecretHandle`] values. It does not decide authorization, inject secrets into

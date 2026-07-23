@@ -1,15 +1,15 @@
-# Reborn integration-tier coverage exemptions. Each [[exemption]] excludes one
+# IronClaw integration-tier coverage exemptions. Each [[exemption]] excludes one
 # source file (`module`) or one whole crate (`crate`, never both) from the
-# per-crate accounting in scripts/ci/reborn-coverage-summary.sh — informational only, reason + issue required per entry.
+# per-crate accounting in scripts/ci/ironclaw-coverage-summary.sh — informational only, reason + issue required per entry.
 #
 # Schema — exactly ONE of `module`/`crate` per entry (never both, never
-# neither; reborn-coverage-summary.sh rejects malformed entries at parse
+# neither; ironclaw-coverage-summary.sh rejects malformed entries at parse
 # time):
 #
 #   # Per-file form: exempts one source file.
 #   [[exemption]]
 #   module = "crates/ironclaw_x/src/y.rs"                       # repo-relative source path
-#   reason = "why this file cannot be exercised by the Reborn CI jobs"
+#   reason = "why this file cannot be exercised by the IronClaw CI jobs"
 #   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 #
 #   # Whole-crate form: exempts every file under crates/<crate>/.
@@ -33,5 +33,5 @@ issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]
 crate  = "ironclaw_tui"
-reason = "v1-only: consumed only by root `ironclaw` (src/main.rs, src/channels/tui.rs); no crates/* dependents. Crate's own doc comment confirms it bridges INTO v1, not Reborn. Covered by \"Tests (Legacy)\"."
+reason = "v1-only: consumed only by root `ironclaw` (src/main.rs, src/channels/tui.rs); no crates/* dependents. Crate's own doc comment confirms it bridges INTO v1, not IronClaw. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"

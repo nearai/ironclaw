@@ -26,8 +26,8 @@
 //! provider-instance readiness contract: this scenario tests per-account
 //! gating, not the earlier missing-instance remediation path.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_auth::{
     GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
     GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
@@ -40,8 +40,8 @@ use serde_json::json;
 const GOOGLE_DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
-pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
-    let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
+pub async fn run(_g: &IronClawIntegrationGroup) -> HarnessResult<()> {
+    let g = IronClawIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let g = &g;
     let google_provider =
         ironclaw_host_api::VendorId::new("google").map_err(|error| error.to_string())?;
@@ -51,16 +51,16 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let calendar = g
         .thread("google-family-calendar-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "google-calendar"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "google-calendar"}),
             ),
             // Consumed by the post-deny resume model call in phase 3.
-            RebornScriptedReply::text("calendar needs authorization"),
+            IronClawScriptedReply::text("calendar needs authorization"),
         ])
         .build()
         .await?;
@@ -114,15 +114,15 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let drive = g
         .thread("google-family-drive-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "google-drive"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "google-drive"}),
             ),
-            RebornScriptedReply::text("drive needs authorization"),
+            IronClawScriptedReply::text("drive needs authorization"),
         ])
         .build()
         .await?;
@@ -194,11 +194,11 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let calendar_restore = g
         .thread("google-family-calendar-restore")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "google-calendar"}),
             ),
-            RebornScriptedReply::text("calendar authorized"),
+            IronClawScriptedReply::text("calendar authorized"),
         ])
         .build()
         .await?;
@@ -230,11 +230,11 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let drive_restore = g
         .thread("google-family-drive-restore")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "google-drive"}),
             ),
-            RebornScriptedReply::text("drive authorized"),
+            IronClawScriptedReply::text("drive authorized"),
         ])
         .build()
         .await?;

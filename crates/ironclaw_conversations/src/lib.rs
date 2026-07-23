@@ -1,4 +1,4 @@
-//! Conversation binding and session-thread contracts for IronClaw Reborn.
+//! Conversation binding and session-thread contracts for IronClaw.
 //!
 //! This crate is the adapter-safe boundary between product/channel adapters and
 //! `ironclaw_turns::TurnCoordinator`. It resolves external actor/conversation
@@ -24,7 +24,7 @@ mod types;
 
 pub use error::InboundTurnError;
 pub use filesystem_store::{
-    FilesystemConversationStateStore, RebornFilesystemConversationServices,
+    FilesystemConversationStateStore, IronClawFilesystemConversationServices,
 };
 pub use ids::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,

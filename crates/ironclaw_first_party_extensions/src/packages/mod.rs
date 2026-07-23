@@ -5,7 +5,7 @@
 //! or onboarding copy, beside its `assets/<id>/` directory. [`bundled_packages`]
 //! concatenates the per-module bundles; composition and the CLI consume them as
 //! opaque [`PackageBundle`]s and never name a package. See
-//! `docs/reborn/extension-runtime/overview.md` §3 (package self-containment).
+//! `docs/ironclaw/extension-runtime/overview.md` §3 (package self-containment).
 //!
 //! This crate is the sanctioned home for concrete package names — the
 //! extension-specificity gate excludes it — so the names live here, next to the

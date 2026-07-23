@@ -8,7 +8,7 @@
 //!
 //! Drives the BARE crate router (`webui_v2_router()` over a minimal fake
 //! `ProductSurface`), not composition's `webui_v2_app` wrapper — the
-//! wrapper needs the heavier `build_reborn_runtime` tier (named follow-on).
+//! wrapper needs the heavier `build_ironclaw_runtime` tier (named follow-on).
 //! Composition deliberately does not re-export the bare router/state
 //! (facade-only rule), so this suite carries the root DEV-dependency on
 //! `ironclaw_webui` itself — production binaries are unaffected.
@@ -17,8 +17,8 @@
 //! `StubServices`; extraction of a shared in-crate `test_support` module was
 //! reviewed and deferred (production-crate touch outside this batch's
 //! budget). Methods the scenario never calls return the shared rejecting
-//! error (`rejecting_reborn_services_error`, the public fakes helper —
-//! `RebornServicesError::service_unavailable` is `pub(super)`) so an
+//! error (`rejecting_ironclaw_services_error`, the public fakes helper —
+//! `IronClawServicesError::service_unavailable` is `pub(super)`) so an
 //! unexpected dispatch fails loudly.
 //!
 //! Flat suite, no harness mounts: this models an HTTP wire contract, not an
@@ -32,9 +32,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
-    WebUiCreateThreadRequest, rejecting_reborn_services_error,
+    IronClawCreateThreadResponse, IronClawServicesError, ProductOperationId,
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, WebUiAuthenticatedCaller,
+    WebUiCreateThreadRequest, rejecting_ironclaw_services_error,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::webui_v2::{
@@ -56,9 +56,9 @@ impl MinimalWebuiServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<IronClawCreateThreadResponse, IronClawServicesError> {
         self.create_thread_calls.lock().expect("lock").push(request);
-        Ok(RebornCreateThreadResponse {
+        Ok(IronClawCreateThreadResponse {
             thread: SessionThreadRecord {
                 thread_id: ThreadId::new("thread:webui-v2-smoke").expect("thread id"),
                 scope: ThreadScope {
@@ -85,16 +85,16 @@ impl ProductSurface for MinimalWebuiServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         let command_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(rejecting_reborn_services_error)?;
+            .ok_or_else(rejecting_ironclaw_services_error)?;
         match command_id {
             ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(IronClawServicesError::internal_from)?;
                 ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
-            _ => Err(rejecting_reborn_services_error()),
+            _ => Err(rejecting_ironclaw_services_error()),
         }
     }
 }

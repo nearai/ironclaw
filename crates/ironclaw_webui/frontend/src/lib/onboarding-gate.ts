@@ -10,7 +10,7 @@
 // `isError` is what unblocks the multi-user / SSO build: the operator
 // LLM-config routes (`/api/webchat/v2/llm/*`) are intentionally unmounted
 // for multi-user authenticators (the gateway 404s until an admin-role
-// boundary exists — see `ironclaw_reborn_composition`
+// boundary exists — see `ironclaw_composition`
 // `allows_operator_*_config`), so the providers query fails. More
 // generally, a failed query (404 gated, transient 5xx, offline) tells us
 // nothing reliable about whether a provider is configured — and the

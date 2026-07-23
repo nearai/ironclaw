@@ -4,10 +4,10 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/processes.md`
-- `docs/reborn/contracts/resources.md`
-- `docs/reborn/contracts/events.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/processes.md`
+- `docs/ironclaw/contracts/resources.md`
+- `docs/ironclaw/contracts/events.md`
 
 ## What This Crate Owns
 

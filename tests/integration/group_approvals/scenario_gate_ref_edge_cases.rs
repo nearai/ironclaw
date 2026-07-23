@@ -14,20 +14,20 @@
 //!   never-issued `GateRef` is resolved on a thread that never raised any
 //!   gate — pins the harness's own request-not-found rejection.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::{GateRef, TurnStatus};
 use serde_json::json;
 
-pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn stale_gate_ref_resume(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-stale-gate-ref")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/stale_ref.txt", "content": "stale ref write"}),
             ),
-            RebornScriptedReply::text("file written after approval"),
+            IronClawScriptedReply::text("file written after approval"),
         ])
         .build()
         .await?;
@@ -66,10 +66,10 @@ pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<
     Ok(())
 }
 
-pub async fn missing_gate_bare_resolve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn missing_gate_bare_resolve(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-missing-gate")
-        .script([RebornScriptedReply::text("no tools needed here")])
+        .script([IronClawScriptedReply::text("no tools needed here")])
         .build()
         .await?;
 

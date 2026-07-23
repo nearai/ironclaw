@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the sealed `Authorized` witness.
 //!
 //! The security-critical heart of the capability-path collapse
-//! (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` §3,
+//! (`docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md` §3,
 //! §5.3.2). `authorize()` folds ALL pre-flightable policy (trust, approval,
 //! resource reservation, lane resolution) into a single decision; its success
 //! value is an [`Authorized`] — the proof that this exact [`Invocation`] passed
@@ -346,6 +346,6 @@ impl AuthorizeResult {
 }
 // Tests live in `tests/authorized_seal.rs` (not an inline `#[cfg(test)]` module):
 // exercising the seal requires a `CapabilityAuthorizer` impl, and the seal
-// enforcement ratchet (`reborn_authorized_seal_ratchet`) bans that impl outside
+// enforcement ratchet (`ironclaw_authorized_seal_ratchet`) bans that impl outside
 // the kernel crate. Keeping the test double under `tests/` matches the
 // convention the ratchet relies on (test doubles are not inventoried).

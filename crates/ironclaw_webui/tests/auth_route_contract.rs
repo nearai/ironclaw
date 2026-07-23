@@ -13,7 +13,7 @@
 //!    without ever reaching the facade.
 //! 3. `Bearer` prefix parsing is case-insensitive — parity with v1's
 //!    `auth.rs` extractor (documented as a KEEP in
-//!    `docs/reborn/security-parity/01-auth.md`).
+//!    `docs/ironclaw/security-parity/01-auth.md`).
 //! 4. A session revoked directly through `SignedTokenSessionStore::revoke` stops
 //!    authenticating, isolated from the OAuth round-trip.
 //! 5. An expired session is rejected at the route layer (the
@@ -35,8 +35,8 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
+use ironclaw_composition::{IronClawReadiness, IronClawWebuiBundle};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
     EnvBearerAuthenticator, OidcAuthenticator, OidcAuthenticatorConfig, SessionAuthenticator,
     SignedTokenSessionStore, signed_session_store,
@@ -71,10 +71,10 @@ const ENV_USER: &str = "operator-user";
 /// handler.
 fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = IronClawWebuiBundle {
         api: services.clone(),
         product_auth: None,
-        readiness: RebornReadiness::disabled(),
+        readiness: IronClawReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -383,10 +383,10 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
     let tenant_b_store = signed_store_for(&TenantId::new("tenant-b").expect("tenant"));
     let authenticator = Arc::new(SessionAuthenticator::new(tenant_b_store.clone()));
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = IronClawWebuiBundle {
         api: services.clone(),
         product_auth: None,
-        readiness: RebornReadiness::disabled(),
+        readiness: IronClawReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new("tenant-b").expect("tenant"),

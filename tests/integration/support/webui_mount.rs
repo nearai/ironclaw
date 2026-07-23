@@ -1,5 +1,5 @@
 //! Shared axum mounting + request helpers for the real `webui_v2_router`
-//! over a real `RebornServices` facade (W5-WEBUI-API-1). Mirrors
+//! over a real `IronClawServices` facade (W5-WEBUI-API-1). Mirrors
 //! `webui_v2_router_smoke.rs::smoke_router`'s shape; auth bypassed by
 //! injecting `WebUiAuthenticatedCaller` directly instead of the bearer middleware.
 

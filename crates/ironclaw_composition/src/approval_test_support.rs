@@ -1,0 +1,147 @@
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore};
+use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
+use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
+use ironclaw_run_state::ApprovalRequestStore;
+
+use crate::builtin_capability_policy::{
+    BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, builtin_one_shot_lease_approval,
+};
+use crate::{IronClawServices, factory::IronClawRuntimeSubstrate};
+
+/// Turn the global auto-approve switch off for `context`'s actor scope.
+/// Global auto-approve defaults ON, so any test exercising the per-tool approval
+/// gate must flip it off first. Shared by every `src` `#[cfg(test)]` site;
+/// integration-test and root-crate binaries keep their own copies (they cannot
+/// see this crate-internal helper).
+pub(crate) async fn disable_global_auto_approve(
+    local_runtime: &IronClawRuntimeSubstrate,
+    context: &ExecutionContext,
+) {
+    local_runtime
+        .auto_approve_settings
+        .set(AutoApproveSettingInput {
+            scope: context.resource_scope.clone(),
+            enabled: false,
+            updated_by: Principal::User(context.resource_scope.user_id.clone()),
+        })
+        .await
+        .expect("disable global auto-approve"); // safety: test-only gating precondition
+}
+
+pub(crate) async fn invoke_json_with_local_dev_approval(
+    services: &IronClawServices,
+    capability_id: &str,
+    context: ExecutionContext,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, RuntimeFailureKind> {
+    match invoke_with_local_dev_approval(services, capability_id, context, input).await {
+        RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
+        RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+        other => panic!("unexpected runtime outcome: {other:?}"),
+    }
+}
+
+pub(crate) async fn invoke_with_local_dev_approval(
+    services: &IronClawServices,
+    capability_id: &str,
+    context: ExecutionContext,
+    input: serde_json::Value,
+) -> RuntimeCapabilityOutcome {
+    let runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("host runtime composed"); // safety: test-only helper in #[cfg(test)] module.
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
+    let capability = CapabilityId::new(capability_id).expect("valid capability id"); // safety: test-only helper in #[cfg(test)] module.
+    let estimate = ResourceEstimate::default();
+    let outcome = runtime
+        .invoke_capability((
+            context.clone(),
+            capability.clone(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .expect("runtime invocation completes"); // safety: test-only helper in #[cfg(test)] module.
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            let approval_record = local_runtime
+                .approval_requests
+                .get(&context.resource_scope, gate.approval_request_id)
+                .await
+                .expect("local-dev approval record read") // safety: test-only helper in #[cfg(test)] module.
+                .expect("local-dev approval request persisted"); // safety: test-only helper in #[cfg(test)] module.
+            let policy_action = BuiltinApprovalPolicyAction::from_host_action(
+                approval_record.request.action.as_ref(),
+            )
+            .expect("dispatch or spawn action in local-dev approval"); // safety: test-only approval helper compiled only under #[cfg(test)].
+            // For local-dev builtin capabilities, derive lease terms through the
+            // capability policy (single source of truth, can't drift from production).
+            // For extension capabilities not registered in the builtin policy (e.g.
+            // third-party skills like gsuite), fall back to the execution context grants.
+            let approval = match local_runtime.capability_policy.lease_approval_for(
+                policy_action,
+                &local_runtime.workspace_mounts,
+                &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
+            ) {
+                Ok(approval) => approval,
+                Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
+                    lease_approval_from_context(&context, &capability)
+                }
+                Err(error) => {
+                    panic!("capability policy lease approval failed for {capability}: {error}")
+                }
+            };
+            let resolver = ApprovalResolver::new(
+                local_runtime.approval_requests.as_ref(),
+                local_runtime.capability_leases.as_ref(),
+            );
+            match approval_record.request.action.as_ref() {
+                Action::Dispatch { .. } => resolver
+                    .approve_dispatch(&context.resource_scope, gate.approval_request_id, approval)
+                    .await
+                    .expect("local-dev approval issues dispatch resume lease"), // safety: test-only helper in #[cfg(test)] module.
+                Action::SpawnCapability { .. } => resolver
+                    .approve_spawn(&context.resource_scope, gate.approval_request_id, approval)
+                    .await
+                    .expect("local-dev approval issues spawn resume lease"), // safety: test-only helper in #[cfg(test)] module.
+                other => panic!("unexpected local-dev approval action: {other:?}"),
+            };
+
+            runtime
+                .resume_capability((
+                    context,
+                    gate.approval_request_id,
+                    capability,
+                    estimate,
+                    input,
+                ))
+                .await
+                .expect("approved runtime invocation resumes") // safety: test-only helper in #[cfg(test)] module.
+        }
+        other => other,
+    }
+}
+
+/// Fallback: build a `LeaseApproval` from an extension capability's grant in
+/// the execution context. Used only when the capability is not registered in the
+/// local-dev builtin policy (e.g. third-party extension skills).
+fn lease_approval_from_context(
+    context: &ExecutionContext,
+    capability: &CapabilityId,
+) -> ironclaw_approvals::LeaseApproval {
+    let constraints = context
+        .grants
+        .grants
+        .iter()
+        .find(|grant| &grant.capability == capability)
+        .expect("matching test capability grant") // safety: test-only helper in #[cfg(test)] module.
+        .constraints
+        .clone();
+    builtin_one_shot_lease_approval(constraints)
+}

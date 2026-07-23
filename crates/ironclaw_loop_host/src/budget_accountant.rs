@@ -1,5 +1,5 @@
 // arch-exempt: large_file, accounting state-machine behavior remains colocated with its production adapter and focused contract tests, plan #6089
-//! Budget reservation glue for the Reborn loop's model gateway.
+//! Budget reservation glue for the IronClaw loop's model gateway.
 //!
 //! [`GovernorBackedAccountant`] is the concrete
 //! [`LoopModelBudgetAccountant`] used by production composition. It estimates

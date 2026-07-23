@@ -1,4 +1,4 @@
-//! Text-only Reborn loop driver.
+//! Text-only IronClaw loop driver.
 //!
 //! This driver is deliberately narrow: it asks the host to build a text-only
 //! prompt bundle, streams one host-managed model response, accepts only a final

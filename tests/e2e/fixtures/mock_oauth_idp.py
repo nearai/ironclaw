@@ -1,6 +1,6 @@
 """Reusable mock OAuth 2.0 authorization server with PKCE support.
 
-Implements the minimum surface needed for Reborn product-auth E2E tests:
+Implements the minimum surface needed for IronClaw product-auth E2E tests:
   - GET  /authorize  — redirects to callback URL with ?code=&state=
   - POST /token      — issues a fake access_token + refresh_token
 

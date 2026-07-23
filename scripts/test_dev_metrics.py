@@ -21,9 +21,9 @@ import dev_metrics as dm  # noqa: E402
 
 
 def test_classify_commit_types():
-    assert dm.classify_commit("feat(reborn): x (#10)")["type"] == "feat"
+    assert dm.classify_commit("feat(ironclaw): x (#10)")["type"] == "feat"
     assert dm.classify_commit("fix: y")["type"] == "fix"
-    assert dm.classify_commit("feat(reborn)!: breaking (#11)")["type"] == "feat"
+    assert dm.classify_commit("feat(ironclaw)!: breaking (#11)")["type"] == "feat"
     assert dm.classify_commit("chore(ci): z")["type"] == "chore"
     assert dm.classify_commit("random prose commit")["type"] is None
 

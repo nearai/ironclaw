@@ -71,7 +71,7 @@ where
 
 // `CapabilityHost` IS the kernel authorizer (Slice-C wiring, arch-simplification
 // §3/§5.3.2). Implementing `CapabilityAuthorizer` here — and NOWHERE else, per
-// the `reborn_authorized_seal_ratchet` — is the "test-seal" half of the
+// the `ironclaw_authorized_seal_ratchet` — is the "test-seal" half of the
 // `Authorized` witness: only this crate can mint an `AuthorizationGrant`, so only
 // the code that runs the authorize fold can seal an `Authorized`. The
 // `authorize()` method that consumes the grant lands in a following wiring slice;

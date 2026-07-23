@@ -1,10 +1,10 @@
 # ironclaw_projects guardrails
 
 First-class **Project** entity, membership, and access control for the IronClaw
-Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
+IronClaw stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
 > Not to be confused with `ironclaw_engine`'s legacy `Project` type. This crate
-> serves the Reborn stack (`ironclaw_product_workflow` → composition →
+> serves the IronClaw stack (`ironclaw_product_workflow` → composition →
 > `ironclaw_webui`).
 
 ## W2 crate-count decision
@@ -26,7 +26,7 @@ move there without forcing lower substrate crates to depend upward.
   `ProjectMemberStatus` — the ACL model.
 - `ProjectRepository` — the persistence contract.
 - `FilesystemProjectRepository` — the **sole** implementation, persisting over
-  the Reborn `ScopedFilesystem` substrate. There is no SQL in this crate.
+  the IronClaw `ScopedFilesystem` substrate. There is no SQL in this crate.
 
 ## Invariants
 
@@ -43,14 +43,14 @@ move there without forcing lower substrate crates to depend upward.
   (see `.claude/rules/error-handling.md`).
 - This crate persists data; it does **not** authorize callers, expose HTTP, or
   know about the facade. Authorization gating that combines `resolve_access`
-  with a required role lives in the composition adapter (`RebornProjectService`),
+  with a required role lives in the composition adapter (`IronClawProjectService`),
   not here.
 
 ## Storage
 
 `FilesystemProjectRepository` persists JSON records over a `ScopedFilesystem`
 under a control-plane mount the agent cannot reach (the same substrate the
-`ironclaw_reborn_identity` store rides). Backend selection — Postgres / libSQL /
+`ironclaw_identity` store rides). Backend selection — Postgres / libSQL /
 JSONL / in-memory — is the host's `RootFilesystem` concern, so this crate is
 backend-agnostic and carries no SQL or `libsql`/`postgres` features.
 
@@ -73,7 +73,7 @@ Why not the agent workspace VFS or raw SQL: the ACL is authorization data the
 agent must not be able to write, so it lives on the control-plane substrate, not
 the `/workspace` mount; and routing through `ScopedFilesystem` (rather than raw
 `deadpool_postgres`/`libsql` handles) keeps one backend-dispatch seam for every
-durable Reborn store.
+durable IronClaw store.
 
 ## Tests
 

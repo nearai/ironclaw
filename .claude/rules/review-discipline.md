@@ -10,7 +10,7 @@ paths:
 ## Review the whole contract
 
 Inspect implementation, callers, persistence, wire types, frontend consumers,
-tests, and relevant Reborn contracts. Search for the bug pattern across
+tests, and relevant IronClaw contracts. Search for the bug pattern across
 `crates/`, not only the reported instance. Verify negative claims with both
 symbol and concept searches.
 
@@ -24,9 +24,9 @@ regression-check exemption rather than silently omitting coverage.
 
 ## Mechanical review traps
 
-- **Zero warnings:** changed Reborn crates must pass clippy with
+- **Zero warnings:** changed IronClaw crates must pass clippy with
   `--all-targets --all-features -- -D warnings`. Before committing, run the
-  Reborn workspace-wide command below and fix every warning it surfaces,
+  IronClaw workspace-wide command below and fix every warning it surfaces,
   including pre-existing warnings outside the immediate files.
 - **Feature matrix, not just `--all-features`:** `--all-features` cannot catch
   feature-gated dead code — a `#[cfg(feature = "x")]`-only caller makes its
@@ -80,7 +80,7 @@ cargo clippy --all --tests --examples -- -D warnings                            
 cargo clippy --all --tests --examples --all-features -- -D warnings               # all-features
 ```
 
-Run the Reborn integration or E2E harness when the change crosses turns,
+Run the IronClaw integration or E2E harness when the change crosses turns,
 capabilities, authorization, approvals, persistence, runtime lanes, networking,
 secrets, product workflow, or user-visible transport.
 
@@ -91,7 +91,7 @@ layers, name that scope or split the PR. Move-only changes state that behavior
 is unchanged, keep behavioral fixes separate, and record follow-up issues for
 problems discovered during the move. After moving or renaming code, search
 `.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`,
-`docs/reborn/contracts/`, and other Markdown references for stale paths.
+`docs/ironclaw/contracts/`, and other Markdown references for stale paths.
 
 ## Removing a "redundant" layer un-masks behavior
 

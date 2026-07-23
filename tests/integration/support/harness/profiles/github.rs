@@ -19,7 +19,7 @@ use super::super::{
 
 /// C-JOURNEY convergence seam: surfaces the file-tool approval-gate
 /// capabilities (`write_file`/`read_file` @ `Ask`) AND a single GitHub
-/// capability (`github.get_repo`) on the SAME `build_reborn_services`
+/// capability (`github.get_repo`) on the SAME `build_ironclaw_services`
 /// local-dev runtime (the one wired with the stores both gate classes'
 /// resume paths need). Distinct from `github_issue_tools_auth_required`
 /// (a separate, lower-level build with a hardcoded credential resolver):
@@ -31,12 +31,12 @@ use super::super::{
 /// auto-approve is NOT capability-scoped, so `github.get_repo` first raises
 /// `BlockedApproval`; approving re-dispatches the still-uncredentialed
 /// capability, which blocks AGAIN at `BlockedAuth`.
-/// `RebornIntegrationHarness::resolve_auth_gate` seeds the account and
+/// `IronClawIntegrationHarness::resolve_auth_gate` seeds the account and
 /// resumes, letting the SAME parked capability complete — see
 /// `scenario_auth_then_approval_journey`'s module doc for the full chain.
 ///
 /// Making `github.*` genuinely dispatchable (not just granted) needs two
-/// seams: (1) `RebornServices::publish_bundled_extension_for_test` registers
+/// seams: (1) `IronClawServices::publish_bundled_extension_for_test` registers
 /// it in the runtime's OWN dispatchable registry (capability_ids/
 /// additional_provider_trust alone only populate the harness-authority grant
 /// layer and would silently no-op); (2) `copy_dir_recursive` copies the real
@@ -78,8 +78,8 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
         )),
         auto_approve_default: Some(false),
         ..ToolsProfile::new(
-            "reborn-e2e-file-github-auth-tools",
-            "reborn-e2e-file-github-auth-user",
+            "ironclaw-e2e-file-github-auth-tools",
+            "ironclaw-e2e-file-github-auth-user",
         )?
     })
 }
@@ -99,7 +99,7 @@ pub(crate) async fn github_issue_tools() -> HarnessResult<HostRuntimeCapabilityH
 
 /// E-AUTHGATE: the GitHub extension wired so its credential account resolver
 /// returns `AuthRequired`, raising a `TurnStatus::BlockedAuth` gate when a
-/// `github.*` capability is dispatched. Used by `RebornIntegrationGroup::live_auth_gate`.
+/// `github.*` capability is dispatched. Used by `IronClawIntegrationGroup::live_auth_gate`.
 pub(crate) async fn github_issue_tools_auth_required() -> HarnessResult<HostRuntimeCapabilityHarness>
 {
     github_issue_tools_with_credential_result(Err(CredentialStageError::AuthRequired))
@@ -119,7 +119,7 @@ pub(crate) async fn github_issue_tools_auth_required() -> HarnessResult<HostRunt
 ///
 /// Empirically verified: removing the obligation does not fall back to an
 /// unauthenticated request — the run hangs and never reaches `Completed`.
-/// That's why `reborn_integration_secret_injection.rs`'s mutation-verify
+/// That's why `ironclaw_integration_secret_injection.rs`'s mutation-verify
 /// flips the secret *value* (a fast, specific failure) rather than removing
 /// the obligation (a slow, ambiguous timeout).
 fn github_issue_tools_with_credential_result(
@@ -167,7 +167,7 @@ fn github_issue_tools_with_credential_result(
         secrets: github_support::secret_handles()?,
         provider_id: github_support::provider_id()?,
         additional_provider_trust: Vec::new(),
-        user_id: UserId::new("reborn-e2e-github-user")?,
+        user_id: UserId::new("ironclaw-e2e-github-user")?,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: Some(runtime_http_egress),
@@ -185,7 +185,7 @@ fn github_issue_tools_with_credential_result(
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
-        reborn_services: None,
+        ironclaw_services: None,
         trigger_active_run_lookup_requested: false,
     })
 }

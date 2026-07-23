@@ -39,4 +39,4 @@ Owns reusable host-side adapters for neutral loop ports.
 - Do not bypass `CapabilityHost` or dispatcher authority paths.
 - Do not make adapters perform runner state transitions.
 - Do not fold unrelated ports into `lib.rs`.
-- Do not use this crate as a dumping ground for Reborn runtime composition.
+- Do not use this crate as a dumping ground for IronClaw runtime composition.

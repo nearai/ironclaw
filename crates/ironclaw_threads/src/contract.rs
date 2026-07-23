@@ -9,7 +9,7 @@ use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResult
 
 pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
 
-/// Canonical scope carried by a Reborn session thread.
+/// Canonical scope carried by a IronClaw session thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ThreadScope {
     pub tenant_id: TenantId,

@@ -28,7 +28,7 @@ pub struct HookPatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HookPatchInner {
     /// Append a safe-summary snippet to the prompt bundle's instruction-snippet
-    /// list. The dispatcher (or a follow-up Reborn middleware) is responsible
+    /// list. The dispatcher (or a follow-up IronClaw middleware) is responsible
     /// for routing this into `LoopContextSnippet` and pinning the source as
     /// `SnippetSourceKind::Hook { hook_id }`.
     AddSnippet {

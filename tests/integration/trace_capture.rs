@@ -2,10 +2,10 @@
 //!
 //! Wires the REAL `TraceCaptureTurnEventSink` (via composition's
 //! `test_support::trace_capture_turn_event_sink_for_test`, mirroring
-//! `build_reborn_runtime`'s recipe) into the group's ONE planned runtime with
+//! `build_ironclaw_runtime`'s recipe) into the group's ONE planned runtime with
 //! `.with_trace_capture()`, and proves the capture path end-to-end: policy
 //! read → transcript capture → redact → score → queue
-//! (`ironclaw_reborn_traces::contribution`, previously 0% on the lane).
+//! (`ironclaw_traces::contribution`, previously 0% on the lane).
 //!
 //! Enrollment divergence from the plan (verified infeasible as written): a
 //! scripted `builtin.trace_commons.onboard` with `confirmed=true` can NEVER
@@ -29,19 +29,19 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
 use std::time::Duration;
 
-use ironclaw_reborn_traces::contribution::{
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
+use ironclaw_traces::contribution::{
     StandingTraceContributionPolicy, queued_trace_envelope_paths_for_scope, trace_scope_key,
     write_trace_policy_for_scope,
 };
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
 use tempfile::TempDir;
 
 const ONBOARD_CAPABILITY_ID: &str = "builtin.trace_commons.onboard";
@@ -107,7 +107,7 @@ async fn wait_for_queued_envelopes(scope: &str) -> Vec<std::path::PathBuf> {
 async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
     setup_base_dir();
 
-    let group = RebornIntegrationGroup::builder()
+    let group = IronClawIntegrationGroup::builder()
         .with_trace_capture()
         .trace_commons_tools()
         .await
@@ -139,14 +139,14 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
         .thread("conv-trace-capture-consent")
         .with_actor_id(CONSENT_CONTROL_ACTOR_ID)
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 ONBOARD_CAPABILITY_ID,
                 serde_json::json!({
                     "invite_url": "https://tc.example.test/onboard#REBORN-INT-CODE",
                     "confirmed": false
                 }),
             ),
-            RebornScriptedReply::text("not enrolled"),
+            IronClawScriptedReply::text("not enrolled"),
         ])
         .build()
         .await
@@ -182,7 +182,7 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
     // capture → redact → score → queue.
     let second = group
         .thread("conv-trace-capture-enrolled")
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("second thread builds");

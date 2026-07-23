@@ -36,7 +36,7 @@ const GOOGLE_ISSUER: &str = "https://accounts.google.com";
 /// `reqwest::Client` has no timeout, which would let a hung Google
 /// response pin the callback handler indefinitely. Operators on a slow /
 /// cross-border path can override it via `GoogleOAuthConfig::http_timeout`
-/// (the reborn CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
+/// (the IronClaw CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
 const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// `jsonwebtoken::Validation` applied a small expiration leeway before the
 /// manual parse path. Keep that tolerance so normal clock skew does not turn a
@@ -240,7 +240,7 @@ impl OAuthProvider for GoogleProvider {
                 // log-injection guard as the GitHub provider.
                 let safe_error = sanitize_error_code(&error_code);
                 tracing::warn!(
-                    target = "ironclaw::reborn::webui_ingress::auth",
+                    target = "ironclaw::webui_ingress::auth",
                     %status,
                     error_code = %safe_error,
                     "Google token endpoint rejected OAuth code exchange",
@@ -250,7 +250,7 @@ impl OAuthProvider for GoogleProvider {
                 )));
             }
             tracing::warn!(
-                target = "ironclaw::reborn::webui_ingress::auth",
+                target = "ironclaw::webui_ingress::auth",
                 %status,
                 "Google token endpoint returned a non-success response without a JSON error code",
             );

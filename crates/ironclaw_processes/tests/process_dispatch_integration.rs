@@ -11,6 +11,9 @@ use ironclaw_event_projections::{
     EventProjectionService, ProjectionRequest, ProjectionScope, ReplayEventProjectionService,
     RunProjectionStatus, TimelineEntryKind,
 };
+use ironclaw_event_store::{
+    IronClawEventStoreConfig, IronClawProfile, build_ironclaw_event_stores,
+};
 use ironclaw_events::{
     DurableEventLog, DurableEventSink, EventSink, EventStreamKey, InMemoryDurableEventLog,
     InMemoryEventSink, ReadScope, RuntimeEventKind,
@@ -18,9 +21,6 @@ use ironclaw_events::{
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
-};
 use serde_json::json;
 use tokio::{sync::Notify, time::timeout};
 
@@ -90,9 +90,9 @@ async fn process_services_complete_background_process_through_process_host_and_e
 async fn process_services_completed_lifecycle_projects_from_jsonl_durable_log_metadata_only() {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
         },

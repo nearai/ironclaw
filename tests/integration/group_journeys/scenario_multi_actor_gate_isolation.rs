@@ -4,38 +4,38 @@
 //! bound to the RAISING actor's turn: approving A's gate does NOT resolve B's,
 //! and B still blocks on its own gate, resolved independently under B's actor.
 //!
-//! Runs on `RebornIntegrationGroup::multiuser_approvals()` (C-MULTIUSER
+//! Runs on `IronClawIntegrationGroup::multiuser_approvals()` (C-MULTIUSER
 //! `scope_capability_by_run_owner` harness seam), which scopes each actor's
 //! gated write to ITS OWN run owner so actor B's dispatch doesn't die with
 //! `driver_protocol_violation` under actor A's user.
 //!
-//! Complementary to (not a duplicate of): `reborn_group_approvals`'s
+//! Complementary to (not a duplicate of): `ironclaw_group_approvals`'s
 //! `concurrent_dual_gate_resume` (SAME actor, two threads parked simultaneously)
-//! and `reborn_group_multiuser`'s `two_actors_own_threads` (distinct actors, NO
+//! and `ironclaw_group_multiuser`'s `two_actors_own_threads` (distinct actors, NO
 //! gate). This is distinct-actor × gate-resolution-binding — the axis neither
 //! covers.
 
-use super::reborn_support::builder::RebornIntegrationHarness;
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
-use super::reborn_support::session_thread::RebornThreadHarnessError;
+use super::ironclaw_support::builder::IronClawIntegrationHarness;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
+use super::ironclaw_support::session_thread::IronClawThreadHarnessError;
 use ironclaw_threads::SessionThreadError;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
 /// Shared per-actor turn script: one gated write + one post-resume reply. Keeps
 /// the two actor arms from fanning out into copy-pasted scripts.
-fn gated_write_script(path: &str, reply: &str) -> [RebornScriptedReply; 2] {
+fn gated_write_script(path: &str, reply: &str) -> [IronClawScriptedReply; 2] {
     [
-        RebornScriptedReply::tool_call(
+        IronClawScriptedReply::tool_call(
             "builtin.write_file",
             json!({"path": path, "content": "ACTOR_PAYLOAD"}),
         ),
-        RebornScriptedReply::text(reply),
+        IronClawScriptedReply::text(reply),
     ]
 }
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // Thread A: the group's default actor.
     let a = g
         .thread("conv-journey-actor-a")
@@ -144,9 +144,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 }
 
 async fn assert_history_isolated(
-    reader: &RebornIntegrationHarness,
+    reader: &IronClawIntegrationHarness,
     reader_name: &str,
-    other: &RebornIntegrationHarness,
+    other: &IronClawIntegrationHarness,
     other_name: &str,
 ) -> HarnessResult<()> {
     match reader
@@ -163,7 +163,7 @@ async fn assert_history_isolated(
         // scope-relative path resolution, not a separate ACL check) rather
         // than accepting any `Err(_)`, which an unrelated backend error
         // could satisfy without proving isolation.
-        Err(RebornThreadHarnessError::Thread(SessionThreadError::UnknownThread { .. })) => Ok(()),
+        Err(IronClawThreadHarnessError::Thread(SessionThreadError::UnknownThread { .. })) => Ok(()),
         Err(other_err) => Err(format!(
             "isolation check for actor {other_name} under actor {reader_name}'s scope failed \
              for the WRONG reason (expected UnknownThread, got: {other_err})"

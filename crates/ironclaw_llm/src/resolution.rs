@@ -900,7 +900,7 @@ mod tests {
         ));
     }
 
-    /// Regression for the Reborn onboarding bug (#4079 introduced the
+    /// Regression for the IronClaw onboarding bug (#4079 introduced the
     /// precedence, #4481's WebUI onboarding made it user-visible): an explicit
     /// model/base_url the operator picked in the UI must win over the ambient
     /// startup env vars (`NEARAI_MODEL` / `NEARAI_BASE_URL`), which a user

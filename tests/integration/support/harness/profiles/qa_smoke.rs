@@ -117,7 +117,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
         additional_provider_trust: Vec::new(),
-        user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
+        user_id: UserId::new("ironclaw-e2e-qa-smoke-user")?,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: None,
@@ -135,7 +135,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
-        reborn_services: None,
+        ironclaw_services: None,
         trigger_active_run_lookup_requested: false,
     })
 }

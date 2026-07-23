@@ -11,13 +11,13 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 /// One turn covers the whole matrix: the first model request captures the
@@ -26,14 +26,14 @@ use serde_json::json;
 /// (never advertised nor resolvable), and the run recovers via a model retry.
 #[tokio::test]
 async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
-    let group = RebornIntegrationGroup::extension_visibility_probe()
+    let group = IronClawIntegrationGroup::extension_visibility_probe()
         .await
         .expect("visibility-probe group builds");
     let harness = group
         .thread("conv-visprobe")
         .script([
-            RebornScriptedReply::tool_call("visprobe.audit", json!({})),
-            RebornScriptedReply::text("audit denied"),
+            IronClawScriptedReply::tool_call("visprobe.audit", json!({})),
+            IronClawScriptedReply::text("audit denied"),
         ])
         .build()
         .await

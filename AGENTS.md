@@ -5,17 +5,17 @@
 `AGENTS.md` is the quick-start contract for coding agents. It is not the full
 architecture specification. Before changing a complex area, read the owning
 crate's `AGENTS.md`, then its `CLAUDE.md`, `CONTRACT.md`, or `README.md` when
-present. Cross-crate behavior is specified under `docs/reborn/contracts/`.
+present. Cross-crate behavior is specified under `docs/ironclaw/contracts/`.
 
-All product work belongs in the Reborn workspace under `crates/`. The shipping
+All product work belongs in the IronClaw workspace under `crates/`. The shipping
 binary is `ironclaw` from the `ironclaw` package in
-`crates/ironclaw_reborn_cli`. Start with:
+`crates/ironclaw_cli`. Start with:
 
-- `.claude/skills/ironclaw-reborn-orientation/SKILL.md` for ownership and flow.
-- `.claude/skills/reborn-feature/SKILL.md` for cross-layer product work.
-- `.claude/skills/ironclaw-reborn-architecture-review/SKILL.md` for boundaries.
-- `.claude/skills/ironclaw-reborn-testing/SKILL.md` for test tiers and seams.
-- `.claude/skills/ironclaw-reborn-skill-maintainer/SKILL.md` before editing guidance.
+- `.claude/skills/ironclaw-orientation/SKILL.md` for ownership and flow.
+- `.claude/skills/ironclaw-feature/SKILL.md` for cross-layer product work.
+- `.claude/skills/ironclaw-architecture-review/SKILL.md` for boundaries.
+- `.claude/skills/ironclaw-testing/SKILL.md` for test tiers and seams.
+- `.claude/skills/ironclaw-skill-maintainer/SKILL.md` before editing guidance.
 
 These are plain Markdown and must be read directly by agents whose harness does
 not load Claude skills.
@@ -29,17 +29,17 @@ knowledge graph before text search:
 2. If fresh and the graph tools are connected, use symbol search, call tracing,
    data-flow tracing, and architecture queries as appropriate.
 3. If missing, stale, or unavailable, fall back immediately to `crates/AGENTS.md`,
-   the Reborn orientation skill, crate-local guidance, and targeted `rg`.
+   the IronClaw orientation skill, crate-local guidance, and targeted `rg`.
 4. Verify graph claims against live code before acting.
 
 Use `rg` directly for configuration, prose, fixtures, and other non-code data.
 Narrative docs under `openwiki/` are generated and read-only.
 
-## Reborn architecture mental model
+## IronClaw architecture mental model
 
 External surfaces normalize untrusted requests through product adapters and the
 product-workflow facade. Thread and turn services establish durable conversation
-state. The scheduler and Reborn run executor invoke the canonical runner/driver
+state. The scheduler and IronClaw run executor invoke the canonical runner/driver
 and agent loop. Capability execution then crosses authorization, approvals,
 obligations, host-runtime mediation, and the selected runtime lane. Durable typed
 events feed projections and transport streams; transports do not invent state.
@@ -48,7 +48,7 @@ Use `crates/AGENTS.md` to locate the owning crate, and regenerate any detailed
 flow from live symbols. A useful verification recipe is:
 
 ```bash
-rg -n "SessionThreadService|TurnCoordinator|TurnRunScheduler|RebornTurnRunExecutor|CanonicalAgentLoopExecutor|CapabilityHost" crates
+rg -n "SessionThreadService|TurnCoordinator|TurnRunScheduler|IronClawTurnRunExecutor|CanonicalAgentLoopExecutor|CapabilityHost" crates
 ```
 
 The composition root assembles dependencies; it does not own domain policy.
@@ -56,7 +56,7 @@ Module-specific initialization stays behind factories or builders in the owning
 crate. Keep feature branching with the abstraction owner and prefer existing
 typed ports and registries over one-off integration paths.
 
-## Where Reborn work belongs
+## Where IronClaw work belongs
 
 Use `crates/AGENTS.md` as the routing index, then verify ownership from live
 dependencies and public contracts:
@@ -89,7 +89,7 @@ composition, stop and run `cargo test -p ironclaw_architecture` before proceedin
 
 Subagent spawn creates and wires child runs only. Planning, execution,
 capability calls, checkpointing, gates, retries, and completion must continue
-through the existing Reborn runner/driver/executor path.
+through the existing IronClaw runner/driver/executor path.
 
 Host-trusted trigger ingress is sealed by trigger-worker-owned request minting
 and private conversation-owned trusted construction. Product adapters, product
@@ -119,7 +119,7 @@ process-local mutex held across backend I/O.
 
 Keep bootstrap configuration, persisted settings, and encrypted secrets as
 separate layers. Preserve configuration precedence, secret-mediated provider
-resolution, and fail-closed startup behavior. Update the owning Reborn config,
+resolution, and fail-closed startup behavior. Update the owning IronClaw config,
 composition, product-workflow, and frontend contracts when onboarding changes.
 
 ## Security and runtime invariants
@@ -157,7 +157,7 @@ composition, product-workflow, and frontend contracts when onboarding changes.
 
 - Update relevant specs, API docs, `FEATURE_PARITY.md`, and `CHANGELOG.md` when
   behavior or implementation status changes.
-- Production-wired Reborn behavior ships with a `tests/integration/` test at a
+- Production-wired IronClaw behavior ships with a `tests/integration/` test at a
   meaningful seam. Crate-tier fallback is acceptable only when integration
   cannot reach the path, and the PR must explain why.
 - Test through the caller when a helper or classifier gates a side effect. A
@@ -177,8 +177,8 @@ Test progression for behavior changes:
 cargo test -p OWNING_CRATE
 cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
 cargo test -p ironclaw_architecture  # dependency/ownership changes
-cargo test --test reborn_integration_SCENARIO  # whole-turn behavior
-bash scripts/reborn-e2e-rust.sh  # Reborn contract/whole-path changes
+cargo test --test ironclaw_integration_SCENARIO  # whole-turn behavior
+bash scripts/ironclaw-e2e-rust.sh  # IronClaw contract/whole-path changes
 scripts/pre-commit-safety.sh
 ```
 

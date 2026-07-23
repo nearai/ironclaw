@@ -13,8 +13,8 @@
 //! `Completed` derivation is owned by `trigger_poller_e2e.rs` +
 //! `repository_contract.rs` and is deliberately NOT re-covered here.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 /// Far-future wall-clock so `trigger_create`'s `next_run_at` (computed against
@@ -33,12 +33,12 @@ const TRIGGER_NAME: &str = "t0-triggers-once";
 // results before a second call to the same verb. The trigger repository has NO
 // cleanup between scenarios — keep list assertions id-scoped, never assert
 // exact `triggers.len()`.
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: create a one-shot Once trigger, then list it ───────────────
     let creator = g
         .thread("trigger-create")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
@@ -46,8 +46,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
                 }),
             ),
-            RebornScriptedReply::tool_call("builtin.trigger_list", json!({})),
-            RebornScriptedReply::text("created"),
+            IronClawScriptedReply::tool_call("builtin.trigger_list", json!({})),
+            IronClawScriptedReply::text("created"),
         ])
         .build()
         .await?;
@@ -89,20 +89,20 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let manager = g
         .thread("trigger-manage")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_pause",
                 json!({"trigger_id": trigger_id}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_resume",
                 json!({"trigger_id": trigger_id}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_remove",
                 json!({"trigger_id": trigger_id}),
             ),
-            RebornScriptedReply::tool_call("builtin.trigger_list", json!({})),
-            RebornScriptedReply::text("managed"),
+            IronClawScriptedReply::tool_call("builtin.trigger_list", json!({})),
+            IronClawScriptedReply::text("managed"),
         ])
         .build()
         .await?;

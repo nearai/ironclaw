@@ -1,4 +1,4 @@
-"""E2E tests: GSuite OAuth flow via Reborn product-auth routes (issue #4112).
+"""E2E tests: GSuite OAuth flow via IronClaw product-auth routes (issue #4112).
 
 Tests the OAuth redirect authentication flow:
 
@@ -6,7 +6,7 @@ Tests the OAuth redirect authentication flow:
 2. ``auth_required`` SSE carries ``challenge_kind: "oauth_url"``,
    ``provider: "google"``, ``authorization_url``
 3. Browser (or test client) opens the authorization URL
-4. Mock IDP issues an auth code; Reborn callback handler receives it
+4. Mock IDP issues an auth code; IronClaw callback handler receives it
 5. Run resumes; Google API receives injected Bearer token
 6. No raw access token / refresh token / PKCE verifier appears in SSE,
    history, or DOM
@@ -15,7 +15,7 @@ Multi-user isolation assertion: a second user in a separate session gets its
 own independent ``auth_required`` event with a separate ``flow_id``.
 
 Browser tests are skeleton-only (``pytest.mark.skip``) until the
-``IRONCLAW_REBORN_WEBUI_TOKEN`` env is wired in the E2E environment; the WebUI
+``IRONCLAW_WEBUI_TOKEN`` env is wired in the E2E environment; the WebUI
 v2 routes themselves are compiled into every binary.
 """
 
@@ -189,8 +189,8 @@ class TestGSuiteOAuthWireShape:
         )
         if r.status_code == 404:
             pytest.skip(
-                "Reborn product-auth routes not mounted; "
-                "need the Reborn binary"
+                "IronClaw product-auth routes not mounted; "
+                "need the IronClaw binary"
             )
         # Route is mounted: 200, 400 (invalid body), or 422 are all acceptable.
         assert r.status_code != 405, "405 means the route is not mounted"
@@ -212,7 +212,7 @@ class TestGSuiteOAuthWireShape:
         )
         gate = await wait_for_pending_auth_gate(v2_gsuite_server, thread_id)
         assert gate.get("request_id"), "gate must have a request_id"
-        # auth_url may or may not be present depending on V1 vs. Reborn path;
+        # auth_url may or may not be present depending on V1 vs. IronClaw path;
         # just assert the gate exists — wire-shape is tested in Rust.
 
     async def test_mock_idp_authorize_endpoint(self, mock_idp):

@@ -414,18 +414,18 @@ def ironclaw_binary():
 
 
 @pytest.fixture(scope="session")
-def ironclaw_reborn_binary():
-    """Ensure the Reborn `ironclaw` binary is built with the WebChat v2 surface.
+def ironclaw_binary():
+    """Ensure the IronClaw `ironclaw` binary is built with the WebChat v2 surface.
 
     Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): this is
-    the Reborn CLI, whose WebUI v2 SPA and `serve` subcommand are compiled
-    unconditionally. Returns the binary path. Used by the Reborn WebUI v2 smoke
+    the IronClaw CLI, whose WebUI v2 SPA and `serve` subcommand are compiled
+    unconditionally. Returns the binary path. Used by the IronClaw WebUI v2 smoke
     scenario.
     """
     target_dir = _cargo_target_dir()
     binary = target_dir / "debug" / "ironclaw"
     if _binary_needs_rebuild(binary):
-        print("Building Reborn ironclaw (this may take a while)...")
+        print("Building IronClaw ironclaw (this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
@@ -444,16 +444,16 @@ def ironclaw_reborn_binary():
 
 
 @pytest.fixture(scope="session")
-def ironclaw_reborn_openai_compat_binary():
-    """Ensure Reborn `ironclaw` is built for the OpenAI-compatible scenarios.
+def ironclaw_openai_compat_binary():
+    """Ensure IronClaw `ironclaw` is built for the OpenAI-compatible scenarios.
 
     The OpenAI-compatible routes are compiled unconditionally, so this builds
-    the same binary as the generic Reborn WebUI fixture. It is kept separate so
+    the same binary as the generic IronClaw WebUI fixture. It is kept separate so
     the OpenAI-compatible E2E owns its own build/staleness stamp.
     """
     target_dir = _cargo_target_dir()
     binary = target_dir / "debug" / "ironclaw"
-    stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat.stamp"
+    stamp = target_dir / "debug" / ".ironclaw-openai-compat.stamp"
     input_mtime = max(
         _latest_mtime(ROOT / "Cargo.toml"),
         _latest_mtime(ROOT / "Cargo.lock"),
@@ -468,7 +468,7 @@ def ironclaw_reborn_openai_compat_binary():
         or not stamp.exists()
         or stamp.stat().st_mtime < input_mtime
     ):
-        print("Building Reborn ironclaw (OpenAI-compatible E2E; this may take a while)...")
+        print("Building IronClaw ironclaw (OpenAI-compatible E2E; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",

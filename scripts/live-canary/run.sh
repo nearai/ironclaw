@@ -106,8 +106,8 @@ write_env_summary() {
     echo "playwright_install=${PLAYWRIGHT_INSTALL}"
     echo "python_bin=${PYTHON_BIN}"
     echo "cases=${CASES:-<default>}"
-    echo "reborn_webui_v2_live_qa_harness_ref=${REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF:-<checkout>}"
-    echo "reborn_webui_v2_live_qa_build_source=${REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE:-<local>}"
+    echo "ironclaw_webui_v2_live_qa_harness_ref=${IRONCLAW_WEBUI_V2_LIVE_QA_HARNESS_REF:-<checkout>}"
+    echo "ironclaw_webui_v2_live_qa_build_source=${IRONCLAW_WEBUI_V2_LIVE_QA_BUILD_SOURCE:-<local>}"
     echo "skip_build=${SKIP_BUILD:-0}"
     echo "skip_python_bootstrap=${SKIP_PYTHON_BOOTSTRAP:-0}"
   } > "${ENV_FILE}"
@@ -211,7 +211,7 @@ build_case_args() {
       trimmed="$(echo "$case_name" | xargs)"
       if [[ -n "${trimmed}" ]]; then
         if [[ "${trimmed}" == "all" || "${trimmed}" == "ALL" || "${trimmed}" == "*" ]]; then
-          if [[ "${LANE}" == "reborn-webui-v2-live-qa" ]]; then
+          if [[ "${LANE}" == "ironclaw-webui-v2-live-qa" ]]; then
             case_args+=(--non-telegram-qa-cases)
           else
             case_args+=(--all-cases)
@@ -330,13 +330,13 @@ main() {
           --playwright-install "${PLAYWRIGHT_INSTALL}"
       fi
       ;;
-    reborn-webui-v2-live-qa)
-      run_python_lane scripts/reborn_webui_v2_live_qa/run_live_qa.py \
+    ironclaw-webui-v2-live-qa)
+      run_python_lane scripts/ironclaw_webui_v2_live_qa/run_live_qa.py \
         --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, reborn-webui-v2-live-qa" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary, ironclaw-webui-v2-live-qa" >&2
       return 2
       ;;
   esac

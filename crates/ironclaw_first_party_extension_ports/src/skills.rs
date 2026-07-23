@@ -25,8 +25,8 @@ pub struct FirstPartySkillsExtensionHandles {
 }
 
 impl FirstPartySkillsExtensionHandles {
-    /// Handles for the standard first-slice Reborn skill roots.
-    pub fn reborn_default() -> Result<Self, FirstPartySkillsExtensionError> {
+    /// Handles for the standard first-slice IronClaw skill roots.
+    pub fn ironclaw_default() -> Result<Self, FirstPartySkillsExtensionError> {
         Self::without_tenant_shared()
     }
 
@@ -40,7 +40,7 @@ impl FirstPartySkillsExtensionHandles {
     }
 
     /// Builds handles from explicit roots and validates that each handle points
-    /// at its Reborn-owned skill namespace.
+    /// at its IronClaw-owned skill namespace.
     pub fn new(
         system_skills: Option<ScopedPath>,
         user_skills: Option<ScopedPath>,
@@ -371,8 +371,8 @@ mod tests {
     }
 
     #[test]
-    fn default_handles_are_exact_reborn_skill_roots() {
-        let handles = FirstPartySkillsExtensionHandles::reborn_default().unwrap();
+    fn default_handles_are_exact_ironclaw_skill_roots() {
+        let handles = FirstPartySkillsExtensionHandles::ironclaw_default().unwrap();
 
         assert_eq!(
             handles.system_skills().map(ScopedPath::as_str),

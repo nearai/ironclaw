@@ -1,10 +1,10 @@
-//! Scripted raw-provider seam for Reborn integration tests. Reuses `TraceLlm`'s replay
-//! engine: builds an in-memory `LlmTrace` from `RebornScriptedReply`, canonicalizes
+//! Scripted raw-provider seam for IronClaw integration tests. Reuses `TraceLlm`'s replay
+//! engine: builds an in-memory `LlmTrace` from `IronClawScriptedReply`, canonicalizes
 //! tool-call ids, and sits at the bottom of the real `ironclaw_llm` decorator chain
 //! (design §3.1/§3.3).
 
 // The parking provider (`ParkingModelGate`/`ParkingLlm`) is consumed only by the
-// `reborn_integration_cancel` test binary, so it reads as dead in the
+// `ironclaw_integration_cancel` test binary, so it reads as dead in the
 // `support_unit_tests` binary that compiles this tree without that consumer —
 // matching the file-level allow every sibling support module already carries.
 #![allow(dead_code)]
@@ -21,15 +21,15 @@ use ironclaw_llm::{
 use rust_decimal::Decimal;
 use tokio::sync::oneshot;
 
-use super::reply::RebornScriptedReply;
+use super::reply::IronClawScriptedReply;
 use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceTurn};
 
 /// Model name surfaced by the scripted provider. Non-empty and not "default" so
-/// the Reborn model gateway's model-override resolution accepts it.
+/// the IronClaw model gateway's model-override resolution accepts it.
 pub const SCRIPTED_MODEL_NAME: &str = "scripted/integration-test";
 
 /// Build a `TraceLlm` that replays the given scripted replies in order.
-pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>) -> TraceLlm {
+pub fn scripted_trace_llm(replies: impl IntoIterator<Item = IronClawScriptedReply>) -> TraceLlm {
     let mut tool_call_ids = ScriptedToolCallIds::default();
     let steps = replies
         .into_iter()

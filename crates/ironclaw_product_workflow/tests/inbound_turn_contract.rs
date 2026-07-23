@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_composition::ProductLiveCapabilityIo;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, ThreadId, UserId,
@@ -32,7 +33,6 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
     InboundTurnService, ProductWorkflowError,
 };
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_runner::model_routes::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
@@ -654,7 +654,7 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
 }
 
 #[tokio::test]
-async fn user_message_no_profile_submission_uses_planned_reborn_default() {
+async fn user_message_no_profile_submission_uses_planned_ironclaw_default() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_turn_state_store());
@@ -1051,7 +1051,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     composition.scheduler_handle.shutdown().await;
 
     assert_eq!(state.status, TurnStatus::Cancelled);
-    // Reborn-integration's executor preserves the assistant reply that arrived
+    // IronClaw-integration's executor preserves the assistant reply that arrived
     // before the cancellation observation; the run still terminates as
     // Cancelled. Verify the reply lands in thread history and the run is
     // cancelled — both must hold together.

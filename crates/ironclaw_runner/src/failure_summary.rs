@@ -4,7 +4,7 @@ use crate::failure_categories::{
 };
 use ironclaw_turns::ModelInvalidOutputDetailReason;
 
-pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static str {
+pub fn ironclaw_failure_summary_for_category(category: Option<&str>) -> &'static str {
     let Some(category) = category else {
         return unknown_failure_summary();
     };
@@ -163,7 +163,7 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
     }
 }
 
-pub fn reborn_failure_summary_for_category_and_detail(
+pub fn ironclaw_failure_summary_for_category_and_detail(
     category: Option<&str>,
     detail: Option<ModelInvalidOutputDetailReason>,
 ) -> &'static str {
@@ -181,7 +181,7 @@ pub fn reborn_failure_summary_for_category_and_detail(
         return detail.failure_summary();
     }
 
-    reborn_failure_summary_for_category(Some(category))
+    ironclaw_failure_summary_for_category(Some(category))
 }
 
 trait ModelInvalidOutputFailureSummary {
@@ -241,30 +241,30 @@ fn unknown_failure_summary() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        reborn_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+        ironclaw_failure_summary_for_category, ironclaw_failure_summary_for_category_and_detail,
     };
     use ironclaw_turns::ModelInvalidOutputDetailReason;
 
     #[test]
-    fn reborn_failure_summary_describes_known_category() {
+    fn ironclaw_failure_summary_describes_known_category() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("driver_invalid_request")),
+            ironclaw_failure_summary_for_category(Some("driver_invalid_request")),
             "The agent runtime rejected the request before producing a reply."
         );
     }
 
     #[test]
-    fn reborn_failure_summary_describes_iteration_limit() {
+    fn ironclaw_failure_summary_describes_iteration_limit() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("iteration_limit")),
+            ironclaw_failure_summary_for_category(Some("iteration_limit")),
             "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit."
         );
     }
 
     #[test]
-    fn reborn_failure_summary_falls_back_for_unknown_category() {
+    fn ironclaw_failure_summary_falls_back_for_unknown_category() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("unexpected_category")),
+            ironclaw_failure_summary_for_category(Some("unexpected_category")),
             "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
         );
     }
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn invalid_model_output_detail_summary_uses_shared_reason() {
         assert_eq!(
-            reborn_failure_summary_for_category_and_detail(
+            ironclaw_failure_summary_for_category_and_detail(
                 Some("model_invalid_output"),
                 Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse),
             ),
@@ -285,23 +285,23 @@ mod tests {
     // `heartbeat_failed` / `driver_panic`. These two assertions pin the live
     // mapping to the real producer strings.
     #[test]
-    fn reborn_failure_summary_describes_scheduler_heartbeat_failure() {
+    fn ironclaw_failure_summary_describes_scheduler_heartbeat_failure() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("scheduler_heartbeat_failed")),
+            ironclaw_failure_summary_for_category(Some("scheduler_heartbeat_failed")),
             "The run failed after the runner heartbeat could not be recorded."
         );
     }
 
     #[test]
-    fn reborn_failure_summary_describes_scheduler_executor_panic() {
+    fn ironclaw_failure_summary_describes_scheduler_executor_panic() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("scheduler_executor_panic")),
+            ironclaw_failure_summary_for_category(Some("scheduler_executor_panic")),
             "The agent runtime stopped unexpectedly."
         );
     }
 
     #[test]
-    fn reborn_failure_summary_omits_internal_system_tool_language() {
+    fn ironclaw_failure_summary_omits_internal_system_tool_language() {
         for category in [
             "driver_not_found",
             "driver_unavailable",
@@ -309,7 +309,8 @@ mod tests {
             "driver_invalid_request",
             "scheduler_executor_panic",
         ] {
-            let summary = reborn_failure_summary_for_category(Some(category)).to_ascii_lowercase();
+            let summary =
+                ironclaw_failure_summary_for_category(Some(category)).to_ascii_lowercase();
 
             assert!(
                 !summary.contains("system tool"),
@@ -332,16 +333,16 @@ mod tests {
     // explainer then paraphrased into a vague "driver protocol error" that
     // masked the real tool failure).
     #[test]
-    fn reborn_failure_summary_describes_capability_protocol_error() {
+    fn ironclaw_failure_summary_describes_capability_protocol_error() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("capability_protocol_error")),
+            ironclaw_failure_summary_for_category(Some("capability_protocol_error")),
             "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening."
         );
     }
 
     #[test]
-    fn reborn_failure_summary_maps_loop_failure_categories_specifically() {
-        let generic = reborn_failure_summary_for_category(None);
+    fn ironclaw_failure_summary_maps_loop_failure_categories_specifically() {
+        let generic = ironclaw_failure_summary_for_category(None);
         for category in [
             "capability_protocol_error",
             "model_error",
@@ -355,7 +356,7 @@ mod tests {
             "compaction_unavailable",
             "driver_protocol_violation",
         ] {
-            let summary = reborn_failure_summary_for_category(Some(category));
+            let summary = ironclaw_failure_summary_for_category(Some(category));
             assert_ne!(
                 summary, generic,
                 "{category} still degrades to the generic failure summary"
@@ -366,13 +367,13 @@ mod tests {
     // Regression guard: the old, never-produced category strings must no longer
     // be specially cased — they now fall through to the generic summary.
     #[test]
-    fn reborn_failure_summary_treats_legacy_dead_categories_as_generic() {
+    fn ironclaw_failure_summary_treats_legacy_dead_categories_as_generic() {
         assert_eq!(
-            reborn_failure_summary_for_category(Some("heartbeat_failed")),
+            ironclaw_failure_summary_for_category(Some("heartbeat_failed")),
             "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
         );
         assert_eq!(
-            reborn_failure_summary_for_category(Some("driver_panic")),
+            ironclaw_failure_summary_for_category(Some("driver_panic")),
             "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
         );
     }

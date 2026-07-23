@@ -133,7 +133,7 @@ pub trait TurnSpawnTreeStateStore: TurnStateStore {
     /// for the same child (recovery re-driving an edge stuck at
     /// `ReservationReleaseState::Claimed`, or a rollback retry) is a no-op
     /// rather than a second decrement — see
-    /// `docs/reborn/subagent-spawn/thread-harness-design.md` §5.5 round-5/6.
+    /// `docs/ironclaw/subagent-spawn/thread-harness-design.md` §5.5 round-5/6.
     /// Callers pass the child's own `TurnRunId`, which never recurs (ABA-immune).
     async fn release_tree_descendants(
         &self,

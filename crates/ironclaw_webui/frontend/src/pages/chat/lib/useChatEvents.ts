@@ -551,7 +551,7 @@ function applyProjectionItems({
         if (runId && promptRunIdRef?.current === runId) {
           promptRunIdRef.current = null;
         }
-        // Reborn's projection bridge does not currently emit `Text` items
+        // IronClaw's projection bridge does not currently emit `Text` items
         // for assistant replies, nor `capability_display_preview` items in
         // the projection state — both the assistant reply and the rich tool
         // input/output cards live only in the thread timeline. Reload the

@@ -1170,8 +1170,8 @@ async fn gmail_send_message_accepts_structured_fields_and_encodes_raw_body() {
             "message": {
                 "to": ["qa@example.test", "ops@example.test"],
                 "cc": "lead@example.test",
-                "subject": "Reborn QA marker",
-                "body": "REBORN_QA_GMAIL_MARKER"
+                "subject": "IronClaw QA marker",
+                "body": "IRONCLAW_QA_GMAIL_MARKER"
             }
         }),
         egress.clone(),
@@ -1187,7 +1187,7 @@ async fn gmail_send_message_accepts_structured_fields_and_encodes_raw_body() {
     let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap();
     assert!(decoded.contains("To: qa@example.test, ops@example.test\r\n"));
     assert!(decoded.contains("Cc: lead@example.test\r\n"));
-    assert!(decoded.contains("Subject: Reborn QA marker\r\n"));
+    assert!(decoded.contains("Subject: IronClaw QA marker\r\n"));
     assert!(decoded.contains("\r\n\r\nREBORN_QA_GMAIL_MARKER"));
 }
 
@@ -1207,7 +1207,7 @@ async fn gmail_send_message_encodes_non_ascii_structured_headers() {
                 "from": "José <jose@example.test>",
                 "to": "Zoë <zoe@example.test>",
                 "subject": "Résumé ready",
-                "body": "REBORN_QA_GMAIL_MARKER"
+                "body": "IRONCLAW_QA_GMAIL_MARKER"
             }
         }),
         egress.clone(),
@@ -1306,8 +1306,8 @@ async fn gmail_send_message_rejects_structured_header_injection_before_egress() 
         json!({
             "message": {
                 "to": "qa@example.test\r\nBcc: leaked@example.test",
-                "subject": "Reborn QA marker",
-                "body": "REBORN_QA_GMAIL_MARKER"
+                "subject": "IronClaw QA marker",
+                "body": "IRONCLAW_QA_GMAIL_MARKER"
             }
         }),
         egress.clone(),

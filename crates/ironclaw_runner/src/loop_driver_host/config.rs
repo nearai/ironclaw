@@ -18,12 +18,12 @@ impl Default for TextOnlyLoopHostConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RebornLoopDriverHostError {
+pub enum IronClawLoopDriverHostError {
     ScopeMismatch { reason: String },
     InvalidRequest { reason: String },
 }
 
-impl fmt::Display for RebornLoopDriverHostError {
+impl fmt::Display for IronClawLoopDriverHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ScopeMismatch { reason } => {
@@ -36,10 +36,10 @@ impl fmt::Display for RebornLoopDriverHostError {
     }
 }
 
-impl Error for RebornLoopDriverHostError {}
+impl Error for IronClawLoopDriverHostError {}
 
 #[derive(Debug, Clone)]
-pub struct RebornLoopDriverHostRequest {
+pub struct IronClawLoopDriverHostRequest {
     pub claimed_run: ClaimedTurnRun,
     pub loop_run_context: LoopRunContext,
 }

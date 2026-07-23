@@ -10,9 +10,9 @@ paths:
   - "crates/ironclaw_wasm/**"
   - "tools-src/**"
 ---
-# Reborn capability architecture
+# IronClaw capability architecture
 
-Capabilities are typed contracts executed through the mediated Reborn host
+Capabilities are typed contracts executed through the mediated IronClaw host
 path. Product callers do not invoke runtime lanes, storage backends, provider
 clients, or secret stores directly to perform an action.
 
@@ -86,6 +86,6 @@ Review for parallel pipelines with:
 
 ```bash
 rg -n "\.dispatch\(|\.invoke\(|\.resume\(" crates/ironclaw_product_workflow \
-  crates/ironclaw_reborn_composition crates/ironclaw_webui
+  crates/ironclaw_composition crates/ironclaw_webui
 rg -n "RuntimeAdapter|CapabilityHost" crates
 ```

@@ -1,4 +1,4 @@
-//! Slack personal (user-token) WASM Tool for IronClaw Reborn.
+//! Slack personal (user-token) WASM Tool for IronClaw.
 //!
 //! Unlike the bot-token `slack` tool, this tool authenticates with a Slack
 //! **user token** (`xoxp-`) stored under the `slack_user_token` secret, so it

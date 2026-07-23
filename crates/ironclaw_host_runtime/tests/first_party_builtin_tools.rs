@@ -2556,7 +2556,7 @@ async fn builtin_rejects_oversized_outputs_before_return() {
 }
 
 #[tokio::test]
-async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
+async fn memory_capabilities_write_read_tree_and_search_native_ironclaw_memory() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
         all_builtin_capability_ids(),
@@ -3100,7 +3100,7 @@ async fn memory_write_records_prompt_safety_audit_event_through_runtime() {
         MEMORY_WRITE_CAPABILITY_ID,
         json!({
             "target": "SOUL.md",
-            "content": "Reborn soul: be helpful and honest.",
+            "content": "IronClaw soul: be helpful and honest.",
             "append": false
         }),
         context,

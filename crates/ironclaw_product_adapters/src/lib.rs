@@ -1,4 +1,4 @@
-//! Product-adapter contracts for IronClaw Reborn.
+//! Product-adapter contracts for IronClaw.
 
 #![forbid(unsafe_code)]
 

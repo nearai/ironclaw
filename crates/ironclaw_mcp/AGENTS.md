@@ -4,14 +4,14 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/mcp.md`
-- `docs/reborn/contracts/runtime-workflows.md`
-- `docs/reborn/contracts/processes.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/mcp.md`
+- `docs/ironclaw/contracts/runtime-workflows.md`
+- `docs/ironclaw/contracts/processes.md`
 
 ## What This Crate Owns
 
-- The Reborn MCP runtime lane (fail-closed process policy, host-mediated egress), currently:
+- The IronClaw MCP runtime lane (fail-closed process policy, host-mediated egress), currently:
 - Runtime + executor: `McpRuntime`, the `McpExecutor` trait, and `McpRuntimeConfig`.
 - Execution request/result types: `McpInvocation`, `McpExecutionRequest`, `McpExecutionResult` (result field is the shared `ironclaw_host_api::CapabilityHostResult`); `McpError`.
 - Client abstraction: the `McpClient` trait with `McpClientRequest` / `McpClientOutput` (JSON-RPC exchange).

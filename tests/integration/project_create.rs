@@ -13,16 +13,16 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_product_workflow::{ProjectCaller, RebornListProjectsRequest};
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::project_service_fault::FAULT_INJECT_DENIED_PROJECT_NAME;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_product_workflow::{IronClawListProjectsRequest, ProjectCaller};
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::project_service_fault::FAULT_INJECT_DENIED_PROJECT_NAME;
+use ironclaw_support::reply::IronClawScriptedReply;
 
 #[test]
 fn project_create_capability_dispatches_and_persists_project() {
@@ -33,17 +33,17 @@ fn project_create_capability_dispatches_and_persists_project() {
 }
 
 async fn project_create_capability_dispatches_and_persists_project_impl() {
-    let group = RebornIntegrationGroup::project_lifecycle()
+    let group = IronClawIntegrationGroup::project_lifecycle()
         .await
         .expect("project-lifecycle group builds");
     let harness = group
         .thread("conv-project-create")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.project_create",
                 serde_json::json!({"name": "My Project", "description": "a test project"}),
             ),
-            RebornScriptedReply::text("created your project"),
+            IronClawScriptedReply::text("created your project"),
         ])
         .build()
         .await
@@ -81,7 +81,7 @@ async fn project_create_capability_dispatches_and_persists_project_impl() {
         user_id: harness.binding.actor_user_id.clone(),
     };
     let projects = project_service
-        .list_projects(caller, RebornListProjectsRequest::default())
+        .list_projects(caller, IronClawListProjectsRequest::default())
         .await
         .expect("list_projects succeeds")
         .projects;
@@ -108,18 +108,18 @@ fn project_create_invalid_input_routes_to_recoverable_tool_error() {
 }
 
 async fn project_create_invalid_input_routes_to_recoverable_tool_error_impl() {
-    let group = RebornIntegrationGroup::project_lifecycle()
+    let group = IronClawIntegrationGroup::project_lifecycle()
         .await
         .expect("project-lifecycle group builds");
     let oversized_name = "a".repeat(201);
     let harness = group
         .thread("conv-project-create-invalid")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.project_create",
                 serde_json::json!({"name": oversized_name}),
             ),
-            RebornScriptedReply::text("that name didn't work"),
+            IronClawScriptedReply::text("that name didn't work"),
         ])
         .build()
         .await
@@ -163,17 +163,17 @@ fn project_create_denied_fault_routes_to_recoverable_tool_error() {
 }
 
 async fn project_create_denied_fault_routes_to_recoverable_tool_error_impl() {
-    let group = RebornIntegrationGroup::project_lifecycle_fault_injected()
+    let group = IronClawIntegrationGroup::project_lifecycle_fault_injected()
         .await
         .expect("project-lifecycle fault-injection group builds");
     let harness = group
         .thread("conv-project-create-fault")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.project_create",
                 serde_json::json!({"name": FAULT_INJECT_DENIED_PROJECT_NAME}),
             ),
-            RebornScriptedReply::text("you are not permitted to create that project"),
+            IronClawScriptedReply::text("you are not permitted to create that project"),
         ])
         .build()
         .await

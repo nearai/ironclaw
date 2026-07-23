@@ -584,7 +584,7 @@ impl ModelFailureDiagnostic {
     /// the accessor a renderer wants, so a new text arm cannot be silently
     /// dropped by a call site that only knew about `Diagnostic`.
     pub fn model_visible_text(&self) -> Option<&str> {
-        // pub-api-exempt: consumed by ironclaw_reborn_composition's host_remediation_contract full-path test
+        // pub-api-exempt: consumed by ironclaw_composition's host_remediation_contract full-path test
         match self {
             ModelFailureDiagnostic::Diagnostic { text } => Some(text.as_str()),
             ModelFailureDiagnostic::HostRemediation { text } => Some(text.as_str()),

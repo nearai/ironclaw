@@ -6,7 +6,7 @@
 //!   checkpoint (the host-derived `retryable` signal: a `Failed` run that has a
 //!   resumable checkpoint).
 //! - [`FailureLane::Explainable`] — terminal, but carries a specific
-//!   user-facing sentence (see [`crate::reborn_failure_summary_for_category`]).
+//!   user-facing sentence (see [`crate::ironclaw_failure_summary_for_category`]).
 //! - [`FailureLane::Security`] — reserved for the ingress safety/leak refusal
 //!   path (`ironclaw_safety`); the run-boundary classifier never produces it,
 //!   because injection/leak are caught before the run starts (minimal
@@ -62,11 +62,11 @@ pub fn failure_lane(category: &str, retryable: bool) -> FailureLane {
 
 /// Canonical list of every failure category the run boundary can produce.
 ///
-/// Sources: `LoopFailureKind::as_str()` (ironclaw_turns), the reborn driver /
+/// Sources: `LoopFailureKind::as_str()` (ironclaw_turns), the IronClaw driver /
 /// scheduler / model / capability / compaction / host-stage categories
 /// (`failure_categories.rs` + `planned_driver` / `turn_runner` / recovery
 /// mapping), and the pinned provider categories. Keep this in lockstep with
-/// `reborn_failure_summary_for_category`: a new producer category MUST be added
+/// `ironclaw_failure_summary_for_category`: a new producer category MUST be added
 /// here (the enforcement test asserts each has a specific explanation + lane).
 ///
 /// `unknown_failure` is deliberately excluded — it IS the generic fallback.
@@ -137,7 +137,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure_summary::reborn_failure_summary_for_category;
+    use crate::failure_summary::ironclaw_failure_summary_for_category;
 
     #[test]
     fn failure_lane_is_retriable_when_retryable_else_explainable() {
@@ -189,10 +189,11 @@ mod tests {
     #[test]
     fn every_failure_category_is_explainable_and_classified() {
         // The generic fallback any unrecognized category collapses to.
-        let generic = reborn_failure_summary_for_category(Some("__category_that_does_not_exist__"));
+        let generic =
+            ironclaw_failure_summary_for_category(Some("__category_that_does_not_exist__"));
 
         for category in ALL_RUN_FAILURE_CATEGORIES {
-            let sentence = reborn_failure_summary_for_category(Some(category));
+            let sentence = ironclaw_failure_summary_for_category(Some(category));
             assert_ne!(
                 sentence, generic,
                 "category {category} has no specific explanation (falls back to the generic summary) \

@@ -7,7 +7,7 @@ Import button accepts.
 
 These are used by both manual/live QA and automated tests: the E2E suite builds
 and uploads these bundles, while the Rust suites build their zip fixtures in-memory
-(`ironclaw_reborn_composition::extension_lifecycle` tests) and pin only the
+(`ironclaw_composition::extension_lifecycle` tests) and pin only the
 manifests here via `include_str!`
 (`available_extensions::tests::test_tool_fixture_manifests_stay_importable`),
 so a manifest that drifts out of the import-legal shape fails CI, not the

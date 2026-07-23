@@ -1,7 +1,7 @@
 //! Scenario: a genuinely-FAILED group run reports its TRUE failure category,
 //! not the masking `driver_protocol_violation`.
 //!
-//! `RebornIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
+//! `IronClawIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
 //! ~line 472) wires `.with_checkpoint_state_store(..)` onto the group-level
 //! `ThreadCheckpointLoopExitEvidencePort` -- the de-mask fix. Without it,
 //! `verify_failure_evidence` (`crates/ironclaw_runner/src/loop_exit_applier.rs`)
@@ -22,10 +22,10 @@
 //! fidelity mapping (`ModelErrorClass::Unavailable`), an exhausted gateway
 //! that cannot serve the call surfaces as category `"model_unavailable"`.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
 use ironclaw_turns::TurnStatus;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // No scripted replies: the first model call exhausts the scripted
     // provider, deterministically driving the run to `Failed` (see module doc).
     let h = g

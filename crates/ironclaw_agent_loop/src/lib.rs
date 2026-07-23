@@ -1,4 +1,4 @@
-//! Agent-loop framework state and strategy contracts for IronClaw Reborn.
+//! Agent-loop framework state and strategy contracts for IronClaw.
 //!
 //! This crate owns the framework layer above `ironclaw_turns`.
 
@@ -14,7 +14,7 @@ pub mod test_support;
 
 /// Public re-exports for progress-detection primitives. The internal
 /// strategy machinery stays crate-private; downstream consumers (turns,
-/// reborn) only need the typed [`ParamHash`](progress::ParamHash) for
+/// IronClaw) only need the typed [`ParamHash`](progress::ParamHash) for
 /// loop-stuck detection.
 pub mod progress {
     pub use crate::strategies::progress::ParamHash;

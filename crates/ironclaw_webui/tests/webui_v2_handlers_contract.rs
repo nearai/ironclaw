@@ -42,67 +42,71 @@ use ironclaw_product_workflow::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
-    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    IronClawAccountLoginLinkResponse, IronClawAccountTracesResponse,
+    IronClawAdminCreateUserRequest, IronClawAdminDeleteSecretProductRequest,
+    IronClawAdminSecretDeletedResponse, IronClawAdminSetRoleProductRequest,
+    IronClawAdminSetStatusProductRequest, IronClawAdminUpdateUserProductRequest,
+    IronClawAdminUserCreatedResponse, IronClawAdminUserListQuery, IronClawAdminUserListResponse,
+    IronClawAdminUserRequest, IronClawAdminUserResponse, IronClawAdminUserSecretsListResponse,
+    IronClawAttachmentBytes, IronClawAttachmentRequest, IronClawAutomationInfo,
+    IronClawAutomationMutationResponse, IronClawAutomationRecentRunInfo,
+    IronClawAutomationRecentRunStatus, IronClawAutomationRequest, IronClawAutomationSource,
+    IronClawAutomationState, IronClawCancelRunResponse, IronClawCreateProjectRequest,
+    IronClawCreateThreadResponse, IronClawExtensionInfo, IronClawExtensionListResponse,
+    IronClawExtensionRegistryResponse, IronClawFsListRequest, IronClawFsListResponse,
+    IronClawFsMountInfo, IronClawFsMountsResponse, IronClawFsReadRequest, IronClawFsStatRequest,
+    IronClawFsStatResponse, IronClawGetProjectRequest, IronClawGetRunStateRequest,
+    IronClawGetRunStateResponse, IronClawGlobalAutoApproveRequest,
+    IronClawGlobalAutoApproveResponse, IronClawListAutomationsResponse,
+    IronClawListMembersResponse, IronClawListProjectsResponse, IronClawListThreadsResponse,
+    IronClawLogQueryRequest, IronClawLogQueryResponse, IronClawOperatorArea,
+    IronClawOperatorCommandPlaneResponse, IronClawOperatorConfigDiagnostic,
+    IronClawOperatorConfigDiagnosticSeverity, IronClawOperatorConfigEntry,
+    IronClawOperatorConfigGetResponse, IronClawOperatorConfigListResponse,
+    IronClawOperatorConfigSetProductRequest, IronClawOperatorConfigSetRequest,
+    IronClawOperatorConfigValidateRequest, IronClawOperatorConfigValidateResponse,
+    IronClawOperatorLogsQuery, IronClawOperatorServiceLifecycleAction,
+    IronClawOperatorServiceLifecycleRequest, IronClawOperatorSetupResponse,
+    IronClawOperatorSetupStatus, IronClawOperatorSurfaceStatus,
+    IronClawOutboundDeliveryTargetCapabilities, IronClawOutboundDeliveryTargetId,
+    IronClawOutboundDeliveryTargetListResponse, IronClawOutboundDeliveryTargetOption,
+    IronClawOutboundDeliveryTargetStatus, IronClawOutboundDeliveryTargetSummary,
+    IronClawOutboundPreferencesResponse, IronClawProjectFsListRequest,
+    IronClawProjectFsListResponse, IronClawProjectFsReadRequest, IronClawProjectFsStatRequest,
+    IronClawProjectFsStatResponse, IronClawProjectInfo, IronClawProjectMemberInfo,
+    IronClawProjectMemberStatus, IronClawProjectResponse, IronClawProjectRole,
+    IronClawProjectState, IronClawRenameAutomationProductRequest, IronClawResolveGateResponse,
+    IronClawResumeGateResponse, IronClawRetryRunResponse, IronClawRunArtifact,
+    IronClawRunArtifactRequest, IronClawServicesError, IronClawServicesErrorCode,
+    IronClawServicesErrorKind, IronClawSetupExtensionResponse, IronClawSkillContentResponse,
+    IronClawSkillListResponse, IronClawSkillSearchResponse, IronClawStreamEventsRequest,
+    IronClawStreamEventsResponse, IronClawStreamEventsSubscription, IronClawSubmitTurnResponse,
+    IronClawTimelineRequest, IronClawTimelineResponse, IronClawTraceCreditsResponse,
+    IronClawTraceHoldAuthorizeProductRequest, IronClawTraceHoldAuthorizeResponse, IronClawViewPage,
+    IronClawViewQuery, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
+    LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductOperationId,
     ProductOperationRequest, ProductOperationResponse, ProductSurface, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
-    RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListMembersResponse, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
-    RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornViewPage, RebornViewQuery, RunArtifactLogs,
-    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    RunArtifactLogs, RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    rejecting_reborn_services_error,
+    rejecting_ironclaw_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -167,10 +171,10 @@ fn router_with_caller_only(services: Arc<dyn ProductSurface>) -> Router {
     .layer(axum::Extension(caller()))
 }
 
-fn service_unavailable_error(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn service_unavailable_error(retryable: bool) -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -198,23 +202,23 @@ fn successful_resolution(activity_id: ActivityId) -> Resolution {
 type OperatorConfigSetCall = (String, Value);
 type LlmUpsertCall = (String, bool);
 type LlmActiveCall = (String, Option<String>);
-type LogsCall = RebornLogQueryRequest;
-type OperatorLogsCall = RebornOperatorLogsQuery;
+type LogsCall = IronClawLogQueryRequest;
+type OperatorLogsCall = IronClawOperatorLogsQuery;
 
-fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
-    RebornOperatorConfigDiagnostic {
+fn operator_config_surface_not_wired_diagnostic() -> IronClawOperatorConfigDiagnostic {
+    IronClawOperatorConfigDiagnostic {
         key: "*".to_string(),
-        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        severity: IronClawOperatorConfigDiagnosticSeverity::Error,
         reason_code: "operator_config_service_not_wired".to_string(),
         message: "Operator config diagnostics are available, but the effective config service is not wired yet.".to_string(),
-        owning_area: RebornOperatorArea::Config,
+        owning_area: IronClawOperatorArea::Config,
         remediation: "Use bootstrap config, environment variables, or existing CLI setup until the operator config service is enabled.".to_string(),
     }
 }
 
 fn operator_config_validation_diagnostics(
     keys: Vec<String>,
-) -> Vec<RebornOperatorConfigDiagnostic> {
+) -> Vec<IronClawOperatorConfigDiagnostic> {
     let keys = if keys.is_empty() {
         vec!["*".to_string()]
     } else {
@@ -226,7 +230,7 @@ fn operator_config_validation_diagnostics(
         .collect()
 }
 
-fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic {
+fn operator_config_key_diagnostic(key: String) -> IronClawOperatorConfigDiagnostic {
     let normalized = key.to_ascii_lowercase();
     let is_secret = ["api_key", "credential", "password", "secret", "token"]
         .iter()
@@ -273,22 +277,22 @@ fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic
         )
     };
 
-    RebornOperatorConfigDiagnostic {
+    IronClawOperatorConfigDiagnostic {
         key,
-        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        severity: IronClawOperatorConfigDiagnosticSeverity::Error,
         reason_code: reason_code.to_string(),
         message: message.to_string(),
-        owning_area: RebornOperatorArea::Config,
+        owning_area: IronClawOperatorArea::Config,
         remediation: remediation.to_string(),
     }
 }
 
 fn operator_config_diagnostic_command_plane_response(
-    area: RebornOperatorArea,
-) -> RebornOperatorCommandPlaneResponse {
-    RebornOperatorCommandPlaneResponse {
+    area: IronClawOperatorArea,
+) -> IronClawOperatorCommandPlaneResponse {
+    IronClawOperatorCommandPlaneResponse {
         area,
-        status: RebornOperatorSurfaceStatus::Unavailable,
+        status: IronClawOperatorSurfaceStatus::Unavailable,
         message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
         operator_status: None,
         logs: None,
@@ -301,20 +305,20 @@ fn operator_config_diagnostic_command_plane_response(
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiCreateThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
-    get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
-    browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
+    get_timeline_calls: Mutex<Vec<IronClawTimelineRequest>>,
+    browse_fs_calls: Mutex<Vec<IronClawFsListRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
-    next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
-    view_queries: Mutex<Vec<RebornViewQuery>>,
+    next_global_auto_approve_error: Mutex<Option<IronClawServicesError>>,
+    view_queries: Mutex<Vec<IronClawViewQuery>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     operation_calls: Mutex<Vec<ProductOperationRequest>>,
-    next_operation_response: Mutex<Option<Result<ProductOperationResponse, RebornServicesError>>>,
-    next_invoke_response: Mutex<Option<Result<Resolution, RebornServicesError>>>,
-    read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
-    read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
-    stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    next_operation_response: Mutex<Option<Result<ProductOperationResponse, IronClawServicesError>>>,
+    next_invoke_response: Mutex<Option<Result<Resolution, IronClawServicesError>>>,
+    read_attachment_calls: Mutex<Vec<IronClawAttachmentRequest>>,
+    read_attachment_response: Mutex<Option<IronClawAttachmentBytes>>,
+    stream_events_calls: Mutex<Vec<IronClawStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
@@ -326,74 +330,75 @@ struct StubServices {
     trace_account_traces_callers: Mutex<Vec<String>>,
     /// Forwarded caller user-ids for each `trace_account_login_link` call.
     trace_account_login_link_callers: Mutex<Vec<String>>,
-    next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_list_automations_error: Mutex<Option<IronClawServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
     list_operator_config_calls: Mutex<usize>,
-    operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
+    operator_config_entries: Mutex<Vec<IronClawOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
-    next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
+    next_set_operator_config_key_error: Mutex<Option<IronClawServicesError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
-    run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
+    run_operator_service_lifecycle_calls: Mutex<Vec<IronClawOperatorServiceLifecycleAction>>,
     get_llm_config_calls: Mutex<usize>,
     upsert_llm_provider_calls: Mutex<Vec<LlmUpsertCall>>,
     delete_llm_provider_calls: Mutex<Vec<String>>,
     set_active_llm_calls: Mutex<Vec<LlmActiveCall>>,
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
-    next_create_thread_error: Mutex<Option<RebornServicesError>>,
-    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, RebornServicesError>>>,
+    next_create_thread_error: Mutex<Option<IronClawServicesError>>,
+    next_retry_run: Mutex<VecDeque<Result<IronClawRetryRunResponse, IronClawServicesError>>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
     /// drive the handler through specific projection envelopes, error
     /// branches, or empty drains in a deterministic order.
-    next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
+    next_stream_events:
+        Mutex<VecDeque<Result<IronClawStreamEventsResponse, IronClawServicesError>>>,
     stream_events_notify: Arc<Notify>,
     stream_events_subscription_enabled: Mutex<bool>,
-    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
-    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
+    subscribe_events_calls: Mutex<Vec<IronClawStreamEventsRequest>>,
+    next_stream_events_subscription: Mutex<Option<IronClawStreamEventsSubscription>>,
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
-    next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
+    next_submit_response: Mutex<Option<IronClawSubmitTurnResponse>>,
 }
 
 impl StubServices {
-    fn fail_create_thread(&self, error: RebornServicesError) {
+    fn fail_create_thread(&self, error: IronClawServicesError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
     }
 
     /// Stage the bytes `read_attachment` should return. When unset, the stub
     /// inherits the trait default (404 not found).
-    fn set_attachment(&self, bytes: RebornAttachmentBytes) {
+    fn set_attachment(&self, bytes: IronClawAttachmentBytes) {
         *self.read_attachment_response.lock().expect("lock") = Some(bytes);
     }
 
-    fn fail_list_automations(&self, error: RebornServicesError) {
+    fn fail_list_automations(&self, error: IronClawServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
     }
 
-    fn enqueue_invoke_response(&self, response: Result<Resolution, RebornServicesError>) {
+    fn enqueue_invoke_response(&self, response: Result<Resolution, IronClawServicesError>) {
         *self.next_invoke_response.lock().expect("lock") = Some(response);
     }
 
     fn enqueue_operation_response(
         &self,
-        response: Result<ProductOperationResponse, RebornServicesError>,
+        response: Result<ProductOperationResponse, IronClawServicesError>,
     ) {
         *self.next_operation_response.lock().expect("lock") = Some(response);
     }
 
-    fn fail_set_operator_config_key(&self, error: RebornServicesError) {
+    fn fail_set_operator_config_key(&self, error: IronClawServicesError) {
         *self
             .next_set_operator_config_key_error
             .lock()
             .expect("lock") = Some(error);
     }
 
-    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, RebornServicesError>) {
+    fn enqueue_retry_run(&self, response: Result<IronClawRetryRunResponse, IronClawServicesError>) {
         self.next_retry_run
             .lock()
             .expect("lock")
@@ -406,7 +411,7 @@ impl StubServices {
     /// is empty.
     fn enqueue_stream_events(
         &self,
-        response: Result<RebornStreamEventsResponse, RebornServicesError>,
+        response: Result<IronClawStreamEventsResponse, IronClawServicesError>,
     ) {
         self.next_stream_events
             .lock()
@@ -416,7 +421,7 @@ impl StubServices {
 
     fn enable_stream_events_subscription(
         &self,
-        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
+        events: Vec<Result<ProductOutboundEnvelope, IronClawServicesError>>,
     ) {
         let (sender, receiver) = mpsc::channel(events.len().max(1));
         for event in events {
@@ -428,7 +433,7 @@ impl StubServices {
             .lock()
             .expect("lock") = true;
         *self.next_stream_events_subscription.lock().expect("lock") =
-            Some(RebornStreamEventsSubscription::new(receiver));
+            Some(IronClawStreamEventsSubscription::new(receiver));
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
@@ -439,7 +444,7 @@ impl StubServices {
         self.stream_events_notify.clone()
     }
 
-    fn set_next_submit_response(&self, response: RebornSubmitTurnResponse) {
+    fn set_next_submit_response(&self, response: IronClawSubmitTurnResponse) {
         *self.next_submit_response.lock().expect("lock") = Some(response);
     }
 }
@@ -448,7 +453,7 @@ impl StubServices {
     async fn global_auto_approve_enabled(
         &self,
         _caller: WebUiAuthenticatedCaller,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, IronClawServicesError> {
         *self.global_auto_approve_calls.lock().expect("lock") += 1;
         if *self.stall_global_auto_approve.lock().expect("lock") {
             std::future::pending::<()>().await;
@@ -468,7 +473,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<IronClawCreateThreadResponse, IronClawServicesError> {
         self.create_thread_calls
             .lock()
             .expect("lock")
@@ -476,7 +481,7 @@ impl StubServices {
         if let Some(error) = self.next_create_thread_error.lock().expect("lock").take() {
             return Err(error);
         }
-        Ok(RebornCreateThreadResponse {
+        Ok(IronClawCreateThreadResponse {
             thread: SessionThreadRecord {
                 thread_id: ironclaw_host_api::ThreadId::new("thread:fake").expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
@@ -503,7 +508,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+    ) -> Result<IronClawSubmitTurnResponse, IronClawServicesError> {
         self.submit_turn_calls
             .lock()
             .expect("lock")
@@ -511,7 +516,7 @@ impl StubServices {
         if let Some(next) = self.next_submit_response.lock().expect("lock").take() {
             return Ok(next);
         }
-        Ok(RebornSubmitTurnResponse::Submitted {
+        Ok(IronClawSubmitTurnResponse::Submitted {
             thread_id: ironclaw_host_api::ThreadId::new(
                 request.thread_id.clone().unwrap_or_default(),
             )
@@ -529,13 +534,13 @@ impl StubServices {
     async fn get_timeline(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
+        request: IronClawTimelineRequest,
+    ) -> Result<IronClawTimelineResponse, IronClawServicesError> {
         self.get_timeline_calls
             .lock()
             .expect("lock")
             .push(request.clone());
-        Ok(RebornTimelineResponse {
+        Ok(IronClawTimelineResponse {
             thread: SessionThreadRecord {
                 thread_id: ironclaw_host_api::ThreadId::new(request.thread_id.clone())
                     .expect("thread id"),
@@ -565,7 +570,7 @@ impl StubServices {
         capability: CapabilityId,
         input: ProductCapabilityInput,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, IronClawServicesError> {
         if let ProductCapabilityInput::LlmProviderUpsert(request) = input {
             self.upsert_llm_provider_calls
                 .lock()
@@ -609,19 +614,19 @@ impl StubServices {
     async fn query(
         &self,
         caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+        query: IronClawViewQuery,
+    ) -> Result<IronClawViewPage, IronClawServicesError> {
         self.view_queries.lock().expect("lock").push(query.clone());
         match query.view_id.as_str() {
             id if id == RUN_ARTIFACT_VIEW.id => {
-                let request: RebornRunArtifactRequest =
+                let request: IronClawRunArtifactRequest =
                     serde_json::from_value(query.params).expect("artifact params");
                 let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
-                let artifact = RebornRunArtifact {
+                let artifact = IronClawRunArtifact {
                     schema: RUN_ARTIFACT_SCHEMA.to_string(),
                     generated_at: Utc::now(),
                     thread_id: request.thread_id,
-                    run: RebornGetRunStateResponse {
+                    run: IronClawGetRunStateResponse {
                         turn_id: "turn-artifact".to_string(),
                         run_id,
                         status: TurnStatus::Completed,
@@ -651,19 +656,19 @@ impl StubServices {
                         applied: false,
                     },
                 };
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(artifact).expect("artifact payload"),
                     next_cursor: None,
                 })
             }
             id if id == LOGS_VIEW.id => {
-                let mut request: RebornLogQueryRequest =
+                let mut request: IronClawLogQueryRequest =
                     serde_json::from_value(query.params).expect("logs params");
                 request.cursor = query.cursor.or(request.cursor);
                 if request.tail && request.follow {
-                    return Err(RebornServicesError {
-                        code: RebornServicesErrorCode::InvalidRequest,
-                        kind: RebornServicesErrorKind::Validation,
+                    return Err(IronClawServicesError {
+                        code: IronClawServicesErrorCode::InvalidRequest,
+                        kind: IronClawServicesErrorKind::Validation,
                         status_code: 400,
                         retryable: false,
                         field: Some("follow".to_string()),
@@ -671,29 +676,29 @@ impl StubServices {
                     });
                 }
                 self.query_logs_calls.lock().expect("lock").push(request);
-                let response = RebornLogQueryResponse {
+                let response = IronClawLogQueryResponse {
                     source: "test".to_string(),
                     entries: Vec::new(),
                     next_cursor: None,
                     tail_supported: true,
                     follow_supported: true,
                 };
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(response).expect("logs payload"),
                     next_cursor: None,
                 })
             }
             id if id == OPERATOR_LOGS_VIEW.id => {
-                let mut request: RebornOperatorLogsQuery =
+                let mut request: IronClawOperatorLogsQuery =
                     serde_json::from_value(query.params).expect("operator logs params");
                 request.cursor = query.cursor.or(request.cursor);
                 self.query_operator_logs_calls
                     .lock()
                     .expect("lock")
                     .push(request);
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(operator_command_response(
-                        RebornOperatorArea::Logs,
+                        IronClawOperatorArea::Logs,
                     ))
                     .expect("operator logs payload"),
                     next_cursor: None,
@@ -701,7 +706,7 @@ impl StubServices {
             }
             id if id == LLM_CONFIG_VIEW.id => {
                 *self.get_llm_config_calls.lock().expect("lock") += 1;
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(llm_snapshot("openai"))
                         .expect("llm config payload"),
                     next_cursor: None,
@@ -712,8 +717,8 @@ impl StubServices {
                     serde_json::from_value(query.params).expect("thread list params");
                 request.cursor = query.cursor.or(request.cursor);
                 self.list_threads_calls.lock().expect("lock").push(request);
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornListThreadsResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawListThreadsResponse {
                         threads: Vec::new(),
                         next_cursor: None,
                     })
@@ -722,31 +727,31 @@ impl StubServices {
                 })
             }
             id if id == TIMELINE_VIEW.id => {
-                let mut request: RebornTimelineRequest =
+                let mut request: IronClawTimelineRequest =
                     serde_json::from_value(query.params).expect("timeline params");
                 request.cursor = query.cursor.or(request.cursor);
                 let response = self.get_timeline(caller, request).await?;
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(response).expect("timeline payload"),
                     next_cursor: None,
                 })
             }
             id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
-                let _: RebornGlobalAutoApproveRequest =
+                let _: IronClawGlobalAutoApproveRequest =
                     serde_json::from_value(query.params).expect("global auto approve params");
                 let enabled = self.global_auto_approve_enabled(caller).await?;
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornGlobalAutoApproveResponse { enabled })
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawGlobalAutoApproveResponse { enabled })
                         .expect("global auto approve payload"),
                     next_cursor: None,
                 })
             }
             id if id == ADMIN_USERS_VIEW.id => {
-                let mut request: RebornAdminUserListQuery =
+                let mut request: IronClawAdminUserListQuery =
                     serde_json::from_value(query.params).expect("admin users params");
                 request.cursor = query.cursor.or(request.cursor);
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornAdminUserListResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawAdminUserListResponse {
                         users: vec![sample_admin_user("user-admin")],
                         next_cursor: None,
                     })
@@ -755,10 +760,10 @@ impl StubServices {
                 })
             }
             id if id == ADMIN_USER_VIEW.id => {
-                let request: RebornAdminUserRequest =
+                let request: IronClawAdminUserRequest =
                     serde_json::from_value(query.params).expect("admin user params");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornAdminUserResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawAdminUserResponse {
                         user: sample_admin_user(request.user_id.as_str()),
                     })
                     .expect("admin user payload"),
@@ -766,10 +771,10 @@ impl StubServices {
                 })
             }
             id if id == ADMIN_USER_SECRETS_VIEW.id => {
-                let _: RebornAdminUserRequest =
+                let _: IronClawAdminUserRequest =
                     serde_json::from_value(query.params).expect("admin user secrets params");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornAdminUserSecretsListResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawAdminUserSecretsListResponse {
                         secrets: vec![AdminUserSecretMeta {
                             handle: "openai_api_key".to_string(),
                             created_at: Some("2026-06-17T00:00:00Z".to_string()),
@@ -795,8 +800,8 @@ impl StubServices {
                 {
                     return Err(error);
                 }
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornListAutomationsResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawListAutomationsResponse {
                         automations: vec![
                             automation_info("automation-listed", "Daily status", "0 9 * * *"),
                             automation_info("automation-alpha", "Renamed status", "0 9 * * *"),
@@ -809,7 +814,7 @@ impl StubServices {
             }
             id if id == OUTBOUND_PREFERENCES_VIEW.id => {
                 *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(outbound_preferences_response("slack-dm-alpha"))
                         .expect("outbound preferences payload"),
                     next_cursor: None,
@@ -820,13 +825,13 @@ impl StubServices {
                     .list_outbound_delivery_targets_calls
                     .lock()
                     .expect("lock") += 1;
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(outbound_delivery_targets_response())
                         .expect("outbound delivery targets payload"),
                     next_cursor: None,
                 })
             }
-            id if id == TRACE_CREDITS_VIEW.id => Ok(RebornViewPage {
+            id if id == TRACE_CREDITS_VIEW.id => Ok(IronClawViewPage {
                 payload: serde_json::to_value(trace_credits_response())
                     .expect("trace credits payload"),
                 next_cursor: None,
@@ -837,8 +842,8 @@ impl StubServices {
                     .lock()
                     .expect("lock")
                     .push(user_id);
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornAccountTracesResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawAccountTracesResponse {
                         enrolled: false,
                         traces: vec![],
                     })
@@ -848,8 +853,8 @@ impl StubServices {
             }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
                 *self.list_operator_config_calls.lock().expect("lock") += 1;
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornOperatorConfigListResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawOperatorConfigListResponse {
                         entries: self.operator_config_entries.lock().expect("lock").clone(),
                         precedence: vec!["default".to_string()],
                         diagnostics: Vec::new(),
@@ -875,22 +880,22 @@ impl StubServices {
                     .find(|entry| entry.key == key)
                     .cloned()
                     .unwrap_or_else(|| operator_config_entry(key, serde_json::json!("configured")));
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornOperatorConfigGetResponse { entry })
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawOperatorConfigGetResponse { entry })
                         .expect("operator config key payload"),
                     next_cursor: None,
                 })
             }
             id if id == OPERATOR_CONFIG_VALIDATE_VIEW.id => {
-                let request: RebornOperatorConfigValidateRequest =
+                let request: IronClawOperatorConfigValidateRequest =
                     serde_json::from_value(query.params).expect("operator config validate params");
                 self.validate_operator_config_calls
                     .lock()
                     .expect("lock")
                     .push(request.keys.clone());
                 let diagnostics = operator_config_validation_diagnostics(request.keys);
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornOperatorConfigValidateResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawOperatorConfigValidateResponse {
                         valid: diagnostics.is_empty(),
                         diagnostics,
                     })
@@ -919,10 +924,10 @@ impl StubServices {
                     .and_then(|input| input.get("model"))
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornOperatorSetupResponse {
-                        area: RebornOperatorArea::Setup,
-                        status: RebornOperatorSetupStatus::Incomplete,
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawOperatorSetupResponse {
+                        area: IronClawOperatorArea::Setup,
+                        status: IronClawOperatorSetupStatus::Incomplete,
                         message: "setup incomplete".to_string(),
                         active_provider_id,
                         active_model,
@@ -933,29 +938,29 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
-            id if id == OPERATOR_DIAGNOSTICS_VIEW.id => Ok(RebornViewPage {
+            id if id == OPERATOR_DIAGNOSTICS_VIEW.id => Ok(IronClawViewPage {
                 payload: serde_json::to_value(operator_config_diagnostic_command_plane_response(
-                    RebornOperatorArea::Diagnostics,
+                    IronClawOperatorArea::Diagnostics,
                 ))
                 .expect("operator diagnostics payload"),
                 next_cursor: None,
             }),
-            id if id == OPERATOR_STATUS_VIEW.id => Ok(RebornViewPage {
+            id if id == OPERATOR_STATUS_VIEW.id => Ok(IronClawViewPage {
                 payload: serde_json::to_value(operator_config_diagnostic_command_plane_response(
-                    RebornOperatorArea::Status,
+                    IronClawOperatorArea::Status,
                 ))
                 .expect("operator status payload"),
                 next_cursor: None,
             }),
-            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornExtensionListResponse {
+            id if id == EXTENSIONS_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawExtensionListResponse {
                     extensions: vec![extension_info("google-calendar", true)],
                 })
                 .expect("extensions payload"),
                 next_cursor: None,
             }),
-            id if id == EXTENSION_REGISTRY_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornExtensionRegistryResponse {
+            id if id == EXTENSION_REGISTRY_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawExtensionRegistryResponse {
                     entries: Vec::new(),
                 })
                 .expect("extension registry payload"),
@@ -968,14 +973,14 @@ impl StubServices {
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
                         .expect("extension setup package ref");
-                Ok(RebornViewPage {
+                Ok(IronClawViewPage {
                     payload: serde_json::to_value(extension_setup_response(package_ref))
                         .expect("extension setup payload"),
                     next_cursor: None,
                 })
             }
-            id if id == SKILLS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornSkillListResponse {
+            id if id == SKILLS_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawSkillListResponse {
                     skills: Vec::new(),
                     count: 0,
                     auto_activate_learned: true,
@@ -983,8 +988,8 @@ impl StubServices {
                 .expect("skills payload"),
                 next_cursor: None,
             }),
-            id if id == SKILL_SEARCH_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornSkillSearchResponse {
+            id if id == SKILL_SEARCH_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawSkillSearchResponse {
                     catalog: Vec::new(),
                     installed: Vec::new(),
                     registry_url: String::new(),
@@ -995,8 +1000,8 @@ impl StubServices {
             }),
             id if id == SKILL_CONTENT_VIEW.id => {
                 let name = query.params["name"].as_str().expect("skill name param");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornSkillContentResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawSkillContentResponse {
                         name: name.to_string(),
                         content: format!("# {name}\n"),
                     })
@@ -1005,10 +1010,10 @@ impl StubServices {
                 })
             }
             id if id == PROJECT_FS_LIST_VIEW.id => {
-                let request: RebornProjectFsListRequest =
+                let request: IronClawProjectFsListRequest =
                     serde_json::from_value(query.params).expect("project fs list params");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornProjectFsListResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawProjectFsListResponse {
                         entries: vec![ProjectFsEntry {
                             name: "report.md".to_string(),
                             path: format!("{}/report.md", request.path.trim_end_matches('/')),
@@ -1020,10 +1025,10 @@ impl StubServices {
                 })
             }
             id if id == PROJECT_FS_STAT_VIEW.id => {
-                let request: RebornProjectFsStatRequest =
+                let request: IronClawProjectFsStatRequest =
                     serde_json::from_value(query.params).expect("project fs stat params");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornProjectFsStatResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawProjectFsStatResponse {
                         stat: ProjectFsStat {
                             path: request.path,
                             kind: ProjectFsEntryKind::File,
@@ -1035,14 +1040,14 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
-            id if id == FS_MOUNTS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornFsMountsResponse {
+            id if id == FS_MOUNTS_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawFsMountsResponse {
                     mounts: vec![
-                        RebornFsMountInfo {
+                        IronClawFsMountInfo {
                             mount: FsMount::Memory,
                             label: "Memory".to_string(),
                         },
-                        RebornFsMountInfo {
+                        IronClawFsMountInfo {
                             mount: FsMount::Workspace,
                             label: "Workspace files".to_string(),
                         },
@@ -1052,14 +1057,14 @@ impl StubServices {
                 next_cursor: None,
             }),
             id if id == FS_LIST_VIEW.id => {
-                let request: RebornFsListRequest =
+                let request: IronClawFsListRequest =
                     serde_json::from_value(query.params).expect("fs list params");
                 self.browse_fs_calls
                     .lock()
                     .expect("lock")
                     .push(request.clone());
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornFsListResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawFsListResponse {
                         mount: request.mount,
                         path: request.path,
                         entries: vec![ProjectFsEntry {
@@ -1073,10 +1078,10 @@ impl StubServices {
                 })
             }
             id if id == FS_STAT_VIEW.id => {
-                let request: RebornFsStatRequest =
+                let request: IronClawFsStatRequest =
                     serde_json::from_value(query.params).expect("fs stat params");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornFsStatResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawFsStatResponse {
                         stat: ProjectFsStat {
                             path: request.path,
                             kind: ProjectFsEntryKind::File,
@@ -1088,26 +1093,26 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
-            id if id == PROJECTS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornListProjectsResponse {
+            id if id == PROJECTS_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawListProjectsResponse {
                     projects: vec![sample_project_info("project-alpha")],
                 })
                 .expect("projects payload"),
                 next_cursor: None,
             }),
             id if id == PROJECT_VIEW.id => {
-                let request: RebornGetProjectRequest =
+                let request: IronClawGetProjectRequest =
                     serde_json::from_value(query.params).expect("project params");
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornProjectResponse {
+                Ok(IronClawViewPage {
+                    payload: serde_json::to_value(IronClawProjectResponse {
                         project: sample_project_info(&request.project_id),
                     })
                     .expect("project payload"),
                     next_cursor: None,
                 })
             }
-            id if id == PROJECT_MEMBERS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornListMembersResponse {
+            id if id == PROJECT_MEMBERS_VIEW.id => Ok(IronClawViewPage {
+                payload: serde_json::to_value(IronClawListMembersResponse {
                     members: vec![
                         sample_member_info("user-beta"),
                         sample_member_info("body-user"),
@@ -1117,15 +1122,15 @@ impl StubServices {
                 .expect("project members payload"),
                 next_cursor: None,
             }),
-            _ => Err(rejecting_reborn_services_error()),
+            _ => Err(rejecting_ironclaw_services_error()),
         }
     }
 
     async fn read_fs_file(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: RebornFsReadRequest,
-    ) -> Result<ProjectFsFile, RebornServicesError> {
+        request: IronClawFsReadRequest,
+    ) -> Result<ProjectFsFile, IronClawServicesError> {
         Ok(ProjectFsFile {
             path: request.path,
             filename: Some("today.md".to_string()),
@@ -1138,17 +1143,17 @@ impl StubServices {
     async fn read_attachment(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: RebornAttachmentRequest,
-    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        request: IronClawAttachmentRequest,
+    ) -> Result<IronClawAttachmentBytes, IronClawServicesError> {
         self.read_attachment_calls
             .lock()
             .expect("lock")
             .push(request);
         match self.read_attachment_response.lock().expect("lock").clone() {
             Some(bytes) => Ok(bytes),
-            None => Err(RebornServicesError {
-                code: RebornServicesErrorCode::NotFound,
-                kind: RebornServicesErrorKind::NotFound,
+            None => Err(IronClawServicesError {
+                code: IronClawServicesErrorCode::NotFound,
+                kind: IronClawServicesErrorKind::NotFound,
                 status_code: 404,
                 retryable: false,
                 field: None,
@@ -1160,8 +1165,8 @@ impl StubServices {
     async fn stream_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsResponse, IronClawServicesError> {
         self.stream_events_calls
             .lock()
             .expect("lock")
@@ -1171,7 +1176,7 @@ impl StubServices {
             return response;
         }
         // Empty drain; SSE handler will keep-alive until the test drops it.
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
+        Ok(IronClawStreamEventsResponse { events: Vec::new() })
     }
 
     fn supports_stream_events_subscription(&self) -> bool {
@@ -1184,8 +1189,8 @@ impl StubServices {
     async fn subscribe_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsSubscription, IronClawServicesError> {
         self.subscribe_events_calls
             .lock()
             .expect("lock")
@@ -1200,15 +1205,15 @@ impl StubServices {
     async fn get_run_state(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        _request: IronClawGetRunStateRequest,
+    ) -> Result<IronClawGetRunStateResponse, IronClawServicesError> {
         // Not exercised by any current handler test — `get_run_state` is on
         // the facade trait but not wired to a WebChat v2 HTTP route. Fail
         // loud rather than fabricate a response so a future caller-level
         // test that forgets to program this path can't quietly pass.
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
+        Err(IronClawServicesError {
+            code: IronClawServicesErrorCode::Internal,
+            kind: IronClawServicesErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -1220,12 +1225,12 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+    ) -> Result<IronClawCancelRunResponse, IronClawServicesError> {
         self.cancel_run_calls
             .lock()
             .expect("lock")
             .push(request.clone());
-        Ok(RebornCancelRunResponse {
+        Ok(IronClawCancelRunResponse {
             run_id: TurnRunId::new(),
             status: TurnStatus::Cancelled,
             event_cursor: EventCursor(2),
@@ -1237,13 +1242,13 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+    ) -> Result<IronClawResolveGateResponse, IronClawServicesError> {
         self.resolve_gate_calls
             .lock()
             .expect("lock")
             .push(request.clone());
-        Ok(RebornResolveGateResponse::Resumed(
-            RebornResumeGateResponse {
+        Ok(IronClawResolveGateResponse::Resumed(
+            IronClawResumeGateResponse {
                 run_id: TurnRunId::new(),
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(3),
@@ -1255,7 +1260,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+    ) -> Result<IronClawRetryRunResponse, IronClawServicesError> {
         self.retry_run_calls
             .lock()
             .expect("lock")
@@ -1271,8 +1276,8 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         key: String,
-        request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        request: IronClawOperatorConfigSetRequest,
+    ) -> Result<IronClawOperatorConfigGetResponse, IronClawServicesError> {
         self.set_operator_config_key_calls
             .lock()
             .expect("lock")
@@ -1285,7 +1290,7 @@ impl StubServices {
         {
             return Err(error);
         }
-        Ok(RebornOperatorConfigGetResponse {
+        Ok(IronClawOperatorConfigGetResponse {
             entry: operator_config_entry(key, request.value),
         })
     }
@@ -1293,14 +1298,14 @@ impl StubServices {
     async fn run_operator_service_lifecycle(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorServiceLifecycleRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        request: IronClawOperatorServiceLifecycleRequest,
+    ) -> Result<IronClawOperatorCommandPlaneResponse, IronClawServicesError> {
         self.run_operator_service_lifecycle_calls
             .lock()
             .expect("lock")
             .push(request.action);
         Ok(operator_command_response(
-            RebornOperatorArea::ServiceLifecycle,
+            IronClawOperatorArea::ServiceLifecycle,
         ))
     }
 
@@ -1308,7 +1313,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
-    ) -> Result<LlmProbeResult, RebornServicesError> {
+    ) -> Result<LlmProbeResult, IronClawServicesError> {
         self.test_llm_connection_calls
             .lock()
             .expect("lock")
@@ -1323,7 +1328,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
-    ) -> Result<LlmModelsResult, RebornServicesError> {
+    ) -> Result<LlmModelsResult, IronClawServicesError> {
         self.list_llm_models_calls
             .lock()
             .expect("lock")
@@ -1338,7 +1343,7 @@ impl StubServices {
     async fn trace_account_login_link(
         &self,
         caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+    ) -> Result<IronClawAccountLoginLinkResponse, IronClawServicesError> {
         // Capture the forwarded caller (tenant AND user — this is the trusted
         // identity boundary) so the contract test can verify the caller-scoped
         // route threads the authenticated identity, then return a hermetic
@@ -1351,7 +1356,7 @@ impl StubServices {
                 caller.tenant_id.as_str(),
                 caller.actor().user_id.as_str()
             ));
-        Ok(RebornAccountLoginLinkResponse {
+        Ok(IronClawAccountLoginLinkResponse {
             minted: true,
             enrolled: true,
             url: Some("https://commons.example/account/login?code=stub".to_string()),
@@ -1367,23 +1372,23 @@ impl ProductSurface for StubServices {
         capability: CapabilityId,
         input: ProductCapabilityInput,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, IronClawServicesError> {
         StubServices::invoke(self, caller, capability, input, activity_id).await
     }
 
     async fn query(
         &self,
         caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+        query: IronClawViewQuery,
+    ) -> Result<IronClawViewPage, IronClawServicesError> {
         StubServices::query(self, caller, query).await
     }
 
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsResponse, IronClawServicesError> {
         StubServices::stream_events(self, caller, request).await
     }
 
@@ -1394,16 +1399,16 @@ impl ProductSurface for StubServices {
     async fn subscribe_events(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsSubscription, IronClawServicesError> {
         StubServices::subscribe_events(self, caller, request).await
     }
 
     async fn get_run_state(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        request: IronClawGetRunStateRequest,
+    ) -> Result<IronClawGetRunStateResponse, IronClawServicesError> {
         StubServices::get_run_state(self, caller, request).await
     }
 
@@ -1411,7 +1416,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         self.operation_calls
             .lock()
             .expect("lock")
@@ -1459,14 +1464,14 @@ impl ProductSurface for StubServices {
                 .await?,
             ),
             ProductOperationId::ProjectCreate => {
-                let _: RebornCreateProjectRequest =
+                let _: IronClawCreateProjectRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornProjectResponse {
+                ProductOperationResponse::json(IronClawProjectResponse {
                     project: sample_project_info("project-created"),
                 })
             }
             ProductOperationId::ProjectFsRead => {
-                let request: RebornProjectFsReadRequest =
+                let request: IronClawProjectFsReadRequest =
                     serde_json::from_value(request.input).expect("input");
                 Ok(ProductOperationResponse::project_file(ProjectFsFile {
                     path: request.path,
@@ -1494,20 +1499,20 @@ impl ProductSurface for StubServices {
                 ProductOperationResponse::json(self.trace_account_login_link(caller).await?)
             }
             ProductOperationId::TraceHoldAuthorize => {
-                let _: RebornTraceHoldAuthorizeProductRequest =
+                let _: IronClawTraceHoldAuthorizeProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornTraceHoldAuthorizeResponse {
+                ProductOperationResponse::json(IronClawTraceHoldAuthorizeResponse {
                     authorized: true,
                 })
             }
             ProductOperationId::OperatorConfigSetKey => {
-                let request: RebornOperatorConfigSetProductRequest =
+                let request: IronClawOperatorConfigSetProductRequest =
                     serde_json::from_value(request.input).expect("input");
                 ProductOperationResponse::json(
                     self.set_operator_config_key(
                         caller,
                         request.key,
-                        RebornOperatorConfigSetRequest {
+                        IronClawOperatorConfigSetRequest {
                             value: request.value,
                         },
                     )
@@ -1551,25 +1556,25 @@ impl ProductSurface for StubServices {
                 verification_uri: "https://openai.com/device".to_string(),
             }),
             ProductOperationId::AdminUserCreate => {
-                let request: RebornAdminCreateUserRequest =
+                let request: IronClawAdminCreateUserRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAdminUserCreatedResponse {
+                ProductOperationResponse::json(IronClawAdminUserCreatedResponse {
                     user: sample_admin_user(request.email.as_deref().unwrap_or("user-admin")),
                     api_token: "token-test".to_string(),
                 })
             }
             ProductOperationId::AdminUserDeleteSecret => {
-                let request: RebornAdminDeleteSecretProductRequest =
+                let request: IronClawAdminDeleteSecretProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAdminSecretDeletedResponse {
+                ProductOperationResponse::json(IronClawAdminSecretDeletedResponse {
                     handle: request.handle,
                     deleted: true,
                 })
             }
             ProductOperationId::AutomationPause => {
-                let request: RebornAutomationRequest =
+                let request: IronClawAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                ProductOperationResponse::json(IronClawAutomationMutationResponse {
                     updated: true,
                     automation: Some(automation_info(
                         request.automation_id.as_str(),
@@ -1579,9 +1584,9 @@ impl ProductSurface for StubServices {
                 })
             }
             ProductOperationId::AutomationResume => {
-                let request: RebornAutomationRequest =
+                let request: IronClawAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                ProductOperationResponse::json(IronClawAutomationMutationResponse {
                     updated: true,
                     automation: Some(automation_info(
                         request.automation_id.as_str(),
@@ -1591,9 +1596,9 @@ impl ProductSurface for StubServices {
                 })
             }
             ProductOperationId::AutomationRename => {
-                let request: RebornRenameAutomationProductRequest =
+                let request: IronClawRenameAutomationProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                ProductOperationResponse::json(IronClawAutomationMutationResponse {
                     updated: true,
                     automation: Some(automation_info(
                         request.automation_id.as_str(),
@@ -1603,9 +1608,9 @@ impl ProductSurface for StubServices {
                 })
             }
             ProductOperationId::AutomationDelete => {
-                let _: RebornAutomationRequest =
+                let _: IronClawAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                ProductOperationResponse::json(IronClawAutomationMutationResponse {
                     updated: true,
                     automation: None,
                 })
@@ -1614,10 +1619,10 @@ impl ProductSurface for StubServices {
     }
 }
 
-fn operator_command_response(area: RebornOperatorArea) -> RebornOperatorCommandPlaneResponse {
-    RebornOperatorCommandPlaneResponse {
+fn operator_command_response(area: IronClawOperatorArea) -> IronClawOperatorCommandPlaneResponse {
+    IronClawOperatorCommandPlaneResponse {
         area,
-        status: RebornOperatorSurfaceStatus::Available,
+        status: IronClawOperatorSurfaceStatus::Available,
         message: "operator route dispatched".to_string(),
         operator_status: None,
         logs: None,
@@ -1626,8 +1631,8 @@ fn operator_command_response(area: RebornOperatorArea) -> RebornOperatorCommandP
     }
 }
 
-fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry {
-    RebornOperatorConfigEntry {
+fn operator_config_entry(key: String, value: Value) -> IronClawOperatorConfigEntry {
+    IronClawOperatorConfigEntry {
         key,
         value,
         source: "test".to_string(),
@@ -1636,8 +1641,8 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
     }
 }
 
-fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
-    RebornSetupExtensionResponse {
+fn extension_setup_response(package_ref: LifecyclePackageRef) -> IronClawSetupExtensionResponse {
+    IronClawSetupExtensionResponse {
         package_ref,
         phase: InstallationState::Unsupported,
         blockers: Vec::new(),
@@ -1648,8 +1653,8 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
     }
 }
 
-fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
-    RebornExtensionInfo {
+fn extension_info(id: &str, active: bool) -> IronClawExtensionInfo {
+    IronClawExtensionInfo {
         package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id.to_string())
             .expect("extension package ref"),
         display_name: id.to_string(),
@@ -1675,12 +1680,12 @@ fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
     }
 }
 
-fn outbound_target_id(target_id: &str) -> RebornOutboundDeliveryTargetId {
-    RebornOutboundDeliveryTargetId::new(target_id).expect("valid target id")
+fn outbound_target_id(target_id: &str) -> IronClawOutboundDeliveryTargetId {
+    IronClawOutboundDeliveryTargetId::new(target_id).expect("valid target id")
 }
 
-fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
-    RebornOutboundDeliveryTargetSummary::new(
+fn outbound_target_summary(target_id: &str) -> IronClawOutboundDeliveryTargetSummary {
+    IronClawOutboundDeliveryTargetSummary::new(
         outbound_target_id(target_id),
         "slack",
         "Slack DM",
@@ -1689,34 +1694,34 @@ fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSumma
     .expect("valid target summary")
 }
 
-fn outbound_preferences_response(target_id: &str) -> RebornOutboundPreferencesResponse {
-    RebornOutboundPreferencesResponse {
+fn outbound_preferences_response(target_id: &str) -> IronClawOutboundPreferencesResponse {
+    IronClawOutboundPreferencesResponse {
         final_reply_target: Some(outbound_target_summary(target_id)),
-        final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
+        final_reply_target_status: IronClawOutboundDeliveryTargetStatus::Available,
         default_modality: Default::default(),
     }
 }
 
-fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListResponse {
-    RebornOutboundDeliveryTargetListResponse {
+fn outbound_delivery_targets_response() -> IronClawOutboundDeliveryTargetListResponse {
+    IronClawOutboundDeliveryTargetListResponse {
         targets: vec![
-            RebornOutboundDeliveryTargetOption {
+            IronClawOutboundDeliveryTargetOption {
                 target: outbound_target_summary("slack-dm-alpha"),
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                capabilities: IronClawOutboundDeliveryTargetCapabilities {
                     final_replies: true,
                     gate_prompts: true,
                     auth_prompts: true,
                 },
             },
-            RebornOutboundDeliveryTargetOption {
-                target: RebornOutboundDeliveryTargetSummary::new(
+            IronClawOutboundDeliveryTargetOption {
+                target: IronClawOutboundDeliveryTargetSummary::new(
                     outbound_target_id("slack-status-alpha"),
                     "slack",
                     "Slack status",
                     None,
                 )
                 .expect("valid target summary"),
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                capabilities: IronClawOutboundDeliveryTargetCapabilities {
                     final_replies: false,
                     gate_prompts: false,
                     auth_prompts: false,
@@ -1727,8 +1732,8 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
     }
 }
 
-fn trace_credits_response() -> RebornTraceCreditsResponse {
-    RebornTraceCreditsResponse {
+fn trace_credits_response() -> IronClawTraceCreditsResponse {
+    IronClawTraceCreditsResponse {
         enrolled: false,
         pending_credit: 0.0,
         final_credit: 0.0,
@@ -1748,25 +1753,25 @@ fn trace_credits_response() -> RebornTraceCreditsResponse {
     }
 }
 
-fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomationInfo {
-    RebornAutomationInfo {
+fn automation_info(automation_id: &str, name: &str, cron: &str) -> IronClawAutomationInfo {
+    IronClawAutomationInfo {
         automation_id: automation_id.to_string(),
         name: name.to_string(),
-        source: RebornAutomationSource::Schedule {
+        source: IronClawAutomationSource::Schedule {
             cron: cron.to_string(),
             timezone: "UTC".to_string(),
         },
-        state: RebornAutomationState::Active,
+        state: IronClawAutomationState::Active,
         next_run_at: None,
         last_run_at: None,
         last_status: None,
-        recent_runs: vec![RebornAutomationRecentRunInfo {
+        recent_runs: vec![IronClawAutomationRecentRunInfo {
             run_id: Some(
                 TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid run id"),
             ),
             thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
             fire_slot: None,
-            status: RebornAutomationRecentRunStatus::Running,
+            status: IronClawAutomationRecentRunStatus::Running,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
             completed_at: None,
         }],
@@ -1909,7 +1914,7 @@ async fn send_message_path_overrides_body_thread_id() {
 #[tokio::test]
 async fn send_message_rejected_busy_wire_shape() {
     let services = Arc::new(StubServices::default());
-    services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
+    services.set_next_submit_response(IronClawSubmitTurnResponse::RejectedBusy {
         thread_id: ThreadId::new("thread-alpha").expect("thread id"),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake").expect("ref"),
         active_run_id: Some(TurnRunId::new()),
@@ -1998,7 +2003,7 @@ async fn set_auto_activate_learned_invokes_capability_with_enabled_flag() {
 #[tokio::test]
 async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
     let services = Arc::new(StubServices::default());
-    services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
+    services.set_next_submit_response(IronClawSubmitTurnResponse::RejectedBusy {
         thread_id: ThreadId::new("thread-alpha").expect("thread id"),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake").expect("ref"),
         active_run_id: None,
@@ -2101,7 +2106,7 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
     let queries = services.view_queries.lock().expect("lock").clone();
     assert_eq!(queries.len(), 1);
     assert_eq!(queries[0].view_id, RUN_ARTIFACT_VIEW.id);
-    let request: RebornRunArtifactRequest =
+    let request: IronClawRunArtifactRequest =
         serde_json::from_value(queries[0].params.clone()).expect("artifact params");
     assert_eq!(request.thread_id, "thread-x");
     assert_eq!(request.run_id, run_id);
@@ -2114,7 +2119,7 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
 #[tokio::test]
 async fn get_attachment_serves_bytes_with_authoritative_content_type() {
     let services = Arc::new(StubServices::default());
-    services.set_attachment(RebornAttachmentBytes {
+    services.set_attachment(IronClawAttachmentBytes {
         mime_type: "image/png".to_string(),
         filename: Some("diagram.png".to_string()),
         bytes: vec![1, 2, 3, 4],
@@ -2279,7 +2284,7 @@ async fn resolve_gate_path_overrides_body_gate_ref() {
 #[tokio::test]
 async fn retry_run_path_overrides_body_run_id() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_retry_run(Ok(RebornRetryRunResponse {
+    services.enqueue_retry_run(Ok(IronClawRetryRunResponse {
         run_id: TurnRunId::new(),
         status: TurnStatus::Queued,
         event_cursor: EventCursor(5),
@@ -2310,9 +2315,9 @@ async fn retry_run_path_overrides_body_run_id() {
 #[tokio::test]
 async fn retry_run_non_retryable_error_maps_to_conflict_body() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_retry_run(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
-        kind: RebornServicesErrorKind::Conflict,
+    services.enqueue_retry_run(Err(IronClawServicesError {
+        code: IronClawServicesErrorCode::Conflict,
+        kind: IronClawServicesErrorKind::Conflict,
         status_code: 409,
         retryable: false,
         field: None,
@@ -2343,7 +2348,7 @@ async fn retry_run_non_retryable_error_maps_to_conflict_body() {
 async fn retry_run_idempotent_replay_returns_same_response_shape() {
     let services = Arc::new(StubServices::default());
     let run_id = TurnRunId::new();
-    let replay = RebornRetryRunResponse {
+    let replay = IronClawRetryRunResponse {
         run_id,
         status: TurnStatus::Queued,
         event_cursor: EventCursor(42),
@@ -2380,9 +2385,9 @@ async fn retry_run_idempotent_replay_returns_same_response_shape() {
 #[tokio::test]
 async fn create_thread_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_create_thread(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.fail_create_thread(IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2460,7 +2465,7 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
 #[tokio::test]
 async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // Two distinct, parseable cursors so the precedence is observable in
-    // the captured RebornStreamEventsRequest — if a future refactor flips
+    // the captured IronClawStreamEventsRequest — if a future refactor flips
     // the `.or()` order, the facade will see cursor-B and this test fails.
     let header_cursor =
         ironclaw_product_workflow::ProjectionCursor::new("cursor-from-header").expect("cursor");
@@ -2708,9 +2713,9 @@ async fn rename_automation_dispatches_path_id_and_body_to_facade() {
 async fn rename_automation_error_maps_to_http_status() {
     for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            IronClawServicesError {
+                code: IronClawServicesErrorCode::InvalidRequest,
+                kind: IronClawServicesErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: Some("name".to_string()),
@@ -2722,9 +2727,9 @@ async fn rename_automation_error_maps_to_http_status() {
             false,
         ),
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            IronClawServicesError {
+                code: IronClawServicesErrorCode::Forbidden,
+                kind: IronClawServicesErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -2966,9 +2971,9 @@ async fn delete_automation_dispatches_path_id_to_facade() {
 async fn delete_automation_error_maps_to_http_status() {
     for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            IronClawServicesError {
+                code: IronClawServicesErrorCode::Forbidden,
+                kind: IronClawServicesErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -2980,9 +2985,9 @@ async fn delete_automation_error_maps_to_http_status() {
             false,
         ),
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
+            IronClawServicesError {
+                code: IronClawServicesErrorCode::Unavailable,
+                kind: IronClawServicesErrorKind::ServiceUnavailable,
                 status_code: 503,
                 retryable: true,
                 field: None,
@@ -3080,9 +3085,9 @@ async fn list_automations_rejects_invalid_run_limit_query_with_400() {
 #[tokio::test]
 async fn list_automations_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_list_automations(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.fail_list_automations(IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -3352,9 +3357,9 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
 #[tokio::test]
 async fn set_outbound_preferences_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_invoke_response(Err(RebornServicesError {
-        code: RebornServicesErrorCode::NotFound,
-        kind: RebornServicesErrorKind::NotFound,
+    services.enqueue_invoke_response(Err(IronClawServicesError {
+        code: IronClawServicesErrorCode::NotFound,
+        kind: IronClawServicesErrorKind::NotFound,
         status_code: 404,
         retryable: false,
         field: None,
@@ -3526,17 +3531,17 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
 
 // The browser hides the Projects surface (sidebar entry + `/projects` route)
 // unless the deployment opts in. The gate is delivered through the session
-// response's `features.reborn_projects` field, fed from
-// `WebUiV2State::with_reborn_projects_enabled` at composition. Drive the real
+// response's `features.ironclaw_projects` field, fed from
+// `WebUiV2State::with_ironclaw_projects_enabled` at composition. Drive the real
 // router (not just the state accessor) so a handler that forgot to surface the
 // flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
 #[tokio::test]
-async fn get_session_reports_reborn_projects_feature_from_state_flag() {
+async fn get_session_reports_ironclaw_projects_feature_from_state_flag() {
     for enabled in [false, true] {
         let services = Arc::new(StubServices::default());
         let router = webui_v2_router(
             WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-                .with_reborn_projects_enabled(enabled),
+                .with_ironclaw_projects_enabled(enabled),
         )
         .layer(axum::Extension(caller()))
         .layer(axum::Extension(WebUiV2Capabilities::default()));
@@ -3555,8 +3560,8 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         assert_eq!(
-            body["features"]["reborn_projects"], enabled,
-            "features.reborn_projects must mirror the state flag (enabled={enabled})"
+            body["features"]["ironclaw_projects"], enabled,
+            "features.ironclaw_projects must mirror the state flag (enabled={enabled})"
         );
     }
 }
@@ -3845,7 +3850,7 @@ async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
         invoke_calls[0].0,
         CapabilityId::new(ADMIN_USER_UPDATE_CAPABILITY_ID).expect("capability id")
     );
-    let update_input: RebornAdminUpdateUserProductRequest =
+    let update_input: IronClawAdminUpdateUserProductRequest =
         serde_json::from_value(invoke_calls[0].1.clone()).expect("update input");
     assert_eq!(update_input.user_id.as_str(), "user-admin");
     assert_eq!(update_input.display_name.as_deref(), Some("Renamed"));
@@ -3853,7 +3858,7 @@ async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
         invoke_calls[1].0,
         CapabilityId::new(ADMIN_USER_SET_STATUS_CAPABILITY_ID).expect("capability id")
     );
-    let status_input: RebornAdminSetStatusProductRequest =
+    let status_input: IronClawAdminSetStatusProductRequest =
         serde_json::from_value(invoke_calls[1].1.clone()).expect("status input");
     assert_eq!(status_input.user_id.as_str(), "user-admin");
     assert_eq!(status_input.status, AdminUserStatus::Suspended);
@@ -3861,7 +3866,7 @@ async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
         invoke_calls[2].0,
         CapabilityId::new(ADMIN_USER_SET_ROLE_CAPABILITY_ID).expect("capability id")
     );
-    let role_input: RebornAdminSetRoleProductRequest =
+    let role_input: IronClawAdminSetRoleProductRequest =
         serde_json::from_value(invoke_calls[2].1.clone()).expect("role input");
     assert_eq!(role_input.user_id.as_str(), "user-admin");
     assert_eq!(role_input.role, AdminUserRole::Member);
@@ -3869,7 +3874,7 @@ async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
         invoke_calls[3].0,
         CapabilityId::new(ADMIN_USER_DELETE_CAPABILITY_ID).expect("capability id")
     );
-    let delete_input: RebornAdminUserRequest =
+    let delete_input: IronClawAdminUserRequest =
         serde_json::from_value(invoke_calls[3].1.clone()).expect("delete input");
     assert_eq!(delete_input.user_id.as_str(), "user-admin");
 
@@ -4139,7 +4144,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
             .lock()
             .expect("lock")
             .as_slice(),
-        [RebornOperatorServiceLifecycleAction::Start]
+        [IronClawOperatorServiceLifecycleAction::Start]
     );
 }
 
@@ -6250,10 +6255,10 @@ async fn stream_events_continues_immediately_after_non_empty_batch() {
 
     let envelope_a = make_projection_update_envelope("cursor:live-a");
     let envelope_b = make_projection_update_envelope("cursor:live-b");
-    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+    services.enqueue_stream_events(Ok(IronClawStreamEventsResponse {
         events: vec![envelope_a],
     }));
-    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+    services.enqueue_stream_events(Ok(IronClawStreamEventsResponse {
         events: vec![envelope_b],
     }));
 
@@ -6367,7 +6372,7 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     let envelope_c = make_projection_update_envelope("cursor:c");
     let envelope_d = make_capability_activity_envelope("cursor:d");
 
-    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+    services.enqueue_stream_events(Ok(IronClawStreamEventsResponse {
         events: vec![
             envelope_a.clone(),
             envelope_b.clone(),
@@ -6377,7 +6382,7 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     }));
     // Second drain is empty: lets the test observe `after_cursor`
     // advancement on the follow-up call without producing more events.
-    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+    services.enqueue_stream_events(Ok(IronClawStreamEventsResponse { events: Vec::new() }));
 
     let router = router_with(services.clone());
     let response = router
@@ -6524,9 +6529,9 @@ fn assert_no_adapter_metadata(json: &Value) {
 #[tokio::test]
 async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.enqueue_stream_events(Err(IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         // The handler must NOT echo these into the SSE payload — the
@@ -6657,15 +6662,15 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
 
     let envelope_a = make_projection_envelope("cursor:a", "hello");
     let envelope_b = make_projection_envelope("cursor:b", "world");
-    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+    services.enqueue_stream_events(Ok(IronClawStreamEventsResponse {
         events: vec![envelope_a.clone(), envelope_b.clone()],
     }));
     // After draining the two real events, the next drain produces a
     // facade error so the handler exercises the redacted-error-frame +
     // close path before lifetime expiry.
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+    services.enqueue_stream_events(Err(IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -6844,9 +6849,9 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+    services.enqueue_stream_events(Err(IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -7291,26 +7296,26 @@ fn sample_admin_user(user_id: &str) -> AdminUserRecord {
     }
 }
 
-fn sample_project_info(project_id: &str) -> RebornProjectInfo {
-    RebornProjectInfo {
+fn sample_project_info(project_id: &str) -> IronClawProjectInfo {
+    IronClawProjectInfo {
         project_id: project_id.to_string(),
         name: "Sample".to_string(),
         description: String::new(),
         icon: None,
         color: None,
         metadata: serde_json::json!({}),
-        state: RebornProjectState::Active,
-        role: RebornProjectRole::Owner,
+        state: IronClawProjectState::Active,
+        role: IronClawProjectRole::Owner,
         created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
         updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
-fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
-    RebornProjectMemberInfo {
+fn sample_member_info(user_id: &str) -> IronClawProjectMemberInfo {
+    IronClawProjectMemberInfo {
         user_id: user_id.to_string(),
-        role: RebornProjectRole::Editor,
-        status: RebornProjectMemberStatus::Active,
+        role: IronClawProjectRole::Editor,
+        status: IronClawProjectMemberStatus::Active,
         granted_by: "user-alpha".to_string(),
         created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
         updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),

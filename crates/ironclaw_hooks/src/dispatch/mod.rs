@@ -2,7 +2,7 @@
 //! ordering, panic isolation, timeout enforcement, slot poisoning on protocol
 //! violation, and short-circuit semantics for gate phases.
 //!
-//! This crate ships the dispatcher contract; the Reborn-side middleware that
+//! This crate ships the dispatcher contract; the IronClaw-side middleware that
 //! wires it into `LoopCapabilityPort` / `LoopPromptPort` / etc. lives in
 //! `ironclaw_runner::loop_driver_host` and lands in a follow-up slice.
 
@@ -259,7 +259,7 @@ impl HookDispatcher {
     /// content. See [`crate::telemetry`] for the conversion helpers.
     ///
     /// Because the dispatcher is typically held behind an `Arc` after it has
-    /// been installed into the Reborn factory, callers must wire the sink
+    /// been installed into the IronClaw factory, callers must wire the sink
     /// *before* wrapping the dispatcher in `Arc`. This is the documented
     /// composition order: build dispatcher, set sink, wrap in `Arc`, install
     /// into the factory via `with_hook_dispatcher`. The sink should be a
@@ -2054,7 +2054,7 @@ impl HookDispatcherBuilder {
 
     /// Attach a [`SecurityAuditSink`] for hook-driven security-boundary
     /// decisions (explicit `Deny`). Optional: production composition wires
-    /// this via `RebornLoopDriverHostFactory` so deny decisions are
+    /// this via `IronClawLoopDriverHostFactory` so deny decisions are
     /// retained per the `CLAUDE.md` "LLM data is never deleted" rule.
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
         self.dispatcher = self.dispatcher.with_security_audit_sink(sink);

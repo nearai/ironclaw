@@ -1,14 +1,14 @@
-# Reborn Integration Tests
+# IronClaw Integration Tests
 
-In-process tests that run a **whole Reborn turn** with the real internal stack —
+In-process tests that run a **whole IronClaw turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real
 `RootFilesystem` persistence. The **only** thing faked is the bottom of the
 stack: a scripted model at the vendor-SDK seam. A test reaches no network, no
 real process, no real channel, and needs no setup.
 
-This is a distinct tier from `RebornBinaryE2EHarness` (which swaps the whole
-`HostManagedModelGateway` with `RebornTraceReplayModelGateway` at the *gateway*
+This is a distinct tier from `IronClawBinaryE2EHarness` (which swaps the whole
+`HostManagedModelGateway` with `IronClawTraceReplayModelGateway` at the *gateway*
 seam, skipping `ironclaw_llm`). This tier mocks one layer lower so the decorator
 chain runs for real.
 
@@ -32,8 +32,8 @@ higher (at the gateway) is wrong — it skips `ironclaw_llm`.
 ```rust
 #[tokio::test]
 async fn replies_to_greeting() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("done")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("done")])
         .build().await.expect("harness builds");
     h.submit_turn("do something").await.expect("turn completes");
     h.assert_reply_contains("done").await.expect("reply finalized");
@@ -41,7 +41,7 @@ async fn replies_to_greeting() {
 ```
 
 `build → submit_turn → assert`. Script each model turn with
-`RebornScriptedReply::text(..)` — one line each. The harness is single-
+`IronClawScriptedReply::text(..)` — one line each. The harness is single-
 conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
 ### Script discipline — one script entry per model call
@@ -68,11 +68,11 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
    one, and say why if you add a new one.
 2. **Readability contract.** ~3–12 lines, `build → submit_turn → assert`, no
    nested structs in the body. **Never** hand-build raw `TraceStep` /
-   `LlmTrace::new` in a Reborn test — that is the verbosity the `RebornScriptedReply`
+   `LlmTrace::new` in a IronClaw test — that is the verbosity the `IronClawScriptedReply`
    façade removes.
-3. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
+3. **Mock only at the SDK seam.** Use `IronClawScriptedReply`; do not swap the
    gateway or stub internals.
-4. **Zero setup.** Must pass offline via a plain `cargo test --test reborn_<name>`
+4. **Zero setup.** Must pass offline via a plain `cargo test --test ironclaw_<name>`
    — no services, no API keys, no `integration` feature, no Docker, no special
    linker. Hermetic env (keychain off, `TZ=UTC`, passthrough LLM config) is baked
    into `build()`.
@@ -87,8 +87,8 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 
 - `scope_gateway.rs` — `ScopeRegistryGateway`, a `HostManagedModelGateway` dispatcher that routes model calls to per-thread scripted gateways by `TurnScope` (looked up in a `Mutex<HashMap>`). Sits at the `HostManagedModelGateway` seam but routes to REAL `LlmProviderModelGateway` instances over the `ironclaw_llm` chain — the single-fake-at-the-vendor-SDK-seam invariant (CLAUDE.md lines 5–8, 28) is preserved. Its own `stream_model` is a `ConfigurationError` sentinel (never reached when routing succeeds); `resolve_for_scope` does the actual lookup.
 - `scripted_provider.rs` — `scripted_trace_llm(..)`, the `TraceLlm` raw-provider seam.
-- `reply.rs` — `RebornScriptedReply` (the one-line-per-turn façade).
-- `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, core assertions
+- `reply.rs` — `IronClawScriptedReply` (the one-line-per-turn façade).
+- `builder.rs` — `IronClawIntegrationHarness` + builder, hermetic env, core assertions
   (`assert_reply_contains` / `assert_tool_invoked` / `assert_egress_request_matching`,
   co-located with the harness fields), shell assertions
   (`assert_shell_command_recorded` / `assert_shell_ran_through_inert_port`),
@@ -127,8 +127,8 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `ParkingModelGate`/`ParkingLlm`; parks a `HostRuntime` capability dispatch
   until released, used by `lease_wedge.rs`), re-exported from
   `doubles/mod.rs`.
-- `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
-  `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
+- `group_constructors.rs` — the per-capability `IronClawIntegrationGroup` /
+  `IronClawIntegrationGroupBuilder` preset constructors (`live_approvals`,
   `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
   private child module of `group.rs` (same `harness_mcp.rs` split precedent)
   so it can reach `group.rs`'s shared assembly internals at module-private
@@ -151,7 +151,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 - Tests live as bins anywhere under `tests/integration/` — flat
   (`tests/integration/<name>.rs`) or inside a domain folder — each registered
   as its own `[[test]]` in the workspace `Cargo.toml` with
-  `name = "reborn_integration_<name>"`. Domain folders group related bins by
+  `name = "ironclaw_integration_<name>"`. Domain folders group related bins by
   pointing the `[[test]]` `path` into the folder — `tests/integration/auth/`
   holds the auth user-journey bins (`oauth_connect`, `oauth_popup_journeys`,
   `oauth_refresh`, `auth_gate`, `auth_failure`, `reopen_resume_through_gate`;
@@ -162,11 +162,11 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   scenarios under `group_extensions/` (see Group tests below).
 
 Module paths: each flat `tests/integration/<name>.rs` declares both
-`#[path = "support/mod.rs"] mod reborn_support;` and
+`#[path = "support/mod.rs"] mod ironclaw_support;` and
 `#[path = "../support/mod.rs"] mod support;` (bins one folder deeper prepend
 one more `../` to each, as above), then
-`use reborn_support::builder::RebornIntegrationHarness;` /
-`use reborn_support::reply::RebornScriptedReply;`. Inside the support tree,
+`use ironclaw_support::builder::IronClawIntegrationHarness;` /
+`use ironclaw_support::reply::IronClawScriptedReply;`. Inside the support tree,
 siblings reference each other via `super::` and `trace_llm` via
 `crate::support::trace_llm` (the top-level `tests/support/` tree, mounted
 separately from `tests/integration/support/` via the second `#[path]`). Copy
@@ -200,7 +200,7 @@ durability).
 
 ### Tool calls
 
-Script a tool call with `RebornScriptedReply::tool_call(capability_id, args)`,
+Script a tool call with `IronClawScriptedReply::tool_call(capability_id, args)`,
 where `capability_id` is the full id (e.g. `"builtin.http"`). Enable the real
 first-party runtime with `.with_builtin_http_tools()`. The recording
 `RuntimeHttpEgress` intercepts every outbound HTTP call at the runtime boundary
@@ -279,7 +279,7 @@ the mock server on a loopback port, injecting `Authorization: Bearer mock-mcp-te
 so the mock's OAuth gate passes; it rejects any URL not prefixed by the configured
 `mcp_url`. A single MCP capability `"mock-mcp.search"` is registered.
 
-Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
+Script with `IronClawScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
 
@@ -294,8 +294,8 @@ injected by the host egress pipeline before it reaches the recording
 network egress. This is the credential-injection-reaches-the-wire proof
 (T0-SECRET-INJECT).
 
-Script with `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
-followed by a trailing `RebornScriptedReply::text(..)` turn.
+Script with `IronClawScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
+followed by a trailing `IronClawScriptedReply::text(..)` turn.
 
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — see the "Richer assertions" list below; this is the assertion for this capability.
 
@@ -316,7 +316,7 @@ Commons capture and skill learning hang off in production. Off by default
 
 ### Attachments (multimodal)
 
-`RebornIntegrationGroup::attachment_tools()` wires the real production
+`IronClawIntegrationGroup::attachment_tools()` wires the real production
 attachment pair over the local-dev workspace filesystem:
 `ProjectScopedAttachmentLander` (lands inbound bytes) +
 `ProjectScopedAttachmentReader` (the `attachment_read_port` the loop model port
@@ -335,7 +335,7 @@ scripted default id is not a vision pattern, so image parts are dropped for it.
 
 ### OAuth / product-auth
 
-Available from crate `ironclaw_reborn_composition::test_support`, gated on
+Available from crate `ironclaw_composition::test_support`, gated on
 `#[cfg(feature = "test-support")]`.
 
 **`ScriptedOAuthTokenEgress`** — `RuntimeHttpEgress` impl returning a fixed
@@ -350,7 +350,7 @@ Constructors:
 
 Assertion accessors: `captured_count()` / `captured_grant_types()` (returns only the non-secret `grant_type` discriminator — e.g. `"authorization_code"` or `"refresh_token"` — extracted from each captured request body, never raw secrets).
 
-**`OAuthProductAuthTestBundle`** — bundles `Arc<RebornProductAuthServices>` wired
+**`OAuthProductAuthTestBundle`** — bundles `Arc<IronClawProductAuthServices>` wired
 over real `FilesystemAuthProductServices<InMemoryBackend>` alongside a
 `ScriptedOAuthTokenEgress`. Construct via:
 
@@ -365,7 +365,7 @@ the default backend build.
 
 ### Approvals (group tests only)
 
-`RebornIntegrationGroup::live_approvals()` constructs a group with real file-tool
+`IronClawIntegrationGroup::live_approvals()` constructs a group with real file-tool
 approval stores (`write_file`/`read_file` at `PermissionMode::Ask`). Auto-approve
 is disabled for the group scope at construction so gated tool calls raise real
 `BlockedApproval` gates.
@@ -384,22 +384,22 @@ On a harness built from a `live_approvals` group:
 
 - `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStore>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
-`ironclaw_reborn_composition::test_support` exposes:
+`ironclaw_composition::test_support` exposes:
 
 - `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
-`RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`IronClawServices` (returned by `build_ironclaw_services`/exposed via `IronClawRuntime::services()`, methods defined in `crates/ironclaw_composition/src/runtime/test_support.rs`) exposes:
 
-- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
+- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_ironclaw_runtime`. `None` without a local-dev runtime.
 - `local_dev_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
-Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornServices` from `build_reborn_services` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
+Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `IronClawServices` from `build_ironclaw_services` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
 
 All of the above are zero-byte in production builds (gated on the `test-support` feature).
 
 ## Group tests
 
-`RebornIntegrationGroup` (in `group.rs`) owns shared storage, a shared
+`IronClawIntegrationGroup` (in `group.rs`) owns shared storage, a shared
 capability backend, and one shared turn runtime (coordinator + scheduler) once;
 each `.thread(conv_id)` builds a per-thread workflow over that one shared
 runtime. Cross-thread persistence is real — thread A
@@ -428,7 +428,7 @@ Group tests live in subdirectories under `tests/integration/`:
 ```
 tests/integration/group_approvals/
     main.rs                              # one #[tokio::test], drives scenarios in order
-    scenario_gate_then_resolve.rs        # pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()>
+    scenario_gate_then_resolve.rs        # pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()>
     scenario_approve_always_persists.rs
 ```
 
@@ -437,26 +437,26 @@ Cargo discovers multi-file integration test binaries via `[[test]]` entries in
 
 ```toml
 [[test]]
-name = "reborn_group_approvals"
+name = "ironclaw_group_approvals"
 path = "tests/integration/group_approvals/main.rs"
 ```
 
 ### `main.rs` boilerplate (required)
 
 ```rust
-#[allow(dead_code)] #[path = "../support/mod.rs"] mod reborn_support;
+#[allow(dead_code)] #[path = "../support/mod.rs"] mod ironclaw_support;
 #[allow(dead_code)] #[path = "../../support/mod.rs"] mod support;
 
 mod scenario_gate_then_resolve;
 mod scenario_approve_always_persists;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::group::{HarnessResult, RebornIntegrationGroup, ScenarioReport};
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup, ScenarioReport};
+use ironclaw_support::reply::IronClawScriptedReply;
 
 #[tokio::test]
 async fn approvals_group() {
-    let g = RebornIntegrationGroup::live_approvals().await.expect("group builds");
+    let g = IronClawIntegrationGroup::live_approvals().await.expect("group builds");
     let mut report = ScenarioReport::new();
     // dependent: must pass before subsequent scenarios consume its side-effect
     scenario_gate_then_resolve::run(&g).await.expect("gate+resolve");
@@ -473,12 +473,12 @@ Both `#[path]` declarations with `#[allow(dead_code)]` are mandatory — bare
 
 ```rust
 // scenario_gate_then_resolve.rs
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-gate-resolve")
-        .script([RebornScriptedReply::tool_call("builtin.write_file", serde_json::json!({}))])
+        .script([IronClawScriptedReply::tool_call("builtin.write_file", serde_json::json!({}))])
         .build().await?;
     let (run_id, gate_ref) = h.submit_turn_until_blocked("write something").await?;
     h.approve_gate(run_id, &gate_ref).await?;
@@ -491,17 +491,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
 | Constructor | Capability | Auto-approve |
 |---|---|---|
-| `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
-| `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
-| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
-| `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
-| `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
-| `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
-| `RebornIntegrationGroup::live_auth_and_approval()` | file tools @ Ask + unseeded `github.get_repo` (raises BlockedApproval AND BlockedAuth on one runtime; C-JOURNEY) | disabled |
-| `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
-| `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
-| `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
-| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesFacade` (C-SYNTH) | enabled |
+| `IronClawIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
+| `IronClawIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
+| `IronClawIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `IronClawIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
+| `IronClawIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
+| `IronClawIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
+| `IronClawIntegrationGroup::live_auth_and_approval()` | file tools @ Ask + unseeded `github.get_repo` (raises BlockedApproval AND BlockedAuth on one runtime; C-JOURNEY) | disabled |
+| `IronClawIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+| `IronClawIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
+| `IronClawIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
+| `IronClawIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesFacade` (C-SYNTH) | enabled |
 
 ### Auth-gate resolution (C-JOURNEY)
 
@@ -513,7 +513,7 @@ On a `live_auth_and_approval()` group thread:
   (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
   `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
   re-dispatches and completes. Only valid on this group (needs the
-  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  `build_ironclaw_services` product-auth wiring; `live_auth_gate()`'s
   lower-level fixture cannot complete an auth resume).
 - `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
 
@@ -535,7 +535,7 @@ coordinator with their history isolated under separate
 `/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
 `tests/integration/group_multiuser/`.
 
-### Key accessors on `RebornIntegrationGroup`
+### Key accessors on `IronClawIntegrationGroup`
 
 - `turn_composite()` — the thread/turn `CompositeRootFilesystem`; use for
   thread-history and turn-state read-back only.
@@ -545,7 +545,7 @@ coordinator with their history isolated under separate
 
 ### Per-thread baseline (R2)
 
-Each `RebornIntegrationHarness` records `baseline_invocation_count`,
+Each `IronClawIntegrationHarness` records `baseline_invocation_count`,
 `baseline_egress_count`, `baseline_result_count`, `baseline_process_count`, and
 `baseline_network_count` at construction from the shared recorder's current
 lengths. All assertion methods (`assert_tool_invoked`,

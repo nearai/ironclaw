@@ -1,4 +1,4 @@
-//! Reborn integration test — cross-reopen capability durability (E-DURABLE seam).
+//! IronClaw integration test — cross-reopen capability durability (E-DURABLE seam).
 //!
 //! Installs an extension through a real turn, then reopens a FRESH, independent
 //! `ExtensionInstallationStore` at the capability harness's on-disk storage root
@@ -8,28 +8,28 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
 async fn extension_install_survives_independent_reopen() {
-    let group = RebornIntegrationGroup::extension_lifecycle()
+    let group = IronClawIntegrationGroup::extension_lifecycle()
         .await
         .expect("extension-lifecycle group builds");
     let harness = group
         .thread("conv-durable")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::text("installed"),
+            IronClawScriptedReply::text("installed"),
         ])
         .build()
         .await

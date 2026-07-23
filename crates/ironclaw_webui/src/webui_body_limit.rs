@@ -141,7 +141,7 @@ pub(crate) async fn enforce_body_limit(
         && declared > max_bytes_u64
     {
         tracing::debug!(
-            target = "ironclaw::reborn::webui_body_limit",
+            target = "ironclaw::webui_body_limit",
             route_id = %route.route_id,
             declared,
             limit = max_bytes_u64,
@@ -158,7 +158,7 @@ pub(crate) async fn enforce_body_limit(
         Ok(value) => value,
         Err(_) => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_body_limit",
+                target = "ironclaw::webui_body_limit",
                 route_id = %route.route_id,
                 limit = max_bytes_u64,
                 "body limit exceeds usize; rejecting as if oversized",
@@ -177,7 +177,7 @@ pub(crate) async fn enforce_body_limit(
         Ok(bytes) => bytes,
         Err(_) => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_body_limit",
+                target = "ironclaw::webui_body_limit",
                 route_id = %route.route_id,
                 limit = max_bytes_u64,
                 "rejecting body that exceeded the per-route cap during read",

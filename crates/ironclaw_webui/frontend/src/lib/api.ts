@@ -4,15 +4,15 @@
 // Every function in this module targets a `/api/webchat/v2/*` route
 // defined by issue #3815, a v2-owned `/auth/*` route mounted by
 // `ironclaw_webui::webui_v2_auth_router`, or a
-// Reborn product-auth route mounted by host composition. The module
+// IronClaw product-auth route mounted by host composition. The module
 // deliberately contains no `/api/chat`, `/api/engine`, or
 // `/api/profile` paths — the hard non-goal of issue #3886 still
 // stands for v1 gateway routes that lack a v2 counterpart.
 //
 // Request/response shapes mirror the Rust DTOs in
 // `ironclaw_product_workflow::webui_inbound` and
-// `ironclaw_product_workflow::reborn_services::types`. The error
-// envelope mirrors `RebornServicesError`.
+// `ironclaw_product_workflow::ironclaw_services::types`. The error
+// envelope mirrors `IronClawServicesError`.
 
 const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
@@ -25,7 +25,7 @@ export class ApiError extends Error {
     this.statusText = statusText;
     this.body = body;
     this.headers = headers;
-    // Parsed RebornServicesError when the server returned JSON in
+    // Parsed IronClawServicesError when the server returned JSON in
     // the documented shape. Undefined for non-JSON 5xx / proxy errors.
     this.payload = payload;
   }

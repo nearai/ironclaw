@@ -1,4 +1,4 @@
-//! Reborn first-party port of the v1 file coding tools.
+//! IronClaw first-party port of the v1 file coding tools.
 //!
 //! The v1 `Tool`/`JobContext`/local-filesystem boundary is replaced here with
 //! `CodingCapabilityRequest`, scoped mounts, and `RootFilesystem`.

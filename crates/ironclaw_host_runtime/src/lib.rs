@@ -1,6 +1,6 @@
-//! Host runtime facade for IronClaw Reborn.
+//! Host runtime facade for IronClaw.
 //!
-//! `ironclaw_host_runtime` is the narrow boundary upper Reborn services build
+//! `ironclaw_host_runtime` is the narrow boundary upper IronClaw services build
 //! against. It surfaces both:
 //!
 //! - the [`HostRuntime`] trait — the stable contract upper turn/loop services
@@ -122,9 +122,9 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
-    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
-    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
-    RebornScopedSandboxCommandTransport,
+    IronClawSandboxConfig, IronClawSandboxContainerIdentity, IronClawSandboxNetworkBroker,
+    IronClawSandboxScopeKey, IronClawSandboxSecretBroker, IronClawSandboxWorkspaceMode,
+    IronClawScopedSandboxCommandTransport,
 };
 pub use services::{
     ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,
@@ -843,7 +843,7 @@ pub trait RuntimeBackendHealth: Send + Sync {
     ) -> Result<Vec<RuntimeKind>, HostRuntimeError>;
 }
 
-/// Contract for the Reborn host runtime facade.
+/// Contract for the IronClaw host runtime facade.
 pub type RuntimeInvocation = (ExecutionContext, CapabilityId, ResourceEstimate, Value);
 pub type RuntimeApprovalResume = (
     ExecutionContext,

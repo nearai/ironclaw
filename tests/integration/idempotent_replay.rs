@@ -4,20 +4,20 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason};
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
 
 #[tokio::test]
 async fn duplicate_inbound_event_replays_prior_ack_without_resubmitting() {
-    let harness = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("done")])
+    let harness = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("harness builds");

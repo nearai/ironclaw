@@ -3,14 +3,14 @@
 //! `coordinator`, so runs carry a genuine `TurnOriginKind::ScheduledTrigger`
 //! origin and land in the same turn store/scheduler as any other turn.
 //!
-//! Two variants: [`RebornIntegrationHarness::submit_triggered_turn`]
+//! Two variants: [`IronClawIntegrationHarness::submit_triggered_turn`]
 //! (submit-only; asserts submit-time state) and
-//! [`RebornIntegrationHarness::submit_triggered_turn_scripted`] (full
+//! [`IronClawIntegrationHarness::submit_triggered_turn_scripted`] (full
 //! production materialization + scripted gateway, drivable to completion or
 //! a mid-fire gate).
 
 // Shared integration-test support: not every binary that mounts the
-// `reborn_support` tree consumes this module — its symbols read as dead there
+// `ironclaw_support` tree consumes this module — its symbols read as dead there
 // under the all-features `-D warnings` lane. Module-level allow matches
 // `builder.rs`/`assertions.rs`/`session_thread.rs`.
 #![allow(dead_code)]
@@ -39,8 +39,8 @@ use ironclaw_turns::{
     TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::builder::{INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness};
-use super::reply::RebornScriptedReply;
+use super::builder::{INTERACTIVE_MODEL_PROFILE, IronClawIntegrationHarness};
+use super::reply::IronClawScriptedReply;
 use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
 use crate::support::trace_llm::TraceLlm;
 
@@ -62,7 +62,7 @@ pub(crate) struct TriggeredSubmission {
     pub(crate) turn_scope: TurnScope,
 }
 
-impl RebornIntegrationHarness {
+impl IronClawIntegrationHarness {
     /// Synthetic `TriggerFire` shared by both triggered-submit seams, handed
     /// to the production submitter.
     fn triggered_fire(&self, prompt: &str, fire_slot: chrono::DateTime<Utc>) -> TriggerFire {
@@ -159,7 +159,7 @@ impl RebornIntegrationHarness {
     pub(crate) async fn submit_triggered_turn_scripted(
         &self,
         prompt: &str,
-        replies: impl IntoIterator<Item = RebornScriptedReply>,
+        replies: impl IntoIterator<Item = IronClawScriptedReply>,
     ) -> HarnessResult<TriggeredSubmission> {
         let fire_slot = triggered_fire_slot();
         let fire = self.triggered_fire(prompt, fire_slot);
@@ -175,7 +175,7 @@ impl RebornIntegrationHarness {
             .ok_or("triggered submit requires a harness binding with an agent id")?;
 
         let (materialized_prompt, turn_scope) =
-            ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test(
+            ironclaw_composition::test_support::materialize_trigger_prompt_for_test(
                 conversations.clone(),
                 thread_service,
                 default_agent_id,

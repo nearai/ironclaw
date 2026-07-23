@@ -620,7 +620,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     // and the runner re-reads them at the blocked exit. That end-to-end
     // persist→read→`TurnRunRecord.credential_requirements` path is covered by the
     // production-composition integration test
-    // `reborn_integration_auth_gate::runtime_401_after_injection_populates_provider_credential_requirement`,
+    // `ironclaw_integration_auth_gate::runtime_401_after_injection_populates_provider_credential_requirement`,
     // so this port-tier test asserts only that the outcome is an auth block.
     assert!(
         matches!(&outcome, Resolution::Blocked(Blocked::Auth(_))),

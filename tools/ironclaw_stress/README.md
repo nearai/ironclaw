@@ -133,7 +133,7 @@ Use `--scenario` for a single workload.
 | `mixed-user-session` | Realistic user turn with configurable synthetic or provider-backed model latency. |
 | `context-growth` | Sequentially grows history, then loads context to expose context read amplification. |
 | `tool-session` | Realistic turn with synthetic tool calls, tool previews, tool results, and optional tool wait/failure paths. |
-| `api-user-capacity` | End-to-end WebUI API send/read pressure against a running Reborn server. |
+| `api-user-capacity` | End-to-end WebUI API send/read pressure against a running IronClaw server. |
 | `cpu-burn` | Process-local CPU pressure control. |
 | `memory-churn` | Process-local allocation/RSS pressure control. |
 

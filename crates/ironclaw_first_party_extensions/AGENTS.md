@@ -16,11 +16,11 @@
 ## Do Not Move In Here
 
 - Host runtime composition, authorization, approvals, resource accounting, or capability registry wiring.
-- Loop-facing skill context ports, turn-run adapters, or Reborn composition wiring.
+- Loop-facing skill context ports, turn-run adapters, or IronClaw composition wiring.
 - Raw secrets, network clients, dispatcher handles, or ambient host authority.
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_first_party_extensions`
 - Caller check after tool behavior changes: `cargo test -p ironclaw_host_runtime --test first_party_coding_tools`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`

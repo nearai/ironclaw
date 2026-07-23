@@ -7,20 +7,20 @@
 //! executor surfaces an authorization failure to the model → the model finalizes
 //! its reply → terminal.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-deny")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/denied.txt", "content": "should not persist"}),
             ),
-            RebornScriptedReply::text("understood, the write was not authorized"),
+            IronClawScriptedReply::text("understood, the write was not authorized"),
         ])
         .build()
         .await?;

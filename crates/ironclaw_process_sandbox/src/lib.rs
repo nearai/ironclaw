@@ -1,4 +1,4 @@
-//! Docker process sandbox process executor for IronClaw Reborn.
+//! Docker process sandbox process executor for IronClaw.
 //!
 //! This crate owns the dynamic process compatibility lane: a trusted host can
 //! execute a typed [`SandboxProcessPlan`] through [`ProcessExecutor`] while

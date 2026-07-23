@@ -33,17 +33,15 @@ pub(crate) fn trace_commons_tools_profile() -> HarnessResult<ToolsProfile> {
         // enabled here so the scripted run isn't gated.
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         ),
         // onboard declares EffectKind::Network, so the lease needs a non-empty network
         // policy or the obligation check rejects dispatch before the consent gate runs.
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
-            "reborn-e2e-trace-commons-tools",
-            "reborn-e2e-trace-commons-user",
+            "ironclaw-e2e-trace-commons-tools",
+            "ironclaw-e2e-trace-commons-user",
         )?
     })
 }

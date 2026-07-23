@@ -221,13 +221,13 @@ EMULATE_SLACK_LIMITED_BEARER = "emulate-slack-limited-token"
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 
-# Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
+# Bearer token for the IronClaw WebUI v2 surface (`ironclaw serve`).
 # Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
 # key and refuses to bind with a shorter secret. Distinct from AUTH_TOKEN,
 # which targets the legacy `ironclaw` web channel.
-REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
+IRONCLAW_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 
-# Selectors for the Reborn WebUI v2 React SPA (served at /). The shell
+# Selectors for the IronClaw WebUI v2 React SPA (served at /). The shell
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)

@@ -8,11 +8,11 @@
   - `crates/ironclaw_agent_loop/CLAUDE.md`
   - `crates/ironclaw_turns/AGENTS.md`
   - `crates/ironclaw_loop_host/CLAUDE.md`
-  - `crates/ironclaw_reborn_composition/CLAUDE.md`
+  - `crates/ironclaw_composition/CLAUDE.md`
 
 ## What This Crate Owns
 
-- Standalone Reborn composition/adapters bridging neutral contracts to concrete Reborn loop execution.
+- Standalone IronClaw composition/adapters bridging neutral contracts to concrete IronClaw loop execution.
 - `planned_driver.rs`, `planned_driver_factory.rs`, `driver_registry.rs`, and `text_loop_driver.rs` driver behavior/registration/readiness.
 - `turn_scheduler.rs` scheduler-backed claiming, heartbeat, lease recovery, bounded concurrency, wake, and shutdown behavior.
 - `loop_driver_host.rs` concrete loop host-port composition for claimed runs.
@@ -38,5 +38,5 @@
 
 - Add a new file when adding a new driver, registry concern, host factory concern, or runtime adapter.
 - Keep `runtime.rs` limited to planned-runtime composition and explicit profile/runtime setup.
-- Do not expose planner strategy slots through Reborn APIs.
+- Do not expose planner strategy slots through IronClaw APIs.
 - Do not duplicate neutral DTOs from `ironclaw_turns`.

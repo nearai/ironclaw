@@ -6,17 +6,17 @@
 //! `TriggeredRunDeliveryStore` excluded — not covered here. Deferred until
 //! PR #5656.
 
+use ironclaw_composition::{IronClawBuildInput, build_ironclaw_services};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
 };
-use ironclaw_reborn_composition::{RebornBuildInput, build_reborn_services};
 
 /// Write survives a fresh libsql reopen of the same on-disk file. Failure
 /// class of PR #4782 (two stores over different mount views).
 #[tokio::test]
 async fn filesystem_outbound_state_store_persists_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_ironclaw_services(IronClawBuildInput::local_dev(
         "w6-outbound-durability",
         dir.path().join("local-dev"),
     ))
@@ -61,7 +61,7 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     // Reopen: a genuinely fresh store over a NEW libsql connection to the
     // same on-disk file — not the same Arc as `store` above.
     let reopened =
-        ironclaw_reborn_composition::test_support::open_local_dev_outbound_preferences_store_for_test(
+        ironclaw_composition::test_support::open_local_dev_outbound_preferences_store_for_test(
             &storage_root,
         )
         .await

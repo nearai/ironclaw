@@ -1,0 +1,530 @@
+# IronClaw Filesystem Contract
+
+**Status:** Draft implementation contract
+**Date:** 2026-04-24
+**Depends on:** `docs/ironclaw/contracts/host-api.md`, `crates/ironclaw_host_api`
+
+---
+
+## 1. Purpose
+
+`ironclaw_filesystem` is the durable path and mount service for IronClaw.
+
+It turns host API path contracts into actual storage operations while preserving the core containment invariant:
+
+```text
+runtime code sees ScopedPath
+host policy reasons over MountView
+filesystem resolves to VirtualPath
+backend code alone touches HostPath
+```
+
+The filesystem is not an agent memory system, search index, workflow engine, database abstraction, or policy engine. It is the service that safely resolves scoped paths, checks mount permissions, applies backend containment, and performs read/write/list/stat operations against mounted stores.
+
+---
+
+## 2. Authority model
+
+Filesystem authority is derived from `ExecutionContext.mounts` and the requested action.
+
+```text
+ExecutionContext
+  -> MountView
+  -> ScopedPath
+  -> permission check
+  -> VirtualPath
+  -> backend mount
+  -> HostPath/internal backend key
+```
+
+Rules:
+
+- runtime code never receives `HostPath`
+- service APIs for untrusted callers accept `ScopedPath`, not raw strings
+- root/admin APIs may accept `VirtualPath`, but only trusted host services should receive them
+- missing mount = deny
+- missing permission = deny
+- invalid path = deny
+- ambiguous backend mount = deny
+- symlink/backend escape = deny
+- backend failures must not reveal raw host paths in user-visible errors
+
+---
+
+## 3. Public service split
+
+### 3.1 `RootFilesystem`
+
+Trusted host-service interface. It operates on canonical `VirtualPath` values.
+
+Use for:
+
+- bootstrapping roots
+- extension discovery under `/system/extensions`
+- project/user/memory namespace setup
+- internal audit/history writes
+- tests that need direct virtual namespace setup
+
+Do not expose `RootFilesystem` to WASM modules, script runner jobs, MCP tools, or third-party extensions.
+
+### 3.2 `ScopedFilesystem`
+
+Invocation-scoped interface. It operates on `ScopedPath` values and carries an `ExecutionContext` or an already-validated `MountView`.
+
+Use for:
+
+- WASM host imports
+- script runner filesystem mediation
+- MCP adapter file access
+- first-party extension host API calls
+- agent/tool work that must respect mount authority
+
+`ScopedFilesystem` must resolve through `MountView` on every operation. It must not cache a broader authority than the context grants.
+
+---
+
+## 4. Namespace roots
+
+Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
+
+```text
+/engine
+/system/settings
+/system/extensions
+/system/skills
+/users
+/projects
+/memory
+/artifacts
+/tmp
+/secrets
+/events
+/processes
+/authorization
+/outbound
+/run-state
+/approvals
+/threads
+/conversations
+/turns
+/resources
+/tenant-shared
+/tenants
+```
+
+Recommended meaning:
+
+| Root | Purpose |
+|---|---|
+| `/engine` | host-owned runtime state, schemas, migrations, and service metadata |
+| `/system/settings` | typed settings repository and optional settings projections |
+| `/system/extensions` | installed extension packages and extension-local config/state/cache roots |
+| `/system/skills` | skill manifests, registries, and installed skill state |
+| `/users` | user-owned durable profile/config areas |
+| `/projects` | project workspaces, missions, thread state, and project-local config |
+| `/memory` | durable memory namespace, initially file-like even if backed by another store |
+| `/artifacts` | artifact/object storage for process output refs and durable generated files |
+| `/tmp` | process/invocation-local temporary data |
+| `/secrets` | encrypted secret records and redacted secret projections only |
+| `/events` | durable event/audit append log and projections |
+| `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
+| `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
+| `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
+| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
+| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+| `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
+| `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
+| `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
+| `/resources` | resource-governor reservation/usage snapshots (consumer-store mount alias under `ironclaw_resources`) |
+| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
+| `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
+
+Extension-visible workspace-style names should be scoped aliases such as:
+
+```text
+/workspace
+/project
+/extension/config
+/extension/state
+/extension/cache
+```
+
+Aliases are resolved by `MountView`; they are not global virtual roots by themselves.
+
+---
+
+## 5. Path types
+
+### 5.1 `VirtualPath`
+
+Canonical durable namespace path, validated by `ironclaw_host_api`.
+
+Examples:
+
+```text
+/projects/project1/src/lib.rs
+/system/extensions/github/config/settings.toml
+/memory/users/user1/facts.md
+```
+
+### 5.2 `ScopedPath`
+
+Runtime-visible path exposed through a mount alias.
+
+Examples:
+
+```text
+/workspace/src/lib.rs
+/project/missions/nightly.toml
+/memory/facts.md
+/extension/state/db.json
+/tmp/run/output.json
+/artifacts/patch.diff
+```
+
+### 5.3 `HostPath`
+
+Backend-local physical path. It is intentionally not serializable and must not appear in audit/user-visible output.
+
+---
+
+## 6. Resolution contract
+
+Resolution is two-step:
+
+```text
+ScopedPath + MountView -> VirtualPath
+VirtualPath + BackendMountTable -> backend-local path/key
+```
+
+Rules:
+
+1. Use longest alias match for `ScopedPath -> VirtualPath`.
+2. Alias match must be exact or segment-boundary prefixed.
+3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution, except trusted local single-user `MountView`s may accept an already-authorized raw host prefix that is explicitly present as a mount alias. Hosted and extension-declared mounts must continue to use stable scoped aliases such as `/workspace` or `/host`.
+4. `VirtualPath` must begin with a known root.
+5. Backend mount selection must use longest virtual mount prefix.
+6. If two backend mounts match with the same prefix length, fail closed.
+7. Final local filesystem canonicalization must remain inside the mounted backend root.
+8. Symlinks may be read or traversed only if final canonical target remains inside the backend root.
+9. Symlink writes that would create or follow an escape outside the root are denied.
+10. Returned errors must identify virtual/scoped paths, not raw host paths.
+
+---
+
+## 7. Permissions
+
+Use `MountPermissions` from `ironclaw_host_api`:
+
+```rust
+pub struct MountPermissions {
+    pub read: bool,
+    pub write: bool,
+    pub delete: bool,
+    pub list: bool,
+    pub execute: bool,
+}
+```
+
+Operation requirements:
+
+| Operation | Required permission |
+|---|---|
+| `read_file` | `read` |
+| `write_file` | `write` |
+| `list_dir` | `list` |
+| `stat` | `read` or `list` |
+| `delete` | `delete` |
+| `create_dir_all` | `write` |
+| executable/script handoff | `execute` plus runtime-specific approval |
+
+`write` does not imply `delete`. `read` does not imply `list` unless the mount grant explicitly carries both.
+
+---
+
+## 8. `/project` vs `/workspace`
+
+Use both aliases deliberately:
+
+- `/project` should point at the canonical project root when the invocation is allowed to reason about the whole project.
+- `/workspace` should point at the working subset for the current task, branch, or sandbox.
+
+In many local cases both aliases may target the same `VirtualPath`, but the distinction allows future task-scoped worktrees, sparse checkouts, review-only mounts, and sandbox overlays without changing extension-visible paths.
+
+---
+
+## 9. `/memory` resolution
+
+`/memory` is a scoped alias backed by the canonical `/memory` virtual root.
+
+V1 should keep memory file-like:
+
+```text
+/memory/users/<user>/...
+/memory/projects/<project>/...
+/memory/tenants/<tenant>/...
+```
+
+Search, embeddings, and indexing belong in a separate service layered on top of filesystem reads/writes. The filesystem may expose memory paths but must not become the semantic memory engine.
+
+Resolution priority is mount-based, not magical:
+
+1. if `MountView` contains `/memory`, use that target
+2. otherwise the path is unavailable to the invocation
+3. do not fall back to global memory automatically
+
+---
+
+## 10. `/tmp` lifecycle
+
+`/tmp` is invocation- or process-scoped scratch space.
+
+Rules:
+
+- not durable by default
+- mounted only when granted
+- cleaned at invocation/process teardown unless explicitly retained for debugging
+- counted against disk/output resource limits
+- not indexed as memory
+- not used for audit as the source of truth
+
+The canonical virtual target may be under a host-managed scratch root such as:
+
+```text
+/engine/tmp/invocations/<invocation_id>
+```
+
+but runtimes should only see `/tmp`.
+
+---
+
+## 11. Artifacts and writeback
+
+Script runner and sandboxed native CLI work should prefer artifact export over broad writable host mounts.
+
+Recommended pattern:
+
+```text
+sandbox writes /artifacts/patch.diff or /artifacts/result.json
+filesystem validates artifact path and size
+host applies approved changes to /project or /workspace
+host writes audit envelope with artifact hashes
+```
+
+Rules:
+
+- artifact writes require `write` permission on `/artifacts`
+- artifact export must enforce size/count limits
+- host apply/writeback is a separate action requiring authorization
+- script runner Docker mounts should not receive raw broad writable host paths by default
+
+---
+
+## 12. Backend mount table and catalog
+
+`CompositeRootFilesystem` owns the trusted backend mount table from `VirtualPath` prefix to backend implementation. Each mount carries a `MountDescriptor` so trusted host services can answer where a path lives without probing every backend.
+
+V1 backend types:
+
+```text
+DiskFilesystem
+PostgresRootFilesystem
+LibSqlRootFilesystem
+Memory/test backends as needed
+```
+
+The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are database-backed `RootFilesystem` implementations for generic file-shaped content, not a mandate that every durable service becomes files.
+
+Catalog metadata distinguishes file-shaped content from structured records and derived indexes:
+
+```rust
+pub struct MountDescriptor {
+    pub virtual_root: VirtualPath,
+    pub backend_id: BackendId,
+    pub backend_kind: BackendKind,
+    pub storage_class: StorageClass,
+    pub content_kind: ContentKind,
+    pub index_policy: IndexPolicy,
+    pub capabilities: BackendCapabilities,
+}
+
+pub struct PathPlacement {
+    pub path: VirtualPath,
+    pub matched_root: VirtualPath,
+    pub backend_id: BackendId,
+    pub backend_kind: BackendKind,
+    pub storage_class: StorageClass,
+    pub content_kind: ContentKind,
+    pub index_policy: IndexPolicy,
+    pub capabilities: BackendCapabilities,
+}
+```
+
+Backend mount rules:
+
+- mount target must be a valid `VirtualPath`
+- exact duplicate mount roots fail closed
+- overlapping mount roots are allowed only when longest-prefix routing is unambiguous
+- longest virtual prefix wins for both catalog lookup and filesystem operations
+- backend-local path joins must remain contained
+- backend mount registration is a trusted host operation
+- catalog lookup does not grant runtime authority; untrusted callers still need `ScopedFilesystem` plus `MountView`
+
+Future backend types:
+
+```text
+ObjectStoreBackend
+RemoteFilesystemBackend
+```
+
+Memory-specific backend adapters are owned outside this crate. The first IronClaw memory seams are `ironclaw_memory::MemoryDocumentFilesystem` for the built-in repository path and `ironclaw_memory::MemoryBackendFilesystemAdapter` for plugin backends that declare file-document capability. PostgreSQL/libSQL adapters port/adapt the current workspace table family (`memory_documents`, `memory_chunks`, libSQL `memory_chunks_fts`, and `memory_document_versions`); metadata inheritance, skip flags, schema validation, embedding-provider integration, embedded chunk writes, FTS search, and rank-fused hybrid search are memory service/indexer responsibilities already represented in `ironclaw_memory`, not in the generic filesystem crate.
+
+---
+
+## 13. Error contract
+
+Use a filesystem-specific service error that can wrap `HostApiError` but does not expose raw host internals.
+
+Minimum variants:
+
+```rust
+pub enum FilesystemError {
+    Contract(HostApiError),
+    PermissionDenied { path: ScopedPath, operation: FilesystemOperation },
+    MountNotFound { path: VirtualPath },
+    PathOutsideMount { path: VirtualPath },
+    SymlinkEscape { path: VirtualPath },
+    MountConflict { path: VirtualPath },
+    Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
+    NotFound { path: VirtualPath, operation: FilesystemOperation },
+    VersionMismatch { path: VirtualPath, expected: Option<RecordVersion>, found: Option<RecordVersion> },
+    Unsupported { path: VirtualPath, operation: FilesystemOperation },
+}
+```
+
+Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths. `NotFound`/`VersionMismatch`/`Unsupported` back `delete_if_version` (§14.1) — absent path, stale version, and unsupported-backend cases respectively.
+
+---
+
+## 14. Initial Rust API sketch
+
+`read_file_bounded` returns `Ok(None)` when the file exceeds the caller's limit; streaming backends should enforce that without allocating the full file first.
+
+```rust
+#[async_trait]
+pub trait RootFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError>;
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
+    // additive, default trait impl below — same pattern as other optional CAS operations (§14.1)
+    // no `CasExpectation`: `Any`/`Absent` are unrepresentable for delete (§14.1)
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let _ = expected_version;
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            // reuses the existing `Delete` operation tag — no new
+            // `FilesystemOperation` variant is introduced for this method
+            operation: FilesystemOperation::Delete,
+        })
+    }
+}
+
+pub struct CompositeRootFilesystem;
+
+impl RootFilesystem for CompositeRootFilesystem { /* delegates by longest virtual prefix */ }
+
+impl CompositeRootFilesystem {
+    pub async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError>;
+    pub async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError>;
+}
+
+pub struct ScopedFilesystem<F> {
+    root: F,
+    mounts: MountView,
+}
+
+impl<F: RootFilesystem> ScopedFilesystem<F> {
+    async fn read_file(&self, path: &ScopedPath) -> Result<Vec<u8>, FilesystemError>;
+    async fn write_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
+    async fn list_dir(&self, path: &ScopedPath) -> Result<Vec<DirEntry>, FilesystemError>;
+    async fn stat(&self, path: &ScopedPath) -> Result<FileStat, FilesystemError>;
+    // requires `delete` permission, same as `delete`
+    async fn delete_if_version(
+        &self,
+        path: &ScopedPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError>;
+}
+```
+
+The implementation may start synchronous if the V1 local backend is synchronous, but the public trait should not block future async/remote backends.
+
+### 14.1 `delete_if_version` — CAS-guarded delete
+
+Additive method on `RootFilesystem` (default trait impl: `Unsupported`, same pattern as other optional CAS operations). Takes a concrete `expected_version: RecordVersion` directly — **not** the `CasExpectation` enum used by the CAS'd write path (`Version(RecordVersion) | Any | Absent`). `Any` and `Absent` are unrepresentable here, by design: `Any` would be behaviorally identical to the existing unconditional `delete(path)` — offering it on `delete_if_version` too would duplicate a sibling method; `Absent` has no meaning for a delete (nothing to compare against). Both are excluded at the type level rather than accepted and runtime-rejected.
+
+Rules:
+
+- version-guarded, single-key delete only — no subtree/cascade semantics
+- path absent -> `NotFound`
+- path present at a different version -> `VersionMismatch`
+- requires `delete` permission at the `ScopedFilesystem` layer, same as `delete`
+- backends without CAS-delete support return `Unsupported` by default — fail-closed, never a silent unconditional delete
+
+**ABA caller invariant.** Version tokens are not generation-stable: a path's version restarts at 1 on a fresh `put` after a prior delete, so a token captured before a delete+recreate cycle can match a different incarnation of the same path (ABA). `delete_if_version` is a sound standalone precondition only for paths that are never recreated; callers that recreate paths must pair every successful delete with an unconditional postcondition recheck.
+
+---
+
+## 15. Minimum TDD coverage
+
+Add tests through the caller-facing filesystem APIs, not only helper functions:
+
+- scoped read resolves through mount view and reads expected bytes
+- read denied when mount lacks `read`
+- write denied on read-only mount
+- list denied when mount lacks `list`
+- longest backend virtual mount wins
+- unknown alias fails closed
+- path traversal in scoped path is rejected before backend access
+- local backend denies symlink escape
+- local backend does not leak raw host path in display error
+- `CompositeRootFilesystem` routes operations by longest virtual mount prefix
+- `CompositeRootFilesystem::describe_path` reports matched root, backend identity, content kind, and index policy
+- exact duplicate composite mount roots fail closed
+- catalog mount listing is stable for diagnostics
+- PostgreSQL/libSQL backends implement `RootFilesystem` without depending on product/runtime/workflow crates
+- libSQL backend reads, writes, stats, overwrites, lists direct children, infers directories, and returns virtual-path-only missing-file errors
+- `/tmp` mount can be created per invocation and cleaned up
+- `/artifacts` writes are captured under approved virtual path only
+- `delete_if_version` distinguishes `NotFound` (absent path) from `VersionMismatch` (wrong version) and leaves the entry untouched on either error
+- `delete_if_version` on a backend using the default trait implementation (no override) returns `Unsupported`
+- `delete_if_version` denied when the mount lacks `delete` permission
+
+---
+
+## 16. Non-goals
+
+Do not add in `ironclaw_filesystem`:
+
+- auth policy evaluation
+- resource reservation
+- search, indexing, or embeddings
+- semantic memory APIs
+- mission/thread orchestration
+- script runner execution
+- Docker/microVM/container logic
+- extension manifest parsing
+- network access
+- secret material storage
+
+Those are separate services using filesystem contracts.

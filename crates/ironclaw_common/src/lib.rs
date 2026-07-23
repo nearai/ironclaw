@@ -15,7 +15,7 @@ pub mod pkce;
 mod platform;
 pub mod provider_transcript;
 mod timezone;
-#[allow(dead_code)] // Trust-boundary scaffolding for the Reborn architecture; not yet consumed.
+#[allow(dead_code)] // Trust-boundary scaffolding for the IronClaw architecture; not yet consumed.
 mod trust_boundary;
 mod util;
 
@@ -47,7 +47,7 @@ pub use util::{truncate_for_preview, truncate_preview};
 /// A single source of truth prevents the two from drifting.
 pub const MAX_WORKER_ITERATIONS: u32 = 500;
 
-// ─── Reborn cost-based budget invariants ────────────────────────────────────
+// ─── IronClaw cost-based budget invariants ────────────────────────────────────
 //
 // These constants are the hard backstops behind the dollar-based budget
 // system. They guarantee that even a misconfigured per-thread limit cannot

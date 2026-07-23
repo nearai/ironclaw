@@ -1,4 +1,4 @@
-//! Provider-neutral memory contract types for IronClaw Reborn.
+//! Provider-neutral memory contract types for IronClaw.
 //!
 //! This crate owns the host-facing IronClaw memory vocabulary: the
 //! [`MemoryService`] trait and its operation shapes, the memory document

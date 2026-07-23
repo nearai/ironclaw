@@ -49,9 +49,9 @@ Run commands from the repository root.
 - `auth-live-seeded`
 - `auth-browser-consent`
 
-### Reborn WebUI v2 QA lane
+### IronClaw WebUI v2 QA lane
 
-- `reborn-webui-v2-live-qa`
+- `ironclaw-webui-v2-live-qa`
 
 PR-targeted runs execute the reviewed PR binary with live integration secrets.
 They must pass the `reborn-live-canary-pr` GitHub environment gate and have an
@@ -103,18 +103,18 @@ LANE=auth-browser-consent CASES=google,notion scripts/live-canary/run.sh
 # it lives in auth-live-seeded instead — see scripts/live_canary/auth_registry.py.
 ```
 
-Run the Reborn WebUI v2 live QA lane against the local copied Reborn home:
+Run the IronClaw WebUI v2 live QA lane against the local copied IronClaw home:
 
 ```bash
-LANE=reborn-webui-v2-live-qa \
-REBORN_WEBUI_V2_LIVE_QA_HOME=/tmp/ironclaw-reborn-real-slack \
+LANE=ironclaw-webui-v2-live-qa \
+IRONCLAW_WEBUI_V2_LIVE_QA_HOME=/tmp/ironclaw-real-slack \
 scripts/live-canary/run.sh
 ```
 
-Run the full QA-sheet-backed Reborn suite:
+Run the full QA-sheet-backed IronClaw suite:
 
 ```bash
-LANE=reborn-webui-v2-live-qa CASES=all scripts/live-canary/run.sh
+LANE=ironclaw-webui-v2-live-qa CASES=all scripts/live-canary/run.sh
 ```
 
 Use CI-style browser installation for auth browser lanes:

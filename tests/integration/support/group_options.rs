@@ -1,4 +1,4 @@
-//! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
+//! Runtime-wiring setters for [`IronClawIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
@@ -21,9 +21,9 @@ use ironclaw_turns::InMemoryTurnEventSink;
 use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 
 use super::super::builder::StorageMode;
-use super::RebornIntegrationGroupBuilder;
+use super::IronClawIntegrationGroupBuilder;
 
-impl RebornIntegrationGroupBuilder {
+impl IronClawIntegrationGroupBuilder {
     /// Select the durable storage backend (default: `StorageMode::InMemory`).
     /// Use `StorageMode::LibSql` to exercise on-disk durability across
     /// `assert_reply_persists_after_reopen`.
@@ -46,7 +46,7 @@ impl RebornIntegrationGroupBuilder {
     /// Install an in-memory `InMemoryTurnEventSink` into the group's ONE
     /// planned runtime via production's `subscribe_best_effort` seam
     /// (C-TRACECAP). Read back via
-    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read
+    /// [`IronClawIntegrationHarness::recorded_turn_events`] — the ONLY read
     /// path; it slices `[baseline_turn_event_count..]` so threads don't see
     /// siblings' events. No raw sink accessor, deliberately.
     pub fn with_turn_event_sink(mut self) -> Self {
@@ -57,8 +57,8 @@ impl RebornIntegrationGroupBuilder {
     /// Wire the PRODUCTION `TraceCaptureTurnEventSink` into the group's ONE
     /// planned runtime (enabler (c), C-TRACECAP), via composition's
     /// `trace_capture_turn_event_sink_for_test` — the same sink + scope-seed
-    /// recipe `build_reborn_runtime` composes. Read the seeded scope back with
-    /// `RebornIntegrationGroup::trace_capture_scope()`. Composes with
+    /// recipe `build_ironclaw_runtime` composes. Read the seeded scope back with
+    /// `IronClawIntegrationGroup::trace_capture_scope()`. Composes with
     /// `.with_turn_event_sink()` through the group's fan-out. NOTE: capture
     /// resolves policy/queue paths through `IRONCLAW_BASE_DIR` (a process-wide
     /// `LazyLock`) — the consuming test binary must point it at a tempdir as
@@ -69,7 +69,7 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
-    /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
+    /// runtime config (enabler (b)), regardless of `IRONCLAW_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
     /// guards against (see `ToolDisclosureMode::from_env`). Defaults `None`
     /// (resolves via `from_env()`, matching today's behavior).
@@ -79,10 +79,10 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Force `ToolDisclosureMode::Off` into the group's ONE planned runtime
-    /// config, regardless of `REBORN_TOOL_DISCLOSURE`. Used by the disclosure
+    /// config, regardless of `IRONCLAW_TOOL_DISCLOSURE`. Used by the disclosure
     /// mode's negative-control test to pin Off-mode behavior explicitly:
     /// leaving it on the `from_env()` default-resolution path would let an
-    /// ambient `REBORN_TOOL_DISCLOSURE=Bridged` (e.g. from a developer's
+    /// ambient `IRONCLAW_TOOL_DISCLOSURE=Bridged` (e.g. from a developer's
     /// shell or a differently-configured CI runner) silently flip the control
     /// into the very mode it's meant to disprove. `apply_hermetic_env()` also
     /// scrubs the var for defense in depth, but this explicit opt-in is what
@@ -149,14 +149,14 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Wire the REAL approval/auth interaction services (via the group's
-    /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
+    /// `HostRuntimeCapabilityHarness`'s retained `IronClawServices`, over the
     /// group's own shared turn-state store) into every thread's
     /// `DefaultProductSurface`, so `submit_inbound(ApprovalResolution/
     /// AuthResolution)` dispatches through the SAME arms a real adapter reply
     /// hits, instead of every workflow's default `Rejecting*InteractionService`
     /// stubs. Requires a `HostRuntime` capability backend built via
     /// `new_with_options` (e.g. `live_approvals`, `live_auth_and_approval`) —
-    /// `RebornThreadBuilder::build()` errors otherwise. Defaults off (every
+    /// `IronClawThreadBuilder::build()` errors otherwise. Defaults off (every
     /// other group keeps today's Rejecting-stub behavior).
     pub fn with_real_gate_dispatch_services(mut self) -> Self {
         self.real_gate_dispatch_services = true;

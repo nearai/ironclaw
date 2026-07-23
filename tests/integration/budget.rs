@@ -4,29 +4,29 @@
 //! and that accountant fires on a real coordinator-path turn.
 //!
 //! Budget SEMANTICS (ledger, thresholds, approval-unblock, `BudgetEvent`
-//! cascade) are covered at crate tier via `build_reborn_runtime`
+//! cascade) are covered at crate tier via `build_ironclaw_runtime`
 //! (`budget_e2e.rs` / `budget_approval_e2e.rs`) — not re-authored here. This
 //! proves only that the accountant is live: on the turn's first model call it
 //! seeds the run owner's daily USD cap, observable via the in-memory governor.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 
 /// Liveness proof: the wired accountant seeds the run owner's daily cap on
 /// the turn's first model call, reaching coordinator → loop → model-port via
 /// `DefaultPlannedRuntimeParts` wiring.
 #[tokio::test]
 async fn budget_accountant_seeds_user_cap_on_turn_model_call() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_budget_accounting()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("harness builds");
@@ -41,8 +41,8 @@ async fn budget_accountant_seeds_user_cap_on_turn_model_call() {
 /// default path stays behavior-identical (no accountant).
 #[tokio::test]
 async fn budget_assertion_requires_wiring() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("no budget")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("no budget")])
         .build()
         .await
         .expect("harness builds");

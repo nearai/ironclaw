@@ -54,10 +54,10 @@ trap 'rm -rf "${tmp}"' EXIT
 make_fixture() {
     local dir="$1" comp_lines="$2" other_lines="$3"
     rm -rf "${dir}"
-    mkdir -p "${dir}/ironclaw_reborn_composition/src" "${dir}/other_crate/src"
+    mkdir -p "${dir}/ironclaw_composition/src" "${dir}/other_crate/src"
     # `|| true`: `yes | head` makes `yes` exit with SIGPIPE (141), which under
     # `set -e`+`pipefail` would abort the harness. The file is fully written.
-    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_reborn_composition/src/lib.rs" || true
+    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_composition/src/lib.rs" || true
     { yes 'let _ = 2;' | head -n "${other_lines}"; } > "${dir}/other_crate/src/lib.rs" || true
 }
 
@@ -82,7 +82,7 @@ EOF
 }
 
 run_gate() {
-    COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+    COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
     CRATES_ROOT="${tmp}/crates" \
     BUDGET_FILE="${tmp}/budget.toml" \
     capture bash "${gate}"
@@ -98,7 +98,7 @@ assert_contains "C1 shows observed share"  "${CAP_OUT}" "30.00% (3000 bp)"
 budget true 2900 30; run_gate
 assert_rc       "C2 breach (enforce) exits 1"  1 "${CAP_RC}"
 assert_contains "C2 reports MASS EXCEEDED"    "${CAP_OUT}" "MASS EXCEEDED"
-assert_contains "C2 names carve-out guidance"  "${CAP_OUT}" "ironclaw-reborn-architecture-review"
+assert_contains "C2 names carve-out guidance"  "${CAP_OUT}" "ironclaw-architecture-review"
 
 # C3: same breach but DRY-RUN -> exit 0, prefixed marker, no hard fail.
 budget false 2900 30; run_gate
@@ -157,7 +157,7 @@ assert_contains "C8b reports schema error not crash" "${CAP_OUT}" "ceiling_bp mu
 # C8c: test-only FILES are excluded from the metric. Add a big tests.rs to the
 # composition fixture; the observed share must stay 30.00% (3000 bp), unchanged.
 make_fixture "${tmp}/crates" 3000 7000
-printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_reborn_composition/src/tests.rs"
+printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_composition/src/tests.rs"
 budget true 3000 30; run_gate
 assert_rc       "C8c test file excluded exits 0"   0 "${CAP_RC}"
 assert_contains "C8c share ignores tests.rs"       "${CAP_OUT}" "30.00% (3000 bp)"
@@ -165,7 +165,7 @@ make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture for later cases
 
 # C9: --print never fails and reports the share.
 budget true 100 0; run_gate  # ceiling absurdly low, but --print ignores it
-COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+COMPOSITION_SRC="${tmp}/crates/ironclaw_composition/src" \
 CRATES_ROOT="${tmp}/crates" \
 BUDGET_FILE="${tmp}/budget.toml" \
 capture bash "${gate}" --print
@@ -176,7 +176,7 @@ assert_contains "C9 --print shows share"  "${CAP_OUT}" "composition share: 30.00
 # D. Dispatch (Arc<dyn>) sub-metric.
 # ---------------------------------------------------------------------------
 make_fixture "${tmp}/crates" 3000 7000
-comp_src="${tmp}/crates/ironclaw_reborn_composition/src"
+comp_src="${tmp}/crates/ironclaw_composition/src"
 # 10 Arc<dyn> sites in a production file.
 printf 'let x: Arc<dyn Foo> = y;\n%.0s' $(seq 1 10) > "${comp_src}/dispatch.rs"
 

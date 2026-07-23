@@ -36,7 +36,7 @@ look like a non-firing hook for the wrong reason.
 
 **Why this is friction:** A hook author writing predicate tests for
 their own hook cannot reproduce the production dispatch shape (named
-provider + unresolved args) without going through Reborn's middleware.
+provider + unresolved args) without going through IronClaw's middleware.
 TDD of a predicate's match logic becomes impossible at the crate
 boundary.
 
@@ -95,7 +95,7 @@ for the model-visible path.
 
 ---
 
-### F3 — Hook 2 (NumericSum) cannot be exercised end-to-end from outside Reborn
+### F3 — Hook 2 (NumericSum) cannot be exercised end-to-end from outside IronClaw
 
 **What happened:** Hook 2 uses
 `ValueOrRateBound::NumericSum { field: "amount_usd", ... }`. The
@@ -117,7 +117,7 @@ which already exists).
 **Why this is friction:** A third-party extension author writing a
 NumericSum hook has no way to TDD the *fire* condition without
 either (a) depending on `ironclaw_runner` as a dev-dep (heavy + the
-extension probably shouldn't reach into Reborn at all), or (b)
+extension probably shouldn't reach into IronClaw at all), or (b)
 faking the resolver in their crate, which requires the
 `SanitizedArguments::from_json` constructor to be reachable.
 
@@ -244,7 +244,7 @@ deviate from `DEFAULT`. Optionally add named constants (`EARLY`,
 |---|---|---|
 | F1 — Sealed `unresolved()` blocks external dispatch tests | High | **Fixed** — `pub fn unresolved()` |
 | F2 — Closed-vocabulary deny reason is undocumented | Med | **Fixed** — rustdoc on `OnExceededAction` and `GateDecisionView` in PR #3573; the `DenyReasonCode` + `PauseReasonCode` enums followed in successor PR #3636 (this branch) |
-| F3 — NumericSum can't be TDD'd outside Reborn | Med | **Fixed** — `SanitizedArguments::for_tests(value)` under `test-support` feature flag |
+| F3 — NumericSum can't be TDD'd outside IronClaw | Med | **Fixed** — `SanitizedArguments::for_tests(value)` under `test-support` feature flag |
 | F4 — Trusted Rust before_prompt hooks (no friction) | — | — |
 | F5 — Two `ExtensionId` types are confusing | Low | **Fixed** — `From<&ironclaw_host_api::ExtensionId>` impl + cross-link rustdoc |
 | F6 — `HookManifestEntry` struct literal is fragile | Low | **Fixed** — `#[non_exhaustive]` + `new(id, kind, body)` + `with_*` builder methods |

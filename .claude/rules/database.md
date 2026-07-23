@@ -3,7 +3,7 @@ paths:
   - "crates/**/*.rs"
   - "migrations/**"
 ---
-# Reborn persistence rules
+# IronClaw persistence rules
 
 ## One storage plane
 

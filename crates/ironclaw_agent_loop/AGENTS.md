@@ -11,7 +11,7 @@
 
 ## What This Crate Owns
 
-- Agent-loop framework state and strategy contracts for Reborn.
+- Agent-loop framework state and strategy contracts for IronClaw.
 - `executor.rs` loop mechanics, canonical tick behavior, and deterministic execution flow.
 - `family.rs`, `families/`, `planner.rs`, `default_planner.rs`, and `strategies/` for sealed built-in loop-family/planning strategy composition.
 - `state.rs` and `state/` for resumable loop state: refs, cursors, counters, versions, and safe summaries only.
@@ -19,7 +19,7 @@
 
 ## Do Not Move In Here
 
-- Product-specific logic, product adapters, transport behavior, or Reborn app composition.
+- Product-specific logic, product adapters, transport behavior, or IronClaw app composition.
 - `AgentLoopDriver` / `PlannedDriver` host wiring; that bridge belongs in `ironclaw_runner`.
 - Runtime lanes, host-runtime services, provider auth, network/secrets, or UI concerns.
 - Raw prompts, raw assistant content, tool input JSON, secrets, host paths, or backend diagnostics in state.

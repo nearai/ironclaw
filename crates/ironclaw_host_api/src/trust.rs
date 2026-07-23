@@ -1,4 +1,4 @@
-//! Requested-trust vocabulary for IronClaw Reborn.
+//! Requested-trust vocabulary for IronClaw.
 //!
 //! This module is the *input* side of the host trust policy boundary. Manifests,
 //! registry entries, and admin configuration deserialize into [`PackageIdentity`]
@@ -37,8 +37,8 @@
 //!
 //! See `ironclaw_trust::TrustPolicy` for the engine that bridges request to
 //! effective trust, `crates/ironclaw_trust/CONTRACT.md` for the full
-//! evaluation matrix, and `docs/reborn/contracts/host-api.md` (in the
-//! staging-track docs) for the broader Reborn vocabulary.
+//! evaluation matrix, and `docs/ironclaw/contracts/host-api.md` (in the
+//! staging-track docs) for the broader IronClaw vocabulary.
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// ## Manifest mapping
 ///
-/// The manifest field `trust = "..."` (see `docs/reborn/contracts/extensions.md`
+/// The manifest field `trust = "..."` (see `docs/ironclaw/contracts/extensions.md`
 /// §4 in the staging-track docs) parses into this type via snake_case serde:
 ///
 /// | Manifest value | Variant |

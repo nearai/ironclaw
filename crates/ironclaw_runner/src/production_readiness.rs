@@ -1,13 +1,13 @@
-//! Reborn loop production readiness validation.
+//! IronClaw loop production readiness validation.
 //!
 //! Host-runtime readiness stays substrate-scoped in
 //! `ironclaw_host_runtime::ProductionWiringReport`. This module validates the
-//! upper Reborn loop graph: selected profile identities, registered loop
+//! upper IronClaw loop graph: selected profile identities, registered loop
 //! drivers, host-loop ports, production safety class, and active-run drain
 //! protection.
 //!
-//! Startup composition is expected to construct `RebornLoopProductionInputs`,
-//! call `validate_reborn_loop_production_readiness`, gate production startup on
+//! Startup composition is expected to construct `IronClawLoopProductionInputs`,
+//! call `validate_ironclaw_loop_production_readiness`, gate production startup on
 //! `report.is_ready()`, and still surface `report.issues` / `has_warnings()` for
 //! operator diagnostics. The runtime gate is tracked separately from this pure
 //! reporting slice so readiness semantics can stabilize before startup wiring.
@@ -22,9 +22,9 @@ use crate::driver_registry::{
     RequirementLevel,
 };
 
-/// Readiness mode for the Reborn loop graph.
+/// Readiness mode for the IronClaw loop graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebornLoopReadinessMode {
+pub enum IronClawLoopReadinessMode {
     /// Explicit local/developer/test mode. Fake, non-durable, and no-op
     /// implementations are allowed but reported as degraded warnings.
     LocalDevTest,
@@ -34,18 +34,18 @@ pub enum RebornLoopReadinessMode {
     Production,
 }
 
-impl From<RebornLoopReadinessMode> for DriverReadinessMode {
-    fn from(mode: RebornLoopReadinessMode) -> Self {
+impl From<IronClawLoopReadinessMode> for DriverReadinessMode {
+    fn from(mode: IronClawLoopReadinessMode) -> Self {
         match mode {
-            RebornLoopReadinessMode::LocalDevTest => Self::LocalDevTest,
-            RebornLoopReadinessMode::Production => Self::Production,
+            IronClawLoopReadinessMode::LocalDevTest => Self::LocalDevTest,
+            IronClawLoopReadinessMode::Production => Self::Production,
         }
     }
 }
 
 /// Production safety class for a concrete component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebornComponentSafetyClass {
+pub enum IronClawComponentSafetyClass {
     /// Verified for production invariants. The implementation may be local
     /// durable (for standalone-local production) or remote/cloud-backed.
     ProductionVerified,
@@ -59,7 +59,7 @@ pub enum RebornComponentSafetyClass {
     UnverifiedProductionImplementation,
 }
 
-impl RebornComponentSafetyClass {
+impl IronClawComponentSafetyClass {
     fn blocks_production(self) -> bool {
         self != Self::ProductionVerified
     }
@@ -68,28 +68,28 @@ impl RebornComponentSafetyClass {
         self != Self::ProductionVerified
     }
 
-    fn issue_kind(self) -> Option<RebornLoopProductionIssueKind> {
+    fn issue_kind(self) -> Option<IronClawLoopProductionIssueKind> {
         match self {
             Self::ProductionVerified => None,
-            Self::TestOnly => Some(RebornLoopProductionIssueKind::TestOnlyImplementation),
-            Self::NonDurable => Some(RebornLoopProductionIssueKind::NonDurableImplementation),
-            Self::Noop => Some(RebornLoopProductionIssueKind::NoopImplementation),
+            Self::TestOnly => Some(IronClawLoopProductionIssueKind::TestOnlyImplementation),
+            Self::NonDurable => Some(IronClawLoopProductionIssueKind::NonDurableImplementation),
+            Self::Noop => Some(IronClawLoopProductionIssueKind::NoopImplementation),
             Self::UnverifiedProductionImplementation => {
-                Some(RebornLoopProductionIssueKind::UnverifiedProductionImplementation)
+                Some(IronClawLoopProductionIssueKind::UnverifiedProductionImplementation)
             }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebornComponentRequirement {
+pub enum IronClawComponentRequirement {
     Required,
     Optional,
     Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RebornLoopProductionComponent {
+pub enum IronClawLoopProductionComponent {
     RunProfile,
     LoopDriver,
     CheckpointSchema,
@@ -110,7 +110,7 @@ pub enum RebornLoopProductionComponent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RebornLoopProductionIssueKind {
+pub enum IronClawLoopProductionIssueKind {
     Missing,
     TestOnlyImplementation,
     NonDurableImplementation,
@@ -124,9 +124,9 @@ pub enum RebornLoopProductionIssueKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornLoopProductionIssue {
-    pub component: RebornLoopProductionComponent,
-    pub kind: RebornLoopProductionIssueKind,
+pub struct IronClawLoopProductionIssue {
+    pub component: IronClawLoopProductionComponent,
+    pub kind: IronClawLoopProductionIssueKind,
     pub subject: String,
     pub profile_id: Option<RunProfileId>,
     pub profile_version: Option<RunProfileVersion>,
@@ -134,26 +134,26 @@ pub struct RebornLoopProductionIssue {
     pub blocks_ready: bool,
 }
 
-impl RebornLoopProductionIssue {
+impl IronClawLoopProductionIssue {
     fn blocking(
-        component: RebornLoopProductionComponent,
-        kind: RebornLoopProductionIssueKind,
+        component: IronClawLoopProductionComponent,
+        kind: IronClawLoopProductionIssueKind,
         subject: impl Into<String>,
     ) -> Self {
         Self::new(component, kind, subject, true)
     }
 
     fn warning(
-        component: RebornLoopProductionComponent,
-        kind: RebornLoopProductionIssueKind,
+        component: IronClawLoopProductionComponent,
+        kind: IronClawLoopProductionIssueKind,
         subject: impl Into<String>,
     ) -> Self {
         Self::new(component, kind, subject, false)
     }
 
     fn new(
-        component: RebornLoopProductionComponent,
-        kind: RebornLoopProductionIssueKind,
+        component: IronClawLoopProductionComponent,
+        kind: IronClawLoopProductionIssueKind,
         subject: impl Into<String>,
         blocks_ready: bool,
     ) -> Self {
@@ -168,14 +168,14 @@ impl RebornLoopProductionIssue {
         }
     }
 
-    fn with_profile(mut self, profile: &RebornConfiguredRunProfile) -> Self {
+    fn with_profile(mut self, profile: &IronClawConfiguredRunProfile) -> Self {
         self.profile_id = Some(profile.profile_id.clone());
         self.profile_version = Some(profile.profile_version);
         self.driver_identity = Some(profile.driver_identity.clone());
         self
     }
 
-    fn with_active_run(mut self, run: &RebornActiveRunIdentity) -> Self {
+    fn with_active_run(mut self, run: &IronClawActiveRunIdentity) -> Self {
         self.profile_id = Some(run.profile_id.clone());
         self.profile_version = Some(run.profile_version);
         self.driver_identity = Some(run.driver_identity.clone());
@@ -184,24 +184,24 @@ impl RebornLoopProductionIssue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebornLoopProductionStatus {
+pub enum IronClawLoopProductionStatus {
     ProductionReady,
     LocalDevDegraded,
     NotReady,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornLoopProductionReport {
-    pub status: RebornLoopProductionStatus,
-    pub issues: Vec<RebornLoopProductionIssue>,
+pub struct IronClawLoopProductionReport {
+    pub status: IronClawLoopProductionStatus,
+    pub issues: Vec<IronClawLoopProductionIssue>,
 }
 
-impl RebornLoopProductionReport {
+impl IronClawLoopProductionReport {
     pub fn is_ready(&self) -> bool {
-        matches!(self.status, RebornLoopProductionStatus::ProductionReady)
+        matches!(self.status, IronClawLoopProductionStatus::ProductionReady)
     }
 
-    pub fn blocking_issues(&self) -> impl Iterator<Item = &RebornLoopProductionIssue> {
+    pub fn blocking_issues(&self) -> impl Iterator<Item = &IronClawLoopProductionIssue> {
         self.issues.iter().filter(|issue| issue.blocks_ready)
     }
 
@@ -211,8 +211,8 @@ impl RebornLoopProductionReport {
 
     pub fn contains(
         &self,
-        component: RebornLoopProductionComponent,
-        kind: RebornLoopProductionIssueKind,
+        component: IronClawLoopProductionComponent,
+        kind: IronClawLoopProductionIssueKind,
     ) -> bool {
         self.issues
             .iter()
@@ -221,7 +221,7 @@ impl RebornLoopProductionReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornConfiguredRunProfile {
+pub struct IronClawConfiguredRunProfile {
     pub profile_id: RunProfileId,
     pub profile_version: RunProfileVersion,
     pub selected: bool,
@@ -230,7 +230,7 @@ pub struct RebornConfiguredRunProfile {
     pub checkpoint_schema_version: RunProfileVersion,
 }
 
-impl RebornConfiguredRunProfile {
+impl IronClawConfiguredRunProfile {
     pub fn selected(
         profile_id: RunProfileId,
         profile_version: RunProfileVersion,
@@ -255,7 +255,7 @@ impl RebornConfiguredRunProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornActiveRunIdentity {
+pub struct IronClawActiveRunIdentity {
     pub run_ref: String,
     pub status: TurnStatus,
     pub profile_id: RunProfileId,
@@ -263,7 +263,7 @@ pub struct RebornActiveRunIdentity {
     pub driver_identity: LoopDriverRegistryKey,
 }
 
-impl RebornActiveRunIdentity {
+impl IronClawActiveRunIdentity {
     pub fn new(
         run_ref: impl Into<String>,
         status: TurnStatus,
@@ -282,48 +282,48 @@ impl RebornActiveRunIdentity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RebornComponentReadiness {
-    pub requirement: RebornComponentRequirement,
-    pub safety: Option<RebornComponentSafetyClass>,
+pub struct IronClawComponentReadiness {
+    pub requirement: IronClawComponentRequirement,
+    pub safety: Option<IronClawComponentSafetyClass>,
 }
 
-impl RebornComponentReadiness {
-    pub fn production_verified(requirement: RebornComponentRequirement) -> Self {
+impl IronClawComponentReadiness {
+    pub fn production_verified(requirement: IronClawComponentRequirement) -> Self {
         Self {
             requirement,
-            safety: Some(RebornComponentSafetyClass::ProductionVerified),
+            safety: Some(IronClawComponentSafetyClass::ProductionVerified),
         }
     }
 
-    pub fn test_only(requirement: RebornComponentRequirement) -> Self {
+    pub fn test_only(requirement: IronClawComponentRequirement) -> Self {
         Self {
             requirement,
-            safety: Some(RebornComponentSafetyClass::TestOnly),
+            safety: Some(IronClawComponentSafetyClass::TestOnly),
         }
     }
 
-    pub fn non_durable(requirement: RebornComponentRequirement) -> Self {
+    pub fn non_durable(requirement: IronClawComponentRequirement) -> Self {
         Self {
             requirement,
-            safety: Some(RebornComponentSafetyClass::NonDurable),
+            safety: Some(IronClawComponentSafetyClass::NonDurable),
         }
     }
 
-    pub fn noop(requirement: RebornComponentRequirement) -> Self {
+    pub fn noop(requirement: IronClawComponentRequirement) -> Self {
         Self {
             requirement,
-            safety: Some(RebornComponentSafetyClass::Noop),
+            safety: Some(IronClawComponentSafetyClass::Noop),
         }
     }
 
-    pub fn unverified(requirement: RebornComponentRequirement) -> Self {
+    pub fn unverified(requirement: IronClawComponentRequirement) -> Self {
         Self {
             requirement,
-            safety: Some(RebornComponentSafetyClass::UnverifiedProductionImplementation),
+            safety: Some(IronClawComponentSafetyClass::UnverifiedProductionImplementation),
         }
     }
 
-    pub fn missing(requirement: RebornComponentRequirement) -> Self {
+    pub fn missing(requirement: IronClawComponentRequirement) -> Self {
         Self {
             requirement,
             safety: None,
@@ -334,62 +334,62 @@ impl RebornComponentReadiness {
         self.safety.is_some()
     }
 
-    fn available_for(self, mode: RebornLoopReadinessMode) -> bool {
+    fn available_for(self, mode: IronClawLoopReadinessMode) -> bool {
         match mode {
-            RebornLoopReadinessMode::LocalDevTest => self.present(),
-            RebornLoopReadinessMode::Production => {
-                self.safety == Some(RebornComponentSafetyClass::ProductionVerified)
+            IronClawLoopReadinessMode::LocalDevTest => self.present(),
+            IronClawLoopReadinessMode::Production => {
+                self.safety == Some(IronClawComponentSafetyClass::ProductionVerified)
             }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornLoopComponentGraphReadiness {
-    pub host_factory: RebornComponentReadiness,
-    pub prompt_port: RebornComponentReadiness,
-    pub model_gateway: RebornComponentReadiness,
-    pub transcript_store: RebornComponentReadiness,
-    pub capability_port: RebornComponentReadiness,
-    pub checkpoint_state_store: RebornComponentReadiness,
-    pub input_control: RebornComponentReadiness,
-    pub loop_exit_applier: RebornComponentReadiness,
-    pub turn_state_store: RebornComponentReadiness,
-    pub subagent_goal_store: RebornComponentReadiness,
-    pub subagent_completion_observer: RebornComponentReadiness,
+pub struct IronClawLoopComponentGraphReadiness {
+    pub host_factory: IronClawComponentReadiness,
+    pub prompt_port: IronClawComponentReadiness,
+    pub model_gateway: IronClawComponentReadiness,
+    pub transcript_store: IronClawComponentReadiness,
+    pub capability_port: IronClawComponentReadiness,
+    pub checkpoint_state_store: IronClawComponentReadiness,
+    pub input_control: IronClawComponentReadiness,
+    pub loop_exit_applier: IronClawComponentReadiness,
+    pub turn_state_store: IronClawComponentReadiness,
+    pub subagent_goal_store: IronClawComponentReadiness,
+    pub subagent_completion_observer: IronClawComponentReadiness,
     /// §3 replacement: the 3 dead-component readiness fields this used to
     /// sit alongside (`subagent_result_tombstone_store` — unwired dead code;
     /// `subagent_autonomous_continuation_budget`/`subagent_restart_reconciler`
     /// — readiness metadata for components never built, §8.3/§4.3 subsume
     /// their concerns) are deleted; this one field replaces them, covering
     /// the new durable CAS'd await-edge store this PR actually ships.
-    pub subagent_await_edge_store: RebornComponentReadiness,
-    pub wake_notifier: RebornComponentReadiness,
-    pub progress_events: RebornComponentReadiness,
+    pub subagent_await_edge_store: IronClawComponentReadiness,
+    pub wake_notifier: IronClawComponentReadiness,
+    pub progress_events: IronClawComponentReadiness,
 }
 
-impl RebornLoopComponentGraphReadiness {
+impl IronClawLoopComponentGraphReadiness {
     pub fn production_verified() -> Self {
-        let required = RebornComponentRequirement::Required;
+        let required = IronClawComponentRequirement::Required;
         Self {
-            host_factory: RebornComponentReadiness::production_verified(required),
-            prompt_port: RebornComponentReadiness::production_verified(required),
-            model_gateway: RebornComponentReadiness::production_verified(required),
-            transcript_store: RebornComponentReadiness::production_verified(required),
-            capability_port: RebornComponentReadiness::production_verified(required),
-            checkpoint_state_store: RebornComponentReadiness::production_verified(required),
-            input_control: RebornComponentReadiness::production_verified(required),
-            loop_exit_applier: RebornComponentReadiness::production_verified(required),
-            turn_state_store: RebornComponentReadiness::production_verified(required),
-            subagent_goal_store: RebornComponentReadiness::production_verified(required),
-            subagent_completion_observer: RebornComponentReadiness::production_verified(required),
-            subagent_await_edge_store: RebornComponentReadiness::production_verified(required),
-            wake_notifier: RebornComponentReadiness::production_verified(required),
-            progress_events: RebornComponentReadiness::production_verified(required),
+            host_factory: IronClawComponentReadiness::production_verified(required),
+            prompt_port: IronClawComponentReadiness::production_verified(required),
+            model_gateway: IronClawComponentReadiness::production_verified(required),
+            transcript_store: IronClawComponentReadiness::production_verified(required),
+            capability_port: IronClawComponentReadiness::production_verified(required),
+            checkpoint_state_store: IronClawComponentReadiness::production_verified(required),
+            input_control: IronClawComponentReadiness::production_verified(required),
+            loop_exit_applier: IronClawComponentReadiness::production_verified(required),
+            turn_state_store: IronClawComponentReadiness::production_verified(required),
+            subagent_goal_store: IronClawComponentReadiness::production_verified(required),
+            subagent_completion_observer: IronClawComponentReadiness::production_verified(required),
+            subagent_await_edge_store: IronClawComponentReadiness::production_verified(required),
+            wake_notifier: IronClawComponentReadiness::production_verified(required),
+            progress_events: IronClawComponentReadiness::production_verified(required),
         }
     }
 
-    fn host_graph_for(&self, mode: RebornLoopReadinessMode) -> HostGraphReadiness {
+    fn host_graph_for(&self, mode: IronClawLoopReadinessMode) -> HostGraphReadiness {
         HostGraphReadiness {
             model: self.model_gateway.available_for(mode),
             prompt: self.prompt_port.available_for(mode),
@@ -403,59 +403,62 @@ impl RebornLoopComponentGraphReadiness {
 
     fn components(
         &self,
-    ) -> impl Iterator<Item = (RebornLoopProductionComponent, RebornComponentReadiness)> {
+    ) -> impl Iterator<Item = (IronClawLoopProductionComponent, IronClawComponentReadiness)> {
         [
             (
-                RebornLoopProductionComponent::HostFactory,
+                IronClawLoopProductionComponent::HostFactory,
                 self.host_factory,
             ),
-            (RebornLoopProductionComponent::PromptPort, self.prompt_port),
             (
-                RebornLoopProductionComponent::ModelGateway,
+                IronClawLoopProductionComponent::PromptPort,
+                self.prompt_port,
+            ),
+            (
+                IronClawLoopProductionComponent::ModelGateway,
                 self.model_gateway,
             ),
             (
-                RebornLoopProductionComponent::TranscriptStore,
+                IronClawLoopProductionComponent::TranscriptStore,
                 self.transcript_store,
             ),
             (
-                RebornLoopProductionComponent::CapabilityPort,
+                IronClawLoopProductionComponent::CapabilityPort,
                 self.capability_port,
             ),
             (
-                RebornLoopProductionComponent::CheckpointStateStore,
+                IronClawLoopProductionComponent::CheckpointStateStore,
                 self.checkpoint_state_store,
             ),
             (
-                RebornLoopProductionComponent::InputControl,
+                IronClawLoopProductionComponent::InputControl,
                 self.input_control,
             ),
             (
-                RebornLoopProductionComponent::LoopExitApplier,
+                IronClawLoopProductionComponent::LoopExitApplier,
                 self.loop_exit_applier,
             ),
             (
-                RebornLoopProductionComponent::TurnStateStore,
+                IronClawLoopProductionComponent::TurnStateStore,
                 self.turn_state_store,
             ),
             (
-                RebornLoopProductionComponent::SubagentGoalStore,
+                IronClawLoopProductionComponent::SubagentGoalStore,
                 self.subagent_goal_store,
             ),
             (
-                RebornLoopProductionComponent::SubagentCompletionObserver,
+                IronClawLoopProductionComponent::SubagentCompletionObserver,
                 self.subagent_completion_observer,
             ),
             (
-                RebornLoopProductionComponent::SubagentAwaitEdgeStore,
+                IronClawLoopProductionComponent::SubagentAwaitEdgeStore,
                 self.subagent_await_edge_store,
             ),
             (
-                RebornLoopProductionComponent::WakeNotifier,
+                IronClawLoopProductionComponent::WakeNotifier,
                 self.wake_notifier,
             ),
             (
-                RebornLoopProductionComponent::ProgressEvents,
+                IronClawLoopProductionComponent::ProgressEvents,
                 self.progress_events,
             ),
         ]
@@ -463,17 +466,17 @@ impl RebornLoopComponentGraphReadiness {
     }
 }
 
-pub struct RebornLoopProductionInputs<'a> {
-    pub mode: RebornLoopReadinessMode,
+pub struct IronClawLoopProductionInputs<'a> {
+    pub mode: IronClawLoopReadinessMode,
     pub driver_registry: &'a DriverRegistry,
-    pub component_graph: RebornLoopComponentGraphReadiness,
-    pub configured_profiles: Vec<RebornConfiguredRunProfile>,
-    pub active_runs: Vec<RebornActiveRunIdentity>,
+    pub component_graph: IronClawLoopComponentGraphReadiness,
+    pub configured_profiles: Vec<IronClawConfiguredRunProfile>,
+    pub active_runs: Vec<IronClawActiveRunIdentity>,
 }
 
-pub fn validate_reborn_loop_production_readiness(
-    inputs: RebornLoopProductionInputs<'_>,
-) -> RebornLoopProductionReport {
+pub fn validate_ironclaw_loop_production_readiness(
+    inputs: IronClawLoopProductionInputs<'_>,
+) -> IronClawLoopProductionReport {
     let mut issues = Vec::new();
     push_component_issues(inputs.mode, &inputs.component_graph, &mut issues);
     push_profile_identity_issues(&inputs.configured_profiles, &mut issues);
@@ -486,60 +489,60 @@ pub fn validate_reborn_loop_production_readiness(
     push_optional_profile_issues(&inputs, &mut issues);
 
     let status = if issues.iter().any(|issue| issue.blocks_ready) {
-        RebornLoopProductionStatus::NotReady
-    } else if inputs.mode == RebornLoopReadinessMode::LocalDevTest
+        IronClawLoopProductionStatus::NotReady
+    } else if inputs.mode == IronClawLoopReadinessMode::LocalDevTest
         && issues.iter().any(|issue| !issue.blocks_ready)
     {
-        RebornLoopProductionStatus::LocalDevDegraded
+        IronClawLoopProductionStatus::LocalDevDegraded
     } else {
-        RebornLoopProductionStatus::ProductionReady
+        IronClawLoopProductionStatus::ProductionReady
     };
 
-    RebornLoopProductionReport { status, issues }
+    IronClawLoopProductionReport { status, issues }
 }
 
 fn push_component_issues(
-    mode: RebornLoopReadinessMode,
-    graph: &RebornLoopComponentGraphReadiness,
-    issues: &mut Vec<RebornLoopProductionIssue>,
+    mode: IronClawLoopReadinessMode,
+    graph: &IronClawLoopComponentGraphReadiness,
+    issues: &mut Vec<IronClawLoopProductionIssue>,
 ) {
     for (component, readiness) in graph.components() {
         match (mode, readiness.requirement, readiness.safety) {
-            (_, RebornComponentRequirement::Unsupported, Some(_)) => {
-                issues.push(RebornLoopProductionIssue::blocking(
+            (_, IronClawComponentRequirement::Unsupported, Some(_)) => {
+                issues.push(IronClawLoopProductionIssue::blocking(
                     component,
-                    RebornLoopProductionIssueKind::UnsupportedRequirement,
+                    IronClawLoopProductionIssueKind::UnsupportedRequirement,
                     component_subject(component),
                 ))
             }
-            (_, RebornComponentRequirement::Required, None) => {
-                issues.push(RebornLoopProductionIssue::blocking(
+            (_, IronClawComponentRequirement::Required, None) => {
+                issues.push(IronClawLoopProductionIssue::blocking(
                     component,
-                    RebornLoopProductionIssueKind::Missing,
+                    IronClawLoopProductionIssueKind::Missing,
                     component_subject(component),
                 ))
             }
             (
-                RebornLoopReadinessMode::Production,
-                RebornComponentRequirement::Required,
+                IronClawLoopReadinessMode::Production,
+                IronClawComponentRequirement::Required,
                 Some(safety),
             ) if safety.blocks_production() => {
                 let Some(issue_kind) = safety.issue_kind() else {
                     continue;
                 };
-                issues.push(RebornLoopProductionIssue::blocking(
+                issues.push(IronClawLoopProductionIssue::blocking(
                     component,
                     issue_kind,
                     component_subject(component),
                 ));
             }
-            (RebornLoopReadinessMode::LocalDevTest, _, Some(safety))
+            (IronClawLoopReadinessMode::LocalDevTest, _, Some(safety))
                 if safety.degraded_in_local_dev() =>
             {
                 let Some(issue_kind) = safety.issue_kind() else {
                     continue;
                 };
-                issues.push(RebornLoopProductionIssue::warning(
+                issues.push(IronClawLoopProductionIssue::warning(
                     component,
                     issue_kind,
                     component_subject(component),
@@ -551,8 +554,8 @@ fn push_component_issues(
 }
 
 fn push_profile_identity_issues(
-    profiles: &[RebornConfiguredRunProfile],
-    issues: &mut Vec<RebornLoopProductionIssue>,
+    profiles: &[IronClawConfiguredRunProfile],
+    issues: &mut Vec<IronClawLoopProductionIssue>,
 ) {
     for profile in profiles.iter().filter(|profile| profile.selected) {
         if profile.driver_identity.checkpoint_schema_id.as_ref()
@@ -561,9 +564,9 @@ fn push_profile_identity_issues(
                 != Some(profile.checkpoint_schema_version)
         {
             issues.push(
-                RebornLoopProductionIssue::blocking(
-                    RebornLoopProductionComponent::CheckpointSchema,
-                    RebornLoopProductionIssueKind::VersionMismatch,
+                IronClawLoopProductionIssue::blocking(
+                    IronClawLoopProductionComponent::CheckpointSchema,
+                    IronClawLoopProductionIssueKind::VersionMismatch,
                     profile.profile_id.as_str(),
                 )
                 .with_profile(profile),
@@ -573,9 +576,9 @@ fn push_profile_identity_issues(
 }
 
 fn push_active_run_profile_issues(
-    profiles: &[RebornConfiguredRunProfile],
-    active_runs: &[RebornActiveRunIdentity],
-    issues: &mut Vec<RebornLoopProductionIssue>,
+    profiles: &[IronClawConfiguredRunProfile],
+    active_runs: &[IronClawActiveRunIdentity],
+    issues: &mut Vec<IronClawLoopProductionIssue>,
 ) {
     for run in active_runs.iter().filter(|run| !run.status.is_terminal()) {
         let keeps_profile_version = profiles.iter().any(|profile| {
@@ -586,9 +589,9 @@ fn push_active_run_profile_issues(
         });
         if !keeps_profile_version {
             issues.push(
-                RebornLoopProductionIssue::blocking(
-                    RebornLoopProductionComponent::RunProfile,
-                    RebornLoopProductionIssueKind::ActiveRunsRequireVersion,
+                IronClawLoopProductionIssue::blocking(
+                    IronClawLoopProductionComponent::RunProfile,
+                    IronClawLoopProductionIssueKind::ActiveRunsRequireVersion,
                     active_run_subject(),
                 )
                 .with_active_run(run),
@@ -598,8 +601,8 @@ fn push_active_run_profile_issues(
 }
 
 fn push_driver_readiness_issues(
-    inputs: &RebornLoopProductionInputs<'_>,
-    issues: &mut Vec<RebornLoopProductionIssue>,
+    inputs: &IronClawLoopProductionInputs<'_>,
+    issues: &mut Vec<IronClawLoopProductionIssue>,
 ) {
     let selected_profiles = inputs
         .configured_profiles
@@ -634,8 +637,8 @@ fn push_driver_readiness_issues(
 }
 
 fn push_optional_profile_issues(
-    inputs: &RebornLoopProductionInputs<'_>,
-    issues: &mut Vec<RebornLoopProductionIssue>,
+    inputs: &IronClawLoopProductionInputs<'_>,
+    issues: &mut Vec<IronClawLoopProductionIssue>,
 ) {
     let optional_profiles = inputs
         .configured_profiles
@@ -657,32 +660,32 @@ fn push_optional_profile_issues(
 fn push_mapped_driver_issues(
     report: crate::driver_registry::DriverReadinessReport,
     keep_blocking: bool,
-    configured_profiles: &[RebornConfiguredRunProfile],
-    active_runs: &[RebornActiveRunIdentity],
-    issues: &mut Vec<RebornLoopProductionIssue>,
+    configured_profiles: &[IronClawConfiguredRunProfile],
+    active_runs: &[IronClawActiveRunIdentity],
+    issues: &mut Vec<IronClawLoopProductionIssue>,
 ) {
     for diagnostic in report.diagnostics {
         let (component, kind) = match diagnostic.code {
             DriverReadinessDiagnosticCode::MissingConfiguredDriver => (
-                RebornLoopProductionComponent::LoopDriver,
-                RebornLoopProductionIssueKind::Missing,
+                IronClawLoopProductionComponent::LoopDriver,
+                IronClawLoopProductionIssueKind::Missing,
             ),
             DriverReadinessDiagnosticCode::MissingNonTerminalRunDriver => (
-                RebornLoopProductionComponent::LoopDriver,
-                RebornLoopProductionIssueKind::ActiveRunDriverUnregistered,
+                IronClawLoopProductionComponent::LoopDriver,
+                IronClawLoopProductionIssueKind::ActiveRunDriverUnregistered,
             ),
             DriverReadinessDiagnosticCode::ReferenceDriverNotProductionReady
             | DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev => (
-                RebornLoopProductionComponent::LoopDriver,
-                RebornLoopProductionIssueKind::TestOnlyImplementation,
+                IronClawLoopProductionComponent::LoopDriver,
+                IronClawLoopProductionIssueKind::TestOnlyImplementation,
             ),
             DriverReadinessDiagnosticCode::MissingRequiredDriverRequirement => (
-                RebornLoopProductionComponent::RunProfile,
-                RebornLoopProductionIssueKind::Missing,
+                IronClawLoopProductionComponent::RunProfile,
+                IronClawLoopProductionIssueKind::Missing,
             ),
         };
         let blocks_ready = keep_blocking && diagnostic.blocks_ready;
-        let mut issue = RebornLoopProductionIssue {
+        let mut issue = IronClawLoopProductionIssue {
             component,
             kind,
             subject: diagnostic.subject,
@@ -701,9 +704,9 @@ fn push_mapped_driver_issues(
 }
 
 fn matching_configured_profile<'a>(
-    issue: &RebornLoopProductionIssue,
-    profiles: &'a [RebornConfiguredRunProfile],
-) -> Option<&'a RebornConfiguredRunProfile> {
+    issue: &IronClawLoopProductionIssue,
+    profiles: &'a [IronClawConfiguredRunProfile],
+) -> Option<&'a IronClawConfiguredRunProfile> {
     profiles.iter().find(|profile| {
         issue.subject == profile.profile_id.as_str()
             && issue.driver_identity.as_ref() == Some(&profile.driver_identity)
@@ -711,9 +714,9 @@ fn matching_configured_profile<'a>(
 }
 
 fn matching_active_run<'a>(
-    issue: &RebornLoopProductionIssue,
-    active_runs: &'a [RebornActiveRunIdentity],
-) -> Option<&'a RebornActiveRunIdentity> {
+    issue: &IronClawLoopProductionIssue,
+    active_runs: &'a [IronClawActiveRunIdentity],
+) -> Option<&'a IronClawActiveRunIdentity> {
     issue.driver_identity.as_ref().and_then(|driver_identity| {
         active_runs
             .iter()
@@ -721,7 +724,7 @@ fn matching_active_run<'a>(
     })
 }
 
-fn configured_driver_profile(profile: &RebornConfiguredRunProfile) -> ConfiguredRunProfile {
+fn configured_driver_profile(profile: &IronClawConfiguredRunProfile) -> ConfiguredRunProfile {
     ConfiguredRunProfile::enabled(profile.profile_id.as_str(), profile.driver_identity.clone())
 }
 
@@ -729,25 +732,27 @@ fn active_run_subject() -> &'static str {
     "active_run"
 }
 
-fn component_subject(component: RebornLoopProductionComponent) -> &'static str {
+fn component_subject(component: IronClawLoopProductionComponent) -> &'static str {
     match component {
-        RebornLoopProductionComponent::RunProfile => "run_profile",
-        RebornLoopProductionComponent::LoopDriver => "loop_driver",
-        RebornLoopProductionComponent::CheckpointSchema => "checkpoint_schema",
-        RebornLoopProductionComponent::HostFactory => "host_factory",
-        RebornLoopProductionComponent::PromptPort => "prompt_port",
-        RebornLoopProductionComponent::ModelGateway => "model_gateway",
-        RebornLoopProductionComponent::TranscriptStore => "transcript_store",
-        RebornLoopProductionComponent::CapabilityPort => "capability_port",
-        RebornLoopProductionComponent::CheckpointStateStore => "checkpoint_state_store",
-        RebornLoopProductionComponent::InputControl => "input_control",
-        RebornLoopProductionComponent::LoopExitApplier => "loop_exit_applier",
-        RebornLoopProductionComponent::TurnStateStore => "turn_state_store",
-        RebornLoopProductionComponent::SubagentGoalStore => "subagent_goal_store",
-        RebornLoopProductionComponent::SubagentCompletionObserver => "subagent_completion_observer",
-        RebornLoopProductionComponent::SubagentAwaitEdgeStore => "subagent_await_edge_store",
-        RebornLoopProductionComponent::WakeNotifier => "wake_notifier",
-        RebornLoopProductionComponent::ProgressEvents => "progress_events",
+        IronClawLoopProductionComponent::RunProfile => "run_profile",
+        IronClawLoopProductionComponent::LoopDriver => "loop_driver",
+        IronClawLoopProductionComponent::CheckpointSchema => "checkpoint_schema",
+        IronClawLoopProductionComponent::HostFactory => "host_factory",
+        IronClawLoopProductionComponent::PromptPort => "prompt_port",
+        IronClawLoopProductionComponent::ModelGateway => "model_gateway",
+        IronClawLoopProductionComponent::TranscriptStore => "transcript_store",
+        IronClawLoopProductionComponent::CapabilityPort => "capability_port",
+        IronClawLoopProductionComponent::CheckpointStateStore => "checkpoint_state_store",
+        IronClawLoopProductionComponent::InputControl => "input_control",
+        IronClawLoopProductionComponent::LoopExitApplier => "loop_exit_applier",
+        IronClawLoopProductionComponent::TurnStateStore => "turn_state_store",
+        IronClawLoopProductionComponent::SubagentGoalStore => "subagent_goal_store",
+        IronClawLoopProductionComponent::SubagentCompletionObserver => {
+            "subagent_completion_observer"
+        }
+        IronClawLoopProductionComponent::SubagentAwaitEdgeStore => "subagent_await_edge_store",
+        IronClawLoopProductionComponent::WakeNotifier => "wake_notifier",
+        IronClawLoopProductionComponent::ProgressEvents => "progress_events",
     }
 }
 
@@ -786,7 +791,7 @@ mod tests {
     #[test]
     fn production_verified_safety_has_no_issue_kind() {
         assert_eq!(
-            RebornComponentSafetyClass::ProductionVerified.issue_kind(),
+            IronClawComponentSafetyClass::ProductionVerified.issue_kind(),
             None
         );
     }

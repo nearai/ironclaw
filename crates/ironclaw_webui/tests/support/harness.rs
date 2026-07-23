@@ -27,9 +27,9 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+    IronClawCreateThreadResponse, IronClawServicesError, IronClawStreamEventsRequest,
+    IronClawStreamEventsResponse, ProductOperationId, ProductOperationRequest,
+    ProductOperationResponse, ProductSurface, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 
@@ -60,7 +60,7 @@ impl StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<IronClawCreateThreadResponse, IronClawServicesError> {
         if let Some(message) = self.create_thread_panic {
             panic!("{message}");
         }
@@ -68,7 +68,7 @@ impl StubServices {
             .lock()
             .expect("lock")
             .push(caller);
-        Ok(RebornCreateThreadResponse {
+        Ok(IronClawCreateThreadResponse {
             thread: SessionThreadRecord {
                 thread_id: ThreadId::new("thread.fake").expect("thread"),
                 scope: ThreadScope {
@@ -91,8 +91,8 @@ impl StubServices {
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        _request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsResponse, IronClawServicesError> {
         // Record the caller so the `?token=` shim test can assert the
         // query token was consumed as the session credential and stamped
         // as that user. Returns an empty event page so a polled SSE
@@ -102,7 +102,7 @@ impl StubServices {
             .lock()
             .expect("lock")
             .push(caller);
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
+        Ok(IronClawStreamEventsResponse { events: Vec::new() })
     }
 }
 
@@ -111,8 +111,8 @@ impl ProductSurface for StubServices {
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsResponse, IronClawServicesError> {
         StubServices::stream_events(self, caller, request).await
     }
 
@@ -120,16 +120,16 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
+            .ok_or_else(|| IronClawServicesError::internal_from("unsupported product operation"))?;
         match operation_id {
             ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(IronClawServicesError::internal_from)?;
                 ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(IronClawServicesError::internal_from(
                 "unsupported product operation",
             )),
         }

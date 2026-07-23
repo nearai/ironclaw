@@ -1,7 +1,7 @@
 // arch-exempt: large_file, host-managed model error contract remains at the crate facade, plan #4088
-//! Loop host adapters for IronClaw Reborn.
+//! Loop host adapters for IronClaw.
 //!
-//! This crate adapts durable Reborn support boundaries (threads/transcripts plus
+//! This crate adapts durable IronClaw support boundaries (threads/transcripts plus
 //! host-managed model gateways) into the narrow `AgentLoopHost` ports. It does
 //! not own provider clients, tool dispatchers, secrets, or runtime handles.
 #![warn(unreachable_pub)]
@@ -241,7 +241,7 @@ pub fn raw_host_managed_model_error(
     HostManagedModelError::safe(kind, safe_summary)
 }
 
-/// Thread-backed context adapter for text-only Reborn loops.
+/// Thread-backed context adapter for text-only IronClaw loops.
 #[derive(Clone)]
 pub struct ThreadBackedLoopContextPort<S>
 where

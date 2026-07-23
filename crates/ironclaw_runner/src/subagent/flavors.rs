@@ -407,7 +407,7 @@ mod tests {
     //
     // These drive the SAME production path a real subagent spawn uses:
     //   flavor.tool_allowlist
-    //     -> RebornSubagentPromptMaterialSource::material_for_run (production)
+    //     -> IronClawSubagentPromptMaterialSource::material_for_run (production)
     //     -> SubagentCapabilitySurfaceResolver (production)
     //     -> CapabilitySurfaceProfileFilter (the real runtime LoopCapabilityPort
     //        wrapper that enforces visibility + invocation denial).
@@ -443,7 +443,7 @@ mod tests {
         use crate::subagent::goal_store::{
             SubagentGoal, SubagentGoalStore, in_memory_backed_subagent_goal_store,
         };
-        use crate::subagent::prompt_material::RebornSubagentPromptMaterialSource;
+        use crate::subagent::prompt_material::IronClawSubagentPromptMaterialSource;
 
         // Full first-party builtin capability surface the host registry exposes.
         // The flavor allowlist must be a subset of these; the filter narrows the
@@ -591,8 +591,9 @@ mod tests {
                 )
                 .await
                 .expect("seed goal");
-            let source: Arc<dyn SubagentPromptMaterialSource> =
-                Arc::new(RebornSubagentPromptMaterialSource::new(goal_store, flavor));
+            let source: Arc<dyn SubagentPromptMaterialSource> = Arc::new(
+                IronClawSubagentPromptMaterialSource::new(goal_store, flavor),
+            );
             let resolver = SubagentCapabilitySurfaceResolver::new(
                 Arc::new(StaticProfileResolver(base_allow_set)),
                 source,
@@ -795,7 +796,7 @@ mod tests {
             let base_allow_set =
                 CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);
             let source: Arc<dyn SubagentPromptMaterialSource> = Arc::new(
-                RebornSubagentPromptMaterialSource::new(goal_store, SubagentFlavorId::Coder),
+                IronClawSubagentPromptMaterialSource::new(goal_store, SubagentFlavorId::Coder),
             );
             let resolver = SubagentCapabilitySurfaceResolver::new(
                 Arc::new(StaticProfileResolver(base_allow_set.clone())),

@@ -58,17 +58,17 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
-| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
-| `test_reborn_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |
+| `test_emulate_ironclaw_provider_contracts.py` | Emulate provider contracts for IronClaw-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
+| `test_ironclaw_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |
 
-## Reborn coverage gate
+## IronClaw coverage gate
 
 The GitHub Actions Code Coverage workflow uses
-`tests/e2e/reborn_coverage_tests.txt` instead of running every scenario in this
+`tests/e2e/ironclaw_coverage_tests.txt` instead of running every scenario in this
 directory. That manifest is intentionally limited to tests that boot
-`ironclaw serve` and cover the Reborn WebChat v2 or OpenAI-compatible
+`ironclaw serve` and cover the IronClaw WebChat v2 or OpenAI-compatible
 API surface. Legacy gateway tests and `ENGINE_V2=true` compatibility tests stay
-in the E2E suite, but they are not part of the Reborn coverage gate. Manifest
+in the E2E suite, but they are not part of the IronClaw coverage gate. Manifest
 entries may be pytest node IDs when only part of a broader scenario file belongs
 in this gate.
 
@@ -81,7 +81,7 @@ in this gate.
 
 ## Emulate-backed provider fixtures
 
-Emulate coverage is intentionally limited to provider APIs that match Reborn
+Emulate coverage is intentionally limited to provider APIs that match IronClaw
 features already present in the codebase:
 
 - Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
@@ -108,7 +108,7 @@ Git object mutation/readback path plus empty Actions route readback, not direct
 `/contents` file create/update/delete or workflow dispatch.
 
 The direct provider-contract tests prove the emulator fixture layer. Full-path
-Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
+IronClaw + Emulate tests should use `hosted_google_emulate_server` or a matching
 provider fixture, install/auth the extension through IronClaw, drive
 `/api/chat/send` with the scripted mock LLM, and assert provider state through
 Emulate readback.

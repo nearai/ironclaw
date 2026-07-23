@@ -39,17 +39,17 @@ use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
-    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    IronClawFilesystemIdempotencyLedger, LinkedThreadActionId, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, SourceBindingKey, StaticProductInstallationResolver,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, ResolvedProductActorUser, SourceBindingKey, StaticProductInstallationResolver,
     approval_gate_ref,
 };
 use ironclaw_threads::InMemorySessionThreadService;
@@ -3162,7 +3162,7 @@ fn scoped_in_memory_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
 }
 
 // PR #5653 review: earlier coverage only exercised the test-support in-memory
-// ledger fake, never the production CAS-backed `RebornFilesystemIdempotencyLedger`
+// ledger fake, never the production CAS-backed `IronClawFilesystemIdempotencyLedger`
 // through the `DefaultProductSurface` caller. This composes the real adapter
 // (over an in-memory `ScopedFilesystem`) with the existing fake inbound service.
 #[tokio::test]
@@ -3177,7 +3177,7 @@ async fn submit_inbound_duplicate_replay_uses_production_filesystem_ledger() {
         thread_id: None,
         invocation_id: InvocationId::new(),
     };
-    let ledger = Arc::new(RebornFilesystemIdempotencyLedger::new(filesystem, scope));
+    let ledger = Arc::new(IronClawFilesystemIdempotencyLedger::new(filesystem, scope));
     let inbound = Arc::new(FakeInboundTurnService::new());
     let binding = Arc::new(FakeConversationBindingService::new());
     let workflow = DefaultProductSurface::new(inbound.clone(), ledger, binding);

@@ -1,4 +1,4 @@
-//! Scope-routing gateway for Reborn group integration tests: routes model calls to
+//! Scope-routing gateway for IronClaw group integration tests: routes model calls to
 //! per-thread scripted gateways by `TurnScope` via `resolve_for_scope`, called at
 //! host-construction time (off the model hot path). Its own `stream_model` is
 //! unreachable on success — fails loudly with `ConfigurationError` on an unregistered
@@ -19,7 +19,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_turns::TurnScope;
 
-/// Scope-keyed gateway registry for Reborn group integration tests.
+/// Scope-keyed gateway registry for IronClaw group integration tests.
 ///
 /// `stream_model` is a sentinel: always returns `ConfigurationError` on a routing miss so
 /// it can't be confused with `TraceLlm` exhaustion (`Unavailable`) or `driver_protocol_violation`.

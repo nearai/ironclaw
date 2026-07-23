@@ -62,7 +62,7 @@ use ironclaw_runner::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
 };
 use ironclaw_runner::loop_driver_host::{
-    RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    IronClawLoopDriverHost, IronClawLoopDriverHostFactory, IronClawLoopDriverHostRequest,
     TextOnlyLoopHostConfig,
 };
 use ironclaw_runner::loop_exit_applier::{
@@ -91,7 +91,7 @@ use ironclaw_runner::subagent::{
     goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
 };
 use ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriver;
-use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
+use ironclaw_runner::turn_run_executor::IronClawTurnRunExecutor;
 use ironclaw_runner::turn_runner::{HostFactory, HostFactoryError};
 use ironclaw_runner::turn_scheduler::{TurnRunScheduler, TurnRunSchedulerConfig};
 use ironclaw_scripts::{
@@ -559,7 +559,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         .factory()
         .with_model_budget_accountant(accountant.clone());
     let host = factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -602,7 +602,7 @@ async fn compaction_system_inference_budget_denial_skips_model_gateway_dispatch(
         .factory()
         .with_model_budget_accountant(accountant.clone());
     let host = factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -1197,7 +1197,7 @@ async fn text_only_host_factory_with_communication_context_provider_injects_comm
     let host = fixture
         .factory()
         .with_communication_context_provider(Arc::new(StubCommunicationContextProvider))
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -1295,7 +1295,7 @@ async fn webui_origin_skips_communication_context_fetch_for_plain_chat_prompt() 
         .with_communication_context_provider(
             Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
         )
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: loop_run_context.clone(),
         })
@@ -1386,7 +1386,7 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
             Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
         )
         .build_text_only_host_with_profiled_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: loop_run_context.clone(),
             },
@@ -1459,7 +1459,7 @@ async fn delivery_tools_visible_requires_both_caps_setter_only_suppresses_hint()
             Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
         )
         .build_text_only_host_with_profiled_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: loop_run_context.clone(),
             },
@@ -1509,7 +1509,7 @@ async fn scheduled_trigger_run_origin_appears_in_model_request() {
         .with_communication_context_provider(
             RecordingCommunicationContextProvider::new() as Arc<dyn CommunicationContextProvider>
         )
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: loop_run_context.clone(),
         })
@@ -1649,7 +1649,7 @@ async fn text_only_model_reply_driver_rejects_profiles_not_assigned_to_driver() 
 #[tokio::test]
 async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
     let fixture = HostFixture::new("thread-host-safety-context", "hello safety").await;
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
         Arc::clone(&fixture.gateway),
@@ -1665,7 +1665,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             .unwrap(),
     );
     let host = factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -1717,7 +1717,7 @@ async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
     let fixture = HostFixture::new("thread-host-default-safety-context", "hello safety").await;
     let host = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -1792,7 +1792,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         )
         .unwrap();
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, reopened_turn_store.clone()),
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(reopened_turn_store.clone()))
@@ -1890,7 +1890,7 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
         )
         .unwrap();
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
@@ -2082,7 +2082,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         thread_service.clone(),
         thread_scope.clone(),
         gateway.clone(),
@@ -2104,7 +2104,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             DriverKind::Reference,
         )
         .unwrap();
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         applier,
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
@@ -2237,7 +2237,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         )
         .unwrap();
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
@@ -2317,7 +2317,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
 }
 
 #[tokio::test]
-async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full() {
+async fn turn_runner_worker_full_ironclaw_fails_when_checkpoint_state_disk_is_full() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-disk-full", "hello disk full").await;
     let turn_store = Arc::new(in_memory_turn_state_store());
@@ -2329,7 +2329,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
         "idem-full-reborn-disk-full",
     )
     .await;
-    let driver = planned_driver_for_full_reborn_test();
+    let driver = planned_driver_for_full_ironclaw_test();
     let descriptor = driver.descriptor();
     let mut registry = DriverRegistry::new();
     registry
@@ -2340,7 +2340,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
         )
         .unwrap();
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         fixture.thread_service.clone(),
         fixture.thread_scope.clone(),
         fixture.gateway.clone(),
@@ -2358,7 +2358,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
         &descriptor,
         planned_requirements_without_capabilities(),
     ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
@@ -2367,7 +2367,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
         executor,
-        full_reborn_chaos_scheduler_config(),
+        full_ironclaw_chaos_scheduler_config(),
     )
     .start();
 
@@ -2393,7 +2393,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 }
 
 #[tokio::test]
-async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoint_state_outage() {
+async fn turn_runner_worker_full_ironclaw_retry_recovers_after_transient_checkpoint_state_outage() {
     let fixture = HostFixture::new_unsubmitted(
         "thread-full-reborn-checkpoint-transient",
         "hello transient checkpoint outage",
@@ -2408,7 +2408,7 @@ async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoin
         "idem-full-reborn-checkpoint-transient",
     )
     .await;
-    let driver = planned_driver_for_full_reborn_test();
+    let driver = planned_driver_for_full_ironclaw_test();
     let descriptor = driver.descriptor();
     let mut registry = DriverRegistry::new();
     registry
@@ -2423,7 +2423,7 @@ async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoin
         1,
     ));
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         fixture.thread_service.clone(),
         fixture.thread_scope.clone(),
         fixture.gateway.clone(),
@@ -2441,7 +2441,7 @@ async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoin
         &descriptor,
         planned_requirements_without_capabilities(),
     ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
@@ -2450,7 +2450,7 @@ async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoin
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
         executor,
-        full_reborn_chaos_scheduler_config(),
+        full_ironclaw_chaos_scheduler_config(),
     )
     .start();
 
@@ -2515,7 +2515,7 @@ async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoin
 }
 
 #[tokio::test]
-async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_offline() {
+async fn turn_runner_worker_full_ironclaw_fails_cleanly_when_model_provider_is_offline() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-model-offline", "hello model outage")
             .await;
@@ -2532,7 +2532,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
         "idem-full-reborn-model-offline",
     )
     .await;
-    let driver = planned_driver_for_full_reborn_test();
+    let driver = planned_driver_for_full_ironclaw_test();
     let descriptor = driver.descriptor();
     let mut registry = DriverRegistry::new();
     registry
@@ -2548,7 +2548,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
             &descriptor,
             planned_requirements_without_capabilities(),
         ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
@@ -2557,7 +2557,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
         executor,
-        full_reborn_chaos_scheduler_config(),
+        full_ironclaw_chaos_scheduler_config(),
     )
     .start();
 
@@ -2596,7 +2596,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
 }
 
 #[tokio::test]
-async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_slow() {
+async fn turn_runner_worker_full_ironclaw_completes_while_postgres_heartbeats_are_slow() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-slow-postgres", "hello slow postgres")
             .await;
@@ -2616,7 +2616,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
         "idem-full-reborn-slow-postgres",
     )
     .await;
-    let driver = planned_driver_for_full_reborn_test();
+    let driver = planned_driver_for_full_ironclaw_test();
     let descriptor = driver.descriptor();
     let mut registry = DriverRegistry::new();
     registry
@@ -2632,7 +2632,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
             &descriptor,
             planned_requirements_without_capabilities(),
         ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
@@ -2641,7 +2641,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
     let scheduler_handle = TurnRunScheduler::new(
         transitions.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
         executor,
-        full_reborn_chaos_scheduler_config()
+        full_ironclaw_chaos_scheduler_config()
             .with_runner_heartbeat_interval(std::time::Duration::from_millis(5))
             .with_max_consecutive_heartbeat_failures(2),
     )
@@ -2675,7 +2675,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
 }
 
 #[tokio::test]
-async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
+async fn turn_runner_worker_full_ironclaw_continues_after_tool_network_outage() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-tool-network", "hello tool network").await;
     fixture
@@ -2717,7 +2717,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
         visible_request: host_runtime_visible_request(&fixture, ["demo"]),
         io: io.clone(),
     };
-    let driver = planned_driver_for_full_reborn_test();
+    let driver = planned_driver_for_full_ironclaw_test();
     let mut registry = DriverRegistry::new();
     registry
         .register_driver(
@@ -2726,7 +2726,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
             DriverKind::Reference,
         )
         .unwrap();
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(host_factory) as Arc<dyn HostFactory>,
@@ -2735,7 +2735,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
         executor,
-        full_reborn_chaos_scheduler_config(),
+        full_ironclaw_chaos_scheduler_config(),
     )
     .start();
 
@@ -2850,7 +2850,7 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         io: io.clone(),
     };
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
@@ -2963,7 +2963,7 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         )
         .unwrap();
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
@@ -3042,7 +3042,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         )
         .unwrap();
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         Arc::new(LoopExitApplier::new(
             turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
             Arc::new(AlwaysVerifiedLoopExitEvidence),
@@ -3178,7 +3178,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
     let host = fixture
         .factory()
         .with_model_route_resolver(resolver)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -3292,7 +3292,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         tenant_id: TenantId::new("tenant-other").unwrap(),
         ..fixture.thread_scope.clone()
     };
-    let rejecting_factory = RebornLoopDriverHostFactory::new(
+    let rejecting_factory = IronClawLoopDriverHostFactory::new(
         Arc::clone(&fixture.thread_service),
         wrong_thread_scope,
         Arc::clone(&fixture.gateway),
@@ -3307,7 +3307,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         InstructionSafetyContext::local_development_noop(),
     );
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(rejecting_factory) as Arc<dyn HostFactory>,
@@ -3651,7 +3651,7 @@ async fn profiled_capability_surface_resolver_errors_are_sanitized() {
         fixture.context.run_id,
         claimed.resolved_run_profile.clone(),
     );
-    let request = RebornLoopDriverHostRequest {
+    let request = IronClawLoopDriverHostRequest {
         claimed_run: claimed,
         loop_run_context,
     };
@@ -3992,7 +3992,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
 //
 // These tests drive the *production* composition function
 // `build_default_planned_runtime` with a per-run hook dispatcher builder
-// factory shaped exactly like the one `ironclaw_reborn_composition::hooks`
+// factory shaped exactly like the one `ironclaw_composition::hooks`
 // produces (first-party builtin no-op observer + extension-declared `Installed`
 // hooks via `HookRegistrar::install`). They then build a host through the
 // composed `host_factory` and invoke a capability, proving the hook gate fires
@@ -4006,9 +4006,9 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
 /// production type. `NoOpObserverHook` was removed from the production
 /// first-party catalog in `1e618d076`: `install_first_party_hooks` now ships
 /// an empty catalog, so there is no production type at
-/// `ironclaw_reborn_composition::hooks::NoOpObserverHook`. The only surviving
+/// `ironclaw_composition::hooks::NoOpObserverHook`. The only surviving
 /// `NoOpObserverHook` is the composition crate's test-only one at
-/// `ironclaw_reborn_composition::hooks::tests::NoOpObserverHook`. This constant
+/// `ironclaw_composition::hooks::tests::NoOpObserverHook`. This constant
 /// just needs a stable, distinct builtin identity for the host-plumbing doubles
 /// (see the note at the `first_party_only_hook_factory` definition below); the
 /// path string is opaque and need not match any real type.
@@ -4138,9 +4138,9 @@ async fn build_runtime_host_with_optional_hooks(
 // port. They are deliberately NOT a substitute for activation coverage: they do
 // not prove the production composition root wires the canonical registry/config.
 // That activation coverage now lives where it belongs — driving the REAL
-// `build_hook_dispatcher_builder_factory` and `build_reborn_runtime` — in
-// `ironclaw_reborn_composition::hooks` and
-// `ironclaw_reborn_composition::runtime` tests. Keep this split: host plumbing
+// `build_hook_dispatcher_builder_factory` and `build_ironclaw_runtime` — in
+// `ironclaw_composition::hooks` and
+// `ironclaw_composition::runtime` tests. Keep this split: host plumbing
 // is tested here; composition activation is tested in the composition crate.
 
 /// First-party-only builder factory: installs just the no-op observer, mirroring
@@ -4476,7 +4476,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
 
     let host = composition
         .host_factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -4648,7 +4648,7 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
     let host = fixture
         .factory()
         .with_model_route_resolver(resolver)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -4717,7 +4717,7 @@ async fn text_only_host_factory_reuses_existing_model_route_snapshot_without_rer
     let host = fixture
         .factory()
         .with_model_route_resolver(resolver)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -4750,7 +4750,7 @@ async fn text_only_host_factory_rejects_persisted_model_route_snapshot_without_r
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -4782,7 +4782,7 @@ async fn text_only_host_factory_passes_advisory_model_route_snapshot_without_res
 
     let host = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -4824,7 +4824,7 @@ async fn text_only_host_factory_rejects_persisted_model_route_snapshot_denied_by
     let error = fixture
         .factory()
         .with_model_route_resolver(resolver)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -4849,7 +4849,7 @@ async fn text_only_host_factory_rejects_unpersisted_context_model_route_snapshot
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: context,
         })
@@ -4881,7 +4881,7 @@ async fn text_only_host_factory_rejects_mismatched_persisted_model_route_snapsho
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -4909,7 +4909,7 @@ async fn text_only_host_factory_rejects_invalid_persisted_model_route_snapshot()
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -4927,7 +4927,7 @@ async fn text_only_host_factory_fails_fast_when_model_route_snapshot_required_wi
             max_messages: 8,
             require_model_route_snapshot: true,
         })
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -4948,7 +4948,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
     let turn_state_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
     let host = fixture
         .factory_with_loop_checkpoint_store(turn_state_store.clone())
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5230,7 +5230,7 @@ async fn text_only_host_factory_rejects_scope_mismatch() {
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: wrong_context,
         })
@@ -5248,7 +5248,7 @@ async fn text_only_host_factory_rejects_non_running_claimed_run() {
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: fixture.context.clone(),
         })
@@ -5269,7 +5269,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
     let host = fixture
         .factory()
         .with_identity_context_source(source)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5323,7 +5323,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 }
 
 /// Fake `HostUserProfileSource` that always returns a fixed `UserProfileContext`.
-/// Used to verify that `RebornLoopDriverHostFactory::with_user_profile_source` is
+/// Used to verify that `IronClawLoopDriverHostFactory::with_user_profile_source` is
 /// stored and called at build time (the rendered runtime context contains the profile).
 struct FixedUserProfileSource {
     profile: UserProfileContext,
@@ -5370,7 +5370,7 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
     let host = fixture
         .factory()
         .with_user_profile_source(source)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5454,7 +5454,7 @@ async fn text_only_host_factory_does_not_block_on_slow_optional_user_profile_sou
         fixture
             .factory()
             .with_user_profile_source(source)
-            .build_text_only_host(RebornLoopDriverHostRequest {
+            .build_text_only_host(IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             }),
@@ -5514,7 +5514,7 @@ async fn text_only_host_factory_excludes_personal_identity_when_profile_excludes
     let host = fixture
         .factory()
         .with_identity_context_source(source)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5549,7 +5549,7 @@ async fn text_only_host_default_cancellation_factory_observes_durable_cancel_req
     let fixture = HostFixture::new("thread-host-default-cancel", "hello").await;
     let mut durable_state = fixture.claimed.state.clone();
     durable_state.status = TurnStatus::CancelRequested;
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
         Arc::clone(&fixture.gateway),
@@ -5566,7 +5566,7 @@ async fn text_only_host_default_cancellation_factory_observes_durable_cancel_req
 
     assert!(factory.cancellation_observation_kind().is_live_capable());
     let host = factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5584,7 +5584,7 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
         tenant_id: TenantId::new("tenant-other").unwrap(),
         ..fixture.thread_scope.clone()
     };
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         Arc::clone(&fixture.thread_service),
         wrong_scope,
         Arc::clone(&fixture.gateway),
@@ -5600,7 +5600,7 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
     );
 
     let error = factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5620,7 +5620,7 @@ async fn text_only_host_factory_rejects_agentless_turn_scope() {
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: context,
         })
@@ -5638,7 +5638,7 @@ async fn text_only_host_factory_rejects_persisted_profile_identity_mismatch() {
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: claimed,
             loop_run_context: fixture.context.clone(),
         })
@@ -5656,7 +5656,7 @@ async fn text_only_host_factory_rejects_loop_driver_identity_mismatch() {
 
     let error = fixture
         .factory()
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: wrong_context,
         })
@@ -5714,7 +5714,7 @@ async fn no_extra_loop_input_port_rejects_unissued_ack_token() {
 
 /// Regression test for the `with_input_queue` factory composition path.
 ///
-/// Proves that `RebornLoopDriverHostFactory::with_input_queue` actually wires the
+/// Proves that `IronClawLoopDriverHostFactory::with_input_queue` actually wires the
 /// provided `HostInputQueue` into the host's `LoopInputPort` — i.e. the factory
 /// does not silently drop the queue. If the wiring were ever broken, `poll_inputs`
 /// would return an empty batch (the `NoExtraLoopInputPort` default) instead of
@@ -5731,7 +5731,7 @@ async fn input_queue_wired_through_factory_drains_steering_message() {
     let host = fixture
         .factory()
         .with_input_queue(queue as Arc<dyn HostInputQueue>)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -5920,7 +5920,7 @@ async fn text_only_host_checkpoint_port_maps_store_failures_to_unavailable() {
     let fixture = HostFixture::new("thread-host-checkpoint-store-error", "hello").await;
     let factory = fixture.factory_with_loop_checkpoint_store(Arc::new(FailingLoopCheckpointStore));
     let host = factory
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -6069,7 +6069,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
     let host = fixture
         .factory()
         .with_skill_context_source(source)
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
         })
@@ -6135,7 +6135,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6206,7 +6206,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6284,7 +6284,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
     let host = fixture
         .factory()
         .build_text_only_host_with_profiled_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6359,7 +6359,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
     let host = fixture
         .factory()
         .build_text_only_host_with_profiled_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6440,7 +6440,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6519,7 +6519,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6594,7 +6594,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6700,7 +6700,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6787,7 +6787,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6854,7 +6854,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -6940,7 +6940,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7012,7 +7012,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7068,7 +7068,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7139,7 +7139,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7218,7 +7218,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7284,7 +7284,7 @@ async fn text_only_host_rejects_mismatched_capability_authority_context() {
     let error = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7295,7 +7295,7 @@ async fn text_only_host_rejects_mismatched_capability_authority_context() {
 
     assert!(matches!(
         error,
-        ironclaw_runner::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { .. }
+        ironclaw_runner::loop_driver_host::IronClawLoopDriverHostError::InvalidRequest { .. }
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -7338,7 +7338,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7405,7 +7405,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7467,7 +7467,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7584,7 +7584,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7657,7 +7657,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -7721,7 +7721,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: fixture.claimed.clone(),
                 loop_run_context: fixture.context.clone(),
             },
@@ -8444,7 +8444,7 @@ section = "capability_provider.tools"
 
 [[capability_provider.tools.capabilities]]
 id = "script.echo"
-description = "Echo text through Reborn adapter e2e"
+description = "Echo text through IronClaw adapter e2e"
 effects = ["dispatch_capability"]
 default_permission = "allow"
 visibility = "model"
@@ -8572,7 +8572,7 @@ impl HostFactory for CapabilityHostFactory {
             self.io.clone(),
             self.milestone_sink.clone(),
         );
-        RebornLoopDriverHostFactory::new(
+        IronClawLoopDriverHostFactory::new(
             self.thread_service.clone(),
             self.thread_scope.clone(),
             self.model_gateway.clone(),
@@ -8587,7 +8587,7 @@ impl HostFactory for CapabilityHostFactory {
             InstructionSafetyContext::local_development_noop(),
         )
         .build_text_only_host_with_capabilities(
-            RebornLoopDriverHostRequest {
+            IronClawLoopDriverHostRequest {
                 claimed_run: claimed.clone(),
                 loop_run_context,
             },
@@ -8849,7 +8849,7 @@ fn loop_exit_applier_for_fixture(
     Arc::new(LoopExitApplier::new(turn_store, evidence))
 }
 
-fn planned_driver_for_full_reborn_test() -> Arc<PlannedDriver> {
+fn planned_driver_for_full_ironclaw_test() -> Arc<PlannedDriver> {
     // Scripted-outage tests pin retry-then-fail behavior; keep >= 2
     // availability retries but far below the production budget so a
     // deliberately offline provider reaches Failed in seconds.
@@ -8867,7 +8867,7 @@ fn planned_requirements_without_capabilities() -> DriverRequirements {
     requirements
 }
 
-fn full_reborn_chaos_scheduler_config() -> TurnRunSchedulerConfig {
+fn full_ironclaw_chaos_scheduler_config() -> TurnRunSchedulerConfig {
     TurnRunSchedulerConfig::default()
         .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
         .with_poll_interval(std::time::Duration::from_millis(10))
@@ -9121,14 +9121,14 @@ impl HostFixture {
 
     fn factory(
         &self,
-    ) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
+    ) -> IronClawLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
         self.factory_with_loop_checkpoint_store(self.loop_checkpoint_store.clone())
     }
 
     fn factory_with_loop_checkpoint_store(
         &self,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
-    ) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
+    ) -> IronClawLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
         self.factory_with_config_and_loop_checkpoint_store(
             TextOnlyLoopHostConfig {
                 max_messages: 8,
@@ -9141,7 +9141,7 @@ impl HostFixture {
     fn factory_with_config(
         &self,
         config: TextOnlyLoopHostConfig,
-    ) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
+    ) -> IronClawLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
         self.factory_with_config_and_loop_checkpoint_store(
             config,
             self.loop_checkpoint_store.clone(),
@@ -9152,8 +9152,8 @@ impl HostFixture {
         &self,
         config: TextOnlyLoopHostConfig,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
-    ) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
-        RebornLoopDriverHostFactory::new(
+    ) -> IronClawLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
+        IronClawLoopDriverHostFactory::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
@@ -9166,9 +9166,9 @@ impl HostFixture {
         )
     }
 
-    async fn build_host(&self) -> RebornLoopDriverHost {
+    async fn build_host(&self) -> IronClawLoopDriverHost {
         self.factory()
-            .build_text_only_host(RebornLoopDriverHostRequest {
+            .build_text_only_host(IronClawLoopDriverHostRequest {
                 claimed_run: self.claimed.clone(),
                 loop_run_context: self.context.clone(),
             })

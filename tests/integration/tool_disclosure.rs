@@ -1,4 +1,4 @@
-//! `REBORN_TOOL_DISCLOSURE=Bridged` int-tier coverage (enabler (b), #5149).
+//! `IRONCLAW_TOOL_DISCLOSURE=Bridged` int-tier coverage (enabler (b), #5149).
 //!
 //! Proves `.with_tool_disclosure_bridged()` reaches production's
 //! `ToolDisclosureCapabilityDecorator` wiring
@@ -34,13 +34,13 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 
 /// Bridge meta-tool names (`tool_disclosure.rs`'s `TOOL_SEARCH_NAME`/
 /// `TOOL_DESCRIBE_NAME`/`TOOL_CALL_NAME`), hardcoded as literals: the
@@ -68,10 +68,10 @@ const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
 /// list, nor the internal-only `tool_describe`/`tool_call` bridges.
 #[tokio::test]
 async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("bridged-disclosure harness builds");
@@ -103,7 +103,7 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
 ///
 /// Pins Off-mode explicitly via `.with_tool_disclosure_off()` rather than
 /// leaving this on the `from_env()` default-resolution path: without an
-/// explicit pin, an ambient `REBORN_TOOL_DISCLOSURE=Bridged` in the process
+/// explicit pin, an ambient `IRONCLAW_TOOL_DISCLOSURE=Bridged` in the process
 /// env would silently flip this control into Bridged mode too, and the
 /// assertions below would then be discriminating on nothing.
 /// `apply_hermetic_env()` also scrubs the var, but the explicit builder call
@@ -111,10 +111,10 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
 /// construction, not just by today's harness hygiene.
 #[tokio::test]
 async fn default_mode_surfaces_the_flat_wide_tool_list() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_tool_disclosure_off()
         .with_github_issue_tools()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("default-disclosure harness builds");
@@ -138,10 +138,10 @@ async fn default_mode_surfaces_the_flat_wide_tool_list() {
 /// (or production surface) below the cap is wired-but-inert in Bridged mode.
 #[tokio::test]
 async fn bridged_mode_below_caps_keeps_the_flat_list() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("below-caps bridged harness builds");

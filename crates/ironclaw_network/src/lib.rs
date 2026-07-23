@@ -1,4 +1,4 @@
-//! Network policy and HTTP egress boundary for IronClaw Reborn.
+//! Network policy and HTTP egress boundary for IronClaw.
 //!
 //! This crate evaluates host API [`NetworkPolicy`] values against scoped network
 //! requests, resolves DNS, rejects private resolved targets when configured,

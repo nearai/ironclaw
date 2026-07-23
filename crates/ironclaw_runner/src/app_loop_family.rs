@@ -7,7 +7,7 @@ use ironclaw_agent_loop::{
 
 /// Build the production loop-family registry.
 ///
-/// This is the Reborn composition root for loop families. Adding another
+/// This is the IronClaw composition root for loop families. Adding another
 /// Builtin family means adding its factory here; the framework crate exports
 /// family factories but does not decide which ones are bound in production.
 pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {

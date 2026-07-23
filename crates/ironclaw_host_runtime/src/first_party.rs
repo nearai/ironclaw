@@ -2,7 +2,7 @@
 //!
 //! First-party handlers are registered by host composition, not by extension
 //! manifests. They receive already-authorized, scoped dispatch input from the
-//! Reborn runtime adapter path and return normalized JSON output plus resource
+//! IronClaw runtime adapter path and return normalized JSON output plus resource
 //! usage. Authority decisions remain in `CapabilityHost`/authorization and the
 //! runtime-policy/planning layers.
 

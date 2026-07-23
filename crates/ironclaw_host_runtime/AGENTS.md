@@ -4,14 +4,14 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/host-runtime.md`
-- `docs/reborn/contracts/runtime-workflows.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/host-runtime.md`
+- `docs/ironclaw/contracts/runtime-workflows.md`
+- `docs/ironclaw/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 
-- Host-side composition shared across Reborn runtime lanes and the kernel-facing services/adapters, currently:
+- Host-side composition shared across IronClaw runtime lanes and the kernel-facing services/adapters, currently:
 - The production host runtime `DefaultHostRuntime` (`production`) and runtime-service composition/readiness: `HostRuntimeServices`, `ProductionWiring*` (component/config/issue/report), `RegisteredRuntimeHealth` (`services`).
 - Capability planning and surface: `plan_capability`/`ExecutionPlan`/`PlannerError` (`planner`); the capability-surface policy `CapabilitySurfacePolicy`/`VisibleCapability`/`VisibleCapabilityAccess` (`surface`); the hot capability catalog `HotCapabilityCatalog`/`HotCapabilityRecord`/`publish_hot_capability_catalog` (`capability_catalog`).
 - First-party capabilities: the `FirstPartyCapabilityRegistry`/handler/request/result (`first_party`) and the builtin tool set `BuiltinFirstPartyTools` with capability IDs (echo/time/json/http/shell/read_file/write_file/list_dir/glob/grep/apply_patch) and `builtin_first_party_handlers`/`_package` (`first_party_tools`).

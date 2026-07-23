@@ -1678,7 +1678,7 @@ fn emit_context_shadow_usage(
     completion_tokens: u32,
     cached_tokens: Option<u32>,
 ) {
-    const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
+    const CONTEXT_SHADOW_TARGET: &str = "ironclaw::context_shadow";
     let cached_tokens_field = cached_tokens.map(i64::from).unwrap_or(-1);
     if let Some(cached_tokens) = cached_tokens.filter(|_| prompt_tokens > 0) {
         tracing::debug!(
@@ -4191,7 +4191,7 @@ data: [DONE]
         );
     }
 
-    /// Verify the default request timeout sits below the Reborn runner lease
+    /// Verify the default request timeout sits below the IronClaw runner lease
     /// (90 s) so the HTTP layer fails a hung request before the lease
     /// reclaims the runner.
     #[test]
@@ -4203,7 +4203,7 @@ data: [DONE]
         const {
             assert!(
                 crate::config::DEFAULT_REQUEST_TIMEOUT_SECS < 90,
-                "DEFAULT_REQUEST_TIMEOUT_SECS must be below the Reborn runner lease \
+                "DEFAULT_REQUEST_TIMEOUT_SECS must be below the IronClaw runner lease \
                  (90 s) so the HTTP layer times out first",
             );
         }

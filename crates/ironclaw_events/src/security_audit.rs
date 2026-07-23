@@ -2,7 +2,7 @@
 //!
 //! [`SecurityAuditSink`] is a payload-free recording trait for *security
 //! decisions* — the moments when a defense-in-depth boundary in IronClaw
-//! Reborn allows, blocks, or otherwise re-shapes a request. It is intentionally
+//! IronClaw allows, blocks, or otherwise re-shapes a request. It is intentionally
 //! distinct from [`AuditSink`](crate::AuditSink) (which carries control-plane
 //! `AuditEnvelope` records with full correlation context) and from
 //! [`EventSink`](crate::EventSink) (which carries runtime event transitions).

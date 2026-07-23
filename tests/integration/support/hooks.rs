@@ -1,11 +1,11 @@
 //! E-HOOK-INFRA: recording hook doubles + per-run `HookDispatcherBuilderFactory`
 //! builders so C-HOOKS can observe hook dispatch on a coordinator-path turn.
 //! Hand-built test hooks, not composition activation coverage — that's covered
-//! at crate tier in `ironclaw_reborn_composition::hooks::tests`; this fills the
+//! at crate tier in `ironclaw_composition::hooks::tests`; this fills the
 //! end-to-end coordinator → loop → host turn-wire gap only.
 
 // Shared integration-test support: not every binary that mounts the
-// `reborn_support` tree consumes this module, so its symbols read as dead there
+// `ironclaw_support` tree consumes this module, so its symbols read as dead there
 // under the all-features `-D warnings` lane.
 #![allow(dead_code)]
 
@@ -20,7 +20,9 @@ use ironclaw_hooks::registry::{HookPointSpec, HookRegistry};
 use ironclaw_hooks::sink::{
     ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook, PrivilegedGateSink,
 };
-use ironclaw_runner::loop_driver_host::{HookDispatcherBuilderFactory, RebornLoopDriverHostError};
+use ironclaw_runner::loop_driver_host::{
+    HookDispatcherBuilderFactory, IronClawLoopDriverHostError,
+};
 
 /// Distinct identity paths so a `BeforeCapability` hook and an `AfterModel`
 /// observer can coexist in one dispatcher.
@@ -108,8 +110,8 @@ impl PrivilegedBeforeCapabilityHook for DenyBeforeCapabilityHook {
     }
 }
 
-fn hook_install_err(context: &str, error: impl std::fmt::Display) -> RebornLoopDriverHostError {
-    RebornLoopDriverHostError::InvalidRequest {
+fn hook_install_err(context: &str, error: impl std::fmt::Display) -> IronClawLoopDriverHostError {
+    IronClawLoopDriverHostError::InvalidRequest {
         reason: format!("failed to install {context} recording hook: {error}"),
     }
 }

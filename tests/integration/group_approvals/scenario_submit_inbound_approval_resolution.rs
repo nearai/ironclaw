@@ -12,21 +12,21 @@
 //! → `coordinator.resume_turn` → the gated capability re-dispatches (approve)
 //! or the run finalizes an authorization failure (deny).
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_product_adapters::{ApprovalDecision, ProductInboundAck};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn approve(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-submit-inbound-approve")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/submit_inbound_approved.txt", "content": "approved via submit_inbound"}),
             ),
-            RebornScriptedReply::text("file written after submit_inbound approval"),
+            IronClawScriptedReply::text("file written after submit_inbound approval"),
         ])
         .build()
         .await?;
@@ -53,15 +53,15 @@ pub async fn approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     Ok(())
 }
 
-pub async fn deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn deny(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-submit-inbound-deny")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/submit_inbound_denied.txt", "content": "should not persist"}),
             ),
-            RebornScriptedReply::text("understood, the write was not authorized"),
+            IronClawScriptedReply::text("understood, the write was not authorized"),
         ])
         .build()
         .await?;

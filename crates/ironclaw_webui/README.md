@@ -1,14 +1,14 @@
 # ironclaw_webui
 
-The **WebUI host stack** for IronClaw Reborn: the single crate that turns
-`ironclaw_reborn_composition`'s product/API surface into a running WebChat v2
+The **WebUI host stack** for IronClaw: the single crate that turns
+`ironclaw_composition`'s product/API surface into a running WebChat v2
 HTTP server a browser can talk to. It owns the route handlers, the single-page
 app bundle, the gateway assembly + middleware, the listener/serve loop, and all
 host-side authentication.
 
 It sits in the `products` layer, one level **above** composition, and is driven
-by the `ironclaw` binary (`crates/ironclaw_reborn_cli`). Composition
-deliberately stops at the `reborn_product_api_crates_do_not_bind_http_ingress`
+by the `ironclaw` binary (`crates/ironclaw_cli`). Composition
+deliberately stops at the `ironclaw_product_api_crates_do_not_bind_http_ingress`
 boundary — it returns a fully composed `axum::Router` but must never bind a
 socket. This crate is the host-owned counterpart that does.
 
@@ -21,8 +21,8 @@ across it:
 | Composed piece | Was | Now lives in |
 |---|---|---|
 | **WebChat v2 route surface + SPA** | crate `ironclaw_webui_v2` | `src/webui_v2/` (public module) + `frontend/` |
-| **Gateway assembly + middleware** | `ironclaw_reborn_composition::webui::webui_serve` + middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
-| **Serve loop + host auth** | crate `ironclaw_reborn_webui_ingress` (this crate's original scope) | `src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs` |
+| **Gateway assembly + middleware** | `ironclaw_composition::webui::webui_serve` + middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
+| **Serve loop + host auth** | crate `ironclaw_webui_ingress` (this crate's original scope) | `src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs` |
 
 ### 1. WebChat v2 route surface + SPA (`src/webui_v2/`)
 
@@ -52,7 +52,7 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
 
 ### 2. Gateway assembly + middleware (`src/webui_serve.rs`, `src/webui_*.rs`)
 
-`webui_v2_app(bundle, config)` takes composition's `RebornWebuiBundle` plus a
+`webui_v2_app(bundle, config)` takes composition's `IronClawWebuiBundle` plus a
 host-owned `WebuiServeConfig` and returns a `WebuiV2App` — the fully composed
 `axum::Router` with the canonical middleware stack layered in a fixed order:
 
@@ -69,7 +69,7 @@ attach under their feature flag.
 
 ### 3. Serve loop + host authentication (`src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`)
 
-- `serve_webui_v2(RebornWebuiServeOptions)` — bind a `tokio::net::TcpListener`
+- `serve_webui_v2(IronClawWebuiServeOptions)` — bind a `tokio::net::TcpListener`
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
   (single operator token for the standalone binary / local dev),
@@ -84,15 +84,15 @@ attach under their feature flag.
 
 ## Layering & boundaries
 
-- Reaches the rest of Reborn **only** through composition's facade
-  (`RebornWebuiBundle`, product-auth mount builders, the
+- Reaches the rest of IronClaw **only** through composition's facade
+  (`IronClawWebuiBundle`, product-auth mount builders, the
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary) and
   `ironclaw_product_workflow::ProductSurface`.
 - **No** direct dependency on `ironclaw_product_adapters` or any lower substrate
   crate; **no** v1 `src/` import; **no** v1 secrets / settings / DB. Host auth
-  stays host-owned here (Path A of `docs/reborn/how-to-port-channel-to-reborn.md`).
+  stays host-owned here (Path A of `docs/ironclaw/how-to-port-channel-to-ironclaw.md`).
 - These edges are enforced by `crates/ironclaw_architecture` — see
-  `tests/reborn_dependency_boundaries.rs`.
+  `tests/ironclaw_dependency_boundaries.rs`.
 
 ## Feature flags
 
@@ -117,11 +117,11 @@ cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
 
 # Dependency boundaries (this crate's allowed edges are asserted here)
-cargo test  -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
+cargo test  -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold
 ```
 
 The SPA frontend builds through `build.rs` (Vite). `frontend/README.md` covers
-the JS/TS toolchain; `Dockerfile.reborn` installs `frontend/` deps before the
+the JS/TS toolchain; `Dockerfile` installs `frontend/` deps before the
 `cargo build` so the release image bundles compiled assets.
 
 ## Where to read next

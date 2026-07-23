@@ -206,7 +206,7 @@ The smells above are the *symptoms*; the accumulated debt (the ~14-type
 mirror-DTO capability path, single-impl `dyn` mediators kept for test doubles,
 per-domain `InMemory*Store` duplication, the `LocalDev*` deployment-mode type
 family) and the target structure are catalogued in
-`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`. When a
+`docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`. When a
 smell here traces to one of those, cite that doc's section as the "plan #NNNN"
 an `arch-exempt` must name, rather than opening a new one. The doc's §5 is the
 minimal-kernel/clean-interface destination; new code should move toward it, not

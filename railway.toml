@@ -6,7 +6,7 @@ dockerfilePath = "Dockerfile"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 # Single-writer volume-backed deployments must not overlap the old and new
-# container across a redeploy (the Reborn home directory is a single-writer
+# container across a redeploy (the IronClaw home directory is a single-writer
 # store). Zero overlap serializes the handoff.
 overlapSeconds = 0
 restartPolicyType = "ON_FAILURE"

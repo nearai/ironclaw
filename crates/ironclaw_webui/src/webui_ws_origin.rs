@@ -122,7 +122,7 @@ fn forbidden_origin(detail: &'static str) -> Response {
     // CLAUDE.md REPL/TUI restriction is about background tasks and
     // interactive CLI surfaces, not gateway request handling.
     tracing::info!(
-        target = "ironclaw::reborn::webui_ws_origin",
+        target = "ironclaw::webui_ws_origin",
         detail,
         "rejecting WebSocket upgrade with disallowed Origin",
     );

@@ -4,10 +4,10 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/filesystem.md`
-- `docs/reborn/contracts/storage-placement.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/filesystem.md`
+- `docs/ironclaw/contracts/storage-placement.md`
+- `docs/ironclaw/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 
@@ -20,7 +20,7 @@
 - Invocation-scoped view `ScopedFilesystem` + `MountViewResolver` (`scoped`) — checks permission against `MountView` before any backend dispatch.
 - Backends, all implementing `RootFilesystem`: `DiskFilesystem`, `PostgresRootFilesystem`, `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`; plus backend containment (symlink traversal, mount escape, raw-host-path prevention).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
-- Note: this supersedes the older "bytes mount; structured records stay typed" boundary (ADR `docs/reborn/2026-05-14-universal-fs-dispatch.md`). The legacy bytes-plane methods and `src/db.rs` are transitional and slated for removal — do not add new consumers.
+- Note: this supersedes the older "bytes mount; structured records stay typed" boundary (ADR `docs/ironclaw/2026-05-14-universal-fs-dispatch.md`). The legacy bytes-plane methods and `src/db.rs` are transitional and slated for removal — do not add new consumers.
 
 ## Do Not Move In Here
 

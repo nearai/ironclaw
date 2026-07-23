@@ -1,6 +1,6 @@
 // Read-only filesystem-viewer API client.
 //
-// Wraps the WebChat v2 `/fs/*` endpoints (backed by the Reborn
+// Wraps the WebChat v2 `/fs/*` endpoints (backed by the IronClaw
 // `FilesystemBrowseReader` port) as the path-oriented surface the workspace
 // tree/viewer consume. A "qualified path" used throughout the UI is
 // `"<mount>/<mount-relative-path>"` — the first segment selects the mount

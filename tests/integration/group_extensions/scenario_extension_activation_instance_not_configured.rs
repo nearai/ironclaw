@@ -15,7 +15,7 @@
 //! credential gate, matching `scenario_extension_activation_reauth_gate.rs`'s
 //! shape. A real `config set` + service restart is a new process, not a live
 //! toggle, so Phase 2 builds a genuinely SEPARATE
-//! `RebornIntegrationGroup::extension_lifecycle_google_oauth_configured()`
+//! `IronClawIntegrationGroup::extension_lifecycle_google_oauth_configured()`
 //! composition rather than reusing `g` — the honest analog of "restart".
 //! Phase 2 pins the no-false-positive contract: the readiness check must not
 //! consume the ordinary per-account gate, so a configured instance with no
@@ -33,11 +33,11 @@
 //! freely in its own, independent composition, where the readiness map has
 //! no "google" entry at all.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // Both phases always run, independent of each other's outcome: they pin
     // two different halves of the contract (early-fail, and no false
     // positive), so an early return via `?` would let the first failure mask
@@ -67,16 +67,16 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 const DEGRADED_PLACEHOLDER: &str = "capability summary unavailable";
 
 async fn phase_1_unconfigured_instance_fails_early(
-    g: &RebornIntegrationGroup,
+    g: &IronClawIntegrationGroup,
 ) -> HarnessResult<()> {
     let activator = g
         .thread("google-calendar-instance-not-configured")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "google-calendar"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "google-calendar"}),
             ),
@@ -84,7 +84,7 @@ async fn phase_1_unconfigured_instance_fails_early(
             // the run continues past activation instead of parking on a gate
             // (RED today: this entry is never reached, `submit_turn` below
             // times out waiting for `Completed` with last status `BlockedAuth`).
-            RebornScriptedReply::text("google-calendar needs instance configuration"),
+            IronClawScriptedReply::text("google-calendar needs instance configuration"),
         ])
         .build()
         .await?;
@@ -139,19 +139,19 @@ async fn phase_2_configured_instance_falls_through_to_normal_gate() -> HarnessRe
     // Fresh composition, Google OAuth backend registered — the "operator ran
     // config set and restarted" state, not a toggle on Phase 1's group.
     let configured_group =
-        RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
+        IronClawIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let activator = configured_group
         .thread("gmail-instance-configured")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "gmail"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "gmail"}),
             ),
-            RebornScriptedReply::text("gmail needs an account"),
+            IronClawScriptedReply::text("gmail needs an account"),
         ])
         .build()
         .await?;

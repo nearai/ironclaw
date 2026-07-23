@@ -21,14 +21,12 @@ pub(crate) fn trigger_management_tools_profile() -> HarnessResult<ToolsProfile> 
         effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         ),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
-            "reborn-e2e-trigger-management-tools",
-            "reborn-e2e-trigger-management-user",
+            "ironclaw-e2e-trigger-management-tools",
+            "ironclaw-e2e-trigger-management-user",
         )?
     })
 }
@@ -48,9 +46,7 @@ pub(crate) fn trigger_management_with_gated_write_profile() -> HarnessResult<Too
     profile.effect_kinds.push(EffectKind::WriteFilesystem);
     profile.options = HostRuntimeHarnessOptions::new(
         workspace_mounts(MountPermissions::read_write_list_delete())?,
-        Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-            true,
-        )?),
+        Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
     )
     // #5886: this profile's group asserts `trigger_list`'s `active_hold`
     // against a REAL gate-parked run, which lives in the group's shared

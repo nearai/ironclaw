@@ -1,7 +1,7 @@
-//! C-JOURNEY — multi-turn Reborn journeys: deterministic twins of the live
+//! C-JOURNEY — multi-turn IronClaw journeys: deterministic twins of the live
 //! canary use cases that chain gate → resume → next turn on ONE
-//! conversation/harness. Distinct from `reborn_group_approvals` /
-//! `reborn_integration_auth_gate` (single-gate mechanics): the value here is
+//! conversation/harness. Distinct from `ironclaw_group_approvals` /
+//! `ironclaw_integration_auth_gate` (single-gate mechanics): the value here is
 //! the chaining across turns.
 //!
 //! | scenario | inbound | gate(s) | outcome |
@@ -15,10 +15,10 @@
 //! entries regardless of approve/deny; a plain follow-up turn consumes ONE.
 //!
 //! `auth_then_approval_journey` and `auth_deny_then_retry_journey` run on a
-//! SECOND group, `RebornIntegrationGroup::live_auth_and_approval()` (built
+//! SECOND group, `IronClawIntegrationGroup::live_auth_and_approval()` (built
 //! from `HostRuntimeCapabilityHarness::file_and_github_auth_tools`), NOT
 //! `live_approvals` above — it converges the auth gate onto the SAME
-//! `build_reborn_services` runtime (unlike `live_auth_gate`'s separate,
+//! `build_ironclaw_services` runtime (unlike `live_auth_gate`'s separate,
 //! lower-level `HostRuntimeServices` build with no `run_state`/
 //! `approval_requests`/`capability_leases` stores). No GitHub credential is
 //! seeded at construction, so `github.get_repo` raises `BlockedApproval` then,
@@ -31,19 +31,19 @@
 //! ## Deferred / blocked permutations
 //!
 //! - **Triggered-origin chained journey**: needs the scripted-gateway seam
-//!   (`RebornIntegrationHarness::submit_triggered_turn_scripted`) to reconcile
+//!   (`IronClawIntegrationHarness::submit_triggered_turn_scripted`) to reconcile
 //!   the trigger's minted owner scope with the journey approval helpers'
 //!   binding scope. Single-turn triggered-origin coverage already exists (see
-//!   `reborn_integration_triggered_submit`).
+//!   `ironclaw_integration_triggered_submit`).
 //! - **Multi-actor GATED journey** (`multi_actor_gate_isolation`): runs on
-//!   `RebornIntegrationGroup::multiuser_approvals()`, whose C-MULTIUSER
+//!   `IronClawIntegrationGroup::multiuser_approvals()`, whose C-MULTIUSER
 //!   `scope_capability_by_run_owner` seam scopes each actor's gated write to
 //!   its own run owner. Plain (non-gated) distinct-actor isolation is covered
-//!   by `reborn_group_multiuser::two_actors_own_threads`.
+//!   by `ironclaw_group_multiuser::two_actors_own_threads`.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
@@ -54,11 +54,11 @@ mod scenario_auth_then_approval_journey;
 mod scenario_interactive_approval_journey;
 mod scenario_multi_actor_gate_isolation;
 
-use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
+use ironclaw_support::group::{IronClawIntegrationGroup, ScenarioReport};
 
 #[tokio::test]
 async fn journeys_group_e2e() {
-    let g = RebornIntegrationGroup::live_approvals()
+    let g = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("group builds");
 
@@ -82,7 +82,7 @@ async fn journeys_group_e2e() {
 async fn journeys_group_auth_convergence_e2e() {
     let mut report = ScenarioReport::new();
 
-    let g = RebornIntegrationGroup::live_auth_and_approval()
+    let g = IronClawIntegrationGroup::live_auth_and_approval()
         .await
         .expect("auth+approval group builds");
     report.record(
@@ -90,7 +90,7 @@ async fn journeys_group_auth_convergence_e2e() {
         scenario_auth_then_approval_journey::run(&g).await,
     );
 
-    let g_deny = RebornIntegrationGroup::live_auth_and_approval()
+    let g_deny = IronClawIntegrationGroup::live_auth_and_approval()
         .await
         .expect("auth+approval deny group builds");
     report.record(
@@ -101,7 +101,7 @@ async fn journeys_group_auth_convergence_e2e() {
     // Isolated AUTH-14 / TOOL-5: a credential-only block (auth gate, no approval
     // in the path) grant-resolved to completion. Fresh group so its seeded
     // `UserReusable` credential can't leak into the scenarios above.
-    let g_grant = RebornIntegrationGroup::live_auth_and_approval()
+    let g_grant = IronClawIntegrationGroup::live_auth_and_approval()
         .await
         .expect("auth grant-resume group builds");
     report.record(
@@ -115,7 +115,7 @@ async fn journeys_group_auth_convergence_e2e() {
 /// journey" note for the `scope_capability_by_run_owner` seam this requires.
 #[tokio::test]
 async fn multi_actor_gate_isolation() {
-    let g = RebornIntegrationGroup::multiuser_approvals()
+    let g = IronClawIntegrationGroup::multiuser_approvals()
         .await
         .expect("group builds");
     scenario_multi_actor_gate_isolation::run(&g)

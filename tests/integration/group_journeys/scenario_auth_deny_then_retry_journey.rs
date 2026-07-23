@@ -10,27 +10,27 @@
 //!   turn 2: fresh approve -> fresh BlockedAuth -> RESOLVE -> re-dispatches
 //!           for real -> Completed
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-journey-auth-deny-then-retry")
         .script([
             // turn 1 (2 entries: approval+auth-gated call + post-deny reply)
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 json!({"owner": "octocat", "repo": "hello-world"}),
             ),
-            RebornScriptedReply::text("could not look up the repo without authorization"),
+            IronClawScriptedReply::text("could not look up the repo without authorization"),
             // turn 2 (2 entries: approval+auth-gated call + post-resolve reply)
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 json!({"owner": "octocat", "repo": "hello-world"}),
             ),
-            RebornScriptedReply::text(
+            IronClawScriptedReply::text(
                 "AUTHDENYRETRY_TURN2 repo info retrieved after connecting github",
             ),
         ])

@@ -451,7 +451,7 @@ fn audit_for(deployment: DeploymentMode) -> AuditMode {
 ///
 /// A resolved policy *value*, not a deployment mode. Composition selects the
 /// budget accountant from this instead of branching on a profile name — §4.4
-/// of `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
+/// of `docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`
 /// ("resolve mode to policy data at the composition edge; the kernel never
 /// names a mode").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

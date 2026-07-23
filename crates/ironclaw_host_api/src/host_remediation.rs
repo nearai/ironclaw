@@ -33,7 +33,7 @@
 //! ## INVARIANT: only host code may construct this
 //!
 //! [`HostRemediation::new`] is `pub` because the producers live in other crates
-//! (`ironclaw_host_runtime`, `ironclaw_reborn_composition`), so there is no
+//! (`ironclaw_host_runtime`, `ironclaw_composition`), so there is no
 //! compiler-enforceable way to restrict it. The invariant is therefore
 //! documented and **tested**: capability output whose provenance is a WASM
 //! module, an MCP server, or any first-party dispatch of arbitrary tool output

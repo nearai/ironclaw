@@ -114,7 +114,7 @@ impl PredicateEvaluator {
     /// and let rate caps drift past `max`.
     ///
     /// Note the in-memory LRU cap is *not* shared across tenants in the
-    /// Reborn composition: that wiring constructs a fresh
+    /// IronClaw composition: that wiring constructs a fresh
     /// `InMemoryPredicateStateBackend` per tenant, so the cross-tenant
     /// eviction concern does not apply there. The remaining limitation is
     /// the multi-host replay-dedup gap above.

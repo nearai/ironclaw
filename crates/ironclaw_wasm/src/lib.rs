@@ -1,6 +1,6 @@
-//! Reborn WASM component runtime lane.
+//! IronClaw WASM component runtime lane.
 //!
-//! This crate owns the Reborn-only WASM runtime surface. It intentionally uses
+//! This crate owns the IronClaw-only WASM runtime surface. It intentionally uses
 //! the canonical WIT/component-model contract in `wit/tool.wit` instead of the
 //! temporary JSON pointer/length ABI that was abandoned before landing.
 

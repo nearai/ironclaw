@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the host-failure channel.
 //!
 //! Part of the capability-path result collapse described in
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` (§3,
+//! `docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md` (§3,
 //! §5.3.2). It resolves the *infrastructure-error* half of §1.2's core footgun:
 //! today a recoverable `Ok(CapabilityOutcome::Failed)` and a run-terminating
 //! `Err(HostRuntimeError)` are "structurally identical — a footgun the

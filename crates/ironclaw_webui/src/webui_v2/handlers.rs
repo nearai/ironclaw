@@ -40,58 +40,59 @@ use ironclaw_product_workflow::{
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY,
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_OPERATION,
-    FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY,
-    LLM_CODEX_LOGIN_OPERATION, LLM_CONFIG_VIEW, LLM_LIST_MODELS_OPERATION,
-    LLM_NEARAI_LOGIN_OPERATION, LLM_NEARAI_WALLET_LOGIN_OPERATION, LLM_PROVIDER_DELETE_CAPABILITY,
-    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_OPERATION, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_OPERATION,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SERVICE_LIFECYCLE_OPERATION, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
-    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_OPERATION, PROJECT_DELETE_CAPABILITY,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_OPERATION, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
+    FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, IronClawAccountLoginLinkResponse,
+    IronClawAccountTracesResponse, IronClawAddMemberRequest, IronClawAdminCreateUserRequest,
+    IronClawAdminDeleteSecretProductRequest, IronClawAdminPutSecretProductRequest,
+    IronClawAdminPutSecretRequest, IronClawAdminSecretDeletedResponse, IronClawAdminSecretResponse,
+    IronClawAdminSetRoleProductRequest, IronClawAdminSetRoleRequest,
+    IronClawAdminSetStatusProductRequest, IronClawAdminSetStatusRequest,
+    IronClawAdminUpdateUserProductRequest, IronClawAdminUpdateUserRequest,
+    IronClawAdminUserCreatedResponse, IronClawAdminUserDeletedResponse, IronClawAdminUserListQuery,
+    IronClawAdminUserListResponse, IronClawAdminUserRequest, IronClawAdminUserResponse,
+    IronClawAdminUserSecretsListResponse, IronClawAttachmentRequest,
+    IronClawAutomationMutationResponse, IronClawAutomationRequest, IronClawCancelRunResponse,
+    IronClawCreateProjectRequest, IronClawCreateThreadResponse, IronClawDeleteProjectRequest,
+    IronClawDeleteThreadRequest, IronClawDeleteThreadResponse, IronClawExtensionActionResponse,
+    IronClawExtensionListResponse, IronClawExtensionOnboardingState,
+    IronClawExtensionRegistryResponse, IronClawFsListRequest, IronClawFsListResponse,
+    IronClawFsMountsRequest, IronClawFsMountsResponse, IronClawFsReadRequest,
+    IronClawFsStatRequest, IronClawFsStatResponse, IronClawGetProjectRequest,
+    IronClawGlobalAutoApproveRequest, IronClawListAutomationsResponse, IronClawListMembersRequest,
+    IronClawListMembersResponse, IronClawListProjectsRequest, IronClawListProjectsResponse,
+    IronClawListThreadsResponse, IronClawLogQueryRequest, IronClawLogQueryResponse,
+    IronClawOperatorCommandPlaneResponse, IronClawOperatorConfigGetResponse,
+    IronClawOperatorConfigListResponse, IronClawOperatorConfigSetProductRequest,
+    IronClawOperatorConfigSetRequest, IronClawOperatorConfigValidateRequest,
+    IronClawOperatorConfigValidateResponse, IronClawOperatorLogsQuery,
+    IronClawOperatorServiceLifecycleRequest, IronClawOperatorSetupResponse,
+    IronClawOutboundDeliveryTargetListResponse, IronClawOutboundPreferencesResponse,
+    IronClawProjectFsListRequest, IronClawProjectFsListResponse, IronClawProjectFsReadRequest,
+    IronClawProjectFsStatRequest, IronClawProjectFsStatResponse, IronClawProjectMemberInfo,
+    IronClawProjectResponse, IronClawRemoveMemberRequest, IronClawRenameAutomationProductRequest,
+    IronClawResolveGateResponse, IronClawRetryRunResponse, IronClawServicesError,
+    IronClawServicesErrorCode, IronClawServicesErrorKind, IronClawSetOutboundPreferencesRequest,
+    IronClawSetupExtensionResponse, IronClawSkillActionResponse, IronClawSkillContentResponse,
+    IronClawSkillListResponse, IronClawSkillSearchResponse, IronClawStreamEventsRequest,
+    IronClawSubmitTurnResponse, IronClawTimelineRequest, IronClawTimelineResponse,
+    IronClawTraceCreditsResponse, IronClawTraceHoldAuthorizeProductRequest,
+    IronClawTraceHoldAuthorizeResponse, IronClawUpdateMemberRoleRequest,
+    IronClawUpdateProjectRequest, IronClawViewDescriptor, IronClawViewQuery,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_OPERATION, LLM_CONFIG_VIEW,
+    LLM_LIST_MODELS_OPERATION, LLM_NEARAI_LOGIN_OPERATION, LLM_NEARAI_WALLET_LOGIN_OPERATION,
+    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_OPERATION,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeResult, NearAiLoginStart, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
+    OPERATOR_CONFIG_SET_KEY_OPERATION, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_OPERATION, OPERATOR_SETUP_RUN_CAPABILITY,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_OPERATION,
+    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_OPERATION,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor, ProductCapabilityInput,
     ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RESOLVE_GATE_OPERATION, RETRY_RUN_OPERATION, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornAutomationRequest, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGlobalAutoApproveRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetProductRequest,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewDescriptor, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    RESOLVE_GATE_OPERATION, RETRY_RUN_OPERATION, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
     SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
     SUBMIT_TURN_OPERATION, SetActiveLlmRequest, SettingsToolPermissionState,
@@ -149,11 +150,11 @@ pub struct WebUiV2SessionResponse {
 /// [`WebUiV2Capabilities`].
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct WebUiV2Features {
-    /// Reborn Projects surface (the conversations-panel entry + the
+    /// IronClaw Projects surface (the conversations-panel entry + the
     /// `/projects` route). Hidden unless the deployment sets
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
-    pub reborn_projects: bool,
+    pub ironclaw_projects: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -175,7 +176,7 @@ pub async fn get_session(
         user_id,
         capabilities,
         features: WebUiV2Features {
-            reborn_projects: state.reborn_projects_enabled(),
+            ironclaw_projects: state.ironclaw_projects_enabled(),
             global_auto_approve,
         },
         attachments: webui_attachment_capabilities(),
@@ -191,7 +192,7 @@ async fn global_auto_approve_enabled(
         GLOBAL_AUTO_APPROVE_VIEW.query_on(
             state.services().as_ref(),
             caller,
-            RebornGlobalAutoApproveRequest {},
+            IronClawGlobalAutoApproveRequest {},
             None,
         ),
     )
@@ -219,7 +220,7 @@ pub async fn create_thread(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<WebUiCreateThreadRequest>,
-) -> Result<Json<RebornCreateThreadResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawCreateThreadResponse>, WebUiV2HttpError> {
     let response = CREATE_THREAD_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
@@ -231,12 +232,12 @@ pub async fn delete_thread(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
-) -> Result<Json<RebornDeleteThreadResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawDeleteThreadResponse>, WebUiV2HttpError> {
     let resolution = invoke_product_capability(
         state.services(),
         caller,
         THREAD_DELETE_CAPABILITY,
-        RebornDeleteThreadRequest {
+        IronClawDeleteThreadRequest {
             thread_id: thread_id.clone(),
         },
     )
@@ -249,7 +250,7 @@ pub async fn delete_thread(
         outbound_preferences_unavailable,
     )?;
     let thread_id = parse_thread_id_for_response("thread_id", thread_id)?;
-    let response = RebornDeleteThreadResponse {
+    let response = IronClawDeleteThreadResponse {
         thread_id,
         deleted: true,
     };
@@ -269,10 +270,9 @@ pub async fn delete_thread(
 /// to a sanitized `400 invalid_request` before the facade is touched.
 fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
     UserId::new(raw).map_err(|_| {
-        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
-            "user_id",
-            WebUiInboundValidationCode::InvalidId,
-        )))
+        WebUiV2HttpError::from(IronClawServicesError::from(
+            WebUiInboundValidationError::new("user_id", WebUiInboundValidationCode::InvalidId),
+        ))
     })
 }
 
@@ -281,10 +281,9 @@ fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
 /// Keeps a bad handle a client fault (400), never an internal 500 downstream.
 fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
     SecretHandle::new(raw).map_err(|_| {
-        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
-            "handle",
-            WebUiInboundValidationCode::InvalidId,
-        )))
+        WebUiV2HttpError::from(IronClawServicesError::from(
+            WebUiInboundValidationError::new("handle", WebUiInboundValidationCode::InvalidId),
+        ))
     })
 }
 
@@ -298,7 +297,7 @@ async fn read_admin_user_secret(
         .query_on(
             services.as_ref(),
             caller,
-            RebornAdminUserRequest { user_id },
+            IronClawAdminUserRequest { user_id },
             None,
         )
         .await?;
@@ -306,7 +305,7 @@ async fn read_admin_user_secret(
         .secrets
         .into_iter()
         .find(|secret| secret.handle == handle)
-        .ok_or_else(|| RebornServicesError::internal_from("updated admin user secret missing"))
+        .ok_or_else(|| IronClawServicesError::internal_from("updated admin user secret missing"))
         .map_err(WebUiV2HttpError::from)
 }
 
@@ -314,8 +313,8 @@ async fn read_admin_user_secret(
 pub async fn admin_list_users(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Query(query): Query<RebornAdminUserListQuery>,
-) -> Result<Json<RebornAdminUserListResponse>, WebUiV2HttpError> {
+    Query(query): Query<IronClawAdminUserListQuery>,
+) -> Result<Json<IronClawAdminUserListResponse>, WebUiV2HttpError> {
     let mut request = query;
     let cursor = request.cursor.take();
     let response = ADMIN_USERS_VIEW
@@ -328,8 +327,8 @@ pub async fn admin_list_users(
 pub async fn admin_create_user(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(body): Json<RebornAdminCreateUserRequest>,
-) -> Result<Json<RebornAdminUserCreatedResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawAdminCreateUserRequest>,
+) -> Result<Json<IronClawAdminUserCreatedResponse>, WebUiV2HttpError> {
     let response = ADMIN_USER_CREATE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
@@ -341,13 +340,13 @@ pub async fn admin_get_user(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(user_id): Path<String>,
-) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAdminUserResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let response = ADMIN_USER_VIEW
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornAdminUserRequest { user_id },
+            IronClawAdminUserRequest { user_id },
             None,
         )
         .await?;
@@ -359,14 +358,14 @@ pub async fn admin_update_user(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(user_id): Path<String>,
-    Json(body): Json<RebornAdminUpdateUserRequest>,
-) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawAdminUpdateUserRequest>,
+) -> Result<Json<IronClawAdminUserResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
         ADMIN_USER_UPDATE_CAPABILITY,
-        RebornAdminUpdateUserProductRequest {
+        IronClawAdminUpdateUserProductRequest {
             user_id: user_id.clone(),
             display_name: body.display_name,
             metadata: body.metadata,
@@ -384,7 +383,7 @@ pub async fn admin_update_user(
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornAdminUserRequest { user_id },
+            IronClawAdminUserRequest { user_id },
             None,
         )
         .await?;
@@ -396,13 +395,13 @@ pub async fn admin_delete_user(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(user_id): Path<String>,
-) -> Result<Json<RebornAdminUserDeletedResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAdminUserDeletedResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let resolution = invoke_product_capability(
         state.services(),
         caller,
         ADMIN_USER_DELETE_CAPABILITY,
-        RebornAdminUserRequest {
+        IronClawAdminUserRequest {
             user_id: user_id.clone(),
         },
     )
@@ -414,7 +413,7 @@ pub async fn admin_delete_user(
         outbound_preferences_forbidden,
         outbound_preferences_unavailable,
     )?;
-    Ok(Json(RebornAdminUserDeletedResponse {
+    Ok(Json(IronClawAdminUserDeletedResponse {
         user_id,
         deleted: true,
     }))
@@ -425,14 +424,14 @@ pub async fn admin_set_user_status(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(user_id): Path<String>,
-    Json(body): Json<RebornAdminSetStatusRequest>,
-) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawAdminSetStatusRequest>,
+) -> Result<Json<IronClawAdminUserResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
         ADMIN_USER_SET_STATUS_CAPABILITY,
-        RebornAdminSetStatusProductRequest {
+        IronClawAdminSetStatusProductRequest {
             user_id: user_id.clone(),
             status: body.status,
         },
@@ -449,7 +448,7 @@ pub async fn admin_set_user_status(
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornAdminUserRequest { user_id },
+            IronClawAdminUserRequest { user_id },
             None,
         )
         .await?;
@@ -461,14 +460,14 @@ pub async fn admin_set_user_role(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(user_id): Path<String>,
-    Json(body): Json<RebornAdminSetRoleRequest>,
-) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawAdminSetRoleRequest>,
+) -> Result<Json<IronClawAdminUserResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
         ADMIN_USER_SET_ROLE_CAPABILITY,
-        RebornAdminSetRoleProductRequest {
+        IronClawAdminSetRoleProductRequest {
             user_id: user_id.clone(),
             role: body.role,
         },
@@ -485,7 +484,7 @@ pub async fn admin_set_user_role(
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornAdminUserRequest { user_id },
+            IronClawAdminUserRequest { user_id },
             None,
         )
         .await?;
@@ -497,13 +496,13 @@ pub async fn admin_list_user_secrets(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(user_id): Path<String>,
-) -> Result<Json<RebornAdminUserSecretsListResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAdminUserSecretsListResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let response = ADMIN_USER_SECRETS_VIEW
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornAdminUserRequest { user_id },
+            IronClawAdminUserRequest { user_id },
             None,
         )
         .await?;
@@ -515,8 +514,8 @@ pub async fn admin_put_user_secret(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path((user_id, handle)): Path<(String, String)>,
-    Json(body): Json<RebornAdminPutSecretRequest>,
-) -> Result<Json<RebornAdminSecretResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawAdminPutSecretRequest>,
+) -> Result<Json<IronClawAdminSecretResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let handle = parse_admin_secret_handle(handle)?;
     let handle_name = handle.as_str().to_string();
@@ -524,7 +523,7 @@ pub async fn admin_put_user_secret(
         state.services(),
         caller.clone(),
         ADMIN_USER_PUT_SECRET_CAPABILITY,
-        RebornAdminPutSecretProductRequest {
+        IronClawAdminPutSecretProductRequest {
             user_id: user_id.clone(),
             handle: handle_name.clone(),
             value: body.value,
@@ -539,7 +538,7 @@ pub async fn admin_put_user_secret(
         outbound_preferences_unavailable,
     )?;
     let secret = read_admin_user_secret(state.services(), caller, user_id, handle_name).await?;
-    Ok(Json(RebornAdminSecretResponse { secret }))
+    Ok(Json(IronClawAdminSecretResponse { secret }))
 }
 
 /// `DELETE /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
@@ -547,7 +546,7 @@ pub async fn admin_delete_user_secret(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path((user_id, handle)): Path<(String, String)>,
-) -> Result<Json<RebornAdminSecretDeletedResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAdminSecretDeletedResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let handle = parse_admin_secret_handle(handle)?;
     let handle = handle.as_str().to_string();
@@ -555,7 +554,7 @@ pub async fn admin_delete_user_secret(
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornAdminDeleteSecretProductRequest { user_id, handle },
+            IronClawAdminDeleteSecretProductRequest { user_id, handle },
         )
         .await?;
     Ok(Json(response))
@@ -570,7 +569,7 @@ pub async fn send_message(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
     Json(mut body): Json<WebUiSendMessageRequest>,
-) -> Result<Json<RebornSubmitTurnResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSubmitTurnResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     let response = SUBMIT_TURN_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
@@ -591,8 +590,8 @@ pub async fn get_timeline(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
     Query(query): Query<TimelineQuery>,
-) -> Result<Json<RebornTimelineResponse>, WebUiV2HttpError> {
-    let request = RebornTimelineRequest {
+) -> Result<Json<IronClawTimelineResponse>, WebUiV2HttpError> {
+    let request = IronClawTimelineRequest {
         thread_id,
         limit: query.limit,
         cursor: query.cursor,
@@ -637,8 +636,8 @@ pub async fn list_project_files(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
     Query(query): Query<ProjectFsQuery>,
-) -> Result<Json<RebornProjectFsListResponse>, WebUiV2HttpError> {
-    let request = RebornProjectFsListRequest {
+) -> Result<Json<IronClawProjectFsListResponse>, WebUiV2HttpError> {
+    let request = IronClawProjectFsListRequest {
         thread_id,
         path: project_fs_list_path(query.path),
     };
@@ -656,8 +655,8 @@ pub async fn stat_project_file(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
     Query(query): Query<ProjectFsQuery>,
-) -> Result<Json<RebornProjectFsStatResponse>, WebUiV2HttpError> {
-    let request = RebornProjectFsStatRequest {
+) -> Result<Json<IronClawProjectFsStatResponse>, WebUiV2HttpError> {
+    let request = IronClawProjectFsStatRequest {
         thread_id,
         path: require_project_fs_path(query.path)?,
     };
@@ -681,7 +680,7 @@ pub async fn read_project_file(
     Path(thread_id): Path<String>,
     Query(query): Query<ProjectFsQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let request = RebornProjectFsReadRequest {
+    let request = IronClawProjectFsReadRequest {
         thread_id,
         path: require_project_fs_path(query.path)?,
     };
@@ -716,7 +715,7 @@ fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2
                 error = %error,
                 "failed to build project-file download response",
             );
-            WebUiV2HttpError::from(RebornServicesError::internal())
+            WebUiV2HttpError::from(IronClawServicesError::internal())
         })
 }
 
@@ -740,12 +739,12 @@ pub struct FsBrowseQuery {
 pub async fn list_fs_mounts(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornFsMountsResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawFsMountsResponse>, WebUiV2HttpError> {
     let response = FS_MOUNTS_VIEW
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornFsMountsRequest {},
+            IronClawFsMountsRequest {},
             None,
         )
         .await?;
@@ -760,8 +759,8 @@ pub async fn browse_fs_dir(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<FsBrowseQuery>,
-) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
-    let request = RebornFsListRequest {
+) -> Result<Json<IronClawFsListResponse>, WebUiV2HttpError> {
+    let request = IronClawFsListRequest {
         mount: query.mount,
         // Absent, empty, or whitespace-only path lists the mount root.
         path: query
@@ -783,8 +782,8 @@ pub async fn stat_fs_path(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<FsBrowseQuery>,
-) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
-    let request = RebornFsStatRequest {
+) -> Result<Json<IronClawFsStatResponse>, WebUiV2HttpError> {
+    let request = IronClawFsStatRequest {
         mount: query.mount,
         path: require_fs_browse_path(query.path)?,
         project_id: query.project_id,
@@ -804,7 +803,7 @@ pub async fn read_fs_file(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let request = RebornFsReadRequest {
+    let request = IronClawFsReadRequest {
         mount: query.mount,
         path: require_fs_browse_path(query.path)?,
         project_id: query.project_id,
@@ -820,11 +819,13 @@ pub async fn read_fs_file(
 fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
     match path {
         Some(path) if !path.trim().is_empty() => Ok(path),
-        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
-            "path",
-            WebUiInboundValidationCode::Blank,
-        ))
-        .into()),
+        _ => Err(
+            IronClawServicesError::from(WebUiInboundValidationError::new(
+                "path",
+                WebUiInboundValidationCode::Blank,
+            ))
+            .into(),
+        ),
     }
 }
 
@@ -844,11 +845,13 @@ fn project_fs_list_path(path: Option<String>) -> String {
 fn require_project_fs_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
     match path {
         Some(path) if !path.trim().is_empty() => Ok(path),
-        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
-            "path",
-            WebUiInboundValidationCode::Blank,
-        ))
-        .into()),
+        _ => Err(
+            IronClawServicesError::from(WebUiInboundValidationError::new(
+                "path",
+                WebUiInboundValidationCode::Blank,
+            ))
+            .into(),
+        ),
     }
 }
 
@@ -864,8 +867,8 @@ pub async fn list_projects(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListProjectsQuery>,
-) -> Result<Json<RebornListProjectsResponse>, WebUiV2HttpError> {
-    let request = RebornListProjectsRequest { limit: query.limit };
+) -> Result<Json<IronClawListProjectsResponse>, WebUiV2HttpError> {
+    let request = IronClawListProjectsRequest { limit: query.limit };
     let response = PROJECTS_VIEW
         .query_on(state.services().as_ref(), caller, request, None)
         .await?;
@@ -876,8 +879,8 @@ pub async fn list_projects(
 pub async fn create_project(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(body): Json<RebornCreateProjectRequest>,
-) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawCreateProjectRequest>,
+) -> Result<Json<IronClawProjectResponse>, WebUiV2HttpError> {
     let response = PROJECT_CREATE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
@@ -889,12 +892,12 @@ pub async fn get_project(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
-) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawProjectResponse>, WebUiV2HttpError> {
     let response = PROJECT_VIEW
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornGetProjectRequest { project_id },
+            IronClawGetProjectRequest { project_id },
             None,
         )
         .await?;
@@ -907,8 +910,8 @@ pub async fn update_project(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
-    Json(mut body): Json<RebornUpdateProjectRequest>,
-) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    Json(mut body): Json<IronClawUpdateProjectRequest>,
+) -> Result<Json<IronClawProjectResponse>, WebUiV2HttpError> {
     body.project_id = project_id;
     let resolution = invoke_product_capability(
         state.services(),
@@ -928,7 +931,7 @@ pub async fn update_project(
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornGetProjectRequest {
+            IronClawGetProjectRequest {
                 project_id: body.project_id,
             },
             None,
@@ -947,7 +950,7 @@ pub async fn delete_project(
         state.services(),
         caller,
         PROJECT_DELETE_CAPABILITY,
-        RebornDeleteProjectRequest { project_id },
+        IronClawDeleteProjectRequest { project_id },
     )
     .await?;
     capability_resolution_succeeded(
@@ -965,12 +968,12 @@ pub async fn list_project_members(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
-) -> Result<Json<RebornListMembersResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawListMembersResponse>, WebUiV2HttpError> {
     let response = PROJECT_MEMBERS_VIEW
         .query_on(
             state.services().as_ref(),
             caller,
-            RebornListMembersRequest { project_id },
+            IronClawListMembersRequest { project_id },
             None,
         )
         .await?;
@@ -983,8 +986,8 @@ pub async fn add_project_member(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
-    Json(mut body): Json<RebornAddMemberRequest>,
-) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
+    Json(mut body): Json<IronClawAddMemberRequest>,
+) -> Result<Json<IronClawProjectMemberInfo>, WebUiV2HttpError> {
     body.project_id = project_id;
     let resolution = invoke_product_capability(
         state.services(),
@@ -1011,8 +1014,8 @@ pub async fn update_project_member(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path((project_id, user_id)): Path<(String, String)>,
-    Json(mut body): Json<RebornUpdateMemberRoleRequest>,
-) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
+    Json(mut body): Json<IronClawUpdateMemberRoleRequest>,
+) -> Result<Json<IronClawProjectMemberInfo>, WebUiV2HttpError> {
     body.project_id = project_id;
     body.user_id = user_id;
     let resolution = invoke_product_capability(
@@ -1044,7 +1047,7 @@ pub async fn remove_project_member(
         state.services(),
         caller,
         PROJECT_MEMBER_REMOVE_CAPABILITY,
-        RebornRemoveMemberRequest {
+        IronClawRemoveMemberRequest {
             project_id,
             user_id,
         },
@@ -1065,12 +1068,12 @@ async fn read_project_member(
     caller: WebUiAuthenticatedCaller,
     project_id: String,
     user_id: String,
-) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
+) -> Result<IronClawProjectMemberInfo, WebUiV2HttpError> {
     let response = PROJECT_MEMBERS_VIEW
         .query_on(
             services.as_ref(),
             caller,
-            RebornListMembersRequest { project_id },
+            IronClawListMembersRequest { project_id },
             None,
         )
         .await?;
@@ -1078,7 +1081,7 @@ async fn read_project_member(
         .members
         .into_iter()
         .find(|member| member.user_id == user_id)
-        .ok_or_else(|| RebornServicesError::internal_from("updated project member missing"))
+        .ok_or_else(|| IronClawServicesError::internal_from("updated project member missing"))
         .map_err(WebUiV2HttpError::from)
 }
 
@@ -1134,7 +1137,7 @@ pub async fn get_attachment(
         .execute_attachment_on(
             state.services().as_ref(),
             caller,
-            RebornAttachmentRequest {
+            IronClawAttachmentRequest {
                 thread_id,
                 message_id,
                 attachment_id,
@@ -1263,9 +1266,9 @@ pub async fn stream_events(
 /// concurrency cap. `retryable: true` because the slot will free as soon
 /// as one of the caller's existing streams closes.
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
-    WebUiV2HttpError::from(RebornServicesError {
-        code: RebornServicesErrorCode::RateLimited,
-        kind: RebornServicesErrorKind::Busy,
+    WebUiV2HttpError::from(IronClawServicesError {
+        code: IronClawServicesErrorCode::RateLimited,
+        kind: IronClawServicesErrorKind::Busy,
         status_code: 429,
         retryable: true,
         field: None,
@@ -1301,8 +1304,8 @@ fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
 /// cannot fail on a tagged enum + bool, so there is no fallback branch.
 #[derive(Debug, Clone, Serialize)]
 struct SseErrorPayload {
-    error: RebornServicesErrorCode,
-    kind: RebornServicesErrorKind,
+    error: IronClawServicesErrorCode,
+    kind: IronClawServicesErrorKind,
     retryable: bool,
 }
 
@@ -1331,7 +1334,7 @@ fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<
     }
 }
 
-fn sse_error_event(error: RebornServicesError) -> Event {
+fn sse_error_event(error: IronClawServicesError) -> Event {
     let payload = SseErrorPayload {
         error: error.code,
         kind: error.kind,
@@ -1384,7 +1387,7 @@ fn build_sse_stream(
             if remaining.is_zero() {
                 return;
             }
-            let request = RebornStreamEventsRequest {
+            let request = IronClawStreamEventsRequest {
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
@@ -1469,7 +1472,7 @@ fn build_sse_stream(
             if remaining.is_zero() {
                 return;
             }
-            let request = RebornStreamEventsRequest {
+            let request = IronClawStreamEventsRequest {
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
@@ -1563,7 +1566,7 @@ pub async fn cancel_run(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(CancelRunPath { thread_id, run_id }): Path<CancelRunPath>,
     Json(mut body): Json<WebUiCancelRunRequest>,
-) -> Result<Json<RebornCancelRunResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawCancelRunResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
     let response = CANCEL_RUN_OPERATION
@@ -1591,7 +1594,7 @@ pub async fn resolve_gate(
         gate_ref,
     }): Path<ResolveGatePath>,
     Json(mut body): Json<WebUiResolveGateRequest>,
-) -> Result<Json<RebornResolveGateResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawResolveGateResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
     body.gate_ref = Some(gate_ref);
@@ -1617,7 +1620,7 @@ pub async fn retry_run(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(RetryRunPath { thread_id, run_id }): Path<RetryRunPath>,
     Json(mut body): Json<WebUiRetryRunRequest>,
-) -> Result<Json<RebornRetryRunResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawRetryRunResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
     let response = RETRY_RUN_OPERATION
@@ -1641,7 +1644,7 @@ pub async fn list_threads(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListThreadsQuery>,
-) -> Result<Json<RebornListThreadsResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawListThreadsResponse>, WebUiV2HttpError> {
     let mut request = WebUiListThreadsRequest {
         limit: query.limit,
         cursor: query.cursor,
@@ -1680,7 +1683,7 @@ pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListAutomationsQuery>,
-) -> Result<Json<RebornListAutomationsResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawListAutomationsResponse>, WebUiV2HttpError> {
     let request = WebUiListAutomationsRequest {
         limit: query.limit,
         run_limit: query.run_limit,
@@ -1697,12 +1700,12 @@ pub async fn pause_automation(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
-) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAutomationMutationResponse>, WebUiV2HttpError> {
     let response = AUTOMATION_PAUSE_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornAutomationRequest { automation_id },
+            IronClawAutomationRequest { automation_id },
         )
         .await?;
     Ok(Json(response))
@@ -1713,12 +1716,12 @@ pub async fn resume_automation(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
-) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAutomationMutationResponse>, WebUiV2HttpError> {
     let response = AUTOMATION_RESUME_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornAutomationRequest { automation_id },
+            IronClawAutomationRequest { automation_id },
         )
         .await?;
     Ok(Json(response))
@@ -1730,12 +1733,12 @@ pub async fn rename_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
     Json(request): Json<WebUiRenameAutomationRequest>,
-) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAutomationMutationResponse>, WebUiV2HttpError> {
     let response = AUTOMATION_RENAME_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornRenameAutomationProductRequest {
+            IronClawRenameAutomationProductRequest {
                 automation_id,
                 name: request.name,
             },
@@ -1749,12 +1752,12 @@ pub async fn delete_automation(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
-) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAutomationMutationResponse>, WebUiV2HttpError> {
     let response = AUTOMATION_DELETE_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornAutomationRequest { automation_id },
+            IronClawAutomationRequest { automation_id },
         )
         .await?;
     Ok(Json(response))
@@ -1794,7 +1797,7 @@ pub struct ListAutomationsQuery {
 pub async fn trace_credits(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawTraceCreditsResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -1814,7 +1817,7 @@ pub async fn trace_credits(
 pub async fn trace_account_traces(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAccountTracesResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -1836,7 +1839,7 @@ pub async fn trace_account_traces(
 pub async fn trace_account_login_link(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornAccountLoginLinkResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawAccountLoginLinkResponse>, WebUiV2HttpError> {
     let response = TRACE_ACCOUNT_LOGIN_LINK_OPERATION
         .execute_on(state.services().as_ref(), caller, serde_json::json!({}))
         .await?;
@@ -1853,12 +1856,12 @@ pub async fn authorize_trace_hold(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(submission_id): Path<String>,
-) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
     let response = TRACE_HOLD_AUTHORIZE_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornTraceHoldAuthorizeProductRequest { submission_id },
+            IronClawTraceHoldAuthorizeProductRequest { submission_id },
         )
         .await?;
     Ok(Json(response))
@@ -1868,7 +1871,7 @@ pub async fn authorize_trace_hold(
 pub async fn get_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOutboundPreferencesResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -1882,13 +1885,13 @@ pub async fn get_outbound_preferences(
 
 /// `POST /api/webchat/v2/outbound/preferences`
 ///
-/// Body shape: [`RebornSetOutboundPreferencesRequest`]. Sending
+/// Body shape: [`IronClawSetOutboundPreferencesRequest`]. Sending
 /// `{"final_reply_target_id": null}` clears the configured final-reply target.
 pub async fn set_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(body): Json<RebornSetOutboundPreferencesRequest>,
-) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawSetOutboundPreferencesRequest>,
+) -> Result<Json<IronClawOutboundPreferencesResponse>, WebUiV2HttpError> {
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
@@ -1919,24 +1922,24 @@ fn capability_resolution_succeeded(
     resolution: Resolution,
     label: &'static str,
     operation_failed_is_invalid_request: bool,
-    forbidden: fn() -> RebornServicesError,
-    unavailable: fn(bool) -> RebornServicesError,
-) -> Result<(), RebornServicesError> {
+    forbidden: fn() -> IronClawServicesError,
+    unavailable: fn(bool) -> IronClawServicesError,
+) -> Result<(), IronClawServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            Some(FailureKind::InvalidInput) => Err(IronClawServicesError {
+                code: IronClawServicesErrorCode::InvalidRequest,
+                kind: IronClawServicesErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: None,
                 validation_code: Some(WebUiInboundValidationCode::InvalidValue),
             }),
             Some(FailureKind::OperationFailed) if operation_failed_is_invalid_request => {
-                Err(RebornServicesError {
-                    code: RebornServicesErrorCode::InvalidRequest,
-                    kind: RebornServicesErrorKind::Validation,
+                Err(IronClawServicesError {
+                    code: IronClawServicesErrorCode::InvalidRequest,
+                    kind: IronClawServicesErrorKind::Validation,
                     status_code: 400,
                     retryable: false,
                     field: None,
@@ -1947,7 +1950,7 @@ fn capability_resolution_succeeded(
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
                 Err(unavailable(true))
             }
-            _ => Err(RebornServicesError::internal_from(format!(
+            _ => Err(IronClawServicesError::internal_from(format!(
                 "{label} capability did not complete successfully"
             ))),
         },
@@ -1961,7 +1964,7 @@ fn parse_thread_id_for_response(
     value: String,
 ) -> Result<ThreadId, WebUiV2HttpError> {
     ThreadId::new(value).map_err(|_| {
-        RebornServicesError::from(WebUiInboundValidationError::new(
+        IronClawServicesError::from(WebUiInboundValidationError::new(
             field,
             WebUiInboundValidationCode::InvalidId,
         ))
@@ -1969,10 +1972,10 @@ fn parse_thread_id_for_response(
     })
 }
 
-fn outbound_preferences_forbidden() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+fn outbound_preferences_forbidden() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -1980,10 +1983,10 @@ fn outbound_preferences_forbidden() -> RebornServicesError {
     }
 }
 
-fn outbound_preferences_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn outbound_preferences_unavailable(retryable: bool) -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -1995,7 +1998,7 @@ fn outbound_preferences_unavailable(retryable: bool) -> RebornServicesError {
 pub async fn list_outbound_delivery_targets(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -2011,7 +2014,7 @@ pub async fn list_outbound_delivery_targets(
 pub async fn list_extensions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawExtensionListResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -2027,7 +2030,7 @@ pub async fn list_extensions(
 pub async fn list_skills(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillListResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -2044,7 +2047,7 @@ pub async fn search_skills(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SearchSkillsBody>,
-) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillSearchResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
@@ -2061,7 +2064,7 @@ pub async fn install_skill(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<InstallSkillBody>,
-) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillActionResponse>, WebUiV2HttpError> {
     let name = body.name;
     let resolution = invoke_product_capability(
         state.services(),
@@ -2074,7 +2077,7 @@ pub async fn install_skill(
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
-    Ok(Json(RebornSkillActionResponse {
+    Ok(Json(IronClawSkillActionResponse {
         success: true,
         message: format!("Skill '{name}' installed"),
     }))
@@ -2085,7 +2088,7 @@ pub async fn get_skill_content(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
-) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillContentResponse>, WebUiV2HttpError> {
     let response = SKILL_CONTENT_VIEW
         .query_on(
             state.services().as_ref(),
@@ -2103,7 +2106,7 @@ pub async fn update_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<UpdateSkillBody>,
-) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillActionResponse>, WebUiV2HttpError> {
     let resolution = invoke_product_capability(
         state.services(),
         caller,
@@ -2115,7 +2118,7 @@ pub async fn update_skill(
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
-    Ok(Json(RebornSkillActionResponse {
+    Ok(Json(IronClawSkillActionResponse {
         success: true,
         message: format!("Skill '{name}' updated"),
     }))
@@ -2126,7 +2129,7 @@ pub async fn remove_skill(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
-) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillActionResponse>, WebUiV2HttpError> {
     let resolution = invoke_product_capability(
         state.services(),
         caller,
@@ -2135,7 +2138,7 @@ pub async fn remove_skill(
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
-    Ok(Json(RebornSkillActionResponse {
+    Ok(Json(IronClawSkillActionResponse {
         success: true,
         message: format!("Skill '{name}' removed"),
     }))
@@ -2147,7 +2150,7 @@ pub async fn set_skill_auto_activate(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<SetSkillAutoActivateBody>,
-) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillActionResponse>, WebUiV2HttpError> {
     let enabled = body.enabled;
     let resolution = invoke_product_capability(
         state.services(),
@@ -2160,7 +2163,7 @@ pub async fn set_skill_auto_activate(
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
-    Ok(Json(RebornSkillActionResponse {
+    Ok(Json(IronClawSkillActionResponse {
         success: true,
         message: format!(
             "Skill '{}' auto-activation {}",
@@ -2175,7 +2178,7 @@ pub async fn set_auto_activate_learned(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SetSkillAutoActivateBody>,
-) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSkillActionResponse>, WebUiV2HttpError> {
     let enabled = body.enabled;
     let resolution = invoke_product_capability(
         state.services(),
@@ -2185,7 +2188,7 @@ pub async fn set_auto_activate_learned(
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
-    Ok(Json(RebornSkillActionResponse {
+    Ok(Json(IronClawSkillActionResponse {
         success: true,
         message: format!(
             "Default skill auto-activation {}",
@@ -2194,14 +2197,14 @@ pub async fn set_auto_activate_learned(
     }))
 }
 
-fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), IronClawServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
             Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
-                Err(RebornServicesError {
-                    code: RebornServicesErrorCode::InvalidRequest,
-                    kind: RebornServicesErrorKind::Validation,
+                Err(IronClawServicesError {
+                    code: IronClawServicesErrorCode::InvalidRequest,
+                    kind: IronClawServicesErrorKind::Validation,
                     status_code: 400,
                     retryable: false,
                     field: None,
@@ -2214,7 +2217,7 @@ fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServices
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
                 Err(skill_mutation_unavailable(true))
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(IronClawServicesError::internal_from(
                 "skill capability did not complete successfully",
             )),
         },
@@ -2223,10 +2226,10 @@ fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServices
     }
 }
 
-fn skill_mutation_forbidden() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+fn skill_mutation_forbidden() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2234,10 +2237,10 @@ fn skill_mutation_forbidden() -> RebornServicesError {
     }
 }
 
-fn skill_mutation_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn skill_mutation_unavailable(retryable: bool) -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2249,7 +2252,7 @@ fn skill_mutation_unavailable(retryable: bool) -> RebornServicesError {
 pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornExtensionRegistryResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawExtensionRegistryResponse>, WebUiV2HttpError> {
     let response = EXTENSION_REGISTRY_VIEW
         .query_on(
             state.services().as_ref(),
@@ -2266,7 +2269,7 @@ pub async fn install_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<InstallExtensionBody>,
-) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
     let resolution = invoke_product_capability(
         state.services(),
@@ -2289,7 +2292,7 @@ pub async fn import_extension(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     body: axum::body::Bytes,
-) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawExtensionActionResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let resolution = invoke_product_capability(
         state.services(),
@@ -2308,7 +2311,7 @@ pub async fn activate_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2330,7 +2333,7 @@ pub async fn remove_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2349,21 +2352,21 @@ pub async fn remove_extension(
 
 fn extension_lifecycle_mutation_succeeded(
     resolution: Resolution,
-) -> Result<(), RebornServicesError> {
+) -> Result<(), IronClawServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            Some(FailureKind::InvalidInput) => Err(IronClawServicesError {
+                code: IronClawServicesErrorCode::InvalidRequest,
+                kind: IronClawServicesErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: None,
                 validation_code: Some(WebUiInboundValidationCode::InvalidValue),
             }),
-            Some(FailureKind::OperationFailed) => Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            Some(FailureKind::OperationFailed) => Err(IronClawServicesError {
+                code: IronClawServicesErrorCode::InvalidRequest,
+                kind: IronClawServicesErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: None,
@@ -2375,7 +2378,7 @@ fn extension_lifecycle_mutation_succeeded(
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
                 Err(extension_lifecycle_unavailable(true))
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(IronClawServicesError::internal_from(
                 "extension lifecycle capability did not complete successfully",
             )),
         },
@@ -2391,7 +2394,7 @@ async fn extension_activation_response(
     caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
     resolution: Resolution,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+) -> Result<IronClawExtensionActionResponse, IronClawServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => {
             let activated = query_extension_active_state(services, caller, &package_ref).await?;
@@ -2400,7 +2403,7 @@ async fn extension_activation_response(
                 Some(activated),
             ))
         }
-        Resolution::Blocked(Blocked::Auth(_)) => Ok(RebornExtensionActionResponse {
+        Resolution::Blocked(Blocked::Auth(_)) => Ok(IronClawExtensionActionResponse {
             success: true,
             message: "Extension authentication required.".to_string(),
             activated: Some(false),
@@ -2409,7 +2412,7 @@ async fn extension_activation_response(
             instructions: Some(
                 "Configure the extension credentials, then activate it again.".to_string(),
             ),
-            onboarding_state: Some(RebornExtensionOnboardingState::AuthRequired),
+            onboarding_state: Some(IronClawExtensionOnboardingState::AuthRequired),
             onboarding: None,
         }),
         other => {
@@ -2426,19 +2429,19 @@ async fn query_extension_active_state(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
     package_ref: &LifecyclePackageRef,
-) -> Result<bool, RebornServicesError> {
+) -> Result<bool, IronClawServicesError> {
     let page = services
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: EXTENSIONS_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
             },
         )
         .await?;
-    let response: RebornExtensionListResponse =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response: IronClawExtensionListResponse =
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     response
         .extensions
         .iter()
@@ -2447,10 +2450,10 @@ async fn query_extension_active_state(
         .ok_or_else(|| extension_lifecycle_unavailable(true))
 }
 
-fn extension_lifecycle_forbidden() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+fn extension_lifecycle_forbidden() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2458,10 +2461,10 @@ fn extension_lifecycle_forbidden() -> RebornServicesError {
     }
 }
 
-fn extension_lifecycle_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn extension_lifecycle_unavailable(retryable: bool) -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2472,8 +2475,8 @@ fn extension_lifecycle_unavailable(retryable: bool) -> RebornServicesError {
 fn extension_action_completed(
     message: impl Into<String>,
     activated: Option<bool>,
-) -> RebornExtensionActionResponse {
-    RebornExtensionActionResponse {
+) -> IronClawExtensionActionResponse {
+    IronClawExtensionActionResponse {
         success: true,
         message: message.into(),
         activated,
@@ -2490,7 +2493,7 @@ pub async fn get_extension_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSetupExtensionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2499,7 +2502,7 @@ pub async fn get_extension_setup(
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: EXTENSION_SETUP_VIEW.id.to_string(),
                 params: serde_json::json!({ "package_id": package_ref.id.as_str() }),
                 cursor: None,
@@ -2507,7 +2510,7 @@ pub async fn get_extension_setup(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2526,15 +2529,15 @@ pub async fn setup_extension(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
     Json(body): Json<WebUiSetupExtensionRequest>,
-) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawSetupExtensionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let mut input = serde_json::to_value(body).map_err(RebornServicesError::internal_from)?;
-    let input_object = input
-        .as_object_mut()
-        .ok_or_else(|| RebornServicesError::internal_from("setup request did not encode object"))?;
+    let mut input = serde_json::to_value(body).map_err(IronClawServicesError::internal_from)?;
+    let input_object = input.as_object_mut().ok_or_else(|| {
+        IronClawServicesError::internal_from("setup request did not encode object")
+    })?;
     input_object.insert(
         "extension_id".to_string(),
         serde_json::Value::String(package_ref.id.as_str().to_string()),
@@ -2551,7 +2554,7 @@ pub async fn setup_extension(
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: EXTENSION_SETUP_VIEW.id.to_string(),
                 params: serde_json::json!({ "package_id": package_ref.id.as_str() }),
                 cursor: None,
@@ -2559,7 +2562,7 @@ pub async fn setup_extension(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2569,9 +2572,9 @@ fn require_operator_webui_config(
     if capabilities.operator_webui_config {
         return Ok(());
     }
-    Err(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    Err(IronClawServicesError {
+        code: IronClawServicesErrorCode::Forbidden,
+        kind: IronClawServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2662,7 +2665,7 @@ pub async fn replace_extension_admin_configuration(
                 .get("revision")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| {
-                    RebornServicesError::internal_from(
+                    IronClawServicesError::internal_from(
                         "admin configuration view omitted a numeric revision",
                     )
                 })?;
@@ -2671,9 +2674,9 @@ pub async fn replace_extension_admin_configuration(
             }
             Err(admin_configuration_done_failure(outcome.verdict.error_kind()).into())
         }
-        Resolution::Denied(_) => Err(RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        Resolution::Denied(_) => Err(IronClawServicesError {
+            code: IronClawServicesErrorCode::Forbidden,
+            kind: IronClawServicesErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -2690,11 +2693,11 @@ async fn invoke_product_capability<T>(
     caller: WebUiAuthenticatedCaller,
     capability: ProductCapabilityDescriptor,
     input: T,
-) -> Result<Resolution, RebornServicesError>
+) -> Result<Resolution, IronClawServicesError>
 where
     T: Serialize,
 {
-    let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+    let input = serde_json::to_value(input).map_err(IronClawServicesError::internal_from)?;
     let activity_id = product_capability_activity_id(&caller, capability, &input)?;
     invoke_product_capability_with_activity_id(services, caller, capability, input, activity_id)
         .await
@@ -2706,7 +2709,7 @@ async fn invoke_product_capability_with_activity_id<T>(
     capability: ProductCapabilityDescriptor,
     input: T,
     activity_id: ActivityId,
-) -> Result<Resolution, RebornServicesError>
+) -> Result<Resolution, IronClawServicesError>
 where
     T: Serialize,
 {
@@ -2719,9 +2722,9 @@ fn product_capability_activity_id(
     caller: &WebUiAuthenticatedCaller,
     capability: ProductCapabilityDescriptor,
     input: &serde_json::Value,
-) -> Result<ActivityId, RebornServicesError> {
+) -> Result<ActivityId, IronClawServicesError> {
     let capability_id = capability.capability_id()?;
-    let input_bytes = serde_json::to_vec(input).map_err(RebornServicesError::internal_from)?;
+    let input_bytes = serde_json::to_vec(input).map_err(IronClawServicesError::internal_from)?;
     let mut seed = Vec::new();
     for segment in [
         "webui-product-capability",
@@ -2749,7 +2752,7 @@ fn product_capability_activity_id(
 fn llm_provider_upsert_activity_id(
     caller: &WebUiAuthenticatedCaller,
     request: &UpsertLlmProviderRequest,
-) -> Result<ActivityId, RebornServicesError> {
+) -> Result<ActivityId, IronClawServicesError> {
     let capability_id = LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?;
     let mut seed = Vec::new();
     for segment in [
@@ -2790,35 +2793,35 @@ fn llm_provider_upsert_activity_id(
 async fn query_product_view<T>(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
-    view: RebornViewDescriptor,
+    view: IronClawViewDescriptor,
     params: serde_json::Value,
     cursor: Option<String>,
-) -> Result<T, RebornServicesError>
+) -> Result<T, IronClawServicesError>
 where
     T: DeserializeOwned,
 {
     let page = services
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: view.id.to_string(),
                 params,
                 cursor,
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)
 }
 
 async fn query_extension_admin_configuration(
     state: &WebUiV2State,
     caller: WebUiAuthenticatedCaller,
-) -> Result<serde_json::Value, RebornServicesError> {
+) -> Result<serde_json::Value, IronClawServicesError> {
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: ADMIN_CONFIGURATION_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
@@ -2830,7 +2833,7 @@ async fn query_extension_admin_configuration(
         .get("groups")
         .is_some_and(serde_json::Value::is_array)
     {
-        return Err(RebornServicesError::internal_from(
+        return Err(IronClawServicesError::internal_from(
             "admin configuration view returned an invalid list payload",
         ));
     }
@@ -2840,7 +2843,7 @@ async fn query_extension_admin_configuration(
 fn select_extension_admin_configuration_group(
     payload: &serde_json::Value,
     group_id: &str,
-) -> Result<serde_json::Value, RebornServicesError> {
+) -> Result<serde_json::Value, IronClawServicesError> {
     payload
         .get("groups")
         .and_then(serde_json::Value::as_array)
@@ -2850,14 +2853,14 @@ fn select_extension_admin_configuration_group(
             })
         })
         .cloned()
-        .ok_or_else(RebornServicesError::not_found)
+        .ok_or_else(IronClawServicesError::not_found)
 }
 
 fn admin_configuration_activity_id(
     caller: &WebUiAuthenticatedCaller,
     group_id: &str,
     idempotency_key: &str,
-) -> Result<ActivityId, RebornServicesError> {
+) -> Result<ActivityId, IronClawServicesError> {
     let validation_code = if idempotency_key.is_empty() {
         Some(WebUiInboundValidationCode::Blank)
     } else if idempotency_key.len() > ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES {
@@ -2870,9 +2873,9 @@ fn admin_configuration_activity_id(
         None
     };
     if let Some(validation_code) = validation_code {
-        return Err(RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        return Err(IronClawServicesError {
+            code: IronClawServicesErrorCode::InvalidRequest,
+            kind: IronClawServicesErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: Some("idempotency_key".to_string()),
@@ -2903,10 +2906,10 @@ fn admin_configuration_activity_id(
     )))
 }
 
-fn admin_configuration_conflict() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
-        kind: RebornServicesErrorKind::Conflict,
+fn admin_configuration_conflict() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Conflict,
+        kind: IronClawServicesErrorKind::Conflict,
         status_code: 409,
         retryable: false,
         field: Some("expected_revision".to_string()),
@@ -2914,10 +2917,10 @@ fn admin_configuration_conflict() -> RebornServicesError {
     }
 }
 
-fn admin_configuration_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn admin_configuration_unavailable(retryable: bool) -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2925,11 +2928,11 @@ fn admin_configuration_unavailable(retryable: bool) -> RebornServicesError {
     }
 }
 
-fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornServicesError {
+fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> IronClawServicesError {
     match error_kind {
-        Some(FailureKind::InvalidInput) => RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        Some(FailureKind::InvalidInput) => IronClawServicesError {
+            code: IronClawServicesErrorCode::InvalidRequest,
+            kind: IronClawServicesErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: None,
@@ -2944,9 +2947,9 @@ fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornS
         ) => admin_configuration_unavailable(true),
         Some(
             FailureKind::Authorization | FailureKind::PolicyDenied | FailureKind::GateDeclined,
-        ) => RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        ) => IronClawServicesError {
+            code: IronClawServicesErrorCode::Forbidden,
+            kind: IronClawServicesErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -2964,18 +2967,18 @@ fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornS
             | FailureKind::Permanent
             | FailureKind::Unknown(_),
         )
-        | None => RebornServicesError::internal(),
+        | None => IronClawServicesError::internal(),
     }
 }
 
-fn admin_configuration_blocked(blocked: Blocked) -> RebornServicesError {
+fn admin_configuration_blocked(blocked: Blocked) -> IronClawServicesError {
     let kind = match blocked {
-        Blocked::Approval(_) => RebornServicesErrorKind::BlockedApproval,
-        Blocked::Auth(_) => RebornServicesErrorKind::BlockedAuthentication,
-        Blocked::Resource(_) => RebornServicesErrorKind::BlockedResource,
+        Blocked::Approval(_) => IronClawServicesErrorKind::BlockedApproval,
+        Blocked::Auth(_) => IronClawServicesErrorKind::BlockedAuthentication,
+        Blocked::Resource(_) => IronClawServicesErrorKind::BlockedResource,
     };
-    RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Conflict,
         kind,
         status_code: 409,
         retryable: true,
@@ -2989,7 +2992,7 @@ pub async fn get_operator_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorSetupResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let response = query_operator_setup_response(state.services(), caller).await?;
     Ok(Json(response))
@@ -2998,18 +3001,18 @@ pub async fn get_operator_setup(
 async fn query_operator_setup_response(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
-) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+) -> Result<IronClawOperatorSetupResponse, IronClawServicesError> {
     let page = services
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_SETUP_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)
 }
 
 /// `POST /api/webchat/v2/operator/setup`
@@ -3018,7 +3021,7 @@ pub async fn run_operator_setup(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorSetupResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let resolution = invoke_product_capability(
         state.services(),
@@ -3043,20 +3046,20 @@ pub async fn list_settings_tools(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
-) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorConfigListResponse>, WebUiV2HttpError> {
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
             },
         )
         .await?;
-    let mut response: RebornOperatorConfigListResponse =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let mut response: IronClawOperatorConfigListResponse =
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     response.entries.retain(|entry| {
         entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
             || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
@@ -3075,7 +3078,7 @@ pub async fn set_settings_tools_auto_approve(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SettingsToolsAutoApproveRequest>,
-) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorConfigGetResponse>, WebUiV2HttpError> {
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
@@ -3117,7 +3120,7 @@ pub async fn set_settings_tool_permission(
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
     Path(SettingsToolPermissionPath { capability_id }): Path<SettingsToolPermissionPath>,
     Json(body): Json<SettingsToolPermissionRequest>,
-) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_tool_capability_id(&capability_id)?;
     let key =
         validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
@@ -3125,7 +3128,7 @@ pub async fn set_settings_tool_permission(
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornOperatorConfigSetProductRequest {
+            IronClawOperatorConfigSetProductRequest {
                 key,
                 value: serde_json::json!({ "state": body.state }),
             },
@@ -3137,17 +3140,19 @@ pub async fn set_settings_tool_permission(
 
 fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
     if capability_id.len() > SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES {
-        return Err(RebornServicesError::from(WebUiInboundValidationError::new(
-            "capability_id",
-            WebUiInboundValidationCode::TooLong,
-        ))
-        .into());
+        return Err(
+            IronClawServicesError::from(WebUiInboundValidationError::new(
+                "capability_id",
+                WebUiInboundValidationCode::TooLong,
+            ))
+            .into(),
+        );
     }
     Ok(())
 }
 
 fn validate_settings_tool_config_response(
-    response: &RebornOperatorConfigGetResponse,
+    response: &IronClawOperatorConfigGetResponse,
 ) -> Result<(), WebUiV2HttpError> {
     if response.entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
         || response.entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
@@ -3155,11 +3160,13 @@ fn validate_settings_tool_config_response(
         return Ok(());
     }
 
-    Err(RebornServicesError::from(WebUiInboundValidationError::new(
-        "key",
-        WebUiInboundValidationCode::InvalidValue,
-    ))
-    .into())
+    Err(
+        IronClawServicesError::from(WebUiInboundValidationError::new(
+            "key",
+            WebUiInboundValidationCode::InvalidValue,
+        ))
+        .into(),
+    )
 }
 
 /// `GET /api/webchat/v2/operator/config`
@@ -3167,13 +3174,13 @@ pub async fn list_operator_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorConfigListResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
@@ -3181,7 +3188,7 @@ pub async fn list_operator_config(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3215,25 +3222,25 @@ fn validate_operator_config_key(key: String) -> Result<String, WebUiV2HttpError>
 }
 
 fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpError {
-    RebornServicesError::from(WebUiInboundValidationError::new("key", code)).into()
+    IronClawServicesError::from(WebUiInboundValidationError::new("key", code)).into()
 }
 
 async fn query_operator_config_key_response(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
     key: String,
-) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+) -> Result<IronClawOperatorConfigGetResponse, IronClawServicesError> {
     let page = services
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
                 params: serde_json::json!({ "key": key }),
                 cursor: None,
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)
 }
 
 /// `GET /api/webchat/v2/operator/config/{key}`
@@ -3242,7 +3249,7 @@ pub async fn get_operator_config_key(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
-) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
     let response = query_operator_config_key_response(state.services(), caller, key).await?;
@@ -3255,15 +3262,15 @@ pub async fn set_operator_config_key(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
-    Json(body): Json<RebornOperatorConfigSetRequest>,
-) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawOperatorConfigSetRequest>,
+) -> Result<Json<IronClawOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
     let response = OPERATOR_CONFIG_SET_KEY_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
-            RebornOperatorConfigSetProductRequest {
+            IronClawOperatorConfigSetProductRequest {
                 key,
                 value: body.value,
             },
@@ -3279,7 +3286,7 @@ pub async fn set_operator_config_key(
 /// priority from surfacing an ambiguous 405.
 pub async fn reject_reserved_operator_config_key(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     Err(operator_config_key_error(
         WebUiInboundValidationCode::InvalidValue,
@@ -3291,22 +3298,22 @@ pub async fn validate_operator_config(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<RebornOperatorConfigValidateRequest>,
-) -> Result<Json<RebornOperatorConfigValidateResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawOperatorConfigValidateRequest>,
+) -> Result<Json<IronClawOperatorConfigValidateResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_CONFIG_VALIDATE_VIEW.id.to_string(),
-                params: serde_json::to_value(body).map_err(RebornServicesError::internal_from)?,
+                params: serde_json::to_value(body).map_err(IronClawServicesError::internal_from)?,
                 cursor: None,
             },
         )
         .await?;
-    let response: RebornOperatorConfigValidateResponse =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response: IronClawOperatorConfigValidateResponse =
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3315,13 +3322,13 @@ pub async fn get_operator_diagnostics(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
@@ -3329,7 +3336,7 @@ pub async fn get_operator_diagnostics(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3338,13 +3345,13 @@ pub async fn get_operator_status(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+) -> Result<Json<IronClawOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_STATUS_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
@@ -3352,7 +3359,7 @@ pub async fn get_operator_status(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3364,16 +3371,16 @@ pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Query(mut query): Query<RebornOperatorLogsQuery>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    Query(mut query): Query<IronClawOperatorLogsQuery>,
+) -> Result<Json<IronClawOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let cursor = query.cursor.take();
-    let params = serde_json::to_value(query).map_err(RebornServicesError::internal_from)?;
+    let params = serde_json::to_value(query).map_err(IronClawServicesError::internal_from)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: OPERATOR_LOGS_VIEW.id.to_string(),
                 params,
                 cursor,
@@ -3381,7 +3388,7 @@ pub async fn query_operator_logs(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3392,11 +3399,11 @@ pub async fn query_operator_logs(
 pub async fn query_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Query(query): Query<RebornOperatorLogsQuery>,
-) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    Query(query): Query<IronClawOperatorLogsQuery>,
+) -> Result<Json<IronClawLogQueryResponse>, WebUiV2HttpError> {
     // The public and operator HTTP query strings intentionally share fields;
     // convert at the handler boundary so the facade can enforce public scope.
-    let mut request = RebornLogQueryRequest {
+    let mut request = IronClawLogQueryRequest {
         limit: query.limit,
         cursor: query.cursor,
         level: query.level,
@@ -3411,12 +3418,12 @@ pub async fn query_logs(
         follow: query.follow,
     };
     let cursor = request.cursor.take();
-    let params = serde_json::to_value(request).map_err(RebornServicesError::internal_from)?;
+    let params = serde_json::to_value(request).map_err(IronClawServicesError::internal_from)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: LOGS_VIEW.id.to_string(),
                 params,
                 cursor,
@@ -3424,7 +3431,7 @@ pub async fn query_logs(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3433,8 +3440,8 @@ pub async fn run_operator_service_lifecycle(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<RebornOperatorServiceLifecycleRequest>,
-) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
+    Json(body): Json<IronClawOperatorServiceLifecycleRequest>,
+) -> Result<Json<IronClawOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let response = OPERATOR_SERVICE_LIFECYCLE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
@@ -3462,18 +3469,18 @@ pub async fn get_llm_config(
 async fn query_llm_config_snapshot(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
-) -> Result<LlmConfigSnapshot, RebornServicesError> {
+) -> Result<LlmConfigSnapshot, IronClawServicesError> {
     let page = services
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: LLM_CONFIG_VIEW.id.to_string(),
                 params: serde_json::json!({}),
                 cursor: None,
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)
 }
 
 /// `POST /api/webchat/v2/llm/providers`
@@ -3606,7 +3613,7 @@ pub async fn start_nearai_login(
     {
         body.as_object_mut()
             .ok_or_else(|| {
-                RebornServicesError::from(WebUiInboundValidationError::new(
+                IronClawServicesError::from(WebUiInboundValidationError::new(
                     "body",
                     WebUiInboundValidationCode::InvalidValue,
                 ))
@@ -3695,11 +3702,11 @@ pub struct SetSkillAutoActivateBody {
 fn extension_package_ref_for_request(
     package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
     field: &'static str,
-) -> Result<LifecyclePackageRef, RebornServicesError> {
+) -> Result<LifecyclePackageRef, IronClawServicesError> {
     package_ref
         .and_then(LifecyclePackageRef::require_extension)
         .map_err(|_| {
-            RebornServicesError::from(WebUiInboundValidationError::new(
+            IronClawServicesError::from(WebUiInboundValidationError::new(
                 field,
                 WebUiInboundValidationCode::InvalidId,
             ))
@@ -3781,7 +3788,7 @@ async fn ws_drain_loop(
                 ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
-        let request = RebornStreamEventsRequest {
+        let request = IronClawStreamEventsRequest {
             thread_id: thread_id.clone(),
             after_cursor: after_cursor.clone(),
         };
@@ -3930,7 +3937,7 @@ async fn ws_drain_loop(
                 ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
-        let request = RebornStreamEventsRequest {
+        let request = IronClawStreamEventsRequest {
             thread_id: thread_id.clone(),
             after_cursor: after_cursor.clone(),
         };

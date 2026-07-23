@@ -1,6 +1,6 @@
 //! Shared, mutex-free compare-and-swap (CAS) read-modify-write helper.
 //!
-//! IronClaw Reborn persistence stores keep their durable state as a single
+//! IronClaw persistence stores keep their durable state as a single
 //! versioned snapshot per scoped key (e.g. `/turns/state.json`). Mutating that
 //! snapshot is a read-modify-write: load the current snapshot + its
 //! [`RecordVersion`](crate::RecordVersion), compute the next snapshot, then

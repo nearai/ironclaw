@@ -472,7 +472,7 @@ async fn list_triggers(
 
 /// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
 /// capability's `active_hold` wire object — same shape the automations facade
-/// maps to `RebornAutomationActiveHold`, just JSON instead of a typed DTO
+/// maps to `IronClawAutomationActiveHold`, just JSON instead of a typed DTO
 /// (#5886).
 fn active_hold_json(hold: ActiveHoldProjection) -> Value {
     let reason = match hold.reason {

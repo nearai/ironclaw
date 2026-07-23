@@ -2213,7 +2213,7 @@ async fn tool_result_preview_with_secretary_survives_model_context_replay() {
     );
 }
 
-/// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
+/// Issue #5838: `ironclaw_composition::local_dev` inlines a first-look
 /// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` into the
 /// `result_reference` observation. This pins that a full-size,
 /// JSON-braces-heavy preview at that cap survives this crate's own

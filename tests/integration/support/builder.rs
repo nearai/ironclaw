@@ -1,7 +1,7 @@
-//! `RebornIntegrationHarness` — the integration test tier that runs the full
-//! internal Reborn stack and intercepts the model at the vendor-SDK seam.
+//! `IronClawIntegrationHarness` — the integration test tier that runs the full
+//! internal IronClaw stack and intercepts the model at the vendor-SDK seam.
 //!
-//! Unlike `RebornBinaryE2EHarness` (swaps the whole `HostManagedModelGateway`),
+//! Unlike `IronClawBinaryE2EHarness` (swaps the whole `HostManagedModelGateway`),
 //! this tier wires the REAL `LlmProviderModelGateway` over the REAL
 //! `ironclaw_llm` decorator chain and only scripts the raw provider underneath
 //! via `TraceLlm` — a turn exercises model-profile resolution, request/tool-def
@@ -13,7 +13,7 @@
 //! `/tenants/...` so thread history and turn state share the same backend.
 
 // Shared integration-test support: not every binary that mounts the
-// `reborn_support` tree consumes this module — `support_unit_tests.rs` mounts
+// `ironclaw_support` tree consumes this module — `support_unit_tests.rs` mounts
 // the tree to run the support unit tests but exercises none of the slice-1/2
 // integration harness, so its symbols read as dead there under `-D warnings`.
 // Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
@@ -53,21 +53,23 @@ use ironclaw_turns::{
 };
 
 use super::capability_backend::{
-    CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
+    CapabilityScriptingInputs, IronClawCapabilityBackend, MOCK_MCP_PROVIDER_ID, ShellMode,
 };
 use super::doubles::ParkingCapabilityGate;
-use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ThreadModelMode};
+use super::group::{
+    GroupCapability, GroupSharedStorage, IronClawIntegrationGroup, ThreadModelMode,
+};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
-use super::reply::RebornScriptedReply;
+use super::reply::IronClawScriptedReply;
 use super::scripted_provider::{
     ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailure,
     RecoverableModelFailureScript,
 };
-use super::session_thread::RebornThreadHarness;
-use super::test_adapter::RebornTestIngress;
+use super::session_thread::IronClawThreadHarness;
+use super::test_adapter::IronClawTestIngress;
 use crate::support::trace_llm::TraceLlm;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -122,13 +124,13 @@ pub(crate) enum StorageReopen {
     },
 }
 
-/// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
+/// Builder for [`IronClawIntegrationHarness`]. The script is fixed at build time
 /// (no post-build mutation), matching the existing harness's construction-time
 /// queue.
-pub struct RebornIntegrationHarnessBuilder {
+pub struct IronClawIntegrationHarnessBuilder {
     conversation_id: String,
-    replies: Vec<RebornScriptedReply>,
-    capability: RebornCapabilityBackend,
+    replies: Vec<IronClawScriptedReply>,
+    capability: IronClawCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
     /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
@@ -151,40 +153,40 @@ pub struct RebornIntegrationHarnessBuilder {
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
-    /// planned runtime, bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`
-    /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
+    /// planned runtime, bypassing `IRONCLAW_TOOL_DISCLOSURE`/`from_env()`
+    /// (test-only knob; see `IronClawIntegrationGroupBuilder::tool_disclosure`).
     /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
     /// today's behavior byte-for-byte.
     tool_disclosure: Option<ToolDisclosureMode>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
-    /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
+    /// degenerate one-thread group (see `IronClawIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
     /// C-COMMCTX: optional communication-context provider threaded into the
     /// degenerate one-thread group (see
-    /// `RebornIntegrationGroupBuilder::communication_context_provider`).
+    /// `IronClawIntegrationGroupBuilder::communication_context_provider`).
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     /// C-HOOKS / E-HOOK-INFRA: optional per-run hook dispatcher builder factory
     /// threaded into the degenerate one-thread group (see
-    /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
+    /// `IronClawIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
     /// E-GATEWAY tool-path analog of `park_gate`: when set, this harness's
     /// `BuiltinHttpTools` capability dispatch parks until released (issue
-    /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
+    /// #5476 lease-wedge coverage). Threaded into `IronClawCapabilityBackend::install`.
     park_tool_gate: Option<ParkingCapabilityGate>,
     /// Shortens the underlying group's turn-state store lease TTL (default
     /// 90s) for lease-expiry-under-a-wedged-tool coverage. Threaded into
-    /// `RebornIntegrationGroupBuilder::with_runner_lease_ttl_for_test`.
+    /// `IronClawIntegrationGroupBuilder::with_runner_lease_ttl_for_test`.
     runner_lease_ttl: Option<chrono::Duration>,
     /// Shortens the underlying group's scheduler lease-recovery sweep
     /// interval (default 10s) for lease-expiry-under-a-wedged-tool coverage.
     /// Threaded into
-    /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
+    /// `IronClawIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     lease_recovery_interval: Option<Duration>,
 }
 
-impl RebornIntegrationHarnessBuilder {
+impl IronClawIntegrationHarnessBuilder {
     /// Set the scripted model replies (consumed in order at the raw-provider seam).
-    pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
+    pub fn script(mut self, replies: impl IntoIterator<Item = IronClawScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
         self
     }
@@ -203,7 +205,7 @@ impl RebornIntegrationHarnessBuilder {
     /// prompt message ahead of any per-turn instructions; read back via
     /// `assert_system_prompt_contains`. Defaults to `None` (no banner, matching
     /// today's behavior) — see `tests/integration/support/group.rs`'s
-    /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
+    /// `IronClawIntegrationGroupBuilder::safety_context` for the underlying wiring.
     pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
         self
@@ -213,7 +215,7 @@ impl RebornIntegrationHarnessBuilder {
     /// (C-BUDGET). On the turn's first model call the accountant seeds the run
     /// owner's daily USD cap into an in-memory governor; read it back with
     /// `assert_budget_user_cap_seeded`. Defaults off. See
-    /// `RebornIntegrationGroupBuilder::budget_accounting` for the wiring.
+    /// `IronClawIntegrationGroupBuilder::budget_accounting` for the wiring.
     pub fn with_budget_accounting(mut self) -> Self {
         self.budget_accounting = true;
         self
@@ -223,7 +225,7 @@ impl RebornIntegrationHarnessBuilder {
     /// (C-COMMCTX), so the delivery-preference / connected-channel slice it
     /// resolves renders into the model request (assert via
     /// `assert_model_request_contains`). Defaults `None`. See
-    /// `RebornIntegrationGroupBuilder::communication_context_provider`.
+    /// `IronClawIntegrationGroupBuilder::communication_context_provider`.
     pub fn with_communication_context_provider(
         mut self,
         provider: Arc<dyn CommunicationContextProvider>,
@@ -235,7 +237,7 @@ impl RebornIntegrationHarnessBuilder {
     /// Wire a per-run `HookDispatcherBuilderFactory` into this harness's
     /// underlying group (C-HOOKS / E-HOOK-INFRA), so hooks fire at their
     /// lifecycle points on a coordinator-path turn. Defaults `None`. See
-    /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`.
+    /// `IronClawIntegrationGroupBuilder::hook_dispatcher_builder_factory`.
     pub fn with_hook_factory(mut self, factory: HookDispatcherBuilderFactory) -> Self {
         self.hook_dispatcher_builder_factory = Some(factory);
         self
@@ -243,7 +245,7 @@ impl RebornIntegrationHarnessBuilder {
 
     /// Park this harness's model call until `gate` is released (E-GATEWAY seam),
     /// so a test can cancel the run mid-turn. See
-    /// [`RebornThreadBuilder::park_model`].
+    /// [`IronClawThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
         self.model_mode = ThreadModelMode::Parked(gate);
         self
@@ -251,7 +253,7 @@ impl RebornIntegrationHarnessBuilder {
 
     /// Fail this harness's model call unconditionally with a fixed, non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
-    /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
+    /// [`IronClawThreadBuilder::fail_model`](super::group::IronClawThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
         self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
         self
@@ -322,7 +324,7 @@ impl RebornIntegrationHarnessBuilder {
     /// (default 10s) so a wedged run is reaped without waiting on the
     /// production tick. `None` (default) leaves today's behavior
     /// byte-identical. See
-    /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
+    /// `IronClawIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
         self.lease_recovery_interval = Some(interval);
         self
@@ -330,14 +332,14 @@ impl RebornIntegrationHarnessBuilder {
 
     /// Install an in-memory `TurnEventSink` into the underlying group's planned
     /// runtime (C-TRACECAP). Read the recorded events back with
-    /// [`RebornIntegrationHarness::recorded_turn_events`].
+    /// [`IronClawIntegrationHarness::recorded_turn_events`].
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = true;
         self
     }
 
     /// Force `ToolDisclosureMode::Bridged` for this harness's underlying group
-    /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
+    /// (enabler (b), `IRONCLAW_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
     /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
     /// tool list with the bridge meta tools in the `tools` argument shipped
     /// to the model. Only `tool_search` is ever ADVERTISED to the model;
@@ -358,10 +360,10 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// Force `ToolDisclosureMode::Off` for this harness's underlying group,
-    /// bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
+    /// bypassing `IRONCLAW_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
     /// negative-control test's mode explicitly rather than relying on the
     /// ambient env default — see
-    /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
+    /// `IronClawIntegrationGroupBuilder::with_tool_disclosure_off` for why the
     /// env-resolution path alone is not control-safe.
     pub fn with_tool_disclosure_off(mut self) -> Self {
         self.tool_disclosure = Some(ToolDisclosureMode::Off);
@@ -372,7 +374,7 @@ impl RebornIntegrationHarnessBuilder {
     /// `RuntimeHttpEgress`, captured at the recording egress (no network). Required
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpTools;
         self
     }
 
@@ -382,7 +384,7 @@ impl RebornIntegrationHarnessBuilder {
     /// double, so a large `read_file` output is persisted durably and
     /// `result_read` can page through it.
     pub fn with_durable_capability_io_file_tools(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::FileToolsDurableIo;
+        self.capability = IronClawCapabilityBackend::FileToolsDurableIo;
         self
     }
 
@@ -391,7 +393,7 @@ impl RebornIntegrationHarnessBuilder {
     /// scoped-roots note is observable on `read_file`'s captured tool
     /// definition (the layer is disabled without a confirmed host-home mount).
     pub fn with_confirmed_host_mount(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpToolsConfirmedHostMount;
         self
     }
 
@@ -405,7 +407,7 @@ impl RebornIntegrationHarnessBuilder {
     ///
     /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_live_shell(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpTools;
         self.shell_mode = ShellMode::Live;
         self
     }
@@ -415,7 +417,7 @@ impl RebornIntegrationHarnessBuilder {
     /// *Completed* result carrying `exit_code`/`success: false`. Implies
     /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_shell_exit_code(mut self, exit_code: i64) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpTools;
         self.shell_mode = ShellMode::Scripted(ScriptedProcessResult::ExitCode(exit_code));
         self
     }
@@ -425,7 +427,7 @@ impl RebornIntegrationHarnessBuilder {
     /// recoverable model-visible `Failed{Resource}` capability error. Implies
     /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_shell_timeout(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpTools;
         self.shell_mode = ShellMode::Scripted(ScriptedProcessResult::Timeout);
         self
     }
@@ -440,7 +442,7 @@ impl RebornIntegrationHarnessBuilder {
         mut self,
         responses: impl IntoIterator<Item = ScriptedHttpResponse>,
     ) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpTools;
         self.keyed_http_responses = responses.into_iter().collect();
         self
     }
@@ -454,11 +456,11 @@ impl RebornIntegrationHarnessBuilder {
     /// credential injection reaches the wire (T0-SECRET-INJECT).
     ///
     /// Script the model with
-    /// `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
-    /// followed by a `RebornScriptedReply::text(..)` turn, then assert with
-    /// [`assert_network_egress_header_contains`](RebornIntegrationHarness::assert_network_egress_header_contains).
+    /// `IronClawScriptedReply::tool_call("github.get_repo", json!({"owner": ..., "repo": ...}))`
+    /// followed by a `IronClawScriptedReply::text(..)` turn, then assert with
+    /// [`assert_network_egress_header_contains`](IronClawIntegrationHarness::assert_network_egress_header_contains).
     pub fn with_github_issue_tools(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::GithubIssueTools;
+        self.capability = IronClawCapabilityBackend::GithubIssueTools;
         self
     }
 
@@ -471,7 +473,7 @@ impl RebornIntegrationHarnessBuilder {
     /// distinct from `github_issue_tools_auth_required`'s credential-missing
     /// path) must be scripted here. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
     pub fn with_github_network_status(mut self, status: u16) -> Self {
-        self.capability = RebornCapabilityBackend::GithubIssueTools;
+        self.capability = IronClawCapabilityBackend::GithubIssueTools;
         self.github_network_statuses.push(status);
         self
     }
@@ -483,13 +485,13 @@ impl RebornIntegrationHarnessBuilder {
     /// they cannot be told apart by the keyed HTTP matcher and are instead
     /// installed onto the recording egress's FIFO queue at build time. Script
     /// the model with
-    /// `RebornScriptedReply::tool_call("web-access.search", json!({"query": ...}))`
+    /// `IronClawScriptedReply::tool_call("web-access.search", json!({"query": ...}))`
     /// followed by a trailing text turn.
     pub fn with_web_access_tools(
         mut self,
         response_bodies: impl IntoIterator<Item = Vec<u8>>,
     ) -> Self {
-        self.capability = RebornCapabilityBackend::WebAccessTools;
+        self.capability = IronClawCapabilityBackend::WebAccessTools;
         self.web_access_response_bodies = response_bodies.into_iter().collect();
         self
     }
@@ -501,7 +503,7 @@ impl RebornIntegrationHarnessBuilder {
     /// Distinct from [`with_builtin_http_tools`](Self::with_builtin_http_tools),
     /// whose `RecordingRuntimeHttpEgress` bypasses both security layers.
     pub fn with_real_egress_pipeline(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpToolsRealEgress;
         self
     }
 
@@ -513,7 +515,7 @@ impl RebornIntegrationHarnessBuilder {
         mut self,
         bodies: impl IntoIterator<Item = Vec<u8>>,
     ) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
+        self.capability = IronClawCapabilityBackend::BuiltinHttpToolsRealEgress;
         self.real_egress_response_bodies = bodies.into_iter().collect();
         self
     }
@@ -526,10 +528,10 @@ impl RebornIntegrationHarnessBuilder {
     /// — real HTTP connections to the mock server on a loopback port, with an
     /// injected Bearer token so the mock's OAuth gate passes.
     ///
-    /// Script the model with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
+    /// Script the model with `IronClawScriptedReply::tool_call("mock-mcp.search", json!({}))`.
     /// Assert via `assert_mcp_tool_called("search")`.
     pub fn with_mock_mcp(mut self, mcp_url: impl Into<String>) -> Self {
-        self.capability = RebornCapabilityBackend::MockMcp {
+        self.capability = IronClawCapabilityBackend::MockMcp {
             mcp_url: mcp_url.into(),
         };
         self
@@ -538,16 +540,16 @@ impl RebornIntegrationHarnessBuilder {
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     ///
-    /// Routes through an internal, degenerate one-thread `RebornIntegrationGroup`
+    /// Routes through an internal, degenerate one-thread `IronClawIntegrationGroup`
     /// so there is exactly ONE assembly path for both groups and single-shot
     /// harnesses — no de-facto fork.
-    pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
+    pub async fn build(self) -> HarnessResult<IronClawIntegrationHarness> {
         apply_hermetic_env();
 
         // --- capability backend → GroupCapability --------------------------
         // Echo by default (records, executes nothing — a text reply invokes no
         // tool). Builtin/MCP swap in the real first-party runtime. (Live approval
-        // stores are a group-only backend; see `RebornIntegrationGroup::live_approvals`.)
+        // stores are a group-only backend; see `IronClawIntegrationGroup::live_approvals`.)
         let group_capability = self
             .capability
             .install(
@@ -566,7 +568,7 @@ impl RebornIntegrationHarnessBuilder {
         // groups and single-shot harnesses). A single-shot harness is a
         // degenerate one-thread group and submits as the default
         // `HARNESS_ACTOR_ID`.
-        let mut group_builder = RebornIntegrationGroup::builder().storage(self.storage);
+        let mut group_builder = IronClawIntegrationGroup::builder().storage(self.storage);
         if let Some(ctx) = self.safety_context {
             group_builder = group_builder.safety_context(ctx);
         }
@@ -597,7 +599,7 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(interval) = self.lease_recovery_interval {
             group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
         }
-        let group: RebornIntegrationGroup = group_builder
+        let group: IronClawIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
         group
@@ -609,10 +611,10 @@ impl RebornIntegrationHarnessBuilder {
     }
 }
 
-/// Full-stack Reborn integration harness with a scripted raw provider beneath
+/// Full-stack IronClaw integration harness with a scripted raw provider beneath
 /// the real decorator chain. See module docs.
-pub struct RebornIntegrationHarness {
-    pub(crate) ingress: RebornTestIngress,
+pub struct IronClawIntegrationHarness {
+    pub(crate) ingress: IronClawTestIngress,
     pub(crate) workflow: std::sync::Arc<DefaultProductSurface>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
@@ -631,7 +633,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
     pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
-    pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
+    pub(crate) thread_harness: IronClawThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
     /// harness's `resume_with_gate` path.
@@ -682,18 +684,18 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_milestone_count: usize,
 }
 
-impl RebornIntegrationHarness {
+impl IronClawIntegrationHarness {
     /// Default harness: InMemory storage, hermetic env, real decorator chain.
-    pub fn test_default() -> RebornIntegrationHarnessBuilder {
+    pub fn test_default() -> IronClawIntegrationHarnessBuilder {
         Self::builder("conv-itest")
     }
 
     /// Builder for a specific conversation id.
-    pub fn builder(conversation_id: impl Into<String>) -> RebornIntegrationHarnessBuilder {
-        RebornIntegrationHarnessBuilder {
+    pub fn builder(conversation_id: impl Into<String>) -> IronClawIntegrationHarnessBuilder {
+        IronClawIntegrationHarnessBuilder {
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
-            capability: RebornCapabilityBackend::Echo,
+            capability: IronClawCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
             github_network_statuses: Vec::new(),
@@ -757,7 +759,7 @@ impl RebornIntegrationHarness {
     /// fixed-at-build-time script (`.script(..)`) remains the norm; reach for
     /// this only when the dependent value genuinely cannot be known ahead of
     /// time.
-    pub fn push_script(&self, replies: impl IntoIterator<Item = RebornScriptedReply>) {
+    pub fn push_script(&self, replies: impl IntoIterator<Item = IronClawScriptedReply>) {
         for reply in replies {
             self.scripted_llm.push_step(reply.into_step());
         }
@@ -787,7 +789,7 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<TurnRunId> {
         if self.capability_recorder.attachment_test_support().is_none() {
             return Err(
-                "no attachment lander wired — build the harness via RebornIntegrationGroup::attachment_tools()"
+                "no attachment lander wired — build the harness via IronClawIntegrationGroup::attachment_tools()"
                     .into(),
             );
         }
@@ -821,7 +823,7 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<TurnRunId> {
         if self.capability_recorder.attachment_test_support().is_none() {
             return Err(
-                "no attachment lander wired — build the harness via RebornIntegrationGroup::attachment_tools()"
+                "no attachment lander wired — build the harness via IronClawIntegrationGroup::attachment_tools()"
                     .into(),
             );
         }
@@ -950,7 +952,7 @@ impl RebornIntegrationHarness {
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
     /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
-    /// destructive tool call in a `RebornIntegrationGroup::live_approvals` thread
+    /// destructive tool call in a `IronClawIntegrationGroup::live_approvals` thread
     /// blocks here; the test then calls `approve_gate`/`deny_gate` and
     /// `wait_for_status(Completed)`.
     pub async fn submit_turn_until_blocked(
@@ -972,7 +974,7 @@ impl RebornIntegrationHarness {
 
     /// Submit a user turn and wait until it blocks on an **auth** gate, returning
     /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
-    /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
+    /// for the `IronClawIntegrationGroup::live_auth_gate` fixture: a scripted
     /// capability whose credential account resolves to `AuthRequired` blocks here
     /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
     pub async fn submit_turn_until_auth_blocked(
@@ -1063,11 +1065,11 @@ impl RebornIntegrationHarness {
                 .await
                 .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
             let mut fresh_composite = CompositeRootFilesystem::new();
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_composition::test_support::mount_local_dev_database_roots_for_test(
                 &mut fresh_composite,
                 filesystem,
             )?;
-            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+            let fresh_harness = IronClawThreadHarness::filesystem_shared_composite(
                 self.thread_harness.scope.clone(),
                 Arc::new(fresh_composite),
                 Arc::clone(&self._shared.turn_root),
@@ -1084,7 +1086,7 @@ impl RebornIntegrationHarness {
             // the fresh db is empty, so `list_thread_history` returns no messages and
             // `assert_final_reply` returns `Err(MissingFinalReply)`.
             let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
-            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+            let fresh_harness = IronClawThreadHarness::filesystem_shared_composite(
                 self.thread_harness.scope.clone(),
                 fresh_composite,
                 Arc::clone(&self._shared.turn_root),
@@ -1283,7 +1285,7 @@ impl RebornIntegrationHarness {
     /// submitted. Read by `assert_system_prompt_contains` in `assertions.rs`.
     ///
     /// No `[baseline..]` slice (unlike `captured_egress_requests`): `scripted_llm`
-    /// is a fresh per-thread `Arc<TraceLlm>` built in `RebornThreadBuilder::build`,
+    /// is a fresh per-thread `Arc<TraceLlm>` built in `IronClawThreadBuilder::build`,
     /// not a group-shared recorder, so it only ever holds this thread's requests.
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
@@ -1325,7 +1327,7 @@ impl RebornIntegrationHarness {
     /// Every `data:` URL from a `ContentPart::ImageUrl` part across all captured
     /// model requests (C-ATTACH). Empty when no multimodal image part reached
     /// the model — either no image was attached, the model id wasn't
-    /// vision-capable (see `RebornThreadBuilder::with_model_override`), or the
+    /// vision-capable (see `IronClawThreadBuilder::with_model_override`), or the
     /// attachment read port failed to land/read the bytes.
     pub(super) fn captured_image_data_urls(&self) -> Vec<String> {
         self.scripted_llm
@@ -1667,7 +1669,7 @@ impl RebornIntegrationHarness {
     ///
     /// Only valid on a harness built via
     /// `HostRuntimeCapabilityHarness::file_and_github_auth_tools` — the
-    /// credential-seeding path needs `build_reborn_services` product-auth
+    /// credential-seeding path needs `build_ironclaw_services` product-auth
     /// wiring that `deny_auth_gate`'s sibling fixture (`live_auth_gate`, a
     /// lower-level build with a hardcoded resolver) does not have.
     pub async fn resolve_auth_gate(
@@ -1710,7 +1712,7 @@ impl RebornIntegrationHarness {
     /// That user is NOT the capability harness's fixed constructor user: the
     /// production capability surface (`local_dev_visible_capability_request` /
     /// `local_dev_resource_scope_for_run` in
-    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) resolves
+    /// `crates/ironclaw_composition/src/runtime/local_dev.rs`) resolves
     /// the execution user per run as `thread owner → run actor → fixed
     /// fallback`, and every harness thread run carries an actor — so the fixed
     /// fallback never applies here. Seeding under the harness's fixed
@@ -1911,7 +1913,7 @@ impl RebornIntegrationHarness {
 }
 
 // Scheduler shutdown: the group's `TurnRunSchedulerHandle` lives on
-// `GroupSharedStorage` (not on any per-thread `RebornIntegrationHarness`), so
+// `GroupSharedStorage` (not on any per-thread `IronClawIntegrationHarness`), so
 // no `Drop` impl is needed here. `TurnRunSchedulerHandle::drop` synchronously
 // cancels the scheduler loop when the last `Arc<GroupSharedStorage>` (held by
 // every harness's `_shared` field) goes away.
@@ -1942,7 +1944,7 @@ async fn reopen_fresh_libsql_composite(
         .await
         .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+    ironclaw_composition::test_support::mount_local_dev_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )?;
@@ -1963,21 +1965,21 @@ pub(crate) async fn build_storage_composite(
     let mut composite = CompositeRootFilesystem::new();
     let reopen = match mode {
         StorageMode::InMemory => {
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_composition::test_support::mount_local_dev_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
             StorageReopen::None
         }
         StorageMode::LibSql => {
-            ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+            ironclaw_composition::test_support::build_default_local_dev_database_roots_for_test(
                 dir,
                 &mut composite,
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
             StorageReopen::LibSql {
-                db_path: dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME),
+                db_path: dir.join(ironclaw_composition::test_support::LOCAL_DEV_DB_FILENAME),
             }
         }
         StorageMode::Postgres => {
@@ -1989,7 +1991,7 @@ pub(crate) async fn build_storage_composite(
                 .run_migrations()
                 .await
                 .map_err(|error| format!("Postgres migrations failed: {error}"))?;
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            ironclaw_composition::test_support::mount_local_dev_database_roots_for_test(
                 &mut composite,
                 filesystem,
             )?;
@@ -2123,7 +2125,7 @@ pub(crate) fn apply_hermetic_env() {
             // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
             // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
             // never ambient (see `tool_disclosure.rs`'s negative control).
-            std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
+            std::env::remove_var(ironclaw_runner::runtime::IRONCLAW_TOOL_DISCLOSURE_ENV);
         }
     });
 }
@@ -2163,7 +2165,7 @@ mod tests {
 
     #[test]
     fn last_model_mode_selection_wins() {
-        let failing = RebornIntegrationHarness::test_default()
+        let failing = IronClawIntegrationHarness::test_default()
             .park_model(ParkingModelGate::new())
             .fail_model();
         assert!(matches!(
@@ -2171,7 +2173,7 @@ mod tests {
             ThreadModelMode::Failing(ErrLlmKind::ContextLength)
         ));
 
-        let recoverable = RebornIntegrationHarness::test_default()
+        let recoverable = IronClawIntegrationHarness::test_default()
             .fail_model_auth()
             .content_filter_model_once();
         assert!(matches!(
@@ -2185,8 +2187,8 @@ mod tests {
     }
 }
 
-// The shared planned-runtime assembly (`RebornIntegrationGroupBuilder::into_group`)
-// and per-thread harness assembly (`RebornThreadBuilder::build`) live in
+// The shared planned-runtime assembly (`IronClawIntegrationGroupBuilder::into_group`)
+// and per-thread harness assembly (`IronClawThreadBuilder::build`) live in
 // `group.rs` (imported above) — that module owns `GroupSharedStorage` and the
 // capability mode types.
 // arch-exempt: large_file, integration builder remains centralized during fixture migration, plan #6175

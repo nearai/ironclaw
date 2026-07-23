@@ -42,18 +42,18 @@ case "${package}" in
   ironclaw_product_workflow)
     printf '%s\n' "--features test-support"
     ;;
-  ironclaw_reborn_composition)
+  ironclaw_composition)
     printf '%s\n' "--features test-support"
     ;;
   ironclaw_runner)
     ;;
-  ironclaw_reborn_event_store)
+  ironclaw_event_store)
     ;;
   ironclaw_hooks)
     # The durable libSQL/Postgres backends + parity matrix folded into this
     # crate are exercised by the dedicated hooks-parity job in
     # platform-and-compat.yml (integration,test-support).
-    # Keep this reborn-closure job light — the framework's own unit tests only —
+    # Keep this IronClaw-closure job light — the framework's own unit tests only —
     # so it does not pull more integration-tier work into the crate bucket.
     printf '%s\n' "--features test-support"
     ;;
@@ -66,14 +66,14 @@ case "${package}" in
     # is gated behind `feature = "test-support"`.
     printf '%s\n' "--features test-support"
     ;;
-  ironclaw_reborn_openai_compat)
+  ironclaw_openai_compat)
     ;;
   ironclaw_architecture | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
-  ironclaw_reborn_config | \
-  ironclaw_reborn_identity | \
-  ironclaw_reborn_traces | \
+  ironclaw_config | \
+  ironclaw_identity | \
+  ironclaw_traces | \
   ironclaw_telegram_extension | \
   ironclaw_telegram_v2_adapter)
     # Already on the allowlist with no feature flags; keep them flag-free now

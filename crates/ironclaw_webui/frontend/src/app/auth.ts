@@ -12,7 +12,7 @@ import { clearAllPins } from "../lib/pin-store";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory";
 import { clearAllDrafts } from "../pages/chat/lib/draft-store";
 
-// The Reborn host validates bearer tokens via OIDC; the SPA simply
+// The IronClaw host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
 // `#token=` URL fragment, OAuth `login_ticket` exchange, or
 // `sessionStorage`) and lets the server reject anything invalid. The
@@ -289,10 +289,10 @@ export function useAuthSession() {
     retrySessionCheck,
     isAuthenticated: Boolean(token && session),
     isAdmin: Boolean(session?.capabilities?.operator_webui_config),
-    // Deployment feature gate (not a per-user capability): the Reborn
+    // Deployment feature gate (not a per-user capability): the IronClaw
     // Projects surface is hidden until the server sets
     // IRONCLAW_REBORN_PROJECTS, while the surface is being finished.
-    rebornProjectsEnabled: Boolean(session?.features?.reborn_projects),
+    rebornProjectsEnabled: Boolean(session?.features?.ironclaw_projects),
     globalAutoApproveEnabled: Boolean(session?.features?.global_auto_approve),
     signIn,
     signOut,

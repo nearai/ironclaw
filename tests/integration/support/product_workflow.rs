@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use super::filesystem::local_filesystem;
 
 #[derive(Debug, Error)]
-pub enum RebornProductWorkflowHarnessError {
+pub enum IronClawProductWorkflowHarnessError {
     #[error("failed to create product workflow harness tempdir: {0}")]
     Tempdir(#[from] std::io::Error),
     #[error("failed to configure local filesystem: {0}")]
@@ -35,7 +35,7 @@ pub enum RebornProductWorkflowHarnessError {
     MissingAgentScope,
 }
 
-pub struct RebornProductWorkflowHarness {
+pub struct IronClawProductWorkflowHarness {
     pub scope: ResourceScope,
     filesystem: Arc<ScopedFilesystem<DiskFilesystem>>,
     backend: Arc<DiskFilesystem>,
@@ -43,10 +43,10 @@ pub struct RebornProductWorkflowHarness {
     idempotency_lock: Arc<Mutex<()>>,
 }
 
-impl RebornProductWorkflowHarness {
+impl IronClawProductWorkflowHarness {
     pub fn filesystem_temp(
         scope: ResourceScope,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+    ) -> Result<Self, IronClawProductWorkflowHarnessError> {
         let root = Arc::new(tempfile::tempdir()?);
         let backend = Arc::new(local_filesystem(root.path())?);
         Self::filesystem_shared_backend(scope, backend, root)
@@ -56,7 +56,7 @@ impl RebornProductWorkflowHarness {
         scope: ResourceScope,
         backend: Arc<DiskFilesystem>,
         root: Arc<tempfile::TempDir>,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+    ) -> Result<Self, IronClawProductWorkflowHarnessError> {
         let idempotency_lock = idempotency_lock_for_workflow_root(&root, &scope);
         Self::filesystem_shared_backend_with_lock(scope, backend, root, idempotency_lock)
     }
@@ -66,7 +66,7 @@ impl RebornProductWorkflowHarness {
         backend: Arc<DiskFilesystem>,
         root: Arc<tempfile::TempDir>,
         idempotency_lock: Arc<Mutex<()>>,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+    ) -> Result<Self, IronClawProductWorkflowHarnessError> {
         let filesystem = scoped_product_workflow_fs_at(Arc::clone(&backend), &scope)?;
         Ok(Self {
             scope,
@@ -77,7 +77,7 @@ impl RebornProductWorkflowHarness {
         })
     }
 
-    pub fn reopened(&self) -> Result<Self, RebornProductWorkflowHarnessError> {
+    pub fn reopened(&self) -> Result<Self, IronClawProductWorkflowHarnessError> {
         Self::filesystem_shared_backend_with_lock(
             self.scope.clone(),
             Arc::clone(&self.backend),
@@ -89,7 +89,7 @@ impl RebornProductWorkflowHarness {
     pub fn with_scope(
         &self,
         scope: ResourceScope,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+    ) -> Result<Self, IronClawProductWorkflowHarnessError> {
         Self::filesystem_shared_backend_with_lock(
             scope,
             Arc::clone(&self.backend),
@@ -102,13 +102,13 @@ impl RebornProductWorkflowHarness {
         &self,
     ) -> Result<
         FilesystemConversationBindingService<DiskFilesystem>,
-        RebornProductWorkflowHarnessError,
+        IronClawProductWorkflowHarnessError,
     > {
         let agent_id = self
             .scope
             .agent_id
             .clone()
-            .ok_or(RebornProductWorkflowHarnessError::MissingAgentScope)?;
+            .ok_or(IronClawProductWorkflowHarnessError::MissingAgentScope)?;
         Ok(FilesystemConversationBindingService::new(
             Arc::clone(&self.filesystem),
             self.scope.clone(),

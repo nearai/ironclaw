@@ -1,7 +1,7 @@
 # Pending Gate Projection
 
-`PendingGateProjection` materializes a Reborn pending-gate read model from
-`TurnLifecycleEvent`. It is the only Reborn path that should write derived
+`PendingGateProjection` materializes a IronClaw pending-gate read model from
+`TurnLifecycleEvent`. It is the only IronClaw path that should write derived
 pending-gate rows.
 
 The legacy root `src/gate/PendingGateStore` remains engine-owned until product
@@ -16,5 +16,5 @@ writer audit:
   thread cleanup, and key discard helpers.
 
 Follow-up composition work must either adapt this projection into the root UI
-store or retire those legacy writers for Reborn-backed turns. Do not add a new
-direct writer for Reborn blocked turns.
+store or retire those legacy writers for IronClaw-backed turns. Do not add a new
+direct writer for IronClaw blocked turns.

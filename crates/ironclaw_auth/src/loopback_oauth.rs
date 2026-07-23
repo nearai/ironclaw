@@ -7,12 +7,12 @@
 //! session login, WASM tool auth, MCP server auth, registry-provider backends)
 //! live in their owning v1 modules and depend on this module for the transport.
 //!
-//! ## Not used by Reborn
+//! ## Not used by IronClaw
 //!
-//! The Reborn stack does **not** use this module. Its hosted, multi-tenant model
+//! The IronClaw stack does **not** use this module. Its hosted, multi-tenant model
 //! receives OAuth callbacks on durable gateway HTTP routes
 //! (`/api/product-auth/oauth/callback/{flow_id}`, see
-//! `ironclaw_reborn_composition::product_auth_serve`) with persisted flow state,
+//! `ironclaw_composition::product_auth_serve`) with persisted flow state,
 //! which is fundamentally incompatible with a single-flow, in-process,
 //! fixed-port loopback listener. The sole consumer is the root `ironclaw` v1
 //! binary.
@@ -20,8 +20,8 @@
 //! ## DELETE WITH V1
 //!
 //! This module is part of the deprecated v1 surface (see "Where to Build —
-//! Reborn-First" in the root `CLAUDE.md`). When the legacy `src/` stack is
-//! removed, delete it outright — do **not** port it to Reborn, which already
+//! IronClaw-First" in the root `CLAUDE.md`). When the legacy `src/` stack is
+//! removed, delete it outright — do **not** port it to IronClaw, which already
 //! has its own callback transport, and do **not** add new consumers.
 
 use std::collections::HashMap;

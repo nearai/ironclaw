@@ -30,6 +30,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
+use ironclaw_composition::PublicRouteMount;
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::TenantId;
 use ironclaw_host_api::ingress::{
@@ -37,7 +38,6 @@ use ironclaw_host_api::ingress::{
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_reborn_composition::PublicRouteMount;
 use parking_lot::Mutex;
 use rand::RngExt as _;
 use secrecy::{ExposeSecret, SecretString};
@@ -255,7 +255,7 @@ async fn login_handler(
         Ok(bearer) => bearer,
         Err(err) => {
             tracing::error!(
-                target = "ironclaw::reborn::webui_ingress::cli_token_login",
+                target = "ironclaw::webui_ingress::cli_token_login",
                 error = %err,
                 "session store create_session failed",
             );

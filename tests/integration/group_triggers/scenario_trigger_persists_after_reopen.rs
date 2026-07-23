@@ -2,7 +2,7 @@
 //! repository at the SAME on-disk local-dev `storage_root` — proving
 //! capability-produced trigger state persists to disk, not just to in-memory
 //! state. Parallels `assert_reply_persists_after_reopen` (thread history) and
-//! `reborn_integration_durable.rs` (extension installs) for the trigger
+//! `ironclaw_integration_durable.rs` (extension installs) for the trigger
 //! repository.
 //!
 //! Creates a one-shot `Once` trigger through a real turn, reads the
@@ -10,19 +10,19 @@
 //! capability harness's `storage_root_for_test()` and confirms the trigger is
 //! there by id — independent of the live `Arc` the group holds.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_triggers::TriggerId;
 use serde_json::json;
 
 const ONCE_AT: &str = "2999-06-01T00:00:00";
 const TRIGGER_NAME: &str = "c-durable-trigger-reopen";
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("trigger-durable")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
@@ -30,7 +30,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
                 }),
             ),
-            RebornScriptedReply::text("created"),
+            IronClawScriptedReply::text("created"),
         ])
         .build()
         .await?;
@@ -51,11 +51,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Reopen a FRESH, independent repository at the same on-disk root — not the
     // live `Arc` the running group holds — and confirm the trigger is there.
-    let reopened =
-        ironclaw_reborn_composition::test_support::open_local_dev_trigger_repository_for_test(
-            &capability_harness.storage_root_for_test(),
-        )
-        .await?;
+    let reopened = ironclaw_composition::test_support::open_local_dev_trigger_repository_for_test(
+        &capability_harness.storage_root_for_test(),
+    )
+    .await?;
     let record = reopened
         .get_trigger(tenant_id, TriggerId::parse(&trigger_id)?)
         .await?

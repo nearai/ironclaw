@@ -21,7 +21,7 @@ use super::super::{
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
-    extension_lifecycle_tools_profile_for_user("reborn-e2e-extension-lifecycle-user")
+    extension_lifecycle_tools_profile_for_user("ironclaw-e2e-extension-lifecycle-user")
 }
 
 /// Same profile as [`extension_lifecycle_tools_profile`], but seeds
@@ -29,7 +29,7 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
 /// of the fixed test constant. Callers that align the built harness's
 /// dispatch scope to a real turn's binding subject (`HostRuntimeCapabilityHarness::with_user_id`,
 /// e.g. `group_constructors.rs`'s `build_group_capability_with_base` and
-/// `RebornBinaryE2EHarness::with_host_runtime_extension_lifecycle_capabilities`)
+/// `IronClawBinaryE2EHarness::with_host_runtime_extension_lifecycle_capabilities`)
 /// must also seed under that SAME aligned user — `with_user_id` only
 /// re-points dispatch scope, not the extension-credential rows seeded during
 /// `.build()`, so a mismatched seed user leaves credentialed extensions
@@ -55,9 +55,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         effect_kinds: local_dev_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
@@ -65,7 +63,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-extension-lifecycle-tools", user_id)?
+        ..ToolsProfile::new("ironclaw-e2e-extension-lifecycle-tools", user_id)?
     })
 }
 
@@ -125,7 +123,7 @@ pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured()
 /// caller-supplied `user_id` — the same fixed-user/aligned-user split
 /// [`extension_lifecycle_tools_profile_for_user`] documents. Callers that align
 /// the harness's dispatch scope to a real turn's binding subject (the
-/// `RebornBinaryE2EHarness` extension-lifecycle constructor) need BOTH the
+/// `IronClawBinaryE2EHarness` extension-lifecycle constructor) need BOTH the
 /// aligned seed user and the configured-instance signal, which neither
 /// single-axis constructor above provides on its own.
 pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured_for_user(
@@ -226,9 +224,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
         effect_kinds: local_dev_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
@@ -246,8 +242,8 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
         )),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
-            "reborn-e2e-extension-visibility-probe",
-            "reborn-e2e-extension-visibility-user",
+            "ironclaw-e2e-extension-visibility-probe",
+            "ironclaw-e2e-extension-visibility-user",
         )?
     })
 }
@@ -258,7 +254,7 @@ pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRunt
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(
-    services: &ironclaw_reborn_composition::RebornServices,
+    services: &ironclaw_composition::IronClawServices,
     user_id: &UserId,
 ) -> HarnessResult<()> {
     let product_auth = services
@@ -644,12 +640,12 @@ pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeC
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
 
 /// The bundled telegram manifest's `runtime.service` id — the same native
-/// binding the binary assembles (`ironclaw_reborn_cli::runtime::native_extensions`).
+/// binding the binary assembles (`ironclaw_cli::runtime::native_extensions`).
 pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 
 /// Native factory for the bundled telegram package: binds the REAL
 /// `TelegramChannelAdapter` as its channel surface, exactly like the binary
-/// assembly in `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+/// assembly in `crates/ironclaw_cli/src/runtime/native_extensions.rs`
 /// (mirrored here because the integration harness composes its own runtime
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
@@ -756,15 +752,15 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
 }
 
 /// Slack's channel-adapter binding, mirrored from the binary assembly
-/// (`ironclaw_reborn_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
+/// (`ironclaw_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
 /// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
 /// harness composes its own runtime and cannot depend on the CLI crate.
 /// Slack's WASM-runtime package cannot ride a native factory, so without
 /// this binding composition serves its `[channel]` surface with the
 /// transitional `HostServedChannelBridge`, which rejects every verified
 /// inbound request.
-fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
-    ironclaw_reborn_composition::ChannelExtensionBinding {
+fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         inbound_payload_classifier: Some(Arc::new(|message| {
@@ -779,8 +775,8 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
     }
 }
 
-fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
-    ironclaw_reborn_composition::ChannelExtensionBinding {
+fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
         extension_id: "telegram".to_string(),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         inbound_payload_classifier: None,
@@ -789,7 +785,7 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
 }
 
 /// Telegram's account-setup declaration, mirrored from the binary assembly
-/// (`ironclaw_reborn_cli::runtime::account_setups`) the same way
+/// (`ironclaw_cli::runtime::account_setups`) the same way
 /// [`TelegramFixtureFactory`] mirrors the native factory: the harness
 /// composes its own runtime and cannot depend on the CLI crate.
 fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAccountSetupDescriptor
@@ -798,7 +794,7 @@ fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAc
     let connection_requirement = ironclaw_product_workflow::ChannelConnectionRequirement {
         channel: "telegram".to_string(),
         display_name: "Telegram".to_string(),
-        strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+        strategy: ironclaw_product_workflow::IronClawChannelConnectStrategy::WebGeneratedCode,
         instructions: "Pair your Telegram account from the pairing panel.".to_string(),
         input_placeholder: String::new(),
         submit_label: "Open pairing".to_string(),

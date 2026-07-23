@@ -5,33 +5,33 @@
 //!
 //! Journey value (not re-tested here) = the CHAINING across turns on one
 //! conversation over the group's ONE shared coordinator/turn-store. Single-gate
-//! mechanics (approve/deny/resume) are already pinned by `reborn_group_approvals`;
+//! mechanics (approve/deny/resume) are already pinned by `ironclaw_group_approvals`;
 //! this asserts they COMPOSE across a live session with no per-turn state bleed
 //! (turn 2's deny doesn't un-persist turn 1's write; turn 3 still sees both).
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-journey-approval")
         .script([
             // turn 1 (2 entries: gated call + post-resume reply)
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/journey-approved.txt", "content": "APPROVED_PAYLOAD"}),
             ),
-            RebornScriptedReply::text("first file written after approval"),
+            IronClawScriptedReply::text("first file written after approval"),
             // turn 2 (2 entries: gated call + post-resume reply)
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/journey-denied.txt", "content": "should not persist"}),
             ),
-            RebornScriptedReply::text("understood, the second write was not authorized"),
+            IronClawScriptedReply::text("understood, the second write was not authorized"),
             // turn 3 (1 entry: plain follow-up reply)
-            RebornScriptedReply::text("JOURNEY_FINAL_REPLY summarizing the session"),
+            IronClawScriptedReply::text("JOURNEY_FINAL_REPLY summarizing the session"),
         ])
         .build()
         .await?;

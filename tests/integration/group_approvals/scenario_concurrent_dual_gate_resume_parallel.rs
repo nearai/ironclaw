@@ -18,12 +18,12 @@
 //! either -- both the libsql exclusion and the retry-tolerance this
 //! scenario used to need are retired.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let path_a = "parallel_a.txt";
     let path_b = "parallel_b.txt";
     let content_a = "thread A approved (parallel)";
@@ -32,22 +32,22 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let thread_a = g
         .thread("conv-concurrent-dual-gate-parallel-a")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": format!("/workspace/{path_a}"), "content": content_a}),
             ),
-            RebornScriptedReply::text("A: write approved"),
+            IronClawScriptedReply::text("A: write approved"),
         ])
         .build()
         .await?;
     let thread_b = g
         .thread("conv-concurrent-dual-gate-parallel-b")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": format!("/workspace/{path_b}"), "content": content_b}),
             ),
-            RebornScriptedReply::text("B: write was not authorized"),
+            IronClawScriptedReply::text("B: write was not authorized"),
         ])
         .build()
         .await?;

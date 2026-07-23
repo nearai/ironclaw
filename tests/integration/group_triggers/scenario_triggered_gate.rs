@@ -2,7 +2,7 @@
 //! `TurnOriginKind::ScheduledTrigger`) raises a real `BlockedApproval` gate
 //! mid-fire; the creator approves (or denies) and the run resumes to terminal.
 //!
-//! Mirrors `reborn_group_approvals/scenario_gate_then_{approve,deny}.rs`, but
+//! Mirrors `ironclaw_group_approvals/scenario_gate_then_{approve,deny}.rs`, but
 //! the gated turn arrives through the trusted-trigger submit wire
 //! (`submit_triggered_turn_scripted`) instead of the interactive
 //! `submit_turn_until_blocked` — pinning that trigger-origin runs raise, park
@@ -14,26 +14,26 @@
 //! otherwise interleave one shared script and one shared approval store,
 //! making gate/coverage attribution ambiguous.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_host_api::TenantId;
 use ironclaw_turns::{ResumeTurnPrecondition, TurnStatus};
 use serde_json::json;
 
 /// Approve arm: triggered fire → gate raised → approve → gated write re-runs
 /// and PERSISTS → `Completed`.
-pub async fn run_approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run_approve(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-triggered-gate-approve").build().await?;
 
     let submission = h
         .submit_triggered_turn_scripted(
             "write the scheduled report",
             [
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.write_file",
                     json!({"path": "/workspace/triggered-approved.txt", "content": "triggered approved write"}),
                 ),
-                RebornScriptedReply::text("report written after approval"),
+                IronClawScriptedReply::text("report written after approval"),
             ],
         )
         .await?;
@@ -73,18 +73,18 @@ pub async fn run_approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 /// Deny arm: triggered fire → gate raised → deny → the executor surfaces a
 /// non-retryable authorization failure to the model, which finalizes →
 /// `Completed`, and the denied side effect never executed.
-pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run_deny(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-triggered-gate-deny").build().await?;
 
     let submission = h
         .submit_triggered_turn_scripted(
             "write the scheduled report",
             [
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.write_file",
                     json!({"path": "/workspace/triggered-denied.txt", "content": "should not persist"}),
                 ),
-                RebornScriptedReply::text("understood, the scheduled write was not authorized"),
+                IronClawScriptedReply::text("understood, the scheduled write was not authorized"),
             ],
         )
         .await?;
@@ -135,18 +135,18 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 /// Approved/Denied in the scope-independent local-dev store even when the
 /// resume itself is rejected, which would corrupt the still-`Pending` state
 /// this scenario's non-vacuity check depends on.
-pub async fn run_wrong_scope_resume_rejected(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run_wrong_scope_resume_rejected(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-triggered-gate-wrong-scope").build().await?;
 
     let submission = h
         .submit_triggered_turn_scripted(
             "write the scheduled report",
             [
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.write_file",
                     json!({"path": "/workspace/triggered-wrong-scope.txt", "content": "triggered wrong-scope write"}),
                 ),
-                RebornScriptedReply::text("report written after approval"),
+                IronClawScriptedReply::text("report written after approval"),
             ],
         )
         .await?;

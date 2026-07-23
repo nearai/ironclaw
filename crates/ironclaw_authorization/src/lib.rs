@@ -1,5 +1,5 @@
 // arch-exempt: large_file, mechanical lease-store migration only — InMemoryCapabilityLeaseStore deleted (net −187 LOC), test-support helper added over FilesystemCapabilityLeaseStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
-//! Capability authorization contracts for IronClaw Reborn.
+//! Capability authorization contracts for IronClaw.
 //!
 //! `ironclaw_authorization` evaluates authority-bearing host API contracts. It
 //! does not execute capabilities, reserve resources, prompt users, or reach into

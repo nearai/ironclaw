@@ -10,8 +10,10 @@
 # Setup / usage docs:
 # https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
 #
+# `ironclaw-reborn` below is a compatibility identifier owned by the external
+# nearai/benchmarks workflow, not the local crate or binary name.
 # Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret, plus
-# `NEARAI_API_KEY` for ironclaw-reborn runs (agent routes to NEAR AI cloud).
+# `NEARAI_API_KEY` for that compatibility lane (agent routes to NEAR AI cloud).
 # Only those secrets are forwarded — `secrets: inherit` is intentionally
 # NOT used (supply-chain hardening).
 
@@ -258,7 +260,8 @@ jobs:
     # to every secret available here.
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # ironclaw-reborn runs route the agent to NEAR AI cloud; the reusable
+      # The external `ironclaw-reborn` compatibility lane routes the agent to
+      # NEAR AI cloud; the reusable
       # workflow reads this for LLM_BACKEND=nearai. Optional there, so legacy
       # ironclaw runs (OpenRouter) are unaffected if it's unset.
       NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}

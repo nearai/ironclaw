@@ -44,7 +44,7 @@ const FORBIDDEN_DEPENDENCIES: &[&str] = &[
     "ironclaw_memory",
     "ironclaw_memory_native",
     "ironclaw_events",
-    "ironclaw_reborn_event_store",
+    "ironclaw_event_store",
     "ironclaw_architecture",
 ];
 

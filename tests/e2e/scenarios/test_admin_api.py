@@ -1,8 +1,8 @@
-"""Admin user-management E2E against the real ``ironclaw-reborn serve`` binary.
+"""Admin user-management E2E against the real ``ironclaw serve`` binary.
 
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
 `ironclaw_product_workflow::AdminUserService`) over HTTP against the standalone
-Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
+IronClaw binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
 router in-process), this exercises serve.rs's real wiring: the operator
 env-bearer authenticator, and the signed-session-store token minter that must
 share its signing secret with the SSO login surface.
@@ -12,7 +12,7 @@ admin creates a user, receives the one-time `api_token`, and that token then
 authenticates a follow-up `/session` request AS the new user — end-to-end
 through the real minter + session-store wiring in the binary.
 
-Authorization: the operator env-bearer (`IRONCLAW_REBORN_WEBUI_TOKEN`) is an
+Authorization: the operator env-bearer (`IRONCLAW_WEBUI_TOKEN`) is an
 implicit owner, so it clears the admin boundary. Last-admin protection (409) is
 covered at the crate tier; here every lifecycle/delete user stays a `member`,
 which can never strand the tenant's admins.
@@ -25,23 +25,23 @@ import httpx
 import pytest
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
-from reborn_webui_harness import (
-    reborn_bearer_headers,
-    reborn_v2_browser,  # noqa: F401 - imported fixture
-    reborn_v2_page,  # noqa: F401 - imported fixture
-    reborn_v2_server,  # noqa: F401 - imported fixture
+from helpers import IRONCLAW_V2_AUTH_TOKEN, SEL_V2
+from ironclaw_webui_harness import (
+    ironclaw_bearer_headers,
+    ironclaw_v2_browser,  # noqa: F401 - imported fixture
+    ironclaw_v2_page,  # noqa: F401 - imported fixture
+    ironclaw_v2_server,  # noqa: F401 - imported fixture
 )
 
 ADMIN_BASE = "/api/webchat/v2/admin"
 
 
 @pytest.fixture()
-async def admin_client(reborn_v2_server):
+async def admin_client(ironclaw_v2_server):
     """Async HTTP client bearing the operator (implicit-owner) token."""
     async with httpx.AsyncClient(
-        base_url=reborn_v2_server,
-        headers={**reborn_bearer_headers(), "Content-Type": "application/json"},
+        base_url=ironclaw_v2_server,
+        headers={**ironclaw_bearer_headers(), "Content-Type": "application/json"},
         timeout=15,
     ) as client:
         yield client
@@ -91,7 +91,7 @@ async def test_create_user_returns_record_and_one_time_token(admin_client):
     await admin_client.delete(f"{ADMIN_BASE}/users/{body['user']['user_id']}")
 
 
-async def test_created_user_token_authenticates_as_that_user(admin_client, reborn_v2_server):
+async def test_created_user_token_authenticates_as_that_user(admin_client, ironclaw_v2_server):
     """Flagship: the one-time api_token logs in AS the new user.
 
     Exercises the whole mint -> return -> validate chain through the real serve
@@ -110,9 +110,9 @@ async def test_created_user_token_authenticates_as_that_user(admin_client, rebor
     api_token = created["api_token"]
 
     # The minted token is distinct from the operator bearer that created the user.
-    assert api_token != REBORN_V2_AUTH_TOKEN
+    assert api_token != IRONCLAW_V2_AUTH_TOKEN
 
-    async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as user_client:
+    async with httpx.AsyncClient(base_url=ironclaw_v2_server, timeout=15) as user_client:
         session = await user_client.get(
             "/api/webchat/v2/session",
             headers={"Authorization": f"Bearer {api_token}"},
@@ -144,7 +144,7 @@ async def test_get_user_detail(admin_client, test_user):
 
 
 async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
-    admin_client, reborn_v2_page, reborn_v2_server, test_user
+    admin_client, ironclaw_v2_page, ironclaw_v2_server, test_user
 ):
     """Role/status pills refresh immediately instead of waiting for the 10s poll."""
     # Keep a separate persisted admin so promoting and then demoting the target
@@ -161,9 +161,9 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
     )
     assert anchor_response.status_code == 200, anchor_response.text
 
-    page = reborn_v2_page
+    page = ironclaw_v2_page
     await page.goto(
-        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+        f"{ironclaw_v2_server}/admin/users?token={IRONCLAW_V2_AUTH_TOKEN}"
     )
     await page.get_by_role(
         "button", name=test_user["display_name"], exact=True
@@ -224,24 +224,24 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
 
 
 async def test_admin_token_visibility_matches_user_creation_lifecycle(
-    admin_client, reborn_v2_page, reborn_v2_server, test_user
+    admin_client, ironclaw_v2_page, ironclaw_v2_server, test_user
 ):
     """Creation shows the one-time token; existing-user details do not."""
-    await reborn_v2_page.goto(
-        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    await ironclaw_v2_page.goto(
+        f"{ironclaw_v2_server}/admin/users?token={IRONCLAW_V2_AUTH_TOKEN}"
     )
     created_user_id = None
     try:
         display_name = f"UI Token User {uuid.uuid4().hex[:8]}"
         email = f"ui-token-{uuid.uuid4().hex[:8]}@example.com"
-        await reborn_v2_page.get_by_role(
+        await ironclaw_v2_page.get_by_role(
             "button", name=SEL_V2["admin_new_user_button_name"], exact=True
         ).click()
-        create_form = reborn_v2_page.locator(SEL_V2["admin_create_form"])
+        create_form = ironclaw_v2_page.locator(SEL_V2["admin_create_form"])
         await create_form.locator(SEL_V2["admin_display_name_input"]).fill(display_name)
         await create_form.locator(SEL_V2["admin_email_input"]).fill(email)
 
-        async with reborn_v2_page.expect_response(
+        async with ironclaw_v2_page.expect_response(
             lambda response: response.request.method == "POST"
             and response.url.endswith(f"{ADMIN_BASE}/users")
         ) as response_info:
@@ -255,38 +255,38 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
         one_time_token = created["api_token"]
 
         await expect(
-            reborn_v2_page.get_by_text(
+            ironclaw_v2_page.get_by_text(
                 SEL_V2["admin_token_created_text"], exact=True
             )
         ).to_be_visible(timeout=15000)
         await expect(
-            reborn_v2_page.locator(SEL_V2["admin_token_value"]).filter(
+            ironclaw_v2_page.locator(SEL_V2["admin_token_value"]).filter(
                 has_text=one_time_token
             )
         ).to_be_visible()
         await expect(
-            reborn_v2_page.get_by_text(
+            ironclaw_v2_page.get_by_text(
                 SEL_V2["admin_token_description_text"], exact=True
             )
         ).to_be_visible()
 
-        await reborn_v2_page.get_by_role(
+        await ironclaw_v2_page.get_by_role(
             "button", name=test_user["display_name"], exact=True
         ).click()
         await expect(
-            reborn_v2_page.get_by_role(
+            ironclaw_v2_page.get_by_role(
                 "heading", name=test_user["display_name"], exact=True
             )
         ).to_be_visible(timeout=15000)
         await expect(
-            reborn_v2_page.get_by_role(
+            ironclaw_v2_page.get_by_role(
                 "button",
                 name=SEL_V2["admin_create_token_button_name"],
                 exact=True,
             )
         ).to_have_count(0)
         await expect(
-            reborn_v2_page.get_by_text(
+            ironclaw_v2_page.get_by_text(
                 SEL_V2["admin_token_description_text"], exact=True
             )
         ).to_have_count(0)
@@ -299,7 +299,7 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
 
 
 async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps_secrets_write_only(
-    admin_client, reborn_v2_page, reborn_v2_server
+    admin_client, ironclaw_v2_page, ironclaw_v2_server
 ):
     """Fresh deployments expose manifest configuration without installing extensions.
 
@@ -313,8 +313,8 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
     assert installed.status_code == 200, installed.text
     assert installed.json()["extensions"] == [], installed.text
 
-    page = reborn_v2_page
-    await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+    page = ironclaw_v2_page
+    await page.goto(f"{ironclaw_v2_server}/chat?token={IRONCLAW_V2_AUTH_TOKEN}")
     await page.get_by_role("link", name="Admin", exact=True).click()
     await page.get_by_role("link", name="Configuration", exact=True).click()
 
@@ -417,7 +417,7 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
 
 
 async def test_admin_configuration_repeated_paste_keeps_form_mounted(
-    reborn_v2_page, reborn_v2_server
+    ironclaw_v2_page, ironclaw_v2_server
 ):
     """Rapid pastes must not retain a React event past its handler lifetime.
 
@@ -426,15 +426,15 @@ async def test_admin_configuration_repeated_paste_keeps_form_mounted(
     intentionally avoiding persistence; combining those concerns would obscure
     whether a failure came from event lifetime or save/reload behavior.
     """
-    page = reborn_v2_page
+    page = ironclaw_v2_page
     await page.context.grant_permissions(
-        ["clipboard-read", "clipboard-write"], origin=reborn_v2_server
+        ["clipboard-read", "clipboard-write"], origin=ironclaw_v2_server
     )
     page_errors = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
 
     await page.goto(
-        f"{reborn_v2_server}/admin/configuration?token={REBORN_V2_AUTH_TOKEN}"
+        f"{ironclaw_v2_server}/admin/configuration?token={IRONCLAW_V2_AUTH_TOKEN}"
     )
     slack_group = page.get_by_test_id(
         SEL_V2["admin_configuration_group_test_id"]
@@ -545,12 +545,12 @@ async def test_secret_lifecycle(admin_client, test_user):
 
 
 async def test_admin_user_detail_manages_write_only_secrets(
-    admin_client, reborn_v2_page, reborn_v2_server, test_user
+    admin_client, ironclaw_v2_page, ironclaw_v2_server, test_user
 ):
     """The Admin UI provisions, replaces, and confirms deletion without echoing values."""
-    page = reborn_v2_page
+    page = ironclaw_v2_page
     await page.goto(
-        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+        f"{ironclaw_v2_server}/v2/admin/users?token={IRONCLAW_V2_AUTH_TOKEN}"
     )
     await page.get_by_role(
         "button", name=test_user["display_name"], exact=True
@@ -665,8 +665,8 @@ async def test_delete_user_and_verify_gone(admin_client):
 # ---------------------------------------------------------------
 
 
-async def test_admin_routes_require_auth(reborn_v2_server):
+async def test_admin_routes_require_auth(ironclaw_v2_server):
     """No bearer -> the admin surface rejects before any facade work."""
-    async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as anon:
+    async with httpx.AsyncClient(base_url=ironclaw_v2_server, timeout=15) as anon:
         r = await anon.get(f"{ADMIN_BASE}/users")
     assert r.status_code == 401

@@ -1,4 +1,4 @@
-// Map v2 `ThreadMessageRecord[]` from RebornTimelineResponse into
+// Map v2 `ThreadMessageRecord[]` from IronClawTimelineResponse into
 // the message shape the UI components render. Turn grouping consumes the
 // normalized `turnRunId` carried by records and previews. Records carry
 // `attachments: AttachmentRef[]`; we project them into the render shape

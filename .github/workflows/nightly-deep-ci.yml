@@ -4,7 +4,7 @@ name: Nightly Deep CI
 # .github/workflows/test.yml and .github/workflows/e2e.yml) were deleted
 # under Tier B ("Clean up old architecture" roadmap;
 # docs/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
-# Reborn suites remain, reused below.
+# IronClaw suites remain, reused below.
 #
 # Cross-cutting platform and compatibility coverage is reused from
 # .github/workflows/platform-and-compat.yml:
@@ -13,18 +13,18 @@ name: Nightly Deep CI
 # - benchmark compilation
 # - Docker image compilation remains disabled here via include_docker: false
 #
-# The Reborn binary suites are reused the same way:
-# - .github/workflows/reborn-tests.yml: per-crate tests across the Reborn
+# The IronClaw binary suites are reused the same way:
+# - .github/workflows/ironclaw-tests.yml: per-crate tests across the IronClaw
 #   crate families plus the partitioned root parity tests (with
 #   event_name == schedule, scope detection short-circuits to full scope)
-# - .github/workflows/reborn-e2e.yml: deterministic Rust contract gate
+# - .github/workflows/ironclaw-e2e.yml: deterministic Rust contract gate
 #   (architecture/runtimes/substrates) plus gateway and WebUI v2 smoke
 #   (workflow_call bypasses the PR path filters, so the full gate runs)
 #
 # Docker is intentionally excluded here because QA/release Docker images are
 # owned by the separate Docker pipeline and need release-team alignment.
-# Browser E2E runs against the Reborn WebChat surface via
-# .github/workflows/reborn-e2e.yml (reused below).
+# Browser E2E runs against the IronClaw WebChat surface via
+# .github/workflows/ironclaw-e2e.yml (reused below).
 
 on:
   schedule:
@@ -57,9 +57,9 @@ jobs:
       ref: ${{ github.sha }}
       include_docker: false
 
-  reborn-tests:
-    name: Reborn Tests
-    uses: ./.github/workflows/reborn-tests.yml
+  ironclaw-tests:
+    name: IronClaw Tests
+    uses: ./.github/workflows/ironclaw-tests.yml
     # Two call-contract requirements, both validated at trigger time; a
     # violation turns the whole nightly run into a startup_failure with ZERO
     # jobs — including nightly-alert, so nothing reports it. This workflow
@@ -68,7 +68,7 @@ jobs:
     # violations of exactly these rules:
     # 1. The called workflow's coverage-report job declares job-level
     #    `pull-requests: write`; the caller must grant it.
-    # 2. reborn-tests.yml references secrets.SCCACHE_*; the caller must pass
+    # 2. ironclaw-tests.yml references secrets.SCCACHE_*; the caller must pass
     #    secrets (`secrets: inherit`).
     permissions:
       contents: read
@@ -77,9 +77,9 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
-  reborn-e2e:
-    name: Reborn E2E
-    uses: ./.github/workflows/reborn-e2e.yml
+  ironclaw-e2e:
+    name: IronClaw E2E
+    uses: ./.github/workflows/ironclaw-e2e.yml
     with:
       ref: ${{ github.sha }}
 

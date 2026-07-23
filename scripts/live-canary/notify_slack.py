@@ -69,7 +69,7 @@ CATEGORIZE_SYSTEM = (
 
 
 @dataclass
-class RebornQaCaseReport:
+class IronClawQaCaseReport:
     rows: tuple[str, ...]
     case: str
     feature: str
@@ -82,12 +82,12 @@ class RebornQaCaseReport:
     failure_category: str = ""
     failure_status: str = ""
     inconclusive: bool = False
-    tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
+    tool_calls: list["IronClawQaToolCall"] = field(default_factory=list)
     debug_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
-class RebornQaToolCall:
+class IronClawQaToolCall:
     name: str
     args_hash: str = ""
     output_digest: str = ""
@@ -119,7 +119,7 @@ class LaneReport:
     error: str = ""
     root_cause: str = ""
     fix: str = ""
-    reborn_qa_cases: list[RebornQaCaseReport] = field(default_factory=list)
+    ironclaw_qa_cases: list[IronClawQaCaseReport] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -291,7 +291,7 @@ def _trim_slack_block_text(value: object, limit: int = 2900) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
-def _reborn_case_from_result(entry: dict) -> str:
+def _ironclaw_case_from_result(entry: dict) -> str:
     details = entry.get("details") or {}
     if isinstance(details, dict):
         case = details.get("case")
@@ -303,7 +303,7 @@ def _reborn_case_from_result(entry: dict) -> str:
     return str(mode or "?")
 
 
-def _reborn_failure_message(entry: dict) -> str:
+def _ironclaw_failure_message(entry: dict) -> str:
     if entry.get("success"):
         return ""
     details = entry.get("details") or {}
@@ -340,8 +340,8 @@ def _signature_key(signature: object) -> tuple[str, str] | None:
     return (str(name), str(args_hash or ""))
 
 
-def parse_reborn_trace_tool_calls(trace_path: Path) -> list[RebornQaToolCall]:
-    """Read a scrubbed Reborn trace and return hashed tool I/O summaries.
+def parse_ironclaw_trace_tool_calls(trace_path: Path) -> list[IronClawQaToolCall]:
+    """Read a scrubbed IronClaw trace and return hashed tool I/O summaries.
 
     Trace payloads can contain live integration data. The checkpoint state
     exposes stable argument hashes and output digests, which are enough for
@@ -383,14 +383,14 @@ def parse_reborn_trace_tool_calls(trace_path: Path) -> list[RebornQaToolCall]:
         if output is not None:
             output_by_signature[key] = str(output)
 
-    tool_calls: list[RebornQaToolCall] = []
+    tool_calls: list[IronClawQaToolCall] = []
     for signature in best_signatures:
         key = _signature_key(signature)
         if key is None:
             continue
         name, args_hash = key
         tool_calls.append(
-            RebornQaToolCall(
+            IronClawQaToolCall(
                 name=name,
                 args_hash=args_hash,
                 output_digest=output_by_signature.get(key, ""),
@@ -399,8 +399,8 @@ def parse_reborn_trace_tool_calls(trace_path: Path) -> list[RebornQaToolCall]:
     return tool_calls
 
 
-def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
-    if report.lane != "reborn-webui-v2-live-qa":
+def parse_ironclaw_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
+    if report.lane != "ironclaw-webui-v2-live-qa":
         return
     results_path = lane_dir / "results.json"
     if not results_path.exists() or results_path.stat().st_size == 0:
@@ -424,13 +424,13 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
             if isinstance(case_data, dict) and isinstance(case_data.get("case"), str):
                 manifest_by_case[case_data["case"]] = case_data
 
-    cases: list[RebornQaCaseReport] = []
+    cases: list[IronClawQaCaseReport] = []
     artifact_path_prefix = "/".join(lane_dir.parts[-3:])
     for entry in results:
         if not isinstance(entry, dict):
             continue
         classification = _normalize_result_classification(entry)
-        case = _reborn_case_from_result(entry)
+        case = _ironclaw_case_from_result(entry)
         details = entry.get("details") or {}
         if not isinstance(details, dict):
             details = {}
@@ -454,7 +454,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
             or case.replace("_", " ")
         )
         latency = entry.get("latency_ms")
-        tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
+        tool_calls = parse_ironclaw_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
         debug_paths = []
         if not entry.get("success"):
             debug_paths = [
@@ -464,13 +464,13 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 f"{artifact_path_prefix}/traces/index.json",
             ]
         cases.append(
-            RebornQaCaseReport(
+            IronClawQaCaseReport(
                 rows=row_tuple,
                 case=case,
                 feature=_trim_slack_text(feature, 120),
                 success=bool(entry.get("success")),
                 latency_ms=latency if isinstance(latency, (int, float)) else None,
-                message=_reborn_failure_message(entry),
+                message=_ironclaw_failure_message(entry),
                 case_tier=classification.tier,
                 blocking=classification.blocking,
                 failure_class=classification.failure_class,
@@ -481,7 +481,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 debug_paths=debug_paths,
             )
         )
-    report.reborn_qa_cases = cases
+    report.ironclaw_qa_cases = cases
 
 
 SUMMARY_STATUS_RE = re.compile(
@@ -522,7 +522,7 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     # enrichment is source-agnostic.
     parse_junit(lane_dir / "auth-canary-junit.xml", r)
     parse_results_json(lane_dir / "results.json", r)
-    parse_reborn_qa_case_reports(lane_dir, r)
+    parse_ironclaw_qa_case_reports(lane_dir, r)
     r.summary_md = read_tail(lane_dir / "summary.md", 4_000)
     r.log_tail = read_tail(lane_dir / "test-output.log", MAX_LOG_BYTES)
 
@@ -669,11 +669,11 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
 QA_ROW_PREFIX_RE = re.compile(r"^(?P<num>\d+)")
 
 
-def _qa_case_rows(case: RebornQaCaseReport) -> str:
+def _qa_case_rows(case: IronClawQaCaseReport) -> str:
     return ", ".join(case.rows) if case.rows else case.case
 
 
-def _qa_group_key(case: RebornQaCaseReport) -> str:
+def _qa_group_key(case: IronClawQaCaseReport) -> str:
     for row in case.rows:
         match = QA_ROW_PREFIX_RE.match(row)
         if match:
@@ -687,7 +687,7 @@ def _qa_group_sort_key(value: str) -> tuple[int, int | str]:
     return (1, value)
 
 
-def _case_outcome(case: RebornQaCaseReport) -> tuple[str, str]:
+def _case_outcome(case: IronClawQaCaseReport) -> tuple[str, str]:
     """Return the display label and emoji for a case's effective outcome."""
     if case.success:
         return "Passed", ":white_check_mark:"
@@ -698,8 +698,8 @@ def _case_outcome(case: RebornQaCaseReport) -> tuple[str, str]:
     return "Failure", ":x:"
 
 
-def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
-    calls: list[RebornQaToolCall] = []
+def _format_ironclaw_tool_summary(cases: list[IronClawQaCaseReport]) -> list[str]:
+    calls: list[IronClawQaToolCall] = []
     for case in cases:
         calls.extend(case.tool_calls)
     if not calls:
@@ -714,8 +714,8 @@ def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     return lines
 
 
-def _format_reborn_failure_lines(
-    cases: list[RebornQaCaseReport],
+def _format_ironclaw_failure_lines(
+    cases: list[IronClawQaCaseReport],
     run_url: str | None,
 ) -> list[str]:
     lines: list[str] = []
@@ -735,9 +735,9 @@ def _format_reborn_failure_lines(
     return lines
 
 
-def _format_reborn_qa_group(
+def _format_ironclaw_qa_group(
     group: str,
-    cases: list[RebornQaCaseReport],
+    cases: list[IronClawQaCaseReport],
     run_url: str | None = None,
 ) -> list[dict]:
     outcomes = [_case_outcome(case) for case in cases]
@@ -771,8 +771,8 @@ def _format_reborn_qa_group(
         f"{status} *QA {group}* — {passed}/{len(cases)} passed{outcome_counts}{duration}",
         f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
     ]
-    lines.extend(_format_reborn_failure_lines(cases, run_url))
-    lines.extend(_format_reborn_tool_summary(cases))
+    lines.extend(_format_ironclaw_failure_lines(cases, run_url))
+    lines.extend(_format_ironclaw_tool_summary(cases))
     blocks: list[dict] = []
     current: list[str] = []
     continuation_header = f"{status} *QA {group}* — continued"
@@ -804,16 +804,16 @@ def _format_reborn_qa_group(
     return blocks
 
 
-def _format_reborn_qa_groups(
-    cases: list[RebornQaCaseReport],
+def _format_ironclaw_qa_groups(
+    cases: list[IronClawQaCaseReport],
     run_url: str | None = None,
 ) -> list[dict]:
-    grouped: dict[str, list[RebornQaCaseReport]] = {}
+    grouped: dict[str, list[IronClawQaCaseReport]] = {}
     for case in cases:
         grouped.setdefault(_qa_group_key(case), []).append(case)
     blocks: list[dict] = []
     for group in sorted(grouped, key=_qa_group_sort_key):
-        blocks.extend(_format_reborn_qa_group(group, grouped[group], run_url))
+        blocks.extend(_format_ironclaw_qa_group(group, grouped[group], run_url))
     return blocks
 
 
@@ -895,7 +895,7 @@ def slack_payload(
             {"type": "context", "elements": [{"type": "mrkdwn", "text": context_text}]}
         )
     for r in reports:
-        renders_reborn_qa_groups = bool(r.reborn_qa_cases)
+        renders_ironclaw_qa_groups = bool(r.ironclaw_qa_cases)
         header_line = (
             f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* ({r.provider}) — "
             f"{r.passed}/{r.tests} passed, {r.failed} failed in {r.duration_s:.0f}s"
@@ -911,7 +911,7 @@ def slack_payload(
         # GitHub issue if needed.
         if (
             _has_blocking_failure(r)
-            and not renders_reborn_qa_groups
+            and not renders_ironclaw_qa_groups
             and (r.test_name or r.error or r.root_cause)
         ):
             if r.test_name:
@@ -922,21 +922,21 @@ def slack_payload(
                 lines.append(f"  *Root Cause:* {r.root_cause}")
             if r.fix:
                 lines.append(f"  *Fix:* {r.fix}")
-        elif r.warning_failures and not renders_reborn_qa_groups:
+        elif r.warning_failures and not renders_ironclaw_qa_groups:
             for name, message in r.warning_failures[:10]:
                 lines.append(f"  *Warning `{name}`:* {message or 'failed'}")
-        elif r.reason and not renders_reborn_qa_groups:
+        elif r.reason and not renders_ironclaw_qa_groups:
             # For passing/skipped lanes we keep the existing single-
             # line reason summary (Haiku's free-form notable).
             lines.append(f"> {r.reason}")
-        if r.tools_used and not renders_reborn_qa_groups:
+        if r.tools_used and not renders_ironclaw_qa_groups:
             lines.append(f"tools: {', '.join(r.tools_used)} (≈{r.tool_calls_total} calls)")
-        if r.notable and not renders_reborn_qa_groups:
+        if r.notable and not renders_ironclaw_qa_groups:
             lines.append(f"_{r.notable}_")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        if renders_reborn_qa_groups:
+        if renders_ironclaw_qa_groups:
             remaining = max(0, SLACK_MAX_BLOCKS - len(blocks))
-            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases, run_url)[:remaining])
+            blocks.extend(_format_ironclaw_qa_groups(r.ironclaw_qa_cases, run_url)[:remaining])
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
@@ -996,7 +996,7 @@ def _markdown_run_context_lines(
     return lines
 
 
-def _markdown_reborn_tool_trace(case: RebornQaCaseReport) -> str:
+def _markdown_ironclaw_tool_trace(case: IronClawQaCaseReport) -> str:
     summaries: list[str] = []
     for call in case.tool_calls[:8]:
         fingerprints: list[str] = []
@@ -1011,12 +1011,12 @@ def _markdown_reborn_tool_trace(case: RebornQaCaseReport) -> str:
     return ", ".join(summaries)
 
 
-def _markdown_reborn_case_lines(
-    cases: list[RebornQaCaseReport],
+def _markdown_ironclaw_case_lines(
+    cases: list[IronClawQaCaseReport],
     run_url: str | None,
 ) -> list[str]:
     lines: list[str] = []
-    grouped: dict[str, list[RebornQaCaseReport]] = {}
+    grouped: dict[str, list[IronClawQaCaseReport]] = {}
     for case in cases:
         grouped.setdefault(_qa_group_key(case), []).append(case)
     for group in sorted(grouped, key=_qa_group_sort_key):
@@ -1052,7 +1052,7 @@ def _markdown_reborn_case_lines(
                 and not case.inconclusive
                 and case.tool_calls
             ):
-                lines.append(f"  - Tool trace: {_markdown_reborn_tool_trace(case)}")
+                lines.append(f"  - Tool trace: {_markdown_ironclaw_tool_trace(case)}")
             if not case.success and case.debug_paths:
                 paths = ", ".join(f"`{_github_md_code(path)}`" for path in case.debug_paths)
                 if run_url:
@@ -1113,7 +1113,7 @@ def github_comment_body(
 
     detail_lines: list[str] = []
     for r in reports:
-        if r.reborn_qa_cases:
+        if r.ironclaw_qa_cases:
             detail_lines.extend(
                 [
                     "",
@@ -1121,7 +1121,7 @@ def github_comment_body(
                     "",
                 ]
             )
-            detail_lines.extend(_markdown_reborn_case_lines(r.reborn_qa_cases, run_url))
+            detail_lines.extend(_markdown_ironclaw_case_lines(r.ironclaw_qa_cases, run_url))
         elif r.status == "fail":
             detail_lines.extend(
                 ["", f"### {_github_md_text(r.lane)} ({_github_md_text(r.provider)})"]
@@ -1412,7 +1412,7 @@ def google_oauth_preflight_report(status: str) -> LaneReport | None:
     if not status or status == "healthy":
         return None
     return LaneReport(
-        lane="reborn-webui-v2-google-oauth-preflight",
+        lane="ironclaw-webui-v2-google-oauth-preflight",
         provider="google-oauth",
         failed=1,
         tests=1,
@@ -1478,7 +1478,7 @@ def main() -> int:
     artifacts_root = Path(args.artifacts_dir)
     lane_dirs = discover_lane_dirs(artifacts_root)
     preflight_report = google_oauth_preflight_report(
-        os.environ.get("REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS", "")
+        os.environ.get("IRONCLAW_GOOGLE_OAUTH_PREFLIGHT_STATUS", "")
     )
     if not lane_dirs and preflight_report is None:
         print(f"[notify_slack] no lane artifacts under {artifacts_root}", file=sys.stderr)
@@ -1522,7 +1522,7 @@ def main() -> int:
     if preflight_report is not None:
         reports.append(preflight_report)
         print(
-            "[notify_slack] added Reborn Google OAuth infrastructure failure: "
+            "[notify_slack] added IronClaw Google OAuth infrastructure failure: "
             f"{preflight_report.error}",
             file=sys.stderr,
         )

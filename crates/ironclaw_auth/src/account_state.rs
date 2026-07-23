@@ -1,6 +1,6 @@
 //! The auth-account state machine (one enum, every vendor).
 //!
-//! `docs/reborn/extension-runtime/overview.md` §6.3: the machine is owned by
+//! `docs/ironclaw/extension-runtime/overview.md` §6.3: the machine is owned by
 //! the auth engine; recipes affect HTTP details only, never states or
 //! transitions. The enum is re-exported by `ironclaw_extension_host::state`
 //! so the two standard state machines stay discoverable together, but the

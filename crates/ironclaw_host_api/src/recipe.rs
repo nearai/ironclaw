@@ -5,7 +5,7 @@
 //! (`oauth2_code`, `api_key`) and vendors differ only in parameters; the
 //! ingress verifier executes signature recipes so signing secrets never
 //! reach an adapter. There is deliberately no auth adapter trait — see
-//! `docs/reborn/extension-runtime/overview.md` §4.3.
+//! `docs/ironclaw/extension-runtime/overview.md` §4.3.
 //!
 //! Everything here is declaration vocabulary: validation and serialization
 //! only, no execution.
@@ -236,7 +236,7 @@ impl VendorAuthRecipe {
 
     /// Whether two recipes for a shared vendor are compatible: identical
     /// except `scopes` and `display_name`
-    /// (`docs/reborn/extension-runtime/overview.md` §3.2).
+    /// (`docs/ironclaw/extension-runtime/overview.md` §3.2).
     pub fn compatible_for_shared_vendor(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Oauth2Code(a), Self::Oauth2Code(b)) => {

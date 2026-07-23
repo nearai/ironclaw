@@ -195,7 +195,7 @@ for df in dockerfiles:
     for ref_file, target in refs:
         # Only enforce for referencing files this Dockerfile actually copies
         # (i.e. actually compiles). A Dockerfile that never copies `src/`
-        # (e.g. Dockerfile.reborn) does not compile `src/hooks/*.rs`, so a
+        # (e.g. Dockerfile) does not compile `src/hooks/*.rs`, so a
         # repo-root `prompts/` reference from there is irrelevant to it.
         if not is_covered(ref_file, roots):
             continue

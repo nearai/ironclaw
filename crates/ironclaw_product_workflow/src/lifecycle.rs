@@ -1,4 +1,4 @@
-//! Product-facing lifecycle contract for Reborn package UX.
+//! Product-facing lifecycle contract for IronClaw package UX.
 //!
 //! This module deliberately models package/install lifecycle separately from
 //! auth, approval, pairing, and policy gates. Those remain owned by their
@@ -15,7 +15,7 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
-use crate::{ProductCommandContext, ProductWorkflowError, RebornChannelConnectStrategy};
+use crate::{IronClawChannelConnectStrategy, ProductCommandContext, ProductWorkflowError};
 
 pub(crate) const LIFECYCLE_ID_MAX_BYTES: usize = 256;
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
@@ -285,7 +285,7 @@ pub struct ChannelConnectionRequirement {
     /// renders this instead of deriving a label from the channel id, so the
     /// connect affordance carries no per-extension copy.
     pub display_name: String,
-    pub strategy: RebornChannelConnectStrategy,
+    pub strategy: IronClawChannelConnectStrategy,
     pub instructions: String,
     pub input_placeholder: String,
     pub submit_label: String,
@@ -572,7 +572,7 @@ pub trait LifecycleProductFacade: Send + Sync {
     /// Redacted activation error for each installed extension whose activation
     /// failed, keyed by extension id — sourced from the durable installation
     /// record's typed `last_error`. The extensions-list facade threads this
-    /// into `RebornExtensionInfo::activation_error` so a failed extension shows
+    /// into `IronClawExtensionInfo::activation_error` so a failed extension shows
     /// *why* it failed instead of collapsing to a bare `installed`/`failed`
     /// state with no reason.
     ///

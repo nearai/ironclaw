@@ -101,7 +101,7 @@ pub(crate) async fn mock_mcp_tools(
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
-        reborn_services: None,
+        ironclaw_services: None,
         trigger_active_run_lookup_requested: false,
     })
 }

@@ -49,7 +49,7 @@ Risk areas:
 
 Tests added or updated:
 - Unit or contract:
-- Reborn integration:
+- IronClaw integration:
 - Recorded fixture:
 - Browser E2E:
 - Backend or runtime:
@@ -63,9 +63,9 @@ Commands run:
 
 <!-- Does this change affect: permissions, network calls, secrets, file access, tool execution, sandbox policy? If yes, describe. If no, write "None". -->
 
-## Reborn Trust-Boundary Checklist
+## IronClaw Trust-Boundary Checklist
 
-<!-- Required for Reborn/security/runtime/DB changes. Write "N/A" with reason if not relevant. -->
+<!-- Required for IronClaw/security/runtime/DB changes. Write "N/A" with reason if not relevant. -->
 
 - [ ] Public policy/evidence/trust-bearing types: who can construct them?
 - [ ] Untrusted content enters prompts only through an envelope/escaping primitive.

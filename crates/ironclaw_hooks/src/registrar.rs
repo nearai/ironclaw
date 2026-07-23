@@ -123,7 +123,7 @@ impl HookRegistrar {
         // is a transparent string newtype the hash derivation consumes.
         //
         // Entries are borrowed, not owned: the per-run rebuild path
-        // (`ironclaw_reborn_composition`) replays the same validated install
+        // (`ironclaw_composition`) replays the same validated install
         // set on every host spawn, so taking `&[HookManifestEntry]` lets the
         // caller lend its already-validated entries instead of cloning the
         // whole `Vec` per rebuild. `install_one` clones only the inner body

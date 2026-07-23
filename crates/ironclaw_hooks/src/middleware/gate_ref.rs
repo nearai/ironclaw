@@ -7,7 +7,7 @@
 //! `AuthRequired` can be routed through the host's gate-resolution
 //! machinery. The middleware does not know how to mint refs that scope
 //! correctly to the current run / approval-router — that knowledge lives
-//! in the Reborn host composition. This trait is the seam the middleware
+//! in the IronClaw host composition. This trait is the seam the middleware
 //! depends on; production code wires a concrete factory that talks to the
 //! host's gate-router.
 //!

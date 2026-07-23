@@ -1,27 +1,27 @@
 //! HTTP error vocabulary for the WebChat v2 routes.
 //!
-//! Maps the redacted [`RebornServicesError`] surface into the wire-stable
+//! Maps the redacted [`IronClawServicesError`] surface into the wire-stable
 //! shape browser handlers return to clients. The handler layer must never
 //! leak backend identifiers, scopes, or transport error details — the only
-//! information that crosses this boundary is what `RebornServicesError`
+//! information that crosses this boundary is what `IronClawServicesError`
 //! already exposes (`code`, `kind`, `status_code`, `retryable`, and the typed
 //! validation hint).
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use ironclaw_product_workflow::{
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    IronClawServicesError, IronClawServicesErrorCode, IronClawServicesErrorKind,
     WebUiInboundValidationCode,
 };
 use serde::Serialize;
 
-/// HTTP-shaped error response wrapping a [`RebornServicesError`].
+/// HTTP-shaped error response wrapping a [`IronClawServicesError`].
 ///
 /// `IntoResponse` is the only construction path: callers convert via
-/// `From<RebornServicesError>` and `?`, never by hand-building a status
+/// `From<IronClawServicesError>` and `?`, never by hand-building a status
 /// code, so the mapping stays consistent across handlers.
 #[derive(Debug)]
-pub struct WebUiV2HttpError(RebornServicesError);
+pub struct WebUiV2HttpError(IronClawServicesError);
 
 impl WebUiV2HttpError {
     pub fn into_response_parts(self) -> (StatusCode, WebUiV2HttpErrorBody) {
@@ -43,7 +43,7 @@ impl WebUiV2HttpError {
         // net that makes surfacing internal errors a property of the boundary,
         // not of each call site remembering to log before it maps. The
         // underlying cause (when a backend error was converted) is logged at the
-        // construction site — see `RebornServicesError::internal_from`.
+        // construction site — see `IronClawServicesError::internal_from`.
         if status.is_server_error() {
             tracing::error!(
                 status = status.as_u16(),
@@ -64,8 +64,8 @@ impl WebUiV2HttpError {
     }
 }
 
-impl From<RebornServicesError> for WebUiV2HttpError {
-    fn from(error: RebornServicesError) -> Self {
+impl From<IronClawServicesError> for WebUiV2HttpError {
+    fn from(error: IronClawServicesError) -> Self {
         Self(error)
     }
 }
@@ -84,8 +84,8 @@ impl IntoResponse for WebUiV2HttpError {
 /// impl, so this struct does not perform any fallible string conversion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebUiV2HttpErrorBody {
-    pub error: RebornServicesErrorCode,
-    pub kind: RebornServicesErrorKind,
+    pub error: IronClawServicesErrorCode,
+    pub kind: IronClawServicesErrorKind,
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,

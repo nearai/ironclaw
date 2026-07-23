@@ -115,9 +115,9 @@ impl Default for SkillActivationSelectorConfig {
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
             selection_mode: SkillActivationSelectionMode::ExplicitAndCriteria,
             regex_activation_enabled: true,
-            // Library default stays the legacy full-body contract; the Reborn
+            // Library default stays the legacy full-body contract; the IronClaw
             // composition seam opts into `Listing` (see
-            // `ironclaw_reborn_composition::runtime::local_dev_selector_config`
+            // `ironclaw_composition::runtime::local_dev_selector_config`
             // and the `IRONCLAW_REBORN_SKILL_INJECTION` env switch).
             injection_mode: SkillInjectionMode::Full,
         }
@@ -245,7 +245,7 @@ impl SkillActivationSelectionError {
 
 /// Host skill context source that activates only conversation-selected skills.
 ///
-/// Reborn composition records the current user message for a turn scope before
+/// IronClaw composition records the current user message for a turn scope before
 /// submitting the turn. When the loop builds model context, this source lists
 /// visible bundles for the real run context, applies v1-style deterministic
 /// activation, and returns candidates only for selected skills.

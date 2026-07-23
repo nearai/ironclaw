@@ -26,7 +26,7 @@ use tc_support::*;
 /// Verify the full dispatch chain:
 ///   agent → `builtin.trace_commons.onboard` (confirmed=true)
 ///         → host runtime dispatch
-///         → `ironclaw_reborn_traces::onboarding::onboard()`
+///         → `ironclaw_traces::onboarding::onboard()`
 ///         → real HTTP POST to mock issuer
 ///         → policy written
 ///   then `builtin.trace_commons.status` reports enrolled.

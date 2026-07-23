@@ -1,6 +1,6 @@
 //! Group integration tests for the trigger-management verbs at int tier.
 //!
-//! A [`RebornIntegrationGroup::triggers`] owns one shared
+//! A [`IronClawIntegrationGroup::triggers`] owns one shared
 //! `HostRuntimeCapabilityHarness` (one trigger repository). The five verbs
 //! (`trigger_create`/`list`/`pause`/`resume`/`remove`) are dispatched through
 //! the real agent-loop turn → capability path — the only int-tier coverage of
@@ -18,7 +18,7 @@
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
@@ -33,11 +33,11 @@ mod scenario_verbs_lifecycle;
 mod scenario_webui_automations_list;
 mod scenario_webui_automations_rename;
 
-use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
+use ironclaw_support::group::{IronClawIntegrationGroup, ScenarioReport};
 
 #[tokio::test]
 async fn triggers_group_e2e() {
-    let g = RebornIntegrationGroup::triggers()
+    let g = IronClawIntegrationGroup::triggers()
         .await
         .expect("group builds");
     let mut report = ScenarioReport::new();
@@ -68,10 +68,10 @@ async fn triggers_group_e2e() {
 
     // Triggered-turn coverage map (E-TRIGGERED-SUBMIT via `submit_triggered_turn`)
     // — do NOT duplicate any of this here:
-    //   - origin propagation: `tests/reborn_integration_triggered_submit.rs`
+    //   - origin propagation: `tests/ironclaw_integration_triggered_submit.rs`
     //   - gate raise/approve/deny/resume: `triggered_gate_group` below
     //   - one-shot fire -> Completed: `trigger_poller_e2e.rs` + `repository_contract.rs`
-    //   - reply persists in trigger's own thread: `reborn_integration_triggered_submit.rs`
+    //   - reply persists in trigger's own thread: `ironclaw_integration_triggered_submit.rs`
     //   - push leg (trigger -> channel outbound delivery): the generic
     //     channel-host e2e suite (`channel_host/e2e_tests.rs`, triggered
     //     scenarios incl. the generic post-submit hook)
@@ -104,7 +104,7 @@ async fn triggers_group_e2e() {
 
 /// Triggered-origin runs raise, park on, and resume from REAL approval gates,
 /// exactly like interactive runs. Lives in this binary (not
-/// `reborn_group_approvals`) because the subject is the TRIGGERED submit wire.
+/// `ironclaw_group_approvals`) because the subject is the TRIGGERED submit wire.
 /// Separate `#[tokio::test]` (own `live_approvals` group per arm) because the
 /// `triggers()` group above has auto-approve ENABLED — a gate can never raise
 /// there.
@@ -112,7 +112,7 @@ async fn triggers_group_e2e() {
 async fn triggered_gate_group() {
     let mut report = ScenarioReport::new();
 
-    let g_approve = RebornIntegrationGroup::live_approvals()
+    let g_approve = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("approve-arm group builds");
     report.record(
@@ -120,7 +120,7 @@ async fn triggered_gate_group() {
         scenario_triggered_gate::run_approve(&g_approve).await,
     );
 
-    let g_deny = RebornIntegrationGroup::live_approvals()
+    let g_deny = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("deny-arm group builds");
     report.record(
@@ -131,7 +131,7 @@ async fn triggered_gate_group() {
     // C-DENYEDGE row 1: a resume for the right run_id but a mutated
     // (wrong-tenant) TurnScope must be rejected with ScopeNotFound, gate still
     // live/resolvable after. Own group: isolates the mutation from the arms above.
-    let g_wrong_scope = RebornIntegrationGroup::live_approvals()
+    let g_wrong_scope = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("wrong-scope-arm group builds");
     report.record(
@@ -143,7 +143,7 @@ async fn triggered_gate_group() {
     // SECOND gate in the SAME run — pins ScheduledTrigger origin across BOTH
     // resume hops plus reply persistence. Own group: isolates the two-gate case
     // from the single-gate arms above.
-    let g_chained = RebornIntegrationGroup::live_approvals()
+    let g_chained = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("chained-gate-arm group builds");
     report.record(
@@ -155,7 +155,7 @@ async fn triggered_gate_group() {
     // active_hold on both read surfaces. Own combined group: trigger verbs
     // need auto-approve ON while write_file gates via an AskEachTime override
     // — neither `triggers()` nor `live_approvals()` offers both.
-    let g_hold = RebornIntegrationGroup::triggers_with_gated_write()
+    let g_hold = IronClawIntegrationGroup::triggers_with_gated_write()
         .await
         .expect("hold-visibility group builds");
     report.record(

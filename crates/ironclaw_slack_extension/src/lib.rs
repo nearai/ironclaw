@@ -1,4 +1,4 @@
-//! Slack channel extension for Reborn (#3857).
+//! Slack channel extension for IronClaw (#3857).
 //!
 //! This crate owns Slack protocol parsing/rendering only. Hosts verify Slack
 //! request signatures, stamp trusted inbound context, and route through

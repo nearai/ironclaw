@@ -1,4 +1,4 @@
-//! IronClaw memory service contract for Reborn.
+//! IronClaw memory service contract for IronClaw.
 //!
 //! This module owns the provider-neutral, host-facing IronClaw memory
 //! operation shapes and the [`MemoryService`] trait. The default native

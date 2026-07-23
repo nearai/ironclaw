@@ -2,7 +2,7 @@
 -- (libSQL / SQLite backend).
 --
 -- This crate owns its own schema (per-crate pattern, like
--- ironclaw_reborn_event_store / ironclaw_filesystem). The DDL is embedded
+-- ironclaw_event_store / ironclaw_filesystem). The DDL is embedded
 -- verbatim into `schema.rs` via `include_str!` and applied as an idempotent
 -- batch by `run_migrations()`; this file is the single human-reviewable
 -- canonical source for that schema. (Previously a hand-maintained Rust const;

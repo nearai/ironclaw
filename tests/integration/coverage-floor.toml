@@ -1,6 +1,6 @@
-# Reborn integration-tier coverage ratchet floor. Read by
-# scripts/ci/reborn-coverage-ratchet.sh inside coverage-report
-# (.github/workflows/reborn-tests.yml). Pure post-processing over the merged,
+# IronClaw integration-tier coverage ratchet floor. Read by
+# scripts/ci/ironclaw-coverage-ratchet.sh inside coverage-report
+# (.github/workflows/ironclaw-tests.yml). Pure post-processing over the merged,
 # exemption-filtered lcov + this file — never re-runs tests, never triggers a
 # second CI pass.
 #
@@ -16,7 +16,7 @@
 #                              # are manifest bugs, not coverage regressions. Flip to true only
 #                              # once the current baseline below is trusted (see captured_from).
 #   floor_percent = 41.9       # aggregate line-% floor, post-exemption — same number as the
-#                              # "Line coverage (Reborn crates): NN%" summary line.
+#                              # "Line coverage (IronClaw crates): NN%" summary line.
 #   tolerance_percent = 0.5    # observed must be >= floor_percent - tolerance_percent.
 #                              # PROVISIONAL: a qualitative estimate (a handful of DA: hit
 #                              # counts flipping 0/1 across the lane+bucket split under timing),
@@ -33,7 +33,7 @@
 #   # A crate may not appear here AND as a whole-crate `coverage-exemptions.toml`
 #   # entry (conflict — the script rejects this at parse time).
 #   [[crate]]
-#   name = "ironclaw_reborn_composition"
+#   name = "ironclaw_composition"
 #   floor_percent = 38.0             # optional
 #   floor_covered_lines = 4200       # optional — immune to denominator growth
 #   tolerance_percent = 0.5          # optional, overrides [global].tolerance_percent
@@ -57,7 +57,7 @@
 enforce = true
 # Recaptured from PR #6467's green coverage-report run 29952071174 at
 # 955950b79: aggregate 305426 / 354049 = 86.27%. The denominator moved +10.58%
-# from the prior capture as the current Reborn crate set entered instrumentation;
+# from the prior capture as the current IronClaw crate set entered instrumentation;
 # this floor-only follow-up does not alter instrumented code. See #6467.
 floor_percent = 86.27
 tolerance_percent = 0.5
@@ -66,5 +66,5 @@ captured_date = "2026-07-22"
 captured_from = "955950b79"
 
 # No [[crate]] entries at initial landing — opt-in, added as owners choose to
-# ratchet a crate they care about (e.g. ironclaw_reborn_composition,
+# ratchet a crate they care about (e.g. ironclaw_composition,
 # ironclaw_product_workflow) as a fast-follow, not blocking this landing.

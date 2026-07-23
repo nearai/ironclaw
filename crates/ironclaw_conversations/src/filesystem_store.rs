@@ -412,7 +412,7 @@ fn filesystem_error(error: FilesystemError) -> InboundTurnError {
 }
 
 /// Filesystem-backed equivalent of the legacy
-/// `RebornLibSqlConversationServices` / `RebornPostgresConversationServices`
+/// `IronClawLibSqlConversationServices` / `IronClawPostgresConversationServices`
 /// wrappers. Wires an [`InMemoryConversationServices`] over a
 /// [`FilesystemConversationStateStore`] so the in-process state is
 /// rehydrated from the filesystem at construction and every mutation
@@ -423,11 +423,11 @@ fn filesystem_error(error: FilesystemError) -> InboundTurnError {
 /// callers construct `Arc<ScopedFilesystem<F>>` once and reuse it across
 /// every consumer store under the same `MountView`.
 #[derive(Clone)]
-pub struct RebornFilesystemConversationServices {
+pub struct IronClawFilesystemConversationServices {
     inner: InMemoryConversationServices,
 }
 
-impl RebornFilesystemConversationServices {
+impl IronClawFilesystemConversationServices {
     pub async fn new<F>(filesystem: Arc<ScopedFilesystem<F>>) -> Result<Self, InboundTurnError>
     where
         F: RootFilesystem + ?Sized + 'static,
@@ -520,7 +520,7 @@ impl RebornFilesystemConversationServices {
 }
 
 #[async_trait]
-impl ConversationActorPairingService for RebornFilesystemConversationServices {
+impl ConversationActorPairingService for IronClawFilesystemConversationServices {
     async fn pair_external_actor(
         &self,
         tenant_id: ironclaw_host_api::TenantId,
@@ -599,7 +599,7 @@ impl ConversationActorPairingService for RebornFilesystemConversationServices {
 }
 
 #[async_trait]
-impl ConversationBindingService for RebornFilesystemConversationServices {
+impl ConversationBindingService for IronClawFilesystemConversationServices {
     async fn resolve_or_create_binding(
         &self,
         request: ResolveConversationRequest,
@@ -647,7 +647,7 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
 }
 
 #[async_trait]
-impl SessionThreadService for RebornFilesystemConversationServices {
+impl SessionThreadService for IronClawFilesystemConversationServices {
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,

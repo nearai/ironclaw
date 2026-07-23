@@ -4,15 +4,15 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/turns-agent-loop.md`
-- `docs/reborn/contracts/turn-persistence.md`
-- `docs/reborn/contracts/turn-runner.md`
-- `docs/reborn/contracts/loop-exit.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/turns-agent-loop.md`
+- `docs/ironclaw/contracts/turn-persistence.md`
+- `docs/ironclaw/contracts/turn-runner.md`
+- `docs/ironclaw/contracts/loop-exit.md`
 
 ## What This Crate Owns
 
-- Host-layer turn coordination contracts (above the Reborn kernel facade), currently:
+- Host-layer turn coordination contracts (above the IronClaw kernel facade), currently:
 - Adapter-facing coordinator: `TurnCoordinator`/`DefaultTurnCoordinator`, `TurnAdmissionPolicy`, run-wake notifier ports (`coordinator`); request/response surface `SubmitTurnRequest`/`ResumeTurnRequest`/`CancelRunRequest`/`GetRunStateRequest` (`request`) and `SubmitTurnResponse`/`ResumeTurnResponse`/`CancelRunResponse`/`ThreadBusy` (`response`).
 - Trusted runner transition ports (`runner`, kept out of the adapter prelude).
 - Canonical typed IDs and references: `TurnId`, `TurnRunId`, `TurnRunnerId`, `RunProfileId`/`RunProfileVersion`, `IdempotencyKey`, `TurnLeaseToken`, gate/message/result/binding refs (`ids`); turn scope/actor (`scope`).

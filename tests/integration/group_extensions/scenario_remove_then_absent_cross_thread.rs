@@ -9,20 +9,20 @@
 //! unit tests). Four threads, different conversation IDs, same
 //! `Arc<HostRuntimeCapabilityHarness>`, prove cross-thread removal persistence.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 1: install "notion" ────────────────────────────────────────────
     let installer = g
         .thread("ext-remove-phase-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "notion"}),
             ),
-            RebornScriptedReply::text("installed"),
+            IronClawScriptedReply::text("installed"),
         ])
         .build()
         .await?;
@@ -41,11 +41,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let remover = g
         .thread("ext-remove-phase-remove")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_remove",
                 json!({"extension_id": "notion"}),
             ),
-            RebornScriptedReply::text("removed"),
+            IronClawScriptedReply::text("removed"),
         ])
         .build()
         .await?;
@@ -64,11 +64,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let retry_remover = g
         .thread("ext-remove-phase-retry")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_remove",
                 json!({"extension_id": "notion"}),
             ),
-            RebornScriptedReply::text("already removed"),
+            IronClawScriptedReply::text("already removed"),
         ])
         .build()
         .await?;
@@ -87,8 +87,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let viewer = g
         .thread("ext-remove-phase-viewer")
         .script([
-            RebornScriptedReply::tool_call("builtin.extension_search", json!({"query": "notion"})),
-            RebornScriptedReply::text("searched"),
+            IronClawScriptedReply::tool_call(
+                "builtin.extension_search",
+                json!({"query": "notion"}),
+            ),
+            IronClawScriptedReply::text("searched"),
         ])
         .build()
         .await?;

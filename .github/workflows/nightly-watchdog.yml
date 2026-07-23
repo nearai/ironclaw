@@ -1,6 +1,6 @@
 name: Nightly Watchdog
 
-# Single alerting path for the scheduled nightlies (Nightly Deep CI, Reborn
+# Single alerting path for the scheduled nightlies (Nightly Deep CI, IronClaw
 # Playwright, IronClaw Stress): checks each workflow's latest scheduled run
 # and posts failures to Slack. Watching from OUTSIDE the runs
 # is deliberate — an in-run alert job dies with its own run on a
@@ -33,7 +33,7 @@ jobs:
       matrix:
         workflow:
           - Nightly Deep CI
-          - Reborn Playwright
+          - IronClaw Playwright
           - IronClaw Stress
     steps:
       - name: Check latest scheduled run and post failures to Slack

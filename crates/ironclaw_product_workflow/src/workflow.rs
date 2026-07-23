@@ -50,14 +50,14 @@ use crate::command_dispatch::{
 use crate::commands::ProductCommand;
 use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
+use crate::ironclaw_services::{
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, IronClawServicesError,
+    IronClawServicesErrorCode, IronClawServicesErrorKind, ProductOperationId,
+    ProductOperationRequest, ProductOperationResponse, ProductOperationTypedInput, ProductSurface,
+};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
-use crate::reborn_services::{
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, ProductOperationId,
-    ProductOperationRequest, ProductOperationResponse, ProductOperationTypedInput, ProductSurface,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-};
 use crate::webui_inbound::WebUiAuthenticatedCaller;
 
 /// Host-side [`ProductSurface`] implementation that dispatches inbound
@@ -200,7 +200,7 @@ impl ProductSurface for DefaultProductSurface {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(channel_surface_unavailable)?;
         if operation_id != ProductOperationId::ChannelInboundAdmit {
@@ -217,10 +217,10 @@ impl ProductSurface for DefaultProductSurface {
     }
 }
 
-fn channel_surface_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn channel_surface_unavailable() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: false,
         field: None,

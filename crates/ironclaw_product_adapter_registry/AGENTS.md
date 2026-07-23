@@ -1,6 +1,6 @@
 # ironclaw_product_adapter_registry Agent Notes
 
-- This crate owns ProductAdapter host-api section projection for IronClaw Reborn. Generic extension manifests, installation state, activation state, health, and credential bindings live in `ironclaw_extensions`.
+- This crate owns ProductAdapter host-api section projection for IronClaw. Generic extension manifests, installation state, activation state, health, and credential bindings live in `ironclaw_extensions`.
 - ProductAdapter declarations live in the single Extension Manifest v2, not a separate adapter manifest.
 - Read `CLAUDE.md` for the full guardrail set before changing behavior.
 - Do not load WASM components, perform HTTP egress, route webhooks, or read raw secret material from this crate.
@@ -11,4 +11,4 @@
 - Validation runs:
   - `cargo test -p ironclaw_product_adapter_registry`
   - `cargo clippy -p ironclaw_product_adapter_registry --all-targets -- -D warnings`
-  - `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+  - `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`

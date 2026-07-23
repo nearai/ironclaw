@@ -22,8 +22,8 @@ use ironclaw_auth::{
     AuthErrorCode, AuthFlowStatus, AuthProviderId, AuthorizationCodeHash,
     CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash,
 };
-use ironclaw_reborn_composition::{
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+use ironclaw_composition::{
+    IronClawOAuthCallbackOutcome, IronClawOAuthCallbackRequest,
     test_support::build_oauth_product_auth_for_test,
 };
 
@@ -52,6 +52,15 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
         OAuthProviderCallbackRequest, PkceVerifierSecret, ProviderScope,
     };
+    use ironclaw_composition::{
+        ChannelIdentityBindingConfig, IronClawUserIdentityBinding,
+        IronClawUserIdentityBindingDeleteStore, IronClawUserIdentityBindingError,
+        IronClawUserIdentityBindingStore,
+        test_support::{
+            build_oauth_product_auth_with_identity_for_test,
+            handle_oauth_callback_with_channel_identity_binding_for_test,
+        },
+    };
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
@@ -59,15 +68,6 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{ExtensionId, VirtualPath};
-    use ironclaw_reborn_composition::{
-        ChannelIdentityBindingConfig, RebornUserIdentityBinding,
-        RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-        RebornUserIdentityBindingStore,
-        test_support::{
-            build_oauth_product_auth_with_identity_for_test,
-            handle_oauth_callback_with_channel_identity_binding_for_test,
-        },
-    };
     use secrecy::SecretString;
 
     const VENDOR: &str = "test-oauth-provider";
@@ -80,28 +80,28 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     /// full-prefix rollback) is what this proof pins.
     #[derive(Default)]
     struct RecordingIdentityStore {
-        bindings: Mutex<Vec<RebornUserIdentityBinding>>,
+        bindings: Mutex<Vec<IronClawUserIdentityBinding>>,
     }
 
     #[async_trait::async_trait]
-    impl RebornUserIdentityBindingStore for RecordingIdentityStore {
+    impl IronClawUserIdentityBindingStore for RecordingIdentityStore {
         async fn bind_user_identity(
             &self,
-            binding: RebornUserIdentityBinding,
-        ) -> Result<(), RebornUserIdentityBindingError> {
+            binding: IronClawUserIdentityBinding,
+        ) -> Result<(), IronClawUserIdentityBindingError> {
             self.bindings.lock().unwrap().push(binding);
             Ok(())
         }
     }
 
     #[async_trait::async_trait]
-    impl RebornUserIdentityBindingDeleteStore for RecordingIdentityStore {
+    impl IronClawUserIdentityBindingDeleteStore for RecordingIdentityStore {
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,
             user_id: &ironclaw_host_api::UserId,
             provider_user_id_prefix: Option<&str>,
-        ) -> Result<usize, RebornUserIdentityBindingError> {
+        ) -> Result<usize, IronClawUserIdentityBindingError> {
             let mut bindings = self.bindings.lock().unwrap();
             let before = bindings.len();
             bindings.retain(|binding| {
@@ -283,11 +283,11 @@ app_id = "/app_id"
                 .expect("create_flow must succeed");
             let response = handle_oauth_callback_with_channel_identity_binding_for_test(
                 &bundle.services,
-                RebornOAuthCallbackRequest {
+                IronClawOAuthCallbackRequest {
                     scope: scope.clone(),
                     flow_id: flow.id,
                     opaque_state_hash: state_hash,
-                    outcome: RebornOAuthCallbackOutcome::Authorized {
+                    outcome: IronClawOAuthCallbackOutcome::Authorized {
                         provider_request: OAuthProviderCallbackRequest {
                             provider: provider.clone(),
                             account_label: CredentialAccountLabel::new("Channel Account").unwrap(),
@@ -840,11 +840,11 @@ async fn denied_consent_terminalizes_flow_and_fresh_retry_connects() {
 
     let denial = bundle
         .services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
+        .handle_oauth_callback(IronClawOAuthCallbackRequest {
             scope: scope.clone(),
             flow_id: denied_flow.id,
             opaque_state_hash: denied_state.clone(),
-            outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            outcome: IronClawOAuthCallbackOutcome::ProviderDenied,
         })
         .await
         .expect_err("a denied consent surfaces as the sanitized ProviderDenied error");

@@ -259,7 +259,7 @@ pub const fn calendar_package_spec() -> GsuitePackageSpec {
     GsuitePackageSpec {
         extension_id: CALENDAR_EXTENSION_ID,
         name: "Google Calendar",
-        description: "First-party Google Calendar capabilities for Reborn.",
+        description: "First-party Google Calendar capabilities for IronClaw.",
         service: "google-calendar",
         schema_prefix: "google-calendar",
         credential_handle: "google_calendar_account",
@@ -272,7 +272,7 @@ pub const fn gmail_package_spec() -> GsuitePackageSpec {
     GsuitePackageSpec {
         extension_id: GMAIL_EXTENSION_ID,
         name: "Gmail",
-        description: "First-party Gmail capabilities for Reborn.",
+        description: "First-party Gmail capabilities for IronClaw.",
         service: "gmail",
         schema_prefix: "gmail",
         credential_handle: "gmail_account",

@@ -1,8 +1,8 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
 use ironclaw_product_workflow::{
-    RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesError,
-    RebornViewQuery, WebUiAuthenticatedCaller,
+    IronClawRunArtifact, IronClawRunArtifactRequest, IronClawServicesError, IronClawViewQuery,
+    RUN_ARTIFACT_VIEW, WebUiAuthenticatedCaller,
 };
 use serde::Deserialize;
 
@@ -20,17 +20,17 @@ pub async fn get_run_artifact(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(path): Path<RunArtifactPath>,
-) -> Result<Json<RebornRunArtifact>, WebUiV2HttpError> {
-    let params = serde_json::to_value(RebornRunArtifactRequest {
+) -> Result<Json<IronClawRunArtifact>, WebUiV2HttpError> {
+    let params = serde_json::to_value(IronClawRunArtifactRequest {
         thread_id: path.thread_id,
         run_id: path.run_id,
     })
-    .map_err(RebornServicesError::internal_from)?;
+    .map_err(IronClawServicesError::internal_from)?;
     let page = state
         .services()
         .query(
             caller,
-            RebornViewQuery {
+            IronClawViewQuery {
                 view_id: RUN_ARTIFACT_VIEW.id.to_string(),
                 params,
                 cursor: None,
@@ -38,6 +38,6 @@ pub async fn get_run_artifact(
         )
         .await?;
     let artifact =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(IronClawServicesError::internal_from)?;
     Ok(Json(artifact))
 }

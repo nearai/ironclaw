@@ -57,7 +57,7 @@ trace_*.json
 .worktrees/
 .ironclaw/
 
-# De-slop loop ledger + local loop scratch (.claude/commands/deslop-reborn.md)
+# De-slop loop ledger + local loop scratch (.claude/commands/deslop-ironclaw.md)
 .work/
 .review/
 

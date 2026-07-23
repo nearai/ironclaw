@@ -10,19 +10,19 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_hooks::dispatch::HOOK_DENY_PREDICATE_CODE;
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::hooks::{
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::hooks::{
     HOOK_TEST_DENY_REASON, RecordingHookLog, denying_hook_factory, recording_hook_factory,
 };
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
@@ -34,12 +34,12 @@ const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 #[tokio::test]
 async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
     let log = RecordingHookLog::new();
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .with_hook_factory(recording_hook_factory(log.clone()))
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -67,12 +67,12 @@ async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
 #[tokio::test]
 async fn hook_deny_blocks_capability_without_wedging_run() {
     let log = RecordingHookLog::new();
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .with_hook_factory(denying_hook_factory(log.clone(), "builtin.http"))
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await

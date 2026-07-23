@@ -103,7 +103,7 @@ reviews:
     - path: "src/db/**"
       instructions: |
         Dual-backend persistence: every new persistence feature supports BOTH PostgreSQL and
-        libSQL — extend the shared Database trait first, then both backends (Reborn stores
+        libSQL — extend the shared Database trait first, then both backends (IronClaw stores
         keep ironclaw_hooks_postgres / ironclaw_hooks_libsql in parity via hooks_parity).
         Multi-step DB operations must be wrapped in a transaction. Driver types
         (tokio_postgres::, libsql::) must not leak outside the allowed modules

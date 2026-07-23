@@ -8,11 +8,11 @@
 //! DISTINCT from the outbound delivery **sink** (E-OUTBOUND): this is prompt
 //! **context**, not a delivery recorder. The production facade→context
 //! mapping is already unit-tested in
-//! `crates/ironclaw_reborn_composition/src/root/communication_context.rs`; this
+//! `crates/ironclaw_composition/src/root/communication_context.rs`; this
 //! double covers only the int-tier wiring gap.
 
 // Shared integration-test support: not every binary that mounts the
-// `reborn_support` tree consumes this module, so its symbols read as dead there
+// `ironclaw_support` tree consumes this module, so its symbols read as dead there
 // under the all-features `-D warnings` lane.
 #![allow(dead_code)]
 

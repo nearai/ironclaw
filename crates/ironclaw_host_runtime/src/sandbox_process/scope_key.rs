@@ -4,11 +4,11 @@ use ironclaw_host_api::ResourceScope;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSandboxScopeKey {
+pub struct IronClawSandboxScopeKey {
     digest: String,
 }
 
-impl RebornSandboxScopeKey {
+impl IronClawSandboxScopeKey {
     pub fn from_scope(scope: &ResourceScope) -> Self {
         let mut raw_parts = vec![
             ("tenant", scope.tenant_id.as_str().to_string()),
@@ -40,7 +40,7 @@ impl RebornSandboxScopeKey {
     }
 
     pub fn container_name_prefix(&self) -> String {
-        format!("ironclaw-reborn-sandbox-{}", &self.digest[..24])
+        format!("ironclaw-sandbox-{}", &self.digest[..24])
     }
 }
 
@@ -89,14 +89,14 @@ mod tests {
 
     #[test]
     fn scope_key_isolates_tenants_with_same_user_and_project() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxScopeKey::from_scope(&scope(
+        let root = Path::new("/tmp/ironclaw-sandbox");
+        let left = IronClawSandboxScopeKey::from_scope(&scope(
             "tenant-a",
             "same-user",
             Some("same-project"),
             None,
         ));
-        let right = RebornSandboxScopeKey::from_scope(&scope(
+        let right = IronClawSandboxScopeKey::from_scope(&scope(
             "tenant-b",
             "same-user",
             Some("same-project"),
@@ -109,9 +109,9 @@ mod tests {
 
     #[test]
     fn scope_key_uses_thread_when_project_is_absent() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("a")));
-        let right = RebornSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("b")));
+        let root = Path::new("/tmp/ironclaw-sandbox");
+        let left = IronClawSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("a")));
+        let right = IronClawSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("b")));
 
         assert_ne!(left.workspace_path(root), right.workspace_path(root));
         assert_ne!(left.container_name_prefix(), right.container_name_prefix());
@@ -119,13 +119,13 @@ mod tests {
 
     #[test]
     fn scope_key_covers_agent_project_and_invocation_fallbacks() {
-        let root = Path::new("/tmp/reborn-sandbox");
+        let root = Path::new("/tmp/ironclaw-sandbox");
         let with_agent = scope("tenant", "user", Some("project"), None);
         let mut without_agent = with_agent.clone();
         without_agent.agent_id = None;
         assert_ne!(
-            RebornSandboxScopeKey::from_scope(&with_agent).workspace_path(root),
-            RebornSandboxScopeKey::from_scope(&without_agent).workspace_path(root)
+            IronClawSandboxScopeKey::from_scope(&with_agent).workspace_path(root),
+            IronClawSandboxScopeKey::from_scope(&without_agent).workspace_path(root)
         );
 
         let project_preferred_a = scope("tenant", "user", Some("project"), Some("thread-a"));
@@ -133,8 +133,8 @@ mod tests {
         project_preferred_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
         project_preferred_b.invocation_id = InvocationId::new();
         assert_eq!(
-            RebornSandboxScopeKey::from_scope(&project_preferred_a),
-            RebornSandboxScopeKey::from_scope(&project_preferred_b)
+            IronClawSandboxScopeKey::from_scope(&project_preferred_a),
+            IronClawSandboxScopeKey::from_scope(&project_preferred_b)
         );
 
         let mut thread_a = project_preferred_a.clone();
@@ -142,8 +142,8 @@ mod tests {
         thread_a.project_id = None;
         thread_b.project_id = None;
         assert_ne!(
-            RebornSandboxScopeKey::from_scope(&thread_a),
-            RebornSandboxScopeKey::from_scope(&thread_b)
+            IronClawSandboxScopeKey::from_scope(&thread_a),
+            IronClawSandboxScopeKey::from_scope(&thread_b)
         );
 
         let mut invocation_a = scope("tenant", "user", None, None);
@@ -151,16 +151,17 @@ mod tests {
         invocation_a.invocation_id = InvocationId::new();
         invocation_b.invocation_id = InvocationId::new();
         assert_ne!(
-            RebornSandboxScopeKey::from_scope(&invocation_a),
-            RebornSandboxScopeKey::from_scope(&invocation_b)
+            IronClawSandboxScopeKey::from_scope(&invocation_a),
+            IronClawSandboxScopeKey::from_scope(&invocation_b)
         );
     }
 
     #[test]
     fn scope_key_does_not_collapse_path_special_characters() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxScopeKey::from_scope(&scope("tenant:a", "user", Some("p"), None));
-        let right = RebornSandboxScopeKey::from_scope(&scope("tenant_a", "user", Some("p"), None));
+        let root = Path::new("/tmp/ironclaw-sandbox");
+        let left = IronClawSandboxScopeKey::from_scope(&scope("tenant:a", "user", Some("p"), None));
+        let right =
+            IronClawSandboxScopeKey::from_scope(&scope("tenant_a", "user", Some("p"), None));
 
         assert_ne!(left.workspace_path(root), right.workspace_path(root));
         assert_ne!(left.container_name_prefix(), right.container_name_prefix());

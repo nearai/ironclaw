@@ -174,7 +174,7 @@ pub(super) struct ServiceResolvedRuntimeAdapter<T> {
 }
 
 // arch-exempt: large_file, runtime adapter composition is still centralized
-// in HostRuntimeServices until the Reborn architecture decomposition tracked
+// in HostRuntimeServices until the IronClaw architecture decomposition tracked
 // by nearai/ironclaw#3231 splits runtime wiring into focused modules.
 impl<T> ServiceResolvedRuntimeAdapter<T> {
     pub(super) fn new(

@@ -1,4 +1,4 @@
-//! Reborn integration-test framework — auth/credential-failure coverage.
+//! IronClaw integration-test framework — auth/credential-failure coverage.
 //!
 //! (a) `revoked_account_reads_back_revoked` — pure-store `update_status(..,
 //! Revoked)` durable read-back; no refresh sweep involved.
@@ -13,12 +13,12 @@
 //! DEFERRED: live-401 reactive re-auth arm — needs a credentialed capability
 //! backend test double, not yet available.
 //!
-//! These tests use the durable product-auth bundle compiled into the Reborn
+//! These tests use the durable product-auth bundle compiled into the IronClaw
 //! stack.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
@@ -27,11 +27,11 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLookupRequest, CredentialAccountStatus,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{
+use ironclaw_composition::{
     KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
 };
-use reborn_support::oauth_flow::connect_google_account;
+use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_support::oauth_flow::connect_google_account;
 
 fn test_scope() -> AuthProductScope {
     let resource = ResourceScope::local_default(
@@ -217,11 +217,11 @@ async fn normal_sweep_does_not_mark_account_revoked() {
 /// verify the FIFO + fallback path and [`captured_count`] in isolation.
 #[tokio::test]
 async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default() {
+    use ironclaw_composition::test_support::ScriptedOAuthTokenEgress;
     use ironclaw_host_api::{
         CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeKind, UserId,
     };
-    use ironclaw_reborn_composition::test_support::ScriptedOAuthTokenEgress;
 
     let egress = ScriptedOAuthTokenEgress::with_error_response(400, "invalid_grant");
 

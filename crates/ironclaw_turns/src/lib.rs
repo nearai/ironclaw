@@ -1,6 +1,6 @@
-//! Host-layer turn coordination contracts for IronClaw Reborn.
+//! Host-layer turn coordination contracts for IronClaw.
 //!
-//! `ironclaw_turns` sits above the Reborn kernel facade. Product adapters use
+//! `ironclaw_turns` sits above the IronClaw kernel facade. Product adapters use
 //! the adapter-safe [`TurnCoordinator`] API with canonical refs resolved by the
 //! binding/session layer. Trusted workers use [`runner`] explicitly; runner
 //! transition APIs are intentionally not re-exported from this crate prelude.

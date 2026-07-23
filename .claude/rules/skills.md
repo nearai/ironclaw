@@ -1,7 +1,7 @@
 ---
 paths:
   - "crates/ironclaw_skills/**"
-  - "crates/ironclaw_reborn_composition/src/extension_host/bundled_skills.rs"
+  - "crates/ironclaw_composition/src/extension_host/bundled_skills.rs"
   - "skills/**"
 ---
 # Skills System
@@ -13,7 +13,7 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. Each
 | Trust Level | Source | Tool Access |
 |-------------|--------|-------------|
 | **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
-| **Installed** | Downloaded from ClawHub registry or HTTPS skill URL (`~/.ironclaw/installed_skills/`, or URL provenance metadata in Reborn scoped skill storage) | Read-only tools only (no shell, file write, HTTP) |
+| **Installed** | Downloaded from ClawHub registry or HTTPS skill URL (`~/.ironclaw/installed_skills/`, or URL provenance metadata in IronClaw scoped skill storage) | Read-only tools only (no shell, file write, HTTP) |
 
 ## SKILL.md Format
 
@@ -59,7 +59,7 @@ The parser supports more than the example above shows (source of truth:
   within those caps or your extra triggers simply don't exist.
 
 When parser behavior changes, update this file in the same PR
-(`ironclaw-reborn-skill-maintainer` rule 7).
+(`ironclaw-skill-maintainer` rule 7).
 
 ## Selection Pipeline
 

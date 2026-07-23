@@ -17,34 +17,34 @@
 //! the shared coordinator SIMULTANEOUSLY, then resolves them with opposite
 //! dispositions.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // Two distinct threads, two distinct gated writes, different target files
     // so each run's own disposition (A approved, B denied) is independently
     // verifiable on disk (see module note on shared-workspace scope).
     let thread_a = g
         .thread("conv-concurrent-dual-gate-a")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/concurrent_a.txt", "content": "thread A approved"}),
             ),
-            RebornScriptedReply::text("A: write approved"),
+            IronClawScriptedReply::text("A: write approved"),
         ])
         .build()
         .await?;
     let thread_b = g
         .thread("conv-concurrent-dual-gate-b")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/concurrent_b.txt", "content": "thread B should not persist"}),
             ),
-            RebornScriptedReply::text("B: write was not authorized"),
+            IronClawScriptedReply::text("B: write was not authorized"),
         ])
         .build()
         .await?;

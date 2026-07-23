@@ -2,7 +2,7 @@
 //!
 //! One adapter instance per extension, one method: given validated input for
 //! a declared (or MCP-discovered) capability, do the work
-//! (`docs/reborn/extension-runtime/overview.md` §4.1). Everything else —
+//! (`docs/ironclaw/extension-runtime/overview.md` §4.1). Everything else —
 //! what tools exist, listing, validation, authorization, approvals,
 //! obligations, resource reservation, credential injection, events, audit —
 //! is manifest data or the host dispatcher pipeline. Adapters never report

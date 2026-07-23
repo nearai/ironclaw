@@ -20,12 +20,12 @@
 - Timezone validation (`ValidTimezone`, `deserialize_option_lenient`) — `timezone.rs`.
 - Preview truncation (`truncate_for_preview`, `truncate_preview`) — `util.rs`.
 - Cross-runtime constants (`MAX_WORKER_ITERATIONS`).
-- Internal Reborn trust-boundary scaffolding (`trust_boundary.rs`) — `pub(crate)` only, `#[allow(dead_code)]`, not yet consumed.
+- Internal IronClaw trust-boundary scaffolding (`trust_boundary.rs`) — `pub(crate)` only, `#[allow(dead_code)]`, not yet consumed.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
 
-- Runtime orchestration, persistence, network clients, web/TUI behavior, policy engines, or domain logic owned by more specific Reborn crates.
+- Runtime orchestration, persistence, network clients, web/TUI behavior, policy engines, or domain logic owned by more specific IronClaw crates.
 - Secrets, raw host paths, backend error details, and unredacted user content in errors, events, snapshots, logs, or docs.
 
 ## Validation

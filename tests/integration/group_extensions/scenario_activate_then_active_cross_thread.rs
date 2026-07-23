@@ -14,20 +14,20 @@
 //! `extension_search` renders an active extension as
 //! `"installation_phase":"active"` vs `"installed"` for installed-but-inactive.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: installer ─────────────────────────────────────────────────
     let installer = g
         .thread("ext-activate-phase-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "web-access"}),
             ),
-            RebornScriptedReply::text("installed"),
+            IronClawScriptedReply::text("installed"),
         ])
         .build()
         .await?;
@@ -46,11 +46,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let activator = g
         .thread("ext-activate-phase-activate")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "web-access"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await?;
@@ -76,11 +76,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let viewer = g
         .thread("ext-activate-phase-viewer")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_search",
                 json!({"query": "web-access"}),
             ),
-            RebornScriptedReply::text("searched"),
+            IronClawScriptedReply::text("searched"),
         ])
         .build()
         .await?;

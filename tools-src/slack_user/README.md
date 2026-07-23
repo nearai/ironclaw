@@ -1,4 +1,4 @@
-# Slack Personal (User-Token) WASM Tool — IronClaw Reborn
+# Slack Personal (User-Token) WASM Tool — IronClaw
 
 A standalone WASM component that lets IronClaw act **as you** in Slack, using a
 personal **user token** (`xoxp-`) rather than a bot token. This enables reading
@@ -29,9 +29,9 @@ cd tools-src/slack_user
 cargo component build --release --target wasm32-wasip2
 ```
 
-The compiled component is embedded into the Reborn binary via
+The compiled component is embedded into the IronClaw binary via
 `crates/ironclaw_first_party_extensions/assets/slack_user/` and registered in
-`crates/ironclaw_reborn_composition/src/available_extensions.rs`.
+`crates/ironclaw_composition/src/available_extensions.rs`.
 
 ## Configuring
 

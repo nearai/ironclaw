@@ -1,24 +1,26 @@
-//! Reborn integration tests for typed model-error recovery observations.
+//! IronClaw integration tests for typed model-error recovery observations.
 //!
 //! These scenarios cross the production turn scheduler, canonical loop,
 //! provider gateway, checkpoint, compaction, and transcript seams.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
+use ironclaw_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
 
 #[tokio::test]
 async fn content_filtered_completion_recovers_with_model_visible_observation() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .content_filter_model_once()
-        .script([RebornScriptedReply::text("recovered after content filter")])
+        .script([IronClawScriptedReply::text(
+            "recovered after content filter",
+        )])
         .build()
         .await
         .expect("harness builds");
@@ -55,14 +57,14 @@ async fn context_overflow_recovers_with_model_visible_observation() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.
     let oversized_setup_turn = format!("third setup turn {}", "history ".repeat(5_000));
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .context_overflow_model_after(3, 3)
         .script([
-            RebornScriptedReply::text("first setup reply"),
-            RebornScriptedReply::text("second setup reply"),
-            RebornScriptedReply::text("third setup reply"),
-            RebornScriptedReply::text("compacted recovery history"),
-            RebornScriptedReply::text("recovered after context overflow"),
+            IronClawScriptedReply::text("first setup reply"),
+            IronClawScriptedReply::text("second setup reply"),
+            IronClawScriptedReply::text("third setup reply"),
+            IronClawScriptedReply::text("compacted recovery history"),
+            IronClawScriptedReply::text("recovered after context overflow"),
         ])
         .build()
         .await
@@ -117,9 +119,11 @@ async fn context_overflow_recovers_with_model_visible_observation() {
 
 #[tokio::test]
 async fn invalid_output_recovers_with_model_visible_observation() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .invalid_output_model_times(3)
-        .script([RebornScriptedReply::text("recovered after invalid output")])
+        .script([IronClawScriptedReply::text(
+            "recovered after invalid output",
+        )])
         .build()
         .await
         .expect("harness builds");

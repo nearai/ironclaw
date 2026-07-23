@@ -1,4 +1,4 @@
-//! Reborn integration-test harness — first-party `web-access.*` scaffolding
+//! IronClaw integration-test harness — first-party `web-access.*` scaffolding
 //! (C-WEBACCESS).
 //!
 //! `web-access.search` / `web-access.get_content` are `RuntimeKind::FirstParty`
@@ -29,6 +29,7 @@ use std::{
 };
 
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_composition::register_bundled_web_access_first_party_handlers;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_first_party_extensions::{EXA_MCP_HOST, NETWORK_EGRESS_LIMIT};
 use ironclaw_host_api::{
@@ -39,7 +40,6 @@ use ironclaw_host_runtime::{
     HostRuntime, HostRuntimeServices, default_host_api_contract_registry,
     default_host_port_catalog,
 };
-use ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};

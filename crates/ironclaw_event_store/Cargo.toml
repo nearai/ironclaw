@@ -1,0 +1,42 @@
+[package]
+name = "ironclaw_event_store"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "IronClaw-owned durable event and audit store backends"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+async-trait = "0.1"
+deadpool-postgres = "0.14"
+hex = "0.4"
+ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tokio-postgres-rustls = "0.13"
+tracing = "0.1"
+urlencoding = "2"
+webpki-roots = "1.0"
+
+[dev-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

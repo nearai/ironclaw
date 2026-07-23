@@ -1018,7 +1018,7 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
 // ironclaw_filesystem::FaultInjecting. It exists to exercise the trait's
 // *default* `append_batch` loop, which the filesystem-backed store overrides
 // (so the real store never runs this path); and the filesystem store lives in
-// the downstream `ironclaw_reborn_event_store` crate, unreachable from
+// the downstream `ironclaw_event_store` crate, unreachable from
 // `ironclaw_events` without a circular dependency.
 struct PartialFailLog {
     call_count: std::sync::atomic::AtomicUsize,

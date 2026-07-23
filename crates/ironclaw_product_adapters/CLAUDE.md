@@ -1,6 +1,6 @@
 # ironclaw_product_adapters guardrails
 
-Owns the product-surface adapter boundary for IronClaw Reborn (issue #3269).
+Owns the product-surface adapter boundary for IronClaw (issue #3269).
 
 - This crate defines the **ProductAdapter** contract: typed inbound/outbound
   parsed event DTOs, capability descriptors, host-mediated protocol

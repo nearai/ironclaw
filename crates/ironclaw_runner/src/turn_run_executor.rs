@@ -1,7 +1,7 @@
 // arch-exempt: large_file, caller-level failure propagation stays at the turn executor seam, plan #4088
-//! Concrete `TurnRunExecutor` for the Reborn planned agent loop.
+//! Concrete `TurnRunExecutor` for the IronClaw planned agent loop.
 //!
-//! Adapts `RebornLoopDriverHostFactory` + `DriverRegistry` + `LoopExitApplier`
+//! Adapts `IronClawLoopDriverHostFactory` + `DriverRegistry` + `LoopExitApplier`
 //! to the `TurnRunExecutor` trait consumed by `TurnRunScheduler`.
 
 use std::{
@@ -45,7 +45,7 @@ fn trace_executor_latency_ok(
     started_at: Option<Instant>,
 ) {
     ironclaw_observability::live_latency_trace_ok!(
-        "reborn_turn_executor",
+        "ironclaw_turn_executor",
         operation,
         started_at,
         tenant_id = %claimed.state.scope.tenant_id,
@@ -54,7 +54,7 @@ fn trace_executor_latency_ok(
         thread_id = %claimed.state.scope.thread_id,
         owner_user_id = claimed.state.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = %claimed.state.run_id,
-        "reborn turn executor operation completed",
+        "IronClaw turn executor operation completed",
     );
 }
 
@@ -65,7 +65,7 @@ fn trace_executor_latency_error<E: ?Sized>(
     _error: &E,
 ) {
     ironclaw_observability::live_latency_trace_error!(
-        "reborn_turn_executor",
+        "ironclaw_turn_executor",
         operation,
         started_at,
         "executor_error",
@@ -75,7 +75,7 @@ fn trace_executor_latency_error<E: ?Sized>(
         thread_id = %claimed.state.scope.thread_id,
         owner_user_id = claimed.state.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = %claimed.state.run_id,
-        "reborn turn executor operation failed",
+        "IronClaw turn executor operation failed",
     );
 }
 
@@ -118,8 +118,8 @@ impl std::fmt::Display for DriverInvocationError {
     }
 }
 
-/// Concrete `TurnRunExecutor` for the Reborn planned agent loop.
-pub struct RebornTurnRunExecutor {
+/// Concrete `TurnRunExecutor` for the IronClaw planned agent loop.
+pub struct IronClawTurnRunExecutor {
     loop_exit_applier: Arc<LoopExitApplier>,
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
@@ -136,7 +136,7 @@ pub struct RebornTurnRunExecutor {
     gate_record_store: Option<Arc<dyn GateRecordStore>>,
 }
 
-impl RebornTurnRunExecutor {
+impl IronClawTurnRunExecutor {
     pub fn new(
         loop_exit_applier: Arc<LoopExitApplier>,
         driver_registry: Arc<DriverRegistry>,
@@ -153,7 +153,7 @@ impl RebornTurnRunExecutor {
 }
 
 #[async_trait]
-impl TurnRunExecutor for RebornTurnRunExecutor {
+impl TurnRunExecutor for IronClawTurnRunExecutor {
     async fn execute_claimed_run(
         &self,
         claimed: ClaimedTurnRun,
@@ -221,7 +221,7 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
     }
 }
 
-impl RebornTurnRunExecutor {
+impl IronClawTurnRunExecutor {
     async fn invoke_driver(
         &self,
         claimed: &ClaimedTurnRun,
@@ -245,7 +245,7 @@ impl RebornTurnRunExecutor {
             resolved_run_profile_id = claimed.resolved_run_profile.profile_id.as_str(),
             loop_driver_id = descriptor.id.as_str(),
             loop_driver_version = descriptor.version.as_u64(),
-            "reborn executor resolved loop driver"
+            "IronClaw executor resolved loop driver"
         );
 
         let host_started_at = live_latency_started_at();
@@ -624,7 +624,7 @@ mod tests {
         turn_runner::HostFactoryError,
     };
 
-    use super::RebornTurnRunExecutor;
+    use super::IronClawTurnRunExecutor;
     use crate::turn_scheduler::TurnRunExecutor;
 
     // ── Minimal fakes ────────────────────────────────────────────────────────
@@ -852,14 +852,14 @@ mod tests {
         }
     }
 
-    fn make_executor_empty_registry() -> RebornTurnRunExecutor {
+    fn make_executor_empty_registry() -> IronClawTurnRunExecutor {
         let transitions: Arc<dyn TurnRunTransitionPort> =
             Arc::new(RecordingTransitionPort::default());
         let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
         let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions, evidence));
         let driver_registry = Arc::new(DriverRegistry::new()); // empty — no drivers registered
         let host_factory = Arc::new(FailingHostFactory);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
+        IronClawTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// When the driver registry has no registered driver, `execute_claimed_run`
@@ -1206,7 +1206,7 @@ mod tests {
 
     fn make_executor_with_driver(
         host_factory: Arc<dyn crate::turn_runner::HostFactory>,
-    ) -> RebornTurnRunExecutor {
+    ) -> IronClawTurnRunExecutor {
         let transitions: Arc<dyn TurnRunTransitionPort> =
             Arc::new(RecordingTransitionPort::default());
         let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
@@ -1221,7 +1221,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
+        IronClawTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// Variant that wires the SAME shared `transitions` port into both the
@@ -1230,7 +1230,7 @@ mod tests {
     fn make_executor_with_driver_and_shared_transitions(
         host_factory: Arc<dyn crate::turn_runner::HostFactory>,
         transitions: Arc<dyn TurnRunTransitionPort>,
-    ) -> RebornTurnRunExecutor {
+    ) -> IronClawTurnRunExecutor {
         let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
         let loop_exit_applier = Arc::new(LoopExitApplier::new(Arc::clone(&transitions), evidence));
         let mut registry = DriverRegistry::new();
@@ -1242,7 +1242,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
+        IronClawTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// A driver that always returns a caller-supplied `AgentLoopDriverError`.
@@ -1284,7 +1284,7 @@ mod tests {
     }
 
     /// Builds an executor whose registered driver always returns the given error.
-    fn make_executor_with_failing_driver(error: AgentLoopDriverError) -> RebornTurnRunExecutor {
+    fn make_executor_with_failing_driver(error: AgentLoopDriverError) -> IronClawTurnRunExecutor {
         let transitions: Arc<dyn TurnRunTransitionPort> =
             Arc::new(RecordingTransitionPort::default());
         let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
@@ -1298,7 +1298,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(
+        IronClawTurnRunExecutor::new(
             loop_exit_applier,
             driver_registry,
             Arc::new(SucceedingHostFactoryWithSnapshot),
@@ -1766,7 +1766,7 @@ mod tests {
         let transitions_arc: Arc<dyn TurnRunTransitionPort> = transitions.clone();
         let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
         let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions_arc.clone(), evidence));
-        let executor = RebornTurnRunExecutor::new(
+        let executor = IronClawTurnRunExecutor::new(
             loop_exit_applier,
             Arc::new(DriverRegistry::new()),
             Arc::new(FailingHostFactory),

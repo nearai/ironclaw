@@ -1,8 +1,8 @@
 //! The installation-state projection (one enum, every extension;
-//! `docs/reborn/extension-runtime/overview.md` §6.1).
+//! `docs/ironclaw/extension-runtime/overview.md` §6.1).
 //!
 //! This enum is the host-owned installation-lifecycle vocabulary. It lives in
-//! `ironclaw_host_api` — the crate every Reborn system-service and the product
+//! `ironclaw_host_api` — the crate every IronClaw system-service and the product
 //! wire already depend on — so both the `ExtensionHost` (in
 //! `ironclaw_extension_host`, which re-exports this type and writes the record
 //! subset `{Installed, Active, Failed}`) and the product-facing extensions wire

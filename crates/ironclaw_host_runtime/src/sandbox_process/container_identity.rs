@@ -3,22 +3,22 @@ use crate::RuntimeProcessError;
 use super::reject_nul;
 
 #[derive(Debug, Clone)]
-pub struct RebornSandboxContainerIdentity {
+pub struct IronClawSandboxContainerIdentity {
     user: Option<String>,
-    workspace_mode: RebornSandboxWorkspaceMode,
+    workspace_mode: IronClawSandboxWorkspaceMode,
 }
 
-impl RebornSandboxContainerIdentity {
+impl IronClawSandboxContainerIdentity {
     pub fn image_default() -> Self {
         Self {
             user: None,
-            workspace_mode: RebornSandboxWorkspaceMode::Private,
+            workspace_mode: IronClawSandboxWorkspaceMode::Private,
         }
     }
 
     pub fn configured_user(
         user: impl Into<String>,
-        workspace_mode: RebornSandboxWorkspaceMode,
+        workspace_mode: IronClawSandboxWorkspaceMode,
     ) -> Self {
         Self {
             user: Some(user.into()),
@@ -39,12 +39,12 @@ impl RebornSandboxContainerIdentity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebornSandboxWorkspaceMode {
+pub enum IronClawSandboxWorkspaceMode {
     Private,
     GroupShared,
 }
 
-impl RebornSandboxWorkspaceMode {
+impl IronClawSandboxWorkspaceMode {
     pub fn as_unix_mode(self) -> u32 {
         match self {
             Self::Private => 0o700,
@@ -70,9 +70,9 @@ mod tests {
     #[test]
     fn container_user_rejects_empty_whitespace_and_nul_values() {
         for user in ["", " \t ", "1000\0:1000"] {
-            let identity = RebornSandboxContainerIdentity::configured_user(
+            let identity = IronClawSandboxContainerIdentity::configured_user(
                 user,
-                RebornSandboxWorkspaceMode::Private,
+                IronClawSandboxWorkspaceMode::Private,
             );
 
             assert!(identity.container_user().is_err());
@@ -81,9 +81,9 @@ mod tests {
 
     #[test]
     fn container_user_accepts_configured_user() {
-        let identity = RebornSandboxContainerIdentity::configured_user(
+        let identity = IronClawSandboxContainerIdentity::configured_user(
             "1000:1000",
-            RebornSandboxWorkspaceMode::Private,
+            IronClawSandboxWorkspaceMode::Private,
         );
 
         assert_eq!(

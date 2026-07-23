@@ -3,7 +3,7 @@ paths:
   - "crates/**/*.rs"
   - "tests/**"
 ---
-# Reborn testing rules
+# IronClaw testing rules
 
 ## Integration-first coverage
 
@@ -18,27 +18,27 @@ conformance. They may replace an integration test only when the integration
 harness cannot reach the path; explain that limitation in the PR. Never add
 test-only wiring for behavior production does not wire.
 
-Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
+Read `.claude/skills/ironclaw-testing/SKILL.md` and
 `tests/integration/CLAUDE.md` before adding a cross-layer scenario.
 
 ## Test tiers
 
 1. **Unit/contract:** pure logic and local public contracts —
    `cargo test -p OWNING_CRATE`.
-2. **In-process Reborn integration:** whole deterministic turns with the real
+2. **In-process IronClaw integration:** whole deterministic turns with the real
    product workflow, runner, loop, decorator chain, and in-memory filesystem —
-   `cargo test --test reborn_integration_SCENARIO`.
+   `cargo test --test ironclaw_integration_SCENARIO`.
 3. **Architecture:** dependency and composition boundaries —
    `cargo test -p ironclaw_architecture`.
 4. **Backend/runtime integration:** DB-, Docker-, or runtime-shaped behavior —
    use the owning feature-gated suite and `cargo test --features integration`
    when required by its guide.
 5. **Recorded model behavior:** hermetic fixtures for tool choice/request shape;
-   validate with `scripts/ci/check-reborn-qa-fixtures.sh`.
+   validate with `scripts/ci/check-ironclaw-qa-fixtures.sh`.
 6. **Browser/E2E:** user-visible WebUI flows under `tests/e2e/`.
 7. **Live canary:** ignored, credentialed drift checks; supplemental only.
 
-Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
+Use `bash scripts/ironclaw-e2e-rust.sh` when a IronClaw contract or whole-path
 behavior changes. Verify workflow coverage rather than assuming a green PR ran
 every integration tier.
 
@@ -75,17 +75,17 @@ delegation, redaction, retry, or policy behavior survives every wrapper.
   partial failure where the contract exposes them.
 - Recorded model fixtures contain no secrets or PII and pass the repository
   fixture validator.
-- Reborn integration coverage follows the committed ratchet in
+- IronClaw integration coverage follows the committed ratchet in
   `tests/integration/coverage-floor.toml`; when coverage is intentionally added,
   follow that file's same-PR recapture/floor-update instructions.
 
 ## Validation
 
 Run targeted crate tests first. Add architecture tests when dependency edges or
-ownership change, and the Reborn integration/E2E harness when behavior crosses
+ownership change, and the IronClaw integration/E2E harness when behavior crosses
 turns, runtime lanes, authorization, approvals, networking, secrets, product
 workflow, or capability dispatch. Re-derive exact commands from
 `crates/AGENTS.md` and the owning crate guide rather than copying stale commands.
 
-Reborn dependency/composition boundary enforcement is
+IronClaw dependency/composition boundary enforcement is
 `cargo test -p ironclaw_architecture`.

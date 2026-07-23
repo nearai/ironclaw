@@ -4,7 +4,7 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for dependencies and backend feature shape.
-- Use `docs/reborn/contracts/events-projections.md` as the source of truth for outbound egress/subscription policy.
+- Use `docs/ironclaw/contracts/events-projections.md` as the source of truth for outbound egress/subscription policy.
 
 ## What This Crate Owns
 
@@ -26,7 +26,7 @@
 - Fast local check: `cargo test -p ironclaw_outbound`
 - Backend parity check without live Postgres: `IRONCLAW_SKIP_POSTGRES_TESTS=1 cargo test -p ironclaw_outbound --all-features`
 - Lint check: `cargo clippy -p ironclaw_outbound --all-targets --all-features -- -D warnings`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 

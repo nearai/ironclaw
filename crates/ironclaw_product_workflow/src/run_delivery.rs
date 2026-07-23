@@ -339,7 +339,7 @@ pub(crate) async fn cancel_auth_blocked_run(
             .await
     {
         tracing::debug!(
-            target = "ironclaw::reborn::run_delivery",
+            target = "ironclaw::run_delivery",
             %run_id,
             %error,
             "failed to cancel stale auth flow on channel auth auto-deny (best-effort)"
@@ -413,7 +413,7 @@ impl RunDeliveryServices {
             Ok(outcome) => delivered_messages_from_outcome(&outcome).into_iter().next(),
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target = "ironclaw::run_delivery",
                     %error,
                     "channel notice delivery failed (best-effort)"
                 );
@@ -455,7 +455,7 @@ impl RunDeliveryServices {
             .await
         {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target = "ironclaw::run_delivery",
                 %error,
                 "failed to retract channel prompt/status message"
             );

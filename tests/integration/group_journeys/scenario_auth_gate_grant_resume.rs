@@ -12,22 +12,22 @@
 //! completes → parked tool resumes) and AUTH-14 (grant stored → tool resumes)
 //! — through the integration harness, without an approval gate confounding it.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-auth-gate-grant-resume")
         .script([
             // Gated tool-call turn = exactly TWO script entries: the call plus
             // the one post-resume model reply.
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 json!({"owner": "octocat", "repo": "hello-world"}),
             ),
-            RebornScriptedReply::text("AUTHGRANT repo info retrieved after connecting github"),
+            IronClawScriptedReply::text("AUTHGRANT repo info retrieved after connecting github"),
         ])
         .build()
         .await?;

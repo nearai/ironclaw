@@ -31,7 +31,7 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Build a small Rust crate through sccache
-        run: cargo check -p ironclaw_reborn_config
+        run: cargo check -p ironclaw_config
 
       - name: Show sccache stats
         if: always()

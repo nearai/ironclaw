@@ -1,0 +1,328 @@
+mod support;
+
+use std::{sync::Arc, time::Duration};
+
+use ironclaw_composition::{
+    IronClawCompositionError, IronClawProductionRuntimePolicy, LibSqlProductionSubstrateConfig,
+    build_libsql_production_host_runtime_services,
+};
+use ironclaw_event_store::IronClawEventStoreConfig;
+use ironclaw_host_api::{
+    AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    RuntimeProfile, SecretMode,
+    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+};
+use ironclaw_host_runtime::{
+    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest,
+    ProductionWiringConfig, RuntimeProcessError, SandboxCommandTransport,
+};
+use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
+use secrecy::SecretString;
+use support::production_readiness::{
+    assert_required_backend_readiness_diagnostics, required_backend_parity_config,
+};
+use tempfile::tempdir;
+use tokio::sync::Mutex;
+
+static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: callers serialize process-env mutation with
+        // SECRETS_MASTER_KEY_ENV_LOCK. The guard restores the previous value on
+        // drop, including panic unwinds from the awaited builder below.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: EnvVarGuard is only constructed while
+        // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn libsql_substrate_builder_wires_production_components_without_local_only_seams() {
+    let fixture = build_libsql_test_services().await;
+
+    let production_config = ProductionWiringConfig::new([])
+        .require_runtime_http_egress()
+        .require_credential_broker();
+    fixture
+        .services
+        .validate_production_wiring(&production_config)
+        .expect("substrate-only production wiring should not use fake seams");
+}
+
+#[tokio::test]
+async fn libsql_substrate_readiness_diagnostics_cover_required_backend_gaps() {
+    let fixture = build_libsql_test_services().await;
+
+    let report = fixture
+        .services
+        .validate_production_wiring(&required_backend_parity_config())
+        .expect_err("required runtime gaps should block production readiness");
+
+    assert_required_backend_readiness_diagnostics(&report);
+}
+
+#[tokio::test]
+async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
+    let state_db_path = dir.path().join("state.db");
+    let events_db_path = dir.path().join("events.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(state_db_path.display().to_string())
+            .build()
+            .await
+            .expect("build local libSQL state database"),
+    );
+
+    let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
+        database,
+        event_store: IronClawEventStoreConfig::Libsql {
+            path_or_url: events_db_path.display().to_string(),
+            auth_token: None,
+        },
+        process_local_resource_governor_singleton: true,
+        secret_master_key: Some(SecretString::from("too-short")),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: IronClawProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .expect("create production runtime policy with tenant sandbox process port"),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(IronClawCompositionError::Secret(
+            ironclaw_secrets::SecretError::InvalidMasterKey
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _env = EnvVarGuard::set(
+        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV,
+        "correct horse battery staple pad!!",
+    );
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
+    let state_db_path = dir.path().join("state.db");
+    let events_db_path = dir.path().join("events.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(state_db_path.display().to_string())
+            .build()
+            .await
+            .expect("build local libSQL state database"),
+    );
+
+    let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
+        database,
+        event_store: IronClawEventStoreConfig::Libsql {
+            path_or_url: events_db_path.display().to_string(),
+            auth_token: None,
+        },
+        process_local_resource_governor_singleton: true,
+        secret_master_key: None,
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: IronClawProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .expect("create production runtime policy with tenant sandbox process port"),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(IronClawCompositionError::Secret(
+            ironclaw_secrets::SecretError::InvalidMasterKey
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_authority() {
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
+    let state_db_path = dir.path().join("state.db");
+    let events_db_path = dir.path().join("events.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(state_db_path.display().to_string())
+            .build()
+            .await
+            .expect("build local libSQL state database"),
+    );
+
+    let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
+        database,
+        event_store: IronClawEventStoreConfig::Libsql {
+            path_or_url: events_db_path.display().to_string(),
+            auth_token: None,
+        },
+        process_local_resource_governor_singleton: false,
+        secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: IronClawProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .expect("create production runtime policy with tenant sandbox process port"),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(IronClawCompositionError::InvalidConfig { reason })
+            if reason.contains("libSQL production FilesystemResourceGovernor uses process-local tallies")
+    ));
+}
+
+#[test]
+fn production_runtime_policy_requires_tenant_sandbox_process_port() {
+    let result = IronClawProductionRuntimePolicy::without_process_port(production_runtime_policy());
+
+    assert!(matches!(
+        result,
+        Err(IronClawCompositionError::MissingTenantSandboxProcessPort)
+    ));
+}
+
+#[test]
+fn production_runtime_policy_rejects_unexpected_tenant_sandbox_process_port() {
+    let mut policy = production_runtime_policy();
+    policy.process_backend = ProcessBackendKind::None;
+
+    let result = IronClawProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        policy,
+        sandbox_process_port(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(
+            IronClawCompositionError::UnexpectedTenantSandboxProcessPort {
+                process_backend: ProcessBackendKind::None
+            }
+        )
+    ));
+}
+
+fn production_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedSafe,
+        resolved_profile: RuntimeProfile::HostedSafe,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Brokered,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+struct LibSqlTestServices {
+    _dir: tempfile::TempDir,
+    services: ironclaw_composition::LibSqlProductionHostRuntimeServices,
+}
+
+async fn build_libsql_test_services() -> LibSqlTestServices {
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
+    let state_db_path = dir.path().join("state.db");
+    let events_db_path = dir.path().join("events.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(state_db_path.display().to_string())
+            .build()
+            .await
+            .expect("build local libSQL state database"),
+    );
+
+    let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
+        database,
+        event_store: IronClawEventStoreConfig::Libsql {
+            path_or_url: events_db_path.display().to_string(),
+            auth_token: None,
+        },
+        process_local_resource_governor_singleton: true,
+        secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: IronClawProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .expect("create production runtime policy with tenant sandbox process port"),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
+    })
+    .await
+    .expect("build libSQL production host runtime services");
+
+    LibSqlTestServices {
+        _dir: dir,
+        services,
+    }
+}
+
+fn sandbox_process_port() -> Arc<ironclaw_host_runtime::TenantSandboxProcessPort> {
+    Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+        Arc::new(RecordingSandboxTransport),
+    ))
+}
+
+#[derive(Debug)]
+struct RecordingSandboxTransport;
+
+#[async_trait::async_trait]
+impl SandboxCommandTransport for RecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        _request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Ok(CommandExecutionOutput {
+            output: String::new(),
+            saved_output: None,
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::ZERO,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RecordingSchedulerWakeNotifier;
+
+impl TurnRunWakeNotifier for RecordingSchedulerWakeNotifier {
+    fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        Ok(())
+    }
+}

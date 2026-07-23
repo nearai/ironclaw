@@ -83,7 +83,7 @@ class ScrubArtifactsTests(unittest.TestCase):
         staged_skill = (
             artifact_dir
             / "lane"
-            / "reborn-home"
+            / "ironclaw-home"
             / "case-a"
             / "local-dev"
             / "system"
@@ -96,7 +96,7 @@ class ScrubArtifactsTests(unittest.TestCase):
             encoding="utf-8",
         )
         marker_payload = marker or {
-            "owner": "ironclaw_reborn_composition_bundled_skill",
+            "owner": "ironclaw_composition_bundled_skill",
             "format": 1,
             "content_hash": self.bundle_hash("local-test", trusted_skill),
         }
@@ -127,7 +127,7 @@ class ScrubArtifactsTests(unittest.TestCase):
         staged_manifest = (
             artifact_dir
             / "lane"
-            / "reborn-home"
+            / "ironclaw-home"
             / "case-a"
             / "local-dev"
             / "system"
@@ -145,7 +145,7 @@ class ScrubArtifactsTests(unittest.TestCase):
     def test_strict_scrub_redacts_diagnostics_and_preserves_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            product_log = root / "ironclaw-reborn-serve.stderr.log"
+            product_log = root / "ironclaw-serve.stderr.log"
             browser_events = root / "browser-events.jsonl"
             product_log.write_text(
                 "authorization: bearer super-secret-token\n"
@@ -219,7 +219,7 @@ class ScrubArtifactsTests(unittest.TestCase):
     def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            product_log = root / "ironclaw-reborn-serve.stderr.log"
+            product_log = root / "ironclaw-serve.stderr.log"
             product_log.write_text("aws_access_key = akia1234567890abcdef\n", encoding="utf-8")
 
             result = self.run_scrub(root, strict=True)
@@ -270,7 +270,7 @@ class ScrubArtifactsTests(unittest.TestCase):
             unmanaged = (
                 root
                 / "lane"
-                / "reborn-home"
+                / "ironclaw-home"
                 / "case-a"
                 / "local-dev"
                 / "system"
@@ -293,7 +293,7 @@ class ScrubArtifactsTests(unittest.TestCase):
             trusted_root, bundled = self.write_bundled_skill_fixture(
                 root,
                 source_body="api_key: live-secret-value\n",
-                marker='{"owner":"ironclaw_reborn_composition_bundled_skill"',
+                marker='{"owner":"ironclaw_composition_bundled_skill"',
             )
 
             result = self.run_scrub(

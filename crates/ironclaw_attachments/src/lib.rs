@@ -1,4 +1,4 @@
-//! Channel-agnostic attachment landing for IronClaw Reborn.
+//! Channel-agnostic attachment landing for IronClaw.
 //!
 //! Inbound attachments must not be transient turn context: their bytes are
 //! written into the agent-accessible project filesystem so an agent can

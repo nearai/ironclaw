@@ -10,6 +10,9 @@ use ironclaw_event_projections::{
     ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
     TimelineEntryKind,
 };
+use ironclaw_event_store::{
+    IronClawEventStoreConfig, IronClawProfile, build_ironclaw_event_stores,
+};
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
@@ -23,11 +26,8 @@ use ironclaw_loop_host::{
     FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
-};
 use ironclaw_runner::loop_driver_host::{
-    RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    IronClawLoopDriverHost, IronClawLoopDriverHostFactory, IronClawLoopDriverHostRequest,
     TextOnlyLoopHostConfig,
 };
 use ironclaw_runner::milestone_events::{
@@ -72,9 +72,9 @@ async fn in_memory_durable_log_replays_loop_model_reply_milestones() {
 async fn jsonl_durable_log_replays_loop_model_reply_milestones() {
     let temp_dir = tempfile::tempdir().unwrap();
     let event_root = temp_dir.path().join("reborn-events");
-    let stores = build_reborn_event_stores(
-        RebornProfile::Test,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::Test,
+        IronClawEventStoreConfig::Jsonl {
             root: event_root.clone(),
             accept_single_node_durable: true,
         },
@@ -858,8 +858,8 @@ impl HostFixture {
         }
     }
 
-    async fn build_host(&self) -> RebornLoopDriverHost {
-        RebornLoopDriverHostFactory::new(
+    async fn build_host(&self) -> IronClawLoopDriverHost {
+        IronClawLoopDriverHostFactory::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
@@ -873,7 +873,7 @@ impl HostFixture {
             },
             InstructionSafetyContext::local_development_noop(),
         )
-        .build_text_only_host(RebornLoopDriverHostRequest {
+        .build_text_only_host(IronClawLoopDriverHostRequest {
             claimed_run: self.claimed.clone(),
             loop_run_context: self.context.clone(),
         })

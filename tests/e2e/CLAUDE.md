@@ -2,12 +2,12 @@
 
 Python/Playwright test suite that runs against a live ironclaw instance. Added in PR #553 ("Trajectory benchmarks and e2e trace test rig").
 
-**The live surface is the Reborn `ironclaw serve` WebChat v2 SPA** (`/`,
-`/api/webchat/v2/*`), driven via the `reborn_webui_harness` / `reborn_v2_*`
-fixtures and `SEL_V2` selectors. This is the only surface the Reborn coverage
-gate (`reborn_coverage_tests.txt`, run by `reborn-e2e.yml`) exercises. When
-adding a browser test, use the `reborn_v2_*` fixtures — see
-`test_reborn_webui_v2_smoke.py` for the canonical example.
+**The live surface is the IronClaw `ironclaw serve` WebChat v2 SPA** (`/`,
+`/api/webchat/v2/*`), driven via the `ironclaw_webui_harness` / `ironclaw_v2_*`
+fixtures and `SEL_V2` selectors. This is the only surface the IronClaw coverage
+gate (`ironclaw_coverage_tests.txt`, run by `ironclaw-e2e.yml`) exercises. When
+adding a browser test, use the `ironclaw_v2_*` fixtures — see
+`test_ironclaw_webui_v2_smoke.py` for the canonical example.
 
 > **Tier B note:** the v1 legacy `ironclaw` gateway binary
 > (`ironclaw-legacy`, formerly built by the `ironclaw_binary` fixture) was
@@ -15,10 +15,10 @@ adding a browser test, use the `reborn_v2_*` fixtures — see
 > §8). The eight browser scenarios that drove only the legacy gateway
 > (`test_connection`, `test_chat`, `test_html_injection`, `test_skills`,
 > `test_sse_reconnect`, `test_tool_approval`, `test_dom_resource_limits`,
-> `test_reborn_gateway_smoke`) were removed. The remaining suite still carries
+> `test_ironclaw_gateway_smoke`) were removed. The remaining suite still carries
 > legacy `conftest.py` fixtures (`ironclaw_binary`, `ironclaw_server`, the
 > legacy `page`/`browser`) and a number of `test_v2_*` scenarios that depend on
-> them; those are non-functional until repointed at the Reborn serve binary and
+> them; those are non-functional until repointed at the IronClaw serve binary and
 > are tracked as a dedicated migration in issue #6369. The doc below still
 > describes that legacy machinery where it remains — treat any `ironclaw_binary`
 > / legacy-`page` reference as pending-removal, not current guidance.
@@ -82,28 +82,28 @@ from `tests/e2e/` for the full, current set.
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny; waiting-approval regression uses a real HTTP tool call |
 | `test_dom_resource_limits.py` | DOM pruning at `MAX_DOM_MESSAGES`, no `setInterval` leaks across reconnect cycles |
 
-**Reborn `ironclaw serve` WebChat v2 SPA (browser via `reborn_v2_*` / `SEL_V2`):**
+**IronClaw `ironclaw serve` WebChat v2 SPA (browser via `ironclaw_v2_*` / `SEL_V2`):**
 
 | File | What it tests |
 |------|--------------|
-| `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
-| `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
-| `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
+| `test_ironclaw_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_ironclaw_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the IronClaw binary |
+| `test_ironclaw_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
 | `test_v2_*_flow.py` / `test_v2_engine_*.py` | v2 auth/OAuth matrix (GitHub PAT, GSuite, Notion MCP) and v2-engine approval/auth/tool-lifecycle/error-handling |
 
-### Reborn E2E coverage gate
+### IronClaw E2E coverage gate
 
 The Code Coverage workflow does **not** run the entire historical Python E2E
-tree. It reads `tests/e2e/reborn_coverage_tests.txt`, which is limited to
+tree. It reads `tests/e2e/ironclaw_coverage_tests.txt`, which is limited to
 scenarios that start the standalone `ironclaw serve` binary and exercise
-the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
-pytest node IDs to include only the Reborn binary/API checks from a broader
+the IronClaw WebChat v2 or OpenAI-compatible API surface. The manifest may use
+pytest node IDs to include only the IronClaw binary/API checks from a broader
 scenario file.
 
 Do not add legacy `ironclaw` gateway tests to that manifest, even if they run
 with `ENGINE_V2=true`. Those are compatibility/runtime E2E tests. Direct
-Emulate provider-contract tests are also excluded from the Reborn coverage gate
+Emulate provider-contract tests are also excluded from the IronClaw coverage gate
 because they primarily validate the fixture provider, while current hosted
 full-path Emulate tests still start the legacy gateway binary.
 
@@ -111,9 +111,9 @@ full-path Emulate tests still start the legacy gateway binary.
 
 | File | What it tests |
 |------|--------------|
-| `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
+| `test_emulate_ironclaw_provider_contracts.py` | IronClaw Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
 | `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`. |
-| `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
+| `test_ironclaw_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
 | `test_extension_uninstall_cleanup.py` | Install/remove for WASM tools/channels, shared Google tools, MCP; uninstall deletes secrets, preserves shared creds |
 
@@ -136,9 +136,9 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | Fixture | What it does |
 |---------|-------------|
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build -p ironclaw` (timeout 600s). |
-| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
-| `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
-| `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
+| `ironclaw_binary` | IronClaw v2 binary. Builds `target/debug/ironclaw` with default features when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
+| `ironclaw_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_ironclaw_webui_v2_smoke.py`.) |
+| `ironclaw_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
 | `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, and Sheets. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
 | `emulate_slack_server` | Starts the selected Emulate CLI with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions, including `search.messages` with the pinned CI fork. |
@@ -156,15 +156,15 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
-| `reborn_qa_emulate_provider_server` | Restores providers mutated by a QA journey while reusing the session-built binary and one module-scoped Reborn process. Google mutation cases restart the seeded provider on its stable port; Slack deliveries are deleted by provider-issued timestamp so the OAuth account remains valid. Read-only providers stay warm. |
+| `ironclaw_qa_emulate_provider_server` | Restores providers mutated by a QA journey while reusing the session-built binary and one module-scoped IronClaw process. Google mutation cases restart the seeded provider on its stable port; Slack deliveries are deleted by provider-issued timestamp so the OAuth account remains valid. Read-only providers stay warm. |
 | `page` | Legacy gateway. Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
-| `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
+| `ironclaw_v2_page` | IronClaw v2 SPA. Fresh context/page navigated to `/?token=<IRONCLAW_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
 
 ### Emulate provider coverage
 
-Use Emulate for provider APIs that map directly to Reborn features already in
+Use Emulate for provider APIs that map directly to IronClaw features already in
 this repo: Google Gmail/Calendar/Drive/Docs/Sheets, Slack delivery/search/reactions/user lookup,
 and GitHub repository, issue, pull request, search, branch, release, fork, Git
 object, and Actions route workflows. The current provider contract covers
@@ -176,16 +176,16 @@ blob/tree/commit read/write, fork create/list, and empty Actions route readback.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
 recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
-`/__mock/llm_trace` endpoint. `test_reborn_qa_trace_replay.py` replays every
+`/__mock/llm_trace` endpoint. `test_ironclaw_qa_trace_replay.py` replays every
 model response from every case in the live-canary manifest. Its closed-set
 assertions require new fixtures and provider operations to be classified
-instead of silently losing coverage. `test_reborn_qa_trace_full_path.py`
+instead of silently losing coverage. `test_ironclaw_qa_trace_full_path.py`
 discovers every manifest journey with an Emulate-supported provider call and
 executes that provider leg through standalone `ironclaw serve`, installed and
 authenticated first-party extensions, the credential/network boundaries, and
 the pinned Emulate fork. Mutated provider state is reset or removed using
 provider-issued evidence while read-only providers, the built binary, and the
-Reborn process are reused; representative mutation journeys run a second time with
+IronClaw process are reused; representative mutation journeys run a second time with
 clean-baseline assertions to prevent order-dependent passes.
 Cross-provider ordering is retained, fresh Docs and
 Sheets IDs are bound from earlier real tool results, redacted provider IDs are
@@ -193,14 +193,14 @@ mapped to deterministic seeded resources, and assertions target capability
 success plus provider readback rather than recorded final-answer wording.
 `ProviderOperationCase` adds typed provider service, capability, argument,
 baseline, and readback cases for operations not yet present in harvested
-journeys. These cases reuse the same Reborn process and reset only their mutable
+journeys. These cases reuse the same IronClaw process and reset only their mutable
 provider world.
-Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
+Debug E2E binaries honor `IRONCLAW_TEST_HTTP_REWRITE_MAP` only for
 loopback IP socket targets after the original destination has passed the normal
 network policy and DNS checks. Release binaries fail startup if that test-only
 environment variable is set.
 
-Legacy hosted full-path Reborn + Emulate tests use
+Legacy hosted full-path IronClaw + Emulate tests use
 `hosted_google_emulate_server` or a matching
 provider fixture, install/auth the first-party extension through IronClaw, drive
 the scripted mock model through `/api/chat/send`, auto-resolve expected approval

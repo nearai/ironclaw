@@ -1,6 +1,6 @@
 # ironclaw_event_streams
 
-Transport-neutral Reborn projection stream manager.
+Transport-neutral IronClaw projection stream manager.
 
 Keep this crate:
 

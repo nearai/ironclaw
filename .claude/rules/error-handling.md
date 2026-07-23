@@ -15,9 +15,9 @@ Existing rules forbid `.unwrap()` / `.expect()` in production. The footguns belo
 - `if let Err(e) = ... { warn!(...) }` followed by caching, inserting, or
   continuing — poisons downstream state with a half-initialized value.
 - `.map_err(|_| OtherError)` — discards the cause. A sanitized
-  `RebornServicesError` may hide details from the client, but the server-side
+  `IronClawServicesError` may hide details from the client, but the server-side
   chain must retain/log the source. Use a cause-preserving constructor such as
-  `RebornServicesError::internal_from`, or log the bound source before mapping.
+  `IronClawServicesError::internal_from`, or log the bound source before mapping.
 
 **Required pattern — fail loud by default:**
 
@@ -33,7 +33,7 @@ let cached = optional_cache.refresh().await.unwrap_or_default(); // silent-ok: o
 
 Review flag: added lines containing `unwrap_or_default()`, `.ok()?`, or `else { return` / `else { return None }` on a DB/IO/workspace/boundary call must carry a `// silent-ok: <reason>` comment or be rejected.
 
-A `map_err(|_| …)` (a closure discarding the error binding) is **not** `silent-ok`-exemptible — a comment does not make the dropped cause reappear. Fix it by carrying the cause (`.map_err(ErrorType::constructor)` / `RebornServicesError::internal_from`) or by logging the bound error before mapping. Reject the line otherwise.
+A `map_err(|_| …)` (a closure discarding the error binding) is **not** `silent-ok`-exemptible — a comment does not make the dropped cause reappear. Fix it by carrying the cause (`.map_err(ErrorType::constructor)` / `IronClawServicesError::internal_from`) or by logging the bound error before mapping. Reject the line otherwise.
 
 ## Persist-Then-Reload Atomicity
 

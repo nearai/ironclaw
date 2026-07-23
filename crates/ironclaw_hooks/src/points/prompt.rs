@@ -8,7 +8,7 @@ use ironclaw_host_api::TenantId;
 /// hint about how much byte budget remains for snippet additions. Richer
 /// fields (current snippet count, identity-message presence, capability
 /// surface descriptors) become available as the dispatcher composes with the
-/// Reborn host port middleware.
+/// IronClaw host port middleware.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BeforePromptHookContext {

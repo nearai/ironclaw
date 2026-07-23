@@ -1,4 +1,4 @@
-//! Coverage for `RebornLoopDriverHostFactory::build_compaction_ports`'
+//! Coverage for `IronClawLoopDriverHostFactory::build_compaction_ports`'
 //! scope-resolved gateway routing. Split out of `loop_driver_host`'s
 //! `mod tests` (sibling pattern, like `port_adapter_tests`) to keep that
 //! file under the architecture size threshold.
@@ -17,8 +17,8 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 /// Coverage gap closed: `build_compaction_ports` (see above) resolves a
 /// scope-specific gateway via `self.model_gateway.resolve_for_scope(&run_context.scope)`,
 /// falling back to the host's own gateway only when the resolver returns
-/// `None`. The Reborn group integration scenario (`ScopeRegistryGateway`
-/// in `tests/support/reborn/scope_gateway.rs`) only drives the MAIN model
+/// `None`. The IronClaw group integration scenario (`ScopeRegistryGateway`
+/// in `tests/support/ironclaw_parity_qa/scope_gateway.rs`) only drives the MAIN model
 /// path through `resolve_for_scope` — it never submits a compaction —
 /// so a regression that drops or misroutes the scoped gateway for
 /// compaction would leave that scenario green while compaction silently
@@ -150,7 +150,7 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
     // ownership of `model_gateway`.
     let fallback = Arc::clone(&model_gateway);
 
-    let factory = RebornLoopDriverHostFactory::new(
+    let factory = IronClawLoopDriverHostFactory::new(
         thread_service,
         thread_scope,
         model_gateway,

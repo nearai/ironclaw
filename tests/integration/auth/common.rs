@@ -13,8 +13,8 @@ use ironclaw_auth::{
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
+use ironclaw_composition::{IronClawOAuthCallbackOutcome, IronClawOAuthCallbackRequest};
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest};
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.
@@ -68,12 +68,12 @@ pub fn authorized_callback_request(
     pkce_hash: &PkceVerifierHash,
     code_hash: &AuthorizationCodeHash,
     label: &str,
-) -> RebornOAuthCallbackRequest {
-    RebornOAuthCallbackRequest {
+) -> IronClawOAuthCallbackRequest {
+    IronClawOAuthCallbackRequest {
         scope: scope.clone(),
         flow_id,
         opaque_state_hash: state_hash.clone(),
-        outcome: RebornOAuthCallbackOutcome::Authorized {
+        outcome: IronClawOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
                 provider: provider.clone(),
                 account_label: CredentialAccountLabel::new(label).unwrap(),

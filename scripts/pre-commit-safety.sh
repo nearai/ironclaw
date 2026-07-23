@@ -13,14 +13,14 @@
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
 #  10. Newly-added pub fn/type/struct/enum/trait with zero callers (dead/speculative API)
 #  11. Architecture sprawl smoke alarms without arch-exempt tracking plan
-#  13. Composition mass ratchet — blocks growth of ironclaw_reborn_composition's
+#  13. Composition mass ratchet — blocks growth of ironclaw_composition's
 #      share of production crate code past the committed budget (runs only when
 #      composition or the gate is staged). See scripts/ci/check-composition-budget.sh.
 #
 # (Checks 7–9 and 12 — the v1 gateway DISPATCH / CREDNAME / SSE-projection /
 #  multi-tenant-broadcast checks, plus the gateway i18n-parity and JS-syntax
 #  runs — were removed under Tier B when the `src/channels/web/` tree and
-#  `crates/ironclaw_gateway` were deleted. Reborn WebUI JS/i18n is validated by
+#  `crates/ironclaw_gateway` were deleted. IronClaw WebUI JS/i18n is validated by
 #  the frontend's own tooling; the dispatch/projection invariants are enforced
 #  in the product/composition crates and by `cargo test -p ironclaw_architecture`.)
 #
@@ -58,7 +58,7 @@ resolve_base_ref() {
 
 # Record whether there are staged changes (used throughout below). The v1
 # gateway i18n-parity and gateway-JS-syntax blocks that used to run here were
-# removed under Tier B along with `crates/ironclaw_gateway` — Reborn WebUI
+# removed under Tier B along with `crates/ironclaw_gateway` — IronClaw WebUI
 # i18n and JS are validated by the frontend's own `pnpm lint`/`pnpm test`
 # (the `webui-v2-js-lint` CI job).
 if git diff --cached --quiet 2>/dev/null; then
@@ -67,7 +67,7 @@ else
     HAS_STAGED_CHANGES=1
 fi
 
-# Composition mass ratchet: block commits that push ironclaw_reborn_composition's
+# Composition mass ratchet: block commits that push ironclaw_composition's
 # share of production crate code past the committed ceiling
 # (scripts/ci/composition-budget.toml). Triggers on ANY staged crates/**.rs change
 # (composition growth OR another crate shrinking both lift the share — the metric
@@ -101,7 +101,7 @@ if [ -n "$COMPOSITION_STAGED" ]; then
     if ! "$PCS_SCRIPT_DIR/ci/check-composition-budget.sh"; then
         echo ""
         echo "Commit blocked: composition mass budget exceeded (see above)."
-        echo "Carve behavior out of ironclaw_reborn_composition, or raise the ceiling in"
+        echo "Carve behavior out of ironclaw_composition, or raise the ceiling in"
         echo "scripts/ci/composition-budget.toml with a rationale. Bypass: git commit --no-verify"
         exit 1
     fi
@@ -336,7 +336,7 @@ fi
 
 # (Checks 7–9 — the v1 gateway DISPATCH / CREDNAME / SSE-PROJECTION checks,
 #  all keyed on the deleted `src/channels/web/` tree — were removed under
-#  Tier B. The Reborn equivalents are enforced in the product/composition
+#  Tier B. The IronClaw equivalents are enforced in the product/composition
 #  crates and by `cargo test -p ironclaw_architecture`.)
 
 # 10. Dead/speculative public API: newly-added `pub fn`/`pub type`/`pub struct`/

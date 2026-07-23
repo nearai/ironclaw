@@ -1,4 +1,4 @@
-//! Reborn integration — golden inference-payload coverage.
+//! IronClaw integration — golden inference-payload coverage.
 //!
 //! Exact-matches the FULL model-visible inference payload (system prompt +
 //! turns + tool-call/tool-result messages + ordered tool surface) per
@@ -14,22 +14,22 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::comm_context::RecordingCommunicationContextProvider;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::comm_context::RecordingCommunicationContextProvider;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 const HTTP_TOOL_URL_A: &str = "https://api.example.test/v1/items/a";
 const HTTP_TOOL_URL_B: &str = "https://api.example.test/v1/items/b";
 /// A vision-capable model id per `ironclaw_llm::vision_models::VISION_PATTERNS`
-/// (mirrors `tests/reborn_integration_attach.rs`).
+/// (mirrors `tests/ironclaw_integration_attach.rs`).
 const VISION_MODEL: &str = "claude-3-5-sonnet-20241022";
 const PNG_MIME: &str = "image/png";
 const PNG_BYTES: &[u8] = &[0x89, b'P', b'N', b'G', 1, 2, 3, 4];
@@ -38,8 +38,8 @@ const PNG_BYTES: &[u8] = &[0x89, b'P', b'N', b'G', 1, 2, 3, 4];
 /// final reply. Pins the base system-prompt construction and text-turn shape.
 #[tokio::test]
 async fn golden_single_turn_greeting() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("Hello! How can I help?")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("Hello! How can I help?")])
         .build()
         .await
         .expect("harness builds");
@@ -55,11 +55,11 @@ async fn golden_single_turn_greeting() {
 /// following `tool` message's `tool_call_id`.
 #[tokio::test]
 async fn golden_tool_call_feedback() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("fetched"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("fetched"),
         ])
         .build()
         .await
@@ -76,10 +76,10 @@ async fn golden_tool_call_feedback() {
 /// pins history/turns accumulation across turns.
 #[tokio::test]
 async fn golden_multi_turn_history() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .script([
-            RebornScriptedReply::text("First reply"),
-            RebornScriptedReply::text("Second reply"),
+            IronClawScriptedReply::text("First reply"),
+            IronClawScriptedReply::text("Second reply"),
         ])
         .build()
         .await
@@ -116,10 +116,10 @@ async fn golden_context_surfacing() {
         "slack",
         "reborn-golden-channel",
     );
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_communication_context_provider(provider)
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::text("context noted")])
+        .script([IronClawScriptedReply::text("context noted")])
         .build()
         .await
         .expect("harness builds");
@@ -138,14 +138,14 @@ async fn golden_context_surfacing() {
 /// message's `tool_call_id` lines up with the right one, in order.
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_calls([
+            IronClawScriptedReply::tool_calls([
                 ("builtin.http", json!({"url": HTTP_TOOL_URL_A})),
                 ("builtin.http", json!({"url": HTTP_TOOL_URL_B})),
             ]),
-            RebornScriptedReply::text("fetched both"),
+            IronClawScriptedReply::text("fetched both"),
         ])
         .build()
         .await
@@ -163,17 +163,17 @@ async fn golden_parallel_tool_calls() {
 /// `submit_inbound_with_attachments` entry point, routed through a
 /// vision-pattern model id. Pins byte-for-byte how `ContentPart::ImageUrl`
 /// renders alongside the text part — complements
-/// `tests/reborn_integration_attach.rs`'s substring check by catching drift in
+/// `tests/ironclaw_integration_attach.rs`'s substring check by catching drift in
 /// part ordering/shape a substring check can't see.
 #[tokio::test]
 async fn golden_image_attachment_turn() {
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let h = group
         .thread("golden-image-attach")
         .with_model_override(VISION_MODEL)
-        .script([RebornScriptedReply::text("I see a diagram")])
+        .script([IronClawScriptedReply::text("I see a diagram")])
         .build()
         .await
         .expect("thread builds");
@@ -198,17 +198,17 @@ async fn golden_image_attachment_turn() {
 /// actually parks on `TurnStatus::BlockedApproval` between the two calls.
 #[tokio::test]
 async fn golden_gated_turn_approve() {
-    let group = RebornIntegrationGroup::live_approvals()
+    let group = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("live-approvals group builds");
     let h = group
         .thread("golden-gated-approve")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/golden.txt", "content": "golden write"}),
             ),
-            RebornScriptedReply::text("file written"),
+            IronClawScriptedReply::text("file written"),
         ])
         .build()
         .await
@@ -231,12 +231,12 @@ async fn golden_gated_turn_approve() {
 
 // (e) Compaction: NOT implemented — blocked. The byte-cap-overflow force-
 // compaction path (`ByteCapStrategy` / `PostCapabilityStage`) sets
-// `state.compaction_state.force_compact_on_next_iteration`, but Reborn's
+// `state.compaction_state.force_compact_on_next_iteration`, but IronClaw's
 // `DefaultPlanner` wires `PromptCompactionStep` to
 // `ActiveTaskPreservingCompactionStrategy::should_compact`
 // (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
 // which never reads that flag — it only compacts on a genuine ~8,000+ token
-// accumulated tail. The force path is a dead letter under Reborn's installed
+// accumulated tail. The force path is a dead letter under IronClaw's installed
 // strategy; exercising it here needs a production fix (out of scope) or a
 // fragile multi-thousand-token scripted transcript that breaks golden-snapshot
 // reviewability.

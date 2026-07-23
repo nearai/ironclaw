@@ -4,10 +4,10 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/events.md`
-- `docs/reborn/contracts/events-projections.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/events.md`
+- `docs/ironclaw/contracts/events-projections.md`
+- `docs/ironclaw/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 
@@ -18,7 +18,7 @@
 - In-memory durable/sink backends for tests and reference loops (`in_memory`) and the byte-level `parse_jsonl` / `replay_jsonl` helpers (`jsonl`).
 - `EventError` (`error`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
-- Production backend selection lives in `ironclaw_reborn_event_store`, not here — downstream store crates depend on this substrate, never the reverse.
+- Production backend selection lives in `ironclaw_event_store`, not here — downstream store crates depend on this substrate, never the reverse.
 
 ## Do Not Move In Here
 

@@ -3,8 +3,8 @@
 //! 1. Retired-taxonomy identifiers stay dead: the single `telegram` extension
 //!    must never grow a `telegram_bot` / `telegram_personal` /
 //!    `telegram_channel` companion identity (the pattern #6116's
-//!    `reborn_retired_taxonomy` gate pins for Slack).
-//! 2. The Reborn context stays free of the v1 pairing surface: no
+//!    `ironclaw_retired_taxonomy` gate pins for Slack).
+//! 2. The IronClaw context stays free of the v1 pairing surface: no
 //!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend —
 //!    Telegram pairing is the WebGeneratedCode flow under
 //!    `/api/webchat/v2/channels/telegram/pairing`.
@@ -75,8 +75,8 @@ const TELEGRAM_PRODUCTION_LINE_BUDGET: usize = 999;
 
 #[test]
 fn generic_channel_delivery_is_not_owned_by_composition() {
-    let old_owner = workspace_root()
-        .join("crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs");
+    let old_owner =
+        workspace_root().join("crates/ironclaw_composition/src/outbound/channel_delivery.rs");
     assert!(
         !old_owner.exists(),
         "generic channel-delivery behavior must be owned by ironclaw_extension_host, not {}",
@@ -87,7 +87,7 @@ fn generic_channel_delivery_is_not_owned_by_composition() {
 #[test]
 fn generic_extension_lifecycle_has_no_telegram_knowledge() {
     let path = workspace_root()
-        .join("crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs");
+        .join("crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs");
     let source = std::fs::read_to_string(&path).expect("extension lifecycle source readable");
     let forbidden = [
         "telegram_paired_source",
@@ -202,8 +202,7 @@ fn telegram_composition_is_assembly_only() {
     // fold removed composition's telegram module entirely. Telegram host
     // behavior rides the generic channel-host/ingress/delivery seams, so
     // composition may not own any telegram-specific source at all.
-    let telegram_module_root =
-        workspace_root().join("crates/ironclaw_reborn_composition/src/telegram");
+    let telegram_module_root = workspace_root().join("crates/ironclaw_composition/src/telegram");
     assert!(
         !telegram_module_root.exists(),
         "composition must not own telegram-specific modules; telegram host \
@@ -324,7 +323,7 @@ fn no_retired_taxonomy_telegram_identifiers() {
 }
 
 #[test]
-fn reborn_context_free_of_v1_pairing_routes() {
+fn ironclaw_context_free_of_v1_pairing_routes() {
     let root = workspace_root();
     let mut offenders = Vec::new();
     for file in rust_and_frontend_files(&root.join("crates")) {
@@ -352,7 +351,7 @@ fn reborn_context_free_of_v1_pairing_routes() {
     }
     assert!(
         offenders.is_empty(),
-        "v1 pairing route literals found in the reborn context (telegram pairing is \
+        "v1 pairing route literals found in the IronClaw context (telegram pairing is \
          /api/webchat/v2/channels/telegram/pairing):\n{}",
         offenders.join("\n")
     );

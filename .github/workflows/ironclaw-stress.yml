@@ -180,15 +180,15 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_DEBUG: 0
       IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
-      IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/ironclaw_stress
-      IRONCLAW_REBORN_SECRET_MASTER_KEY: stress-ci-secret-master-key-0123456789abcdef
-      IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"
-      IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE: "32"
-      IRONCLAW_REBORN_RUNNER_WORKER_COUNT: "0"
-      IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER: "0"
-      IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS: "0"
-      IRONCLAW_REBORN_WEBUI_TOKEN: stress-ci-webui-token-0123456789abcdef0123456789abcdef
-      IRONCLAW_REBORN_WEBUI_USER_ID: stress-ci-user
+      IRONCLAW_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/ironclaw_stress
+      IRONCLAW_SECRET_MASTER_KEY: stress-ci-secret-master-key-0123456789abcdef
+      IRONCLAW_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"
+      IRONCLAW_POSTGRES_POOL_MAX_SIZE: "32"
+      IRONCLAW_RUNNER_WORKER_COUNT: "0"
+      IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER: "0"
+      IRONCLAW_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS: "0"
+      IRONCLAW_WEBUI_TOKEN: stress-ci-webui-token-0123456789abcdef0123456789abcdef
+      IRONCLAW_WEBUI_USER_ID: stress-ci-user
       LLM_API_KEY: stress-ci-key
     steps:
       - name: Checkout repository
@@ -227,8 +227,8 @@ jobs:
       - name: Run hosted-single-tenant Postgres API capacity workload
         run: |
           set -euo pipefail
-          mkdir -p target/ironclaw-stress "$RUNNER_TEMP/ironclaw-reborn-home"
-          cat > "$RUNNER_TEMP/ironclaw-reborn-home/config.toml" <<'EOF'
+          mkdir -p target/ironclaw-stress "$RUNNER_TEMP/ironclaw-home"
+          cat > "$RUNNER_TEMP/ironclaw-home/config.toml" <<'EOF'
           api_version = "ironclaw.runtime/v1"
 
           [boot]
@@ -241,8 +241,8 @@ jobs:
 
           [storage]
           backend = "postgres"
-          url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-          secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+          url_env = "IRONCLAW_POSTGRES_URL"
+          secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
           pool_max_size = 32
 
           [runner]
@@ -257,7 +257,7 @@ jobs:
           api_key_env = "LLM_API_KEY"
           EOF
 
-          IRONCLAW_REBORN_HOME="$RUNNER_TEMP/ironclaw-reborn-home" \
+          IRONCLAW_HOME="$RUNNER_TEMP/ironclaw-home" \
             target/release/ironclaw serve \
               --host 127.0.0.1 \
               --port 18080 \
@@ -271,7 +271,7 @@ jobs:
               break
             fi
             if ! kill -0 "$server_pid" 2>/dev/null; then
-              echo "ironclaw-reborn exited before becoming healthy" >&2
+              echo "IronClaw exited before becoming healthy" >&2
               cat target/ironclaw-stress/postgres-api-server.log >&2 || true
               exit 1
             fi
@@ -280,26 +280,26 @@ jobs:
           curl -fsS http://127.0.0.1:18080/api/health >/dev/null
           for _ in $(seq 1 120); do
             if curl -fsS \
-              -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+              -H "Authorization: Bearer $IRONCLAW_WEBUI_TOKEN" \
               http://127.0.0.1:18080/api/webchat/v2/session >/dev/null; then
               break
             fi
             if ! kill -0 "$server_pid" 2>/dev/null; then
-              echo "ironclaw-reborn exited before WebUI API readiness" >&2
+              echo "IronClaw exited before WebUI API readiness" >&2
               cat target/ironclaw-stress/postgres-api-server.log >&2 || true
               exit 1
             fi
             sleep 1
           done
           curl -fsS \
-            -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+            -H "Authorization: Bearer $IRONCLAW_WEBUI_TOKEN" \
             http://127.0.0.1:18080/api/webchat/v2/session >/dev/null
 
           target/release/ironclaw_stress \
             --backend libsql \
             --scenario api-user-capacity \
             --api-base-url http://127.0.0.1:18080 \
-            --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
+            --api-admin-bearer-token "$IRONCLAW_WEBUI_TOKEN" \
             --api-admin-provisioners 4 \
             --users 100 \
             --concurrency 25 \

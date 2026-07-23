@@ -23,10 +23,10 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
             CapabilityId::new(
-                ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+                ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
             )?,
             CapabilityId::new(
-                ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+                ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
             )?,
         ],
         effect_kinds: vec![
@@ -37,12 +37,13 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         )
         .with_outbound_target_tools(facade, true),
-        ..ToolsProfile::new("reborn-e2e-outbound-target-tools", "reborn-e2e-outbound-target-user")?
+        ..ToolsProfile::new(
+            "ironclaw-e2e-outbound-target-tools",
+            "ironclaw-e2e-outbound-target-user",
+        )?
     })
 }
 

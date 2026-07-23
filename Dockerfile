@@ -1,13 +1,13 @@
-# Multi-stage Dockerfile for the standalone Reborn CLI HTTP service.
+# Multi-stage Dockerfile for the standalone IronClaw CLI HTTP service.
 #
 # Build:
-#   docker build -f Dockerfile.reborn -t ironclaw-reborn:latest .
+#   docker build -f Dockerfile -t ironclaw:latest .
 #
 # Run locally:
-#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
+#   docker run --rm --env-file .env.ironclaw -p 127.0.0.1:3000:3000 ironclaw:latest
 #
 # Railway:
-#   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_SERVE_HOST=0.0.0.0.
+#   Set Dockerfile path to Dockerfile and IRONCLAW_SERVE_HOST=0.0.0.0.
 #   Railway supplies PORT. Set IRONCLAW_PROFILE=hosted-single-tenant for
 #   Postgres-backed hosted storage, or hosted-single-tenant-volume for a
 #   Railway volume-backed single-tenant preview.
@@ -92,20 +92,22 @@ RUN apt-get -o Acquire::Retries=3 update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
-COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
-COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
-COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml
-COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
-COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
+COPY docker/ironclaw/config.toml /opt/ironclaw/defaults/config.toml
+COPY docker/ironclaw/config.hosted-single-tenant.toml /opt/ironclaw/defaults/config.hosted-single-tenant.toml
+COPY docker/ironclaw/config.hosted-single-tenant-volume.toml /opt/ironclaw/defaults/config.hosted-single-tenant-volume.toml
+COPY docker/ironclaw/config.production.toml /opt/ironclaw/defaults/config.production.toml
+COPY docker/ironclaw/entrypoint.sh /usr/local/bin/ironclaw-entrypoint
 
 ENV HOME=/home/ironclaw \
     IRONCLAW_LOG=info \
     IRONCLAW_SERVE_HOST=127.0.0.1
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
-    && mkdir -p /data/ironclaw-reborn /workspace \
-    && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
-    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+    && mkdir -p /data/ironclaw /workspace \
+    && ln -s defaults /opt/ironclaw/reborn \
+    && ln -s ironclaw-entrypoint /usr/local/bin/ironclaw-reborn-entrypoint \
+    && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw /workspace \
+    && chmod +x /usr/local/bin/ironclaw-entrypoint
 
 WORKDIR /workspace
 
@@ -113,4 +115,4 @@ EXPOSE 3000
 
 USER ironclaw
 
-ENTRYPOINT ["ironclaw-reborn-entrypoint"]
+ENTRYPOINT ["ironclaw-entrypoint"]

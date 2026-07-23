@@ -11,7 +11,7 @@
 
 ## What This Crate Owns
 
-- Canonical Reborn `session_threads` and transcript service contracts.
+- Canonical IronClaw `session_threads` and transcript service contracts.
 - Thread identifiers, transcript message contracts, message ordering/status/redaction semantics, context-window reads.
 - In-memory/fake stores and feature-gated durable contract stores.
 - Stable turn/run references supplied by `TurnCoordinator`.

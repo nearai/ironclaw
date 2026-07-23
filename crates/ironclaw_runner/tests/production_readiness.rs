@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use ironclaw_runner::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey},
     production_readiness::{
-        RebornActiveRunIdentity, RebornComponentReadiness, RebornComponentRequirement,
-        RebornConfiguredRunProfile, RebornLoopComponentGraphReadiness,
-        RebornLoopProductionComponent, RebornLoopProductionInputs, RebornLoopProductionIssueKind,
-        RebornLoopProductionStatus, RebornLoopReadinessMode, subagent_driver_requirements,
-        text_only_driver_requirements, tool_capable_driver_requirements,
-        validate_reborn_loop_production_readiness,
+        IronClawActiveRunIdentity, IronClawComponentReadiness, IronClawComponentRequirement,
+        IronClawConfiguredRunProfile, IronClawLoopComponentGraphReadiness,
+        IronClawLoopProductionComponent, IronClawLoopProductionInputs,
+        IronClawLoopProductionIssueKind, IronClawLoopProductionStatus, IronClawLoopReadinessMode,
+        subagent_driver_requirements, text_only_driver_requirements,
+        tool_capable_driver_requirements, validate_ironclaw_loop_production_readiness,
     },
 };
 use ironclaw_turns::{
@@ -23,18 +23,18 @@ fn production_readiness_rejects_missing_selected_driver() {
     let registry = DriverRegistry::new();
     let profile = selected_profile(missing_key("text_loop", 1, "text_checkpoint", 1));
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![profile],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::LoopDriver,
-        RebornLoopProductionIssueKind::Missing
+        IronClawLoopProductionComponent::LoopDriver,
+        IronClawLoopProductionIssueKind::Missing
     ));
 }
 
@@ -43,18 +43,18 @@ fn production_readiness_rejects_reference_driver() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "reference_echo", DriverKind::Reference);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::LoopDriver,
-        RebornLoopProductionIssueKind::TestOnlyImplementation
+        IronClawLoopProductionComponent::LoopDriver,
+        IronClawLoopProductionIssueKind::TestOnlyImplementation
     ));
 }
 
@@ -63,19 +63,22 @@ fn local_dev_allows_reference_driver_with_degraded_status() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "reference_echo", DriverKind::Reference);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::LocalDevTest,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::LocalDevTest,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::LocalDevDegraded);
+    assert_eq!(
+        report.status,
+        IronClawLoopProductionStatus::LocalDevDegraded
+    );
     assert_eq!(report.blocking_issues().count(), 0);
     assert!(report.contains(
-        RebornLoopProductionComponent::LoopDriver,
-        RebornLoopProductionIssueKind::TestOnlyImplementation
+        IronClawLoopProductionComponent::LoopDriver,
+        IronClawLoopProductionIssueKind::TestOnlyImplementation
     ));
 }
 
@@ -83,22 +86,22 @@ fn local_dev_allows_reference_driver_with_degraded_status() {
 fn production_readiness_rejects_in_memory_checkpoint_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.checkpoint_state_store =
-        RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::non_durable(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::CheckpointStateStore,
-        RebornLoopProductionIssueKind::NonDurableImplementation
+        IronClawLoopProductionComponent::CheckpointStateStore,
+        IronClawLoopProductionIssueKind::NonDurableImplementation
     ));
 }
 
@@ -106,22 +109,22 @@ fn production_readiness_rejects_in_memory_checkpoint_store() {
 fn production_readiness_rejects_non_durable_subagent_goal_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.subagent_goal_store =
-        RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::non_durable(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentGoalStore,
-        RebornLoopProductionIssueKind::NonDurableImplementation
+        IronClawLoopProductionComponent::SubagentGoalStore,
+        IronClawLoopProductionIssueKind::NonDurableImplementation
     ));
 }
 
@@ -129,22 +132,22 @@ fn production_readiness_rejects_non_durable_subagent_goal_store() {
 fn production_readiness_rejects_missing_subagent_completion_observer() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.subagent_completion_observer =
-        RebornComponentReadiness::missing(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::missing(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentCompletionObserver,
-        RebornLoopProductionIssueKind::Missing
+        IronClawLoopProductionComponent::SubagentCompletionObserver,
+        IronClawLoopProductionIssueKind::Missing
     ));
 }
 
@@ -160,22 +163,22 @@ fn production_readiness_rejects_missing_subagent_completion_observer() {
 fn production_readiness_rejects_non_durable_subagent_await_edge_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.subagent_await_edge_store =
-        RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::non_durable(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentAwaitEdgeStore,
-        RebornLoopProductionIssueKind::NonDurableImplementation
+        IronClawLoopProductionComponent::SubagentAwaitEdgeStore,
+        IronClawLoopProductionIssueKind::NonDurableImplementation
     ));
 }
 
@@ -183,22 +186,22 @@ fn production_readiness_rejects_non_durable_subagent_await_edge_store() {
 fn production_readiness_rejects_missing_subagent_await_edge_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.subagent_await_edge_store =
-        RebornComponentReadiness::missing(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::missing(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentAwaitEdgeStore,
-        RebornLoopProductionIssueKind::Missing
+        IronClawLoopProductionComponent::SubagentAwaitEdgeStore,
+        IronClawLoopProductionIssueKind::Missing
     ));
 }
 
@@ -206,21 +209,21 @@ fn production_readiness_rejects_missing_subagent_await_edge_store() {
 fn production_readiness_rejects_noop_wake_notifier() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.wake_notifier = RebornComponentReadiness::noop(RebornComponentRequirement::Required);
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
+    graph.wake_notifier = IronClawComponentReadiness::noop(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::WakeNotifier,
-        RebornLoopProductionIssueKind::NoopImplementation
+        IronClawLoopProductionComponent::WakeNotifier,
+        IronClawLoopProductionIssueKind::NoopImplementation
     ));
 }
 
@@ -239,19 +242,19 @@ fn production_readiness_allows_text_only_with_deny_capability_port() {
             DriverKind::Production,
         )
         .expect("production text driver registration succeeds");
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.capability_port =
-        RebornComponentReadiness::production_verified(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::production_verified(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::ProductionReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::ProductionReady);
     assert!(report.issues.is_empty());
 }
 
@@ -270,21 +273,22 @@ fn production_readiness_rejects_tool_profile_without_surface_service() {
             DriverKind::Production,
         )
         .expect("production tool driver registration succeeds");
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.capability_port = RebornComponentReadiness::missing(RebornComponentRequirement::Required);
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
+    graph.capability_port =
+        IronClawComponentReadiness::missing(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::CapabilityPort,
-        RebornLoopProductionIssueKind::Missing
+        IronClawLoopProductionComponent::CapabilityPort,
+        IronClawLoopProductionIssueKind::Missing
     ));
 }
 
@@ -300,7 +304,7 @@ fn subagent_driver_requirements_match_tool_capable_surface() {
 fn production_readiness_rejects_checkpoint_version_mismatch() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let profile = RebornConfiguredRunProfile::selected(
+    let profile = IronClawConfiguredRunProfile::selected(
         RunProfileId::new("interactive_default").expect("valid profile id"),
         RunProfileVersion::new(1),
         key,
@@ -308,18 +312,18 @@ fn production_readiness_rejects_checkpoint_version_mismatch() {
         RunProfileVersion::new(1),
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![profile],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::CheckpointSchema,
-        RebornLoopProductionIssueKind::VersionMismatch
+        IronClawLoopProductionComponent::CheckpointSchema,
+        IronClawLoopProductionIssueKind::VersionMismatch
     ));
 }
 
@@ -327,7 +331,7 @@ fn production_readiness_rejects_checkpoint_version_mismatch() {
 fn production_readiness_rejects_removed_profile_version_with_active_runs() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let active_run = RebornActiveRunIdentity::new(
+    let active_run = IronClawActiveRunIdentity::new(
         "run-active-1",
         TurnStatus::Running,
         RunProfileId::new("old_interactive").expect("valid profile id"),
@@ -335,18 +339,18 @@ fn production_readiness_rejects_removed_profile_version_with_active_runs() {
         key.clone(),
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: vec![active_run],
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::RunProfile,
-        RebornLoopProductionIssueKind::ActiveRunsRequireVersion
+        IronClawLoopProductionComponent::RunProfile,
+        IronClawLoopProductionIssueKind::ActiveRunsRequireVersion
     ));
 }
 
@@ -355,7 +359,7 @@ fn production_readiness_rejects_active_run_driver_identity_mismatch() {
     let mut registry = DriverRegistry::new();
     let configured_key = register_driver(&mut registry, "text_loop_v2", DriverKind::Production);
     let active_run_key = register_driver(&mut registry, "text_loop_v1", DriverKind::Production);
-    let active_run = RebornActiveRunIdentity::new(
+    let active_run = IronClawActiveRunIdentity::new(
         "run-active-1",
         TurnStatus::Running,
         RunProfileId::new("interactive_default").expect("valid profile id"),
@@ -363,18 +367,18 @@ fn production_readiness_rejects_active_run_driver_identity_mismatch() {
         active_run_key,
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(configured_key)],
         active_runs: vec![active_run],
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::RunProfile,
-        RebornLoopProductionIssueKind::ActiveRunsRequireVersion
+        IronClawLoopProductionComponent::RunProfile,
+        IronClawLoopProductionIssueKind::ActiveRunsRequireVersion
     ));
 }
 
@@ -394,14 +398,14 @@ fn production_readiness_rejects_active_run_checkpoint_schema_identity_mismatch()
         )
         .expect("configured driver registration succeeds");
     let active_run_key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let profile = RebornConfiguredRunProfile::selected(
+    let profile = IronClawConfiguredRunProfile::selected(
         RunProfileId::new("interactive_default").expect("valid profile id"),
         RunProfileVersion::new(1),
         configured_key,
         CheckpointSchemaId::new("new_text_checkpoint").expect("valid checkpoint id"),
         RunProfileVersion::new(1),
     );
-    let active_run = RebornActiveRunIdentity::new(
+    let active_run = IronClawActiveRunIdentity::new(
         "run-active-1",
         TurnStatus::Running,
         RunProfileId::new("interactive_default").expect("valid profile id"),
@@ -409,18 +413,18 @@ fn production_readiness_rejects_active_run_checkpoint_schema_identity_mismatch()
         active_run_key,
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![profile],
         active_runs: vec![active_run],
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::RunProfile,
-        RebornLoopProductionIssueKind::ActiveRunsRequireVersion
+        IronClawLoopProductionComponent::RunProfile,
+        IronClawLoopProductionIssueKind::ActiveRunsRequireVersion
     ));
 }
 
@@ -428,7 +432,7 @@ fn production_readiness_rejects_active_run_checkpoint_schema_identity_mismatch()
 fn readiness_surface_redacts_active_run_subject() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let active_run = RebornActiveRunIdentity::new(
+    let active_run = IronClawActiveRunIdentity::new(
         "provider/sk-secret/prompt",
         TurnStatus::Running,
         RunProfileId::new("old_interactive").expect("valid profile id"),
@@ -436,15 +440,15 @@ fn readiness_surface_redacts_active_run_subject() {
         missing_key("missing_loop", 1, "text_checkpoint", 1),
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: vec![active_run],
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     for issue in report.issues {
         assert!(!issue.subject.contains('/'));
         assert!(!issue.subject.contains("sk-"));
@@ -457,7 +461,7 @@ fn readiness_surface_redacts_active_run_subject() {
 fn optional_profile_unavailable_does_not_block_startup() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let optional = RebornConfiguredRunProfile::selected(
+    let optional = IronClawConfiguredRunProfile::selected(
         RunProfileId::new("optional_tool_profile").expect("valid profile id"),
         RunProfileVersion::new(1),
         missing_key("tool_loop", 1, "tool_checkpoint", 1),
@@ -466,27 +470,27 @@ fn optional_profile_unavailable_does_not_block_startup() {
     )
     .optional();
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key), optional.clone()],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::ProductionReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::ProductionReady);
     assert_eq!(report.blocking_issues().count(), 0);
     assert!(report.contains(
-        RebornLoopProductionComponent::LoopDriver,
-        RebornLoopProductionIssueKind::Missing
+        IronClawLoopProductionComponent::LoopDriver,
+        IronClawLoopProductionIssueKind::Missing
     ));
     assert!(report.has_warnings());
     let issue = report
         .issues
         .iter()
         .find(|issue| {
-            issue.component == RebornLoopProductionComponent::LoopDriver
-                && issue.kind == RebornLoopProductionIssueKind::Missing
+            issue.component == IronClawLoopProductionComponent::LoopDriver
+                && issue.kind == IronClawLoopProductionIssueKind::Missing
         })
         .expect("optional missing driver issue is reported");
     assert_eq!(issue.profile_id.as_ref(), Some(&optional.profile_id));
@@ -502,10 +506,10 @@ fn selected_driver_readiness_issues_include_profile_context() {
     let registry = DriverRegistry::new();
     let profile = selected_profile(missing_key("text_loop", 1, "text_checkpoint", 1));
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![profile.clone()],
         active_runs: Vec::new(),
     });
@@ -514,8 +518,8 @@ fn selected_driver_readiness_issues_include_profile_context() {
         .issues
         .iter()
         .find(|issue| {
-            issue.component == RebornLoopProductionComponent::LoopDriver
-                && issue.kind == RebornLoopProductionIssueKind::Missing
+            issue.component == IronClawLoopProductionComponent::LoopDriver
+                && issue.kind == IronClawLoopProductionIssueKind::Missing
         })
         .expect("selected missing driver issue is reported");
     assert_eq!(issue.profile_id.as_ref(), Some(&profile.profile_id));
@@ -530,7 +534,7 @@ fn selected_driver_readiness_issues_include_profile_context() {
 fn missing_active_run_driver_has_distinct_issue_kind_and_context() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let active_run = RebornActiveRunIdentity::new(
+    let active_run = IronClawActiveRunIdentity::new(
         "run-active-1",
         TurnStatus::Running,
         RunProfileId::new("interactive_default").expect("valid profile id"),
@@ -538,10 +542,10 @@ fn missing_active_run_driver_has_distinct_issue_kind_and_context() {
         missing_key("missing_loop", 1, "text_checkpoint", 1),
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: vec![active_run.clone()],
     });
@@ -550,8 +554,8 @@ fn missing_active_run_driver_has_distinct_issue_kind_and_context() {
         .issues
         .iter()
         .find(|issue| {
-            issue.component == RebornLoopProductionComponent::LoopDriver
-                && issue.kind == RebornLoopProductionIssueKind::ActiveRunDriverUnregistered
+            issue.component == IronClawLoopProductionComponent::LoopDriver
+                && issue.kind == IronClawLoopProductionIssueKind::ActiveRunDriverUnregistered
         })
         .expect("active-run missing driver issue is reported");
     assert_eq!(issue.subject, "active_run");
@@ -572,15 +576,15 @@ fn local_durable_components_are_not_rejected_by_name_or_locality() {
         DriverKind::Production,
     );
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
-        component_graph: RebornLoopComponentGraphReadiness::production_verified(),
+        component_graph: IronClawLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::ProductionReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::ProductionReady);
     assert!(report.issues.is_empty());
 }
 
@@ -588,19 +592,19 @@ fn local_durable_components_are_not_rejected_by_name_or_locality() {
 fn readiness_surface_stays_redaction_safe() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    let mut graph = IronClawLoopComponentGraphReadiness::production_verified();
     graph.model_gateway =
-        RebornComponentReadiness::unverified(RebornComponentRequirement::Required);
+        IronClawComponentReadiness::unverified(IronClawComponentRequirement::Required);
 
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
+    let report = validate_ironclaw_loop_production_readiness(IronClawLoopProductionInputs {
+        mode: IronClawLoopReadinessMode::Production,
         driver_registry: &registry,
         component_graph: graph,
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert_eq!(report.status, IronClawLoopProductionStatus::NotReady);
     for issue in report.issues {
         assert!(!issue.subject.contains('/'));
         assert!(!issue.subject.contains("sk-"));
@@ -628,8 +632,8 @@ fn register_driver(
         .expect("driver registration succeeds")
 }
 
-fn selected_profile(driver_identity: LoopDriverRegistryKey) -> RebornConfiguredRunProfile {
-    RebornConfiguredRunProfile::selected(
+fn selected_profile(driver_identity: LoopDriverRegistryKey) -> IronClawConfiguredRunProfile {
+    IronClawConfiguredRunProfile::selected(
         RunProfileId::new("interactive_default").expect("valid profile id"),
         RunProfileVersion::new(1),
         driver_identity,

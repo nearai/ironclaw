@@ -1,5 +1,5 @@
 // arch-exempt: large_file, caller-level failure mapping regression stays with the driver, plan #4088
-//! Planned Reborn loop driver.
+//! Planned IronClaw loop driver.
 //!
 //! This module is the bridge from the runner-facing `AgentLoopDriver` trait to
 //! the sealed `ironclaw_agent_loop` framework. It intentionally holds an opaque

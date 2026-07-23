@@ -4,14 +4,14 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/wasm.md`
-- `docs/reborn/contracts/runtime-workflows.md`
-- `docs/reborn/contracts/network.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/wasm.md`
+- `docs/ironclaw/contracts/runtime-workflows.md`
+- `docs/ironclaw/contracts/network.md`
 
 ## What This Crate Owns
 
-- The Reborn WASM component runtime lane (load/compile/validate/meter/execute already-selected components), currently:
+- The IronClaw WASM component runtime lane (load/compile/validate/meter/execute already-selected components), currently:
 - The runtime + execution surface: `WitToolRuntime` (`runtime`), `WitToolHost`, `WitToolRequest`/`WitToolExecution`/`PreparedWitTool`, `WasmLogLevel`/`WasmLogRecord` (`types`, `host`), and `bindings`/`store`.
 - The folded `wasm_sandbox_core` module: domain-free Wasmtime/WASI sandbox primitives, component-engine setup, epoch ticker, minimal WASI p2 linker, resource limiter, limits, and store-core helpers.
 - Runtime config + ABI version: `WitToolRuntimeConfig`, `WIT_TOOL_VERSION` (`config`; per-execution limits use `wasm_sandbox_core::SandboxLimits`); errors `WasmError`/`WasmHostError` (`error`).

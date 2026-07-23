@@ -1,17 +1,17 @@
 //! HEADLINE: the full skill-management verb lifecycle at int tier.
 //!
 //! Three threads over the SAME shared `HostRuntimeCapabilityHarness` skill
-//! filesystem (mirrors `reborn_group_triggers`'s shared-repo shape):
+//! filesystem (mirrors `ironclaw_group_triggers`'s shared-repo shape):
 //! thread A lists (empty of the test skill), thread B installs then lists
 //! (present), thread C removes then lists (absent again). Split into three
 //! threads — not one multi-step turn — because `tool_result_output(cap)`
 //! returns only the MOST RECENT result for `cap` in a thread's slice, and
 //! `skill_list` is dispatched three times total; one thread per checkpoint
 //! keeps each `tool_result_output` call unambiguous (see the same gotcha
-//! documented in `reborn_group_triggers/scenario_verbs_lifecycle.rs`).
+//! documented in `ironclaw_group_triggers/scenario_verbs_lifecycle.rs`).
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 const SKILL_NAME: &str = "t0-skills-review";
@@ -26,13 +26,13 @@ fn skill_names(list_output: &serde_json::Value) -> HarnessResult<Vec<String>> {
         .collect())
 }
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: list before install — the test skill is absent ────────────
     let lister_before = g
         .thread("skills-list-before")
         .script([
-            RebornScriptedReply::tool_call("builtin.skill_list", json!({})),
-            RebornScriptedReply::text("listed"),
+            IronClawScriptedReply::tool_call("builtin.skill_list", json!({})),
+            IronClawScriptedReply::text("listed"),
         ])
         .build()
         .await?;
@@ -48,12 +48,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let installer = g
         .thread("skills-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.skill_install",
                 json!({"name": SKILL_NAME, "content": SKILL_CONTENT}),
             ),
-            RebornScriptedReply::tool_call("builtin.skill_list", json!({})),
-            RebornScriptedReply::text("installed"),
+            IronClawScriptedReply::tool_call("builtin.skill_list", json!({})),
+            IronClawScriptedReply::text("installed"),
         ])
         .build()
         .await?;
@@ -73,9 +73,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let remover = g
         .thread("skills-remove")
         .script([
-            RebornScriptedReply::tool_call("builtin.skill_remove", json!({"name": SKILL_NAME})),
-            RebornScriptedReply::tool_call("builtin.skill_list", json!({})),
-            RebornScriptedReply::text("removed"),
+            IronClawScriptedReply::tool_call("builtin.skill_remove", json!({"name": SKILL_NAME})),
+            IronClawScriptedReply::tool_call("builtin.skill_list", json!({})),
+            IronClawScriptedReply::text("removed"),
         ])
         .build()
         .await?;

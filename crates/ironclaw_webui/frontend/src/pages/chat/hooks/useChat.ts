@@ -409,7 +409,7 @@ export function useChat(threadId) {
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
     onStreamError: handleStreamError,
-    // Reborn's projection bridge does not yet emit `Text` items for
+    // IronClaw's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
     // tool input/output cards live only in the thread timeline. Refetch

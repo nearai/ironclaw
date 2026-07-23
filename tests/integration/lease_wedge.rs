@@ -1,4 +1,4 @@
-//! Reborn integration test — tool-path lease-expiry wedge coverage (issue
+//! IronClaw integration test — tool-path lease-expiry wedge coverage (issue
 //! #5476, Row-D runtime robustness).
 //!
 //! The model path already has `ParkingModelGate`/`ParkingLlm` for mid-turn
@@ -13,17 +13,17 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
 use std::time::Duration;
 
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::doubles::ParkingCapabilityGate;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::doubles::ParkingCapabilityGate;
-use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
@@ -38,12 +38,12 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
     let gate = ParkingCapabilityGate::new();
     let _guard = gate.release_guard();
 
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .park_tool_dispatch(gate.clone())
         .with_runner_lease_ttl_for_test(chrono::Duration::milliseconds(200))
         .with_lease_recovery_interval_for_test(Duration::from_millis(50))
-        .script([RebornScriptedReply::tool_call(
+        .script([IronClawScriptedReply::tool_call(
             "builtin.http",
             json!({"url": HTTP_TOOL_URL}),
         )])

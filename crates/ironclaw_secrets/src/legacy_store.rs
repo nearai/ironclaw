@@ -4,7 +4,7 @@
 //! redacted Debug output and decrypted material exposed only via an explicit
 //! host-boundary method. The legacy `SecretsStore` trait and its encrypted
 //! in-memory engine were removed with the §4.3 secrets-cluster consolidation
-//! (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`);
+//! (`docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`);
 //! volatile stores now use `FilesystemSecretStore::ephemeral()`.
 
 use std::fmt;

@@ -17,7 +17,7 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 - Where a symbol is defined → `search_graph(name_pattern=…)`, then `get_code_snippet(qualified_name=…)`
 - Who calls X / what X calls → `trace_path(function_name=…, mode="calls")`
 - How a value flows across layers → `trace_path(mode="data_flow")`
-- Cross-crate / cross-service path (the reborn 5-layer feature flow) → `trace_path(mode="cross_service")`
+- Cross-crate / cross-service path (the IronClaw 5-layer feature flow) → `trace_path(mode="cross_service")`
 - Structure of an area → `get_architecture(…)`; graph-augmented text search → `search_code(pattern=…)`
 - Arbitrary structural queries → `query_graph(<Cypher>)`
 
@@ -25,18 +25,18 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 
 **Narrative orientation (what/why, not where):** prose docs for each subsystem live in `openwiki/` — an auto-generated wiki kept fresh by `.github/workflows/openwiki-update.yml`. For *"what does this subsystem do / how does this flow work"* questions, `Read` the relevant `openwiki/` page; use the graph for precise structure. Do not hand-edit `openwiki/` — it is regenerated. The two layers are complementary: `openwiki/` = prose map, the graph = exact index.
 
-## Where to Build — the Reborn stack in `crates/`
+## Where to Build — the IronClaw stack in `crates/`
 
-**All work lives in the Reborn stack under `crates/`.** The v1 `src/` monolith
+**All work lives in the IronClaw stack under `crates/`.** The v1 `src/` monolith
 (package `ironclaw_legacy`) was deleted under Tier B
 (`docs/plans/2026-07-02-reborn-internal-module-refactor.md` §8) — there is no
-longer a v1 codebase to disambiguate from. A Reborn feature crosses
+longer a v1 codebase to disambiguate from. A IronClaw feature crosses
 `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the
-binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`).
-Start from the `reborn-feature` skill — it maps those layers so you wire a
+binary entry point is `crates/ironclaw_cli` (binary name `ironclaw`).
+Start from the `ironclaw-feature` skill — it maps those layers so you wire a
 feature in one pass instead of layer-by-layer. The workspace root
-(`Cargo.toml`, package `ironclaw_reborn_integration_tests`) now hosts only the
-Reborn integration test suite (`tests/integration/*`); it has no lib/bin of its
+(`Cargo.toml`, package `ironclaw_integration_tests`) now hosts only the
+IronClaw integration test suite (`tests/integration/*`); it has no lib/bin of its
 own.
 
 ## Build & Test
@@ -46,7 +46,7 @@ cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
 cargo test                                                   # unit tests
 cargo test --features integration                            # + PostgreSQL tests
-RUST_LOG=ironclaw=debug cargo run -p ironclaw -- serve       # run the Reborn serve binary with logging
+RUST_LOG=ironclaw=debug cargo run -p ironclaw -- serve       # run the IronClaw serve binary with logging
 ```
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
@@ -77,7 +77,7 @@ Two rules are non-negotiable for **all** tests:
    stand up a redundant new "extensive" test that overloads the suite.
    Add a new test only for a genuinely distinct scenario, and say why an
    existing one couldn't absorb it.
-3. **Integration-first coverage.** Production-wired Reborn behavior
+3. **Integration-first coverage.** Production-wired IronClaw behavior
    ships with a test in `tests/integration/`, driven through the
    harness and asserting at a seam — never `wait_for_status(Completed)`
    alone. Crate-tier is the fallback only when that tier can't reach
@@ -85,7 +85,7 @@ Two rules are non-negotiable for **all** tests:
    `.claude/rules/testing.md`.
 
 Where to look: hard rules (tiers, test-through-the-caller,
-regression-with-every-fix) in `.claude/rules/testing.md`; **Reborn
+regression-with-every-fix) in `.claude/rules/testing.md`; **IronClaw
 integration tests** authoring guide in `tests/integration/CLAUDE.md`;
 Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 
@@ -99,7 +99,7 @@ Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/ironclaw_loop_host`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. IronClaw examples: `crates/ironclaw_loop_host`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 - **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
@@ -109,7 +109,7 @@ Prefer generic/extensible architectures over hardcoding specific integrations. A
 
 ### Extension/Auth Invariants
 
-**Reborn (`crates/`): the unified extension model.** The top-level product
+**IronClaw (`crates/`): the unified extension model.** The top-level product
 object is always an *extension*; a channel is one capability surface an
 extension's manifest declares (`tool` / `channel` / `auth` —
 `ironclaw_host_api::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
@@ -118,8 +118,8 @@ product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
 authority namespace and may be shared across extensions (`google` backs
 gmail + drive + calendar + …). There is no separate channel registry, no
 `slack_bot`/`slack_personal` split, and no extension `kind` wire string —
-`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs` pins the
-retired vocabulary at zero. Start from the `reborn-extension-surfaces` skill
+`crates/ironclaw_architecture/tests/ironclaw_retired_taxonomy.rs` pins the
+retired vocabulary at zero. Start from the `ironclaw-extension-surfaces` skill
 when adding an integration. The identity rules below predate the unified model
 and remain binding wherever credential/extension identities appear:
 
@@ -148,9 +148,9 @@ Rules:
 The `credential_name` / `extension_name` newtypes live in
 `crates/ironclaw_common/src/identity.rs` (see `.claude/rules/types.md`). The v1
 resolver/auth-flow ownership (`src/auth/extension.rs`, the web `pending_auth`
-path, the `ironclaw_gateway` onboarding JS) was deleted under Tier B; the Reborn
-identity/product-auth model lives in the Reborn crates
-(`crates/ironclaw_reborn_identity/CONTRACT.md`, `crates/ironclaw_oauth`,
+path, the `ironclaw_gateway` onboarding JS) was deleted under Tier B; the IronClaw
+identity/product-auth model lives in the IronClaw crates
+(`crates/ironclaw_identity/CONTRACT.md`, `crates/ironclaw_oauth`,
 `crates/ironclaw_auth`) and its WebUI onboarding in
 `crates/ironclaw_webui/frontend`.
 
@@ -166,18 +166,18 @@ Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skil
 
 ## Project Structure
 
-All production code lives under `crates/` (the Reborn stack). The v1 `src/`
+All production code lives under `crates/` (the IronClaw stack). The v1 `src/`
 monolith and the `ironclaw_gateway` / `ironclaw_tui` crates were deleted under
 Tier B. For where a symbol or subsystem lives, query the codebase knowledge
 graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
-`AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The reborn-feature
+`AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The ironclaw-feature
 flow crosses `product_workflow → composition → webui_v2 → runtime/serve →
-frontend` (binary `ironclaw` in `crates/ironclaw_reborn_cli`).
+frontend` (binary `ironclaw` in `crates/ironclaw_cli`).
 
 ```
 crates/                     # all production code (see crates/AGENTS.md for the full map)
-├── ironclaw_reborn_cli/    # binary entry point (binary name `ironclaw`)
-├── ironclaw_reborn_composition/  # wires storage/runtime services by profile
+├── ironclaw_cli/    # binary entry point (binary name `ironclaw`)
+├── ironclaw_composition/  # wires storage/runtime services by profile
 ├── ironclaw_product_workflow/    # product-facing workflow surface
 ├── ironclaw_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
 ├── ironclaw_webui/         # WebChat v2 SPA (frontend/) + serve wiring
@@ -186,15 +186,15 @@ crates/                     # all production code (see crates/AGENTS.md for the 
 └── ...                     # domain crates (threads, secrets, oauth, triggers, …)
 
 tests/
-├── integration/            # Reborn in-process integration tests (see tests/integration/CLAUDE.md)
-├── reborn_*.rs             # Reborn parity/QA tests
+├── integration/            # IronClaw in-process integration tests (see tests/integration/CLAUDE.md)
+├── ironclaw_*.rs             # IronClaw parity/QA tests
 ├── support/                # shared test support (trace_llm, mocks)
 └── e2e/                    # Python/Playwright E2E scenarios (see tests/e2e/CLAUDE.md)
 ```
 
 ## Database
 
-Reborn persistence goes through the `RootFilesystem` mount catalog
+IronClaw persistence goes through the `RootFilesystem` mount catalog
 (`crates/ironclaw_filesystem`); composition chooses concrete backends
 (PostgreSQL, libSQL, local filesystem) by profile. Domain crates own record
 schemas and never branch on backend. When a domain supports multiple durable
@@ -205,7 +205,7 @@ backends, keep behavioral parity via a shared conformance suite. See
 
 When modifying a module with a spec, read the spec first. Code follows spec; spec is the tiebreaker.
 
-**Module-owned initialization:** Module-specific initialization logic (storage connection, transport creation, service wiring) must live in the owning crate as a public factory function — not reconstructed at the composition/route layer. Composition (`ironclaw_reborn_composition`) orchestrates calls to crate factories and chooses concrete backends by profile.
+**Module-owned initialization:** Module-specific initialization logic (storage connection, transport creation, service wiring) must live in the owning crate as a public factory function — not reconstructed at the composition/route layer. Composition (`ironclaw_composition`) orchestrates calls to crate factories and chooses concrete backends by profile.
 
 | Module | Spec |
 |--------|------|
@@ -213,10 +213,10 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/ironclaw_embeddings/` | `crates/ironclaw_embeddings/AGENTS.md` |
 | `crates/ironclaw_filesystem/` | `crates/ironclaw_filesystem/CLAUDE.md` |
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
-| `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
-| `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `crates/ironclaw_composition/` | `crates/ironclaw_composition/CLAUDE.md` |
+| `crates/ironclaw_identity/` | `crates/ironclaw_identity/CONTRACT.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
-| `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
+| `tests/support/ironclaw_parity_qa/` | `tests/support/ironclaw_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine
@@ -242,17 +242,17 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 
 ## Adding a New Channel
 
-A Reborn channel is one capability surface of an **extension** (unified model):
+A IronClaw channel is one capability surface of an **extension** (unified model):
 the manifest (`reborn.extension_manifest.v3`) declares `[channel]` (ingress
 verification recipe, `[channel.config]`, egress allowlist, presentation) beside
 the extension's tools and auth recipes, and the extension's `ChannelAdapter`
 (`crates/ironclaw_product_adapters`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
-`RebornBuildInput::with_channel_extension_bindings`
-(`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
+`IronClawBuildInput::with_channel_extension_bindings`
+(`crates/ironclaw_composition/src/input.rs`); composition wires the
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the
-`reborn-extension-surfaces` skill; the worked example is the Slack package
+`ironclaw-extension-surfaces` skill; the worked example is the Slack package
 (`crates/ironclaw_first_party_extensions/assets/slack/`).
 
 ## Everything Goes Through Capability Dispatch
@@ -276,7 +276,7 @@ Persistent memory with hybrid search lives in `crates/ironclaw_memory`
 (`memory_search`, `memory_write`, `memory_read`, `memory_tree`), persisted
 through the `RootFilesystem` mount catalog. Identity files (AGENTS.md, SOUL.md,
 USER.md, IDENTITY.md) are injected into the system prompt. (The v1 heartbeat
-proactive-execution loop has no Reborn equivalent yet — see issue #6369.)
+proactive-execution loop has no IronClaw equivalent yet — see issue #6369.)
 
 ## Debugging
 

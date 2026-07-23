@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_extension_host", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_extension", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "tools/ironclaw_stress"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_event_store", "crates/ironclaw_extensions", "crates/ironclaw_extension_host", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_config", "crates/ironclaw_composition", "crates/ironclaw_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_cli", "crates/ironclaw_traces", "crates/ironclaw_webui", "crates/ironclaw_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_extension", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "tools/ironclaw_stress"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -41,7 +41,7 @@ wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"
 # stable surface). These are `warn`, not `deny`, and are *opted into*
 # per-crate via `[lints] workspace = true` so they do not flood the build
 # with pre-existing noise across the whole workspace. Currently scoped to the
-# hook/reborn crates.
+# hook/IronClaw crates.
 #
 # - `unreachable_pub`: flags `pub` items that are not reachable outside their
 #   crate — the classic "this should be `pub(crate)`" smell.
@@ -68,10 +68,10 @@ unused_must_use = "deny"
 # Tier B (see docs/plans/2026-07-02-reborn-internal-module-refactor.md §8):
 # the v1 legacy monolith (`src/`, package `ironclaw_legacy`, binary
 # `ironclaw-legacy`) has been deleted. This package now exists solely to host
-# the Reborn integration test suite (`tests/integration/*`, the `reborn_*`
+# the IronClaw integration test suite (`tests/integration/*`, the `ironclaw_*`
 # `[[test]]` targets below, and their shared `[dev-dependencies]`) — it has no
 # library or binary target of its own.
-name = "ironclaw_reborn_integration_tests"
+name = "ironclaw_integration_tests"
 publish = false
 version = "0.1.0"
 edition = "2024"
@@ -87,8 +87,8 @@ layer = "app"
 dist = false
 
 [dev-dependencies]
-# Common utility crates the Reborn integration tests (`tests/integration/*`,
-# `tests/reborn_*.rs`) reference directly — previously satisfied via the now-
+# Common utility crates the IronClaw integration tests (`tests/integration/*`,
+# `tests/ironclaw_*.rs`) reference directly — previously satisfied via the now-
 # deleted v1 `[dependencies]` block, since regular deps were visible to test
 # binaries too.
 tokio = { version = "1", features = ["full"] }
@@ -117,8 +117,8 @@ ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_common = { path = "crates/ironclaw_common" }
 ironclaw_safety = { path = "crates/ironclaw_safety" }
-ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
-# The Reborn integration harness provisions Postgres testcontainers in every
+ironclaw_traces = { path = "crates/ironclaw_traces", version = "0.1.0" }
+# The IronClaw integration harness provisions Postgres testcontainers in every
 # feature lane (StorageMode::Postgres skips at runtime when unavailable), so
 # the pool deps are unconditional dev-dependencies (the `postgres` feature is
 # a marker with no dependency gating).
@@ -141,7 +141,7 @@ ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", 
 ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0", features = ["test-support"] }
 # Pull the auth crate's `test-support` feature in only for tests so the
 # `test_support::conformance` OAuth-flow suite (used by the
-# `reborn_integration_oauth_connect` test) doesn't ship in release binaries.
+# `ironclaw_integration_oauth_connect` test) doesn't ship in release binaries.
 ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0", features = ["test-support"] }
 # C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
 ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
@@ -172,7 +172,7 @@ ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features = ["test-support"] }
-# `ironclaw_webui` + `ironclaw_reborn_identity` sit on the int-tier coverage
+# `ironclaw_webui` + `ironclaw_identity` sit on the int-tier coverage
 # lane (identity_resolution_smoke / webui_v2_router_smoke); they compile into
 # every int-tier build, behaviorally inert for suites that never call them.
 # W5-SLACK-PAIR: the Slack host surface grows the lcov denominator by ~42k
@@ -180,7 +180,7 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features
 # composing them in int-tier tests. All 17 of those modules are recompiled
 # into every int-tier test binary — a real, one-time build-time cost for the
 # lane, behaviorally inert for suites that never reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+ironclaw_composition = { path = "crates/ironclaw_composition", version = "0.1.0", features = ["test-support"] }
 ironclaw_loop_host = { path = "crates/ironclaw_loop_host", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
@@ -192,8 +192,8 @@ ironclaw_webui = { path = "crates/ironclaw_webui", version = "0.1.0" }
 # constants; Slack pairing/actor-resolution int-tier tests need them directly.
 ironclaw_slack_extension = { path = "crates/ironclaw_slack_extension", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "crates/ironclaw_telegram_extension", version = "0.1.0" }
-ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
-ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0"}
+ironclaw_config = { path = "crates/ironclaw_config", version = "0.1.0" }
+ironclaw_openai_compat = { path = "crates/ironclaw_openai_compat", version = "0.1.0"}
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks `ironclaw_turns::test_support::in_memory_turn_state_store`
@@ -210,7 +210,7 @@ ironclaw_events = { path = "crates/ironclaw_events", version = "0.1.0" }
 ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
 # Trigger-conversation binding/session services for the E-TRIGGERED-SUBMIT harness seam —
 # mirrors the conversation-services type production's own local-dev build wires for the
-# trusted-trigger submit path (ironclaw_reborn_composition::runtime.rs).
+# trusted-trigger submit path (ironclaw_composition::runtime.rs).
 ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
@@ -229,215 +229,215 @@ rstest = "0.23"
 integration = []
 
 [[test]]
-name = "reborn_group_approvals"
+name = "ironclaw_group_approvals"
 path = "tests/integration/group_approvals/main.rs"
 
 [[test]]
-name = "reborn_group_memory"
+name = "ironclaw_group_memory"
 path = "tests/integration/group_memory/main.rs"
 
 [[test]]
-name = "reborn_group_extensions"
+name = "ironclaw_group_extensions"
 path = "tests/integration/group_extensions/main.rs"
 
 [[test]]
-name = "reborn_group_triggers"
+name = "ironclaw_group_triggers"
 path = "tests/integration/group_triggers/main.rs"
 
 [[test]]
-name = "reborn_group_multiuser"
+name = "ironclaw_group_multiuser"
 path = "tests/integration/group_multiuser/main.rs"
 
 [[test]]
-name = "reborn_group_skills"
+name = "ironclaw_group_skills"
 path = "tests/integration/group_skills/main.rs"
 
 [[test]]
-name = "reborn_group_journeys"
+name = "ironclaw_group_journeys"
 path = "tests/integration/group_journeys/main.rs"
 
 [[test]]
-name = "reborn_integration_oauth_refresh"
+name = "ironclaw_integration_oauth_refresh"
 path = "tests/integration/auth/oauth_refresh.rs"
 
 [[test]]
-name = "reborn_integration_attach"
+name = "ironclaw_integration_attach"
 path = "tests/integration/attach.rs"
 
 [[test]]
-name = "reborn_integration_subagent_await_edge"
+name = "ironclaw_integration_subagent_await_edge"
 path = "tests/integration/subagent_await_edge.rs"
 
 [[test]]
-name = "reborn_integration_auth_failure"
+name = "ironclaw_integration_auth_failure"
 path = "tests/integration/auth/auth_failure.rs"
 
 [[test]]
-name = "reborn_integration_auth_gate"
+name = "ironclaw_integration_auth_gate"
 path = "tests/integration/auth/auth_gate.rs"
 
 [[test]]
-name = "reborn_integration_backend_matrix"
+name = "ironclaw_integration_backend_matrix"
 path = "tests/integration/backend_matrix.rs"
 
 [[test]]
-name = "reborn_integration_budget"
+name = "ironclaw_integration_budget"
 path = "tests/integration/budget.rs"
 
 [[test]]
-name = "reborn_integration_cancel"
+name = "ironclaw_integration_cancel"
 path = "tests/integration/cancel.rs"
 
 [[test]]
-name = "reborn_integration_model_recovery"
+name = "ironclaw_integration_model_recovery"
 path = "tests/integration/model_recovery.rs"
 
 [[test]]
-name = "reborn_integration_comm_context"
+name = "ironclaw_integration_comm_context"
 path = "tests/integration/comm_context.rs"
 
 [[test]]
-name = "reborn_integration_durable"
+name = "ironclaw_integration_durable"
 path = "tests/integration/durable.rs"
 
 [[test]]
-name = "reborn_integration_extension_runtime"
+name = "ironclaw_integration_extension_runtime"
 path = "tests/integration/extension_runtime.rs"
 
 [[test]]
-name = "reborn_integration_extension_ingress"
+name = "ironclaw_integration_extension_ingress"
 path = "tests/integration/extension_ingress.rs"
 
 [[test]]
-name = "reborn_integration_extension_delivery"
+name = "ironclaw_integration_extension_delivery"
 path = "tests/integration/extension_delivery.rs"
 
 [[test]]
-name = "reborn_integration_extension_visibility"
+name = "ironclaw_integration_extension_visibility"
 path = "tests/integration/extension_visibility.rs"
 
 [[test]]
-name = "reborn_integration_golden_payload"
+name = "ironclaw_integration_golden_payload"
 path = "tests/integration/golden_payload.rs"
 
 [[test]]
-name = "reborn_integration_greeting"
+name = "ironclaw_integration_greeting"
 path = "tests/integration/greeting.rs"
 
 [[test]]
-name = "reborn_integration_hooks"
+name = "ironclaw_integration_hooks"
 path = "tests/integration/hooks.rs"
 
 [[test]]
-name = "reborn_integration_http_matcher"
+name = "ironclaw_integration_http_matcher"
 path = "tests/integration/http_matcher.rs"
 
 [[test]]
-name = "reborn_integration_idempotent_replay"
+name = "ironclaw_integration_idempotent_replay"
 path = "tests/integration/idempotent_replay.rs"
 
 [[test]]
-name = "reborn_integration_identity_resolution_smoke"
+name = "ironclaw_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
 
 [[test]]
-name = "reborn_integration_lease_wedge"
+name = "ironclaw_integration_lease_wedge"
 path = "tests/integration/lease_wedge.rs"
 
 [[test]]
-name = "reborn_integration_mcp"
+name = "ironclaw_integration_mcp"
 path = "tests/integration/mcp.rs"
 
 [[test]]
-name = "reborn_integration_oauth_connect"
+name = "ironclaw_integration_oauth_connect"
 path = "tests/integration/auth/oauth_connect.rs"
 
 [[test]]
-name = "reborn_integration_oauth_popup_journeys"
+name = "ironclaw_integration_oauth_popup_journeys"
 path = "tests/integration/auth/oauth_popup_journeys.rs"
 
 [[test]]
-name = "reborn_integration_outbound_store_durability"
+name = "ironclaw_integration_outbound_store_durability"
 path = "tests/integration/outbound_store_durability.rs"
 
 [[test]]
-name = "reborn_integration_outbound_target"
+name = "ironclaw_integration_outbound_target"
 path = "tests/integration/outbound_target.rs"
 
 [[test]]
-name = "reborn_integration_process_port"
+name = "ironclaw_integration_process_port"
 path = "tests/integration/process_port.rs"
 
 [[test]]
-name = "reborn_integration_profile"
+name = "ironclaw_integration_profile"
 path = "tests/integration/profile.rs"
 
 [[test]]
-name = "reborn_integration_project_create"
+name = "ironclaw_integration_project_create"
 path = "tests/integration/project_create.rs"
 
 [[test]]
-name = "reborn_integration_real_egress_pipeline"
+name = "ironclaw_integration_real_egress_pipeline"
 path = "tests/integration/real_egress_pipeline.rs"
 
 [[test]]
-name = "reborn_integration_reopen_resume_through_gate"
+name = "ironclaw_integration_reopen_resume_through_gate"
 path = "tests/integration/auth/reopen_resume_through_gate.rs"
 
 [[test]]
-name = "reborn_integration_safety"
+name = "ironclaw_integration_safety"
 path = "tests/integration/safety.rs"
 
 [[test]]
-name = "reborn_integration_secret_injection"
+name = "ironclaw_integration_secret_injection"
 path = "tests/integration/secret_injection.rs"
 
 [[test]]
-name = "reborn_integration_secrets"
+name = "ironclaw_integration_secrets"
 path = "tests/integration/secrets.rs"
 
 [[test]]
-name = "reborn_integration_skill_activate"
+name = "ironclaw_integration_skill_activate"
 path = "tests/integration/skill_activate.rs"
 
 [[test]]
-name = "reborn_integration_surface_disclosure"
+name = "ironclaw_integration_surface_disclosure"
 path = "tests/integration/surface_disclosure.rs"
 
 [[test]]
-name = "reborn_integration_tool_call"
+name = "ironclaw_integration_tool_call"
 path = "tests/integration/tool_call.rs"
 
 [[test]]
-name = "reborn_integration_tool_disclosure"
+name = "ironclaw_integration_tool_disclosure"
 path = "tests/integration/tool_disclosure.rs"
 
 [[test]]
-name = "reborn_integration_trace_capture"
+name = "ironclaw_integration_trace_capture"
 path = "tests/integration/trace_capture.rs"
 
 [[test]]
-name = "reborn_integration_tracecap"
+name = "ironclaw_integration_tracecap"
 path = "tests/integration/tracecap.rs"
 
 [[test]]
-name = "reborn_integration_triggered_submit"
+name = "ironclaw_integration_triggered_submit"
 path = "tests/integration/triggered_submit.rs"
 
 [[test]]
-name = "reborn_integration_web_access"
+name = "ironclaw_integration_web_access"
 path = "tests/integration/web_access.rs"
 
 [[test]]
-name = "reborn_integration_webui_v2_product_api"
+name = "ironclaw_integration_webui_v2_product_api"
 path = "tests/integration/webui_v2_product_api.rs"
 
 [[test]]
-name = "reborn_integration_webui_v2_router_smoke"
+name = "ironclaw_integration_webui_v2_router_smoke"
 path = "tests/integration/webui_v2_router_smoke.rs"
 
 [[test]]
-name = "reborn_integration_wiring_parity"
+name = "ironclaw_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
 
 [profile.release]
@@ -455,7 +455,7 @@ cargo-dist-version = "0.31.0"
 # cargo-dist 0.31 grants `contents: write` to every generated job. Keep the
 # checked-in CI customized so only the host job can publish a GitHub Release.
 allow-dirty = ["ci"]
-# Release only the canonical Reborn CLI.
+# Release only the canonical IronClaw CLI.
 packages = ["ironclaw"]
 # CI backends to support
 ci = "github"

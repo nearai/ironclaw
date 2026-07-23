@@ -19,13 +19,11 @@ pub(crate) fn attachment_tools_profile() -> HarnessResult<ToolsProfile> {
         effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         ),
         ..ToolsProfile::new(
-            "reborn-e2e-attachment-tools",
-            "reborn-e2e-attachment-tools-user",
+            "ironclaw-e2e-attachment-tools",
+            "ironclaw-e2e-attachment-tools-user",
         )?
     })
 }

@@ -1,6 +1,6 @@
 //! Extension Manifest v2.
 //!
-//! v2 is the manifest shape consumed by Reborn. It is intentionally additive in
+//! v2 is the manifest shape consumed by IronClaw. It is intentionally additive in
 //! this slice: this module ships alongside the v1 parser so downstream crates
 //! can migrate one at a time. The v1 parser is deleted in the follow-up slice
 //! once every caller is on v2.
@@ -94,7 +94,7 @@ pub const MAX_HOOK_ENTRY_BYTES: usize = 8 * 1024;
 /// hook entry (`ironclaw_hooks::manifest::HookManifestEntry`). Instead it
 /// captures the raw, deserialized TOML for the entry as a structurally-typed
 /// [`toml::Value`] table plus the local id string. The composition-layer
-/// loader (`ironclaw_reborn_composition`, which depends on *both* crates)
+/// loader (`ironclaw_composition`, which depends on *both* crates)
 /// is the single seam that projects this raw payload into a typed
 /// `HookManifestEntry`, validates it, and installs it through
 /// `HookRegistrar::install` at the `Installed` trust tier.

@@ -57,7 +57,7 @@ impl BeforeCapabilityHookDecision {
     }
 
     /// Public read-only view for callers needing to react to the decision (the
-    /// dispatcher, the Reborn middleware that translates into
+    /// dispatcher, the IronClaw middleware that translates into
     /// `CapabilityOutcome`).
     pub fn view(&self) -> GateDecisionView<'_> {
         match &self.inner {

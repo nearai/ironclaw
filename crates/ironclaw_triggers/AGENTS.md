@@ -4,7 +4,7 @@
 
 - Read `Cargo.toml` for backend feature shape.
 - Read `src/lib.rs` for trigger domain contracts and repository traits.
-- Use `docs/reborn/contracts/triggers.md` as the source of truth before changing behavior.
+- Use `docs/ironclaw/contracts/triggers.md` as the source of truth before changing behavior.
 
 ## What This Crate Owns
 
@@ -20,14 +20,14 @@
 - Poller lifecycle, background worker startup/shutdown, routine bridges, or composition wiring.
 - First-party trigger capabilities such as create/list/remove.
 - Trusted inbound turn wiring, product adapter behavior, or outbound delivery resolution.
-- libSQL/PostgreSQL handle construction, connection-string validation, production substrate selection, or shared Reborn database bootstrap.
+- libSQL/PostgreSQL handle construction, connection-string validation, production substrate selection, or shared IronClaw database bootstrap.
 - Composition/bootstrap owns those boundaries and passes typed handles into repository constructors.
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_triggers`
 - Lint check: `cargo clippy -p ironclaw_triggers --all-targets --all-features -- -D warnings`
-- Boundary check after dependency changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency changes: `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 

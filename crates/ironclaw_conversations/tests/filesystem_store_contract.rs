@@ -1,5 +1,5 @@
 //! Contract tests for [`FilesystemConversationStateStore`] and
-//! [`RebornFilesystemConversationServices`].
+//! [`IronClawFilesystemConversationServices`].
 //!
 //! Most surface coverage already lives in `inbound_contract.rs`, which
 //! drives the in-memory services + the legacy libsql/postgres adapters.
@@ -15,7 +15,7 @@ use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome, ConversationBindingService,
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, InboundTurnError,
-    RebornFilesystemConversationServices, ResolveConversationRequest,
+    IronClawFilesystemConversationServices, ResolveConversationRequest,
 };
 use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -93,7 +93,7 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
 
-    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+    let services = IronClawFilesystemConversationServices::new(Arc::clone(&scoped))
         .await
         .unwrap();
     services
@@ -122,7 +122,7 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
     // `external_event_id` is what we'd expect from a retry — the test
     // only cares that the second resolve succeeds (same thread reused),
     // not the precise idempotency status here.
-    let reopened = RebornFilesystemConversationServices::new(scoped)
+    let reopened = IronClawFilesystemConversationServices::new(scoped)
         .await
         .unwrap();
     let resolution = reopened
@@ -143,7 +143,7 @@ async fn filesystem_conversation_services_persist_unpair_revocation_on_reopen() 
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
 
-    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+    let services = IronClawFilesystemConversationServices::new(Arc::clone(&scoped))
         .await
         .unwrap();
     services
@@ -176,7 +176,7 @@ async fn filesystem_conversation_services_persist_unpair_revocation_on_reopen() 
         .unwrap();
     drop(services);
 
-    let reopened = RebornFilesystemConversationServices::new(scoped)
+    let reopened = IronClawFilesystemConversationServices::new(scoped)
         .await
         .unwrap();
     reopened
@@ -223,7 +223,7 @@ async fn filesystem_conversation_services_persist_conditional_unpair_epochs_on_r
     let first_epoch = ExternalActorBindingEpoch::new("generation-1").expect("epoch");
     let second_epoch = ExternalActorBindingEpoch::new("generation-2").expect("epoch");
 
-    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+    let services = IronClawFilesystemConversationServices::new(Arc::clone(&scoped))
         .await
         .expect("services");
     services
@@ -260,7 +260,7 @@ async fn filesystem_conversation_services_persist_conditional_unpair_epochs_on_r
         .expect("new generation pairing");
     drop(services);
 
-    let reopened = RebornFilesystemConversationServices::new(scoped)
+    let reopened = IronClawFilesystemConversationServices::new(scoped)
         .await
         .expect("reopen");
     let stale = reopened
@@ -295,7 +295,7 @@ async fn filesystem_conversation_services_persist_conditional_unpair_epochs_on_r
 async fn filesystem_conversation_services_reopen_snapshot_without_pairing_epochs() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
-    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+    let services = IronClawFilesystemConversationServices::new(Arc::clone(&scoped))
         .await
         .expect("services");
     services
@@ -333,7 +333,7 @@ async fn filesystem_conversation_services_reopen_snapshot_without_pairing_epochs
         .await
         .expect("write legacy snapshot");
 
-    let reopened = RebornFilesystemConversationServices::new(scoped)
+    let reopened = IronClawFilesystemConversationServices::new(scoped)
         .await
         .expect("old snapshots remain readable");
     let resolution = reopened
@@ -350,7 +350,7 @@ async fn filesystem_conversation_services_reopen_snapshot_without_pairing_epochs
 }
 
 /// Regression for the `ScopedFilesystem` migration: two
-/// [`RebornFilesystemConversationServices`] instances share one
+/// [`IronClawFilesystemConversationServices`] instances share one
 /// underlying [`RootFilesystem`] but each is constructed with a
 /// [`MountView`] whose `/conversations` alias resolves to a different
 /// tenant-scoped target. The pairing and binding produced under tenant
@@ -371,10 +371,10 @@ async fn filesystem_conversation_state_store_isolates_two_tenants_with_same_user
     let scoped_a = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
     let scoped_b = scoped_conversations_fs(Arc::clone(&backend), "tenant-b", "alice");
 
-    let services_a = RebornFilesystemConversationServices::new(scoped_a)
+    let services_a = IronClawFilesystemConversationServices::new(scoped_a)
         .await
         .unwrap();
-    let services_b = RebornFilesystemConversationServices::new(scoped_b)
+    let services_b = IronClawFilesystemConversationServices::new(scoped_b)
         .await
         .unwrap();
 

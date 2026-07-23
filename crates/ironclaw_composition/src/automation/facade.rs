@@ -1,0 +1,577 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::Timestamp;
+use ironclaw_product_workflow::{
+    AutomationListRequest, AutomationName, AutomationProductFacade, IronClawAutomationActiveHold,
+    IronClawAutomationHoldReason, IronClawAutomationInfo, IronClawAutomationMutationResponse,
+    IronClawAutomationRecentRunInfo, IronClawAutomationRecentRunStatus,
+    IronClawAutomationRunStatus, IronClawAutomationSource, IronClawAutomationState,
+    IronClawServicesError, IronClawServicesErrorCode, IronClawServicesErrorKind,
+    ProductAgentBoundCaller, TriggerRunThreadScope,
+};
+use ironclaw_triggers::{
+    ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
+};
+
+const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// WebUI panel facade for automation (trigger) listing.
+///
+/// ## Dual-access design
+///
+/// The model/agent-loop path uses the `builtin.trigger_list` capability with
+/// the full pipeline (trust evaluation, approval gates) in
+/// `ironclaw_host_runtime` first_party_tools::trigger_management. The panel
+/// path (this facade) calls scoped repository methods directly, which is
+/// correct for a user-direct fetch-and-render surface where the approval
+/// pipeline would be wrong by design. Both paths converge on the same scoping
+/// contract: tenant + creator_user + agent + project.
+///
+/// Panel mutations stay caller-scoped through the same tenant + creator_user +
+/// agent + project repository contract as reads. Route descriptors classify
+/// those endpoints as user actions so host ingress audit policy remains the
+/// outer audit boundary.
+#[derive(Clone)]
+pub struct IronClawAutomationProductFacade {
+    trigger_repository: Arc<dyn TriggerRepository>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    backend_timeout: Duration,
+    /// Whether the background trigger poller is running. Surfaced to the WebUI
+    /// so the panel can warn that listed automations will not fire while
+    /// scheduling is off. Defaults to `true`; production wiring sets the real
+    /// value from runtime readiness.
+    scheduler_enabled: bool,
+}
+
+impl std::fmt::Debug for IronClawAutomationProductFacade {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IronClawAutomationProductFacade")
+            .field("trigger_repository", &"Arc<dyn TriggerRepository>")
+            .field("active_run_lookup", &"Arc<dyn TriggerActiveRunLookup>")
+            .finish()
+    }
+}
+
+impl IronClawAutomationProductFacade {
+    pub(crate) fn new(
+        trigger_repository: Arc<dyn TriggerRepository>,
+        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    ) -> Self {
+        Self {
+            trigger_repository,
+            active_run_lookup,
+            backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
+            scheduler_enabled: true,
+        }
+    }
+
+    /// Set whether the background trigger poller (scheduler) is running. Wired
+    /// by WebUI composition from runtime readiness.
+    pub(crate) fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+        self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_backend_timeout(
+        trigger_repository: Arc<dyn TriggerRepository>,
+        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+        backend_timeout: Duration,
+    ) -> Self {
+        Self {
+            trigger_repository,
+            active_run_lookup,
+            backend_timeout,
+            scheduler_enabled: true,
+        }
+    }
+
+    /// Batch-resolve active-run states for records holding an active fire and
+    /// derive each record's hold projection (#5886), shared with
+    /// `ironclaw_host_runtime::first_party_tools::trigger_management` via
+    /// `ironclaw_triggers::active_holds_for_records`. Lookup failure degrades
+    /// to "no hold" — this is a display-only projection and must not fail the
+    /// panel list.
+    async fn active_holds_for_records(
+        &self,
+        records: &[TriggerRecord],
+        deadline: tokio::time::Instant,
+        now: Timestamp,
+    ) -> HashMap<TriggerId, IronClawAutomationActiveHold> {
+        let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+        active_holds_for_records(&*self.active_run_lookup, records, now, timeout)
+            .await
+            .into_iter()
+            .map(|(trigger_id, hold)| (trigger_id, wire_hold_from_projection(hold)))
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl AutomationProductFacade for IronClawAutomationProductFacade {
+    fn scheduler_enabled(&self) -> bool {
+        self.scheduler_enabled
+    }
+
+    async fn list_automations(
+        &self,
+        caller: ProductAgentBoundCaller,
+        request: AutomationListRequest,
+    ) -> Result<Vec<IronClawAutomationInfo>, IronClawServicesError> {
+        // Both repository calls share one deadline so the panel read budget is
+        // backend_timeout total, not per call.
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        // Soft-completed one-shots have fired and will never run again. By
+        // default exclude them from the active automations panel so they do
+        // not clutter the list with stale entries. When `include_completed` is
+        // set the exclusion slice is empty, returning all states including
+        // Completed. The exclusion is pushed to the SQL layer so LIMIT is
+        // applied after filtering (fixes pagination undercount).
+        //
+        // Scheduled and Paused triggers are always kept; Paused triggers may be
+        // resumed by the user and still have a meaningful next_run_at slot to
+        // display.
+        let excluded_states: &[TriggerState] = if request.include_completed {
+            &[]
+        } else {
+            &[TriggerState::Completed]
+        };
+        let records = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository.list_scoped_triggers(
+                caller.tenant_id.clone(),
+                caller.user_id.clone(),
+                Some(caller.agent_id.clone()),
+                caller.project_id.clone(),
+                request.limit,
+                excluded_states,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        // The required run-history fetch runs before the optional hold lookup
+        // so a slow hold derivation (#5886) can never steal deadline budget
+        // from data the caller actually needs. When there's nothing to fetch
+        // (no records, or run history wasn't requested) skip the batch call
+        // entirely rather than issuing it with an empty id list.
+        let mut runs_by_trigger: HashMap<TriggerId, Vec<TriggerRunRecord>> =
+            if records.is_empty() || request.run_limit == 0 {
+                HashMap::new()
+            } else {
+                let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+                tokio::time::timeout_at(
+                    deadline,
+                    self.trigger_repository.list_trigger_run_history_batch(
+                        caller.tenant_id.clone(),
+                        &trigger_ids,
+                        request.run_limit,
+                    ),
+                )
+                .await
+                .map_err(|_| backend_timeout_error())?
+                .map_err(map_trigger_error)?
+            };
+
+        let mut holds = self
+            .active_holds_for_records(&records, deadline, chrono::Utc::now())
+            .await;
+
+        Ok(records
+            .into_iter()
+            .map(|record| {
+                let runs = runs_by_trigger
+                    .remove(&record.trigger_id)
+                    .unwrap_or_default();
+                let hold = holds.remove(&record.trigger_id);
+                automation_info_from_record(record, &runs, hold)
+            })
+            .collect())
+    }
+
+    async fn pause_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<IronClawAutomationMutationResponse, IronClawServicesError> {
+        self.set_automation_state(caller, automation_id, TriggerState::Paused)
+            .await
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<IronClawAutomationMutationResponse, IronClawServicesError> {
+        self.set_automation_state(caller, automation_id, TriggerState::Scheduled)
+            .await
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        name: AutomationName,
+    ) -> Result<IronClawAutomationMutationResponse, IronClawServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let record = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.rename_scoped_trigger(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+                name,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(IronClawAutomationMutationResponse {
+            updated: record.is_some(),
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<IronClawAutomationMutationResponse, IronClawServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let removed = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.remove_scoped_trigger(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(IronClawAutomationMutationResponse {
+            updated: removed.is_some(),
+            automation: None,
+        })
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, IronClawServicesError> {
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+
+        // Direct thread-id-keyed lookup — O(1) repository query instead of the
+        // prior O(triggers × runs) linear scan.
+        let result = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository
+                .find_trigger_run_by_thread_id(caller.tenant_id.clone(), thread_id),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        let Some((trigger, _run)) = result else {
+            return Ok(None);
+        };
+
+        // Apply the same caller-visibility predicate that `list_scoped_triggers`
+        // enforces: the trigger must match tenant + creator_user_id + agent_id +
+        // project_id.  A mismatch means this caller cannot see the trigger in
+        // `list_automations`, so it must not see it here either.
+        if !trigger_is_caller_visible(&trigger, &caller) {
+            return Ok(None);
+        }
+
+        Ok(Some(TriggerRunThreadScope {
+            agent_id: trigger.agent_id,
+            project_id: trigger.project_id,
+            creator_user_id: trigger.creator_user_id,
+        }))
+    }
+}
+
+impl IronClawAutomationProductFacade {
+    async fn set_automation_state(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        state: TriggerState,
+    ) -> Result<IronClawAutomationMutationResponse, IronClawServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let record = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.set_scoped_trigger_state(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+                state,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(IronClawAutomationMutationResponse {
+            updated: record.is_some(),
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
+        })
+    }
+}
+
+/// Returns `true` when `trigger` belongs to the caller — i.e. the trigger
+/// matches the exact caller scope that `list_scoped_triggers` enforces
+/// (tenant_id + creator_user_id + agent_id + project_id).  This mirrors the
+/// filter in `InMemoryTriggerRepository::list_scoped_triggers` and the SQL
+/// WHERE clause used by the libSQL and PostgreSQL backends:
+///
+/// ```text
+/// WHERE tenant_id    = <caller.tenant_id>
+///   AND creator_user_id = <caller.user_id>
+///   AND agent_id    IS <caller.agent_id>   -- NULL-safe equality
+///   AND project_id  IS <caller.project_id> -- NULL-safe equality
+/// ```
+///
+/// **Visibility for listing vs. thread authorization are deliberately
+/// decoupled.**  The default `list_automations` response excludes
+/// `TriggerState::Completed` triggers (soft-completed fire-once triggers) to
+/// avoid cluttering the active automations panel.  However, completed triggers
+/// remain queryable (`include_completed = true` / `trigger_list` model tool)
+/// and their run threads remain accessible — the history is retained user data.
+/// This resolver intentionally does NOT filter on trigger state: a completed
+/// trigger's run threads must stay resolvable so the user can always reach
+/// their own trigger history.  Adding a `Completed` exclusion here would
+/// regress access to run threads that are still valid retained data.
+///
+/// **None-agent triggers are never visible** through this path.
+/// `ProductAgentBoundCaller` always carries a concrete `AgentId` (it is a
+/// required field, not `Option`), so `list_scoped_triggers` is always called
+/// with `agent_id = Some(caller.agent_id)`.  The NULL-safe comparison in the
+/// storage backends therefore never returns a trigger whose stored `agent_id`
+/// is NULL.  This predicate matches that contract: `trigger.agent_id ==
+/// Some(caller.agent_id)` correctly excludes NULL-agent triggers rather than
+/// granting phantom access.  The service-layer agent-id fallback in
+/// `check_automation_trigger_access` is only reachable via non-production
+/// facades that do not go through `ProductAgentBoundCaller`.
+///
+/// A `false` result causes `resolve_run_thread_scope` to return `Ok(None)` (404
+/// upstream) without leaking the existence of the trigger to an unauthorized
+/// caller.
+fn trigger_is_caller_visible(trigger: &TriggerRecord, caller: &ProductAgentBoundCaller) -> bool {
+    trigger.tenant_id == caller.tenant_id
+        && trigger.creator_user_id == caller.user_id
+        && trigger.agent_id == Some(caller.agent_id.clone())
+        && trigger.project_id == caller.project_id
+}
+
+fn automation_info_from_record(
+    record: TriggerRecord,
+    runs: &[TriggerRunRecord],
+    active_hold: Option<IronClawAutomationActiveHold>,
+) -> IronClawAutomationInfo {
+    let source = automation_source_from_record(&record);
+    let is_active = record.has_active_fire();
+    // Completed is terminal: the stored next_run_at is a stale past slot and
+    // would render as a misleading "next run" date. Paused keeps its slot so
+    // the panel can show when a resumed trigger would next fire.
+    let next_run_at = match record.state {
+        TriggerState::Completed => None,
+        TriggerState::Scheduled | TriggerState::Paused => Some(record.next_run_at),
+    };
+    IronClawAutomationInfo {
+        automation_id: record.trigger_id.to_string(),
+        name: record.name,
+        source,
+        state: map_trigger_state(record.state),
+        next_run_at,
+        last_run_at: record.last_run_at,
+        last_status: record.last_status.map(map_trigger_run_status),
+        recent_runs: runs.iter().filter_map(map_recent_run).collect(),
+        is_active,
+        created_at: Some(record.created_at),
+        active_hold,
+    }
+}
+
+/// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
+/// facade's wire DTO. The reason/elapsed-occurrence derivation itself lives
+/// in `ironclaw_triggers::active_hold_projection` — only the wire-type
+/// mapping belongs here (#5886).
+fn wire_hold_from_projection(hold: ActiveHoldProjection) -> IronClawAutomationActiveHold {
+    IronClawAutomationActiveHold {
+        reason: match hold.reason {
+            ActiveHoldReason::Approval => IronClawAutomationHoldReason::Approval,
+            ActiveHoldReason::Auth => IronClawAutomationHoldReason::Auth,
+            ActiveHoldReason::InProgress => IronClawAutomationHoldReason::InProgress,
+            ActiveHoldReason::Other => IronClawAutomationHoldReason::Other,
+        },
+        since: hold.since,
+        elapsed_occurrences: hold.elapsed_occurrences,
+        elapsed_occurrences_capped: hold.elapsed_occurrences_capped,
+    }
+}
+
+/// Maps a trigger record's source kind + schedule to the wire DTO source.
+///
+/// This match is exhaustive on purpose: if `TriggerSourceKind` gains a new
+/// variant or `TriggerSchedule` gains a new arm, the compiler rejects the
+/// build here — preventing any new schedule type from being silently dropped.
+fn automation_source_from_record(record: &TriggerRecord) -> IronClawAutomationSource {
+    match record.source {
+        TriggerSourceKind::Schedule => match &record.schedule {
+            TriggerSchedule::Cron {
+                expression,
+                timezone,
+            } => IronClawAutomationSource::Schedule {
+                cron: expression.clone(),
+                timezone: timezone.clone(),
+            },
+            TriggerSchedule::Once { at, timezone } => IronClawAutomationSource::Once {
+                at: at.to_rfc3339(),
+                timezone: timezone.clone(),
+            },
+        },
+    }
+}
+
+/// Maps the repository trigger state to the wire DTO state.
+///
+/// Exhaustive — no wildcard arm so a new `TriggerState` variant is a compile
+/// error here rather than a silent mapping gap.
+fn map_trigger_state(state: TriggerState) -> IronClawAutomationState {
+    match state {
+        TriggerState::Scheduled => IronClawAutomationState::Scheduled,
+        TriggerState::Paused => IronClawAutomationState::Paused,
+        TriggerState::Completed => IronClawAutomationState::Completed,
+    }
+}
+
+/// Maps the repository run status to the wire DTO run status.
+///
+/// Exhaustive — no wildcard arm so a new `TriggerRunStatus` variant is a
+/// compile error here rather than a silent mapping gap.
+fn map_trigger_run_status(status: TriggerRunStatus) -> IronClawAutomationRunStatus {
+    match status {
+        TriggerRunStatus::Ok => IronClawAutomationRunStatus::Ok,
+        TriggerRunStatus::Error => IronClawAutomationRunStatus::Error,
+    }
+}
+
+fn map_recent_run(run: &TriggerRunRecord) -> Option<IronClawAutomationRecentRunInfo> {
+    let status = match run.status {
+        TriggerRunHistoryStatus::Running => IronClawAutomationRecentRunStatus::Running,
+        TriggerRunHistoryStatus::Ok => IronClawAutomationRecentRunStatus::Ok,
+        TriggerRunHistoryStatus::Error => IronClawAutomationRecentRunStatus::Error,
+    };
+    Some(IronClawAutomationRecentRunInfo {
+        run_id: run.run_id,
+        // `thread_id` is `None` until fire acceptance; pre-acceptance and
+        // pre-submit-failure rows carry no canonical thread. The WebUI panel
+        // must not render a chat link when this field is absent.
+        thread_id: run.thread_id.clone(),
+        fire_slot: Some(run.fire_slot),
+        status,
+        submitted_at: run.submitted_at,
+        completed_at: run.completed_at,
+    })
+}
+
+fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, IronClawServicesError> {
+    TriggerId::parse(automation_id).map_err(|parse_error| {
+        tracing::debug!(
+            automation_id,
+            error = %parse_error,
+            "failed to parse automation trigger id"
+        );
+        services_error(
+            IronClawServicesErrorCode::InvalidRequest,
+            IronClawServicesErrorKind::Validation,
+            400,
+            false,
+        )
+    })
+}
+
+/// Shared 503 for repository calls that exceed the panel read deadline.
+fn backend_timeout_error() -> IronClawServicesError {
+    services_error(
+        IronClawServicesErrorCode::Unavailable,
+        IronClawServicesErrorKind::ServiceUnavailable,
+        503,
+        true,
+    )
+}
+
+fn map_trigger_error(error: TriggerError) -> IronClawServicesError {
+    match error {
+        TriggerError::Backend { .. } => services_error(
+            IronClawServicesErrorCode::Unavailable,
+            IronClawServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        ),
+        TriggerError::NotFound => services_error(
+            IronClawServicesErrorCode::NotFound,
+            IronClawServicesErrorKind::NotFound,
+            404,
+            false,
+        ),
+        TriggerError::InvalidTriggerId { .. }
+        | TriggerError::InvalidFireIdentityComponent { .. }
+        | TriggerError::InvalidRecord { .. }
+        | TriggerError::InvalidPollerConfig { .. }
+        | TriggerError::InvalidSchedule { .. }
+        | TriggerError::InvalidMaterialization { .. } => internal_invariant(),
+        TriggerError::BlockedMaterialization { .. } => services_error(
+            IronClawServicesErrorCode::Forbidden,
+            IronClawServicesErrorKind::ParticipantDenied,
+            403,
+            false,
+        ),
+    }
+}
+
+fn services_error(
+    code: IronClawServicesErrorCode,
+    kind: IronClawServicesErrorKind,
+    status_code: u16,
+    retryable: bool,
+) -> IronClawServicesError {
+    IronClawServicesError {
+        code,
+        kind,
+        status_code,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn internal_invariant() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Internal,
+        kind: IronClawServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests;

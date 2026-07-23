@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v3"
 id = "gmail"
 name = "Gmail"
 version = "0.1.0"
-description = "First-party Gmail capabilities for Reborn."
+description = "First-party Gmail capabilities for IronClaw."
 trust = "first_party_requested"
 
 [runtime]

@@ -1,8 +1,8 @@
-//! Router-backed hook gate refs for Reborn host composition.
+//! Router-backed hook gate refs for IronClaw host composition.
 //!
 //! `ironclaw_hooks` owns the hook middleware contract, but it deliberately
 //! does not know how to reserve host approval/auth gates. This module is the
-//! Reborn-side adapter: it binds hook-emitted pause decisions to the current
+//! IronClaw-side adapter: it binds hook-emitted pause decisions to the current
 //! run, actor, capability, arguments digest, and router-enforced lease window
 //! before returning a `LoopGateRef` to the middleware.
 
@@ -237,7 +237,7 @@ pub struct HookGateResolution {
     pub resolved_at: DateTime<Utc>,
 }
 
-/// Minimal host-router seam used by the Reborn hook gate-ref factory.
+/// Minimal host-router seam used by the IronClaw hook gate-ref factory.
 ///
 /// Existing approval resolution in `ironclaw_approvals::ApprovalResolver`
 /// resolves already persisted approval requests into capability leases; it

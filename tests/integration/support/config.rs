@@ -1,6 +1,6 @@
-//! Shared Reborn test-support configuration.
+//! Shared IronClaw test-support configuration.
 
-#![allow(dead_code)] // Shared by staged Reborn harness modules as ports opt in.
+#![allow(dead_code)] // Shared by staged IronClaw harness modules as ports opt in.
 
 use std::time::Duration;
 

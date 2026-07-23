@@ -64,7 +64,7 @@ export function connectsViaOauth(item, secrets = []) {
 // `installed` / `active` / `failed` and derives `configured` / `disabled` /
 // `unsupported` at projection time (never a real in-flight step).
 //
-// Onboarding-state axis (§6.2, `RebornExtensionOnboardingState`) — layered on
+// Onboarding-state axis (§6.2, `IronClawExtensionOnboardingState`) — layered on
 // top of installation state for an extension still missing credentials.
 // `installed` / `failed` are shared with the installation axis above;
 // `auth_required` / `setup_required` are onboarding-only.

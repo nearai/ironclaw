@@ -1,7 +1,7 @@
 //! Slice-C kernel capability vocabulary — the one invocation payload.
 //!
 //! This module lands the first types of the capability-path DTO collapse
-//! described in `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
+//! described in `docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`
 //! (§3 "one payload, authority as a fold"; §3.1 "the three real states, named";
 //! §5.2.1 "origin is part of the `Invocation`"). Per the migration plan (§9), the
 //! kernel vocabulary lands in `ironclaw_host_api` *first*, ahead of any wiring —

@@ -261,7 +261,7 @@ impl BedrockConfig {
 
 /// Default per-request LLM HTTP timeout in seconds.
 ///
-/// Kept BELOW the Reborn runner lease (`ironclaw_turns`
+/// Kept BELOW the IronClaw runner lease (`ironclaw_turns`
 /// `DEFAULT_RUNNER_LEASE_TTL_SECONDS` = 90s) so the HTTP layer fails a hung
 /// request before the lease reclaims the runner. The `ironclaw_llm` crate must
 /// not depend on `ironclaw_turns`, so the relationship is documented here and
@@ -288,7 +288,7 @@ pub const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
 pub const AUXILIARY_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Request timeout for audio transcription calls. Transcription is not a
-/// turn-model call and is not gated by the Reborn runner lease, so it keeps a
+/// turn-model call and is not gated by the IronClaw runner lease, so it keeps a
 /// longer budget for large audio uploads.
 pub const TRANSCRIPTION_REQUEST_TIMEOUT_SECS: u64 = 120;
 
@@ -348,7 +348,7 @@ pub struct LlmConfig {
     /// OpenAI Codex config (populated when backend=openai_codex).
     pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
-    /// Default: `DEFAULT_REQUEST_TIMEOUT_SECS` (60), kept below the Reborn
+    /// Default: `DEFAULT_REQUEST_TIMEOUT_SECS` (60), kept below the IronClaw
     /// runner lease. Increase via `LLM_REQUEST_TIMEOUT_SECS` for local LLMs
     /// (Ollama, vLLM, LM Studio) that need more time on consumer hardware.
     pub request_timeout_secs: u64,
@@ -616,7 +616,7 @@ mod tests {
     use super::*;
 
     /// Every timeout const that gates a turn-model call must sit below the
-    /// Reborn runner lease (90s, `ironclaw_turns DEFAULT_RUNNER_LEASE_TTL_SECONDS`)
+    /// IronClaw runner lease (90s, `ironclaw_turns DEFAULT_RUNNER_LEASE_TTL_SECONDS`)
     /// so the HTTP layer fails a hung request before the lease reclaims the
     /// runner. `ironclaw_llm` must not depend on `ironclaw_turns`, so the bound
     /// is asserted here by literal; the turns crate owns the invariant on its

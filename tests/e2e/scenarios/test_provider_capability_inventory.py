@@ -14,7 +14,7 @@ from provider_operation_cases import PROVIDER_OPERATION_CASES
 
 ROOT = Path(__file__).resolve().parents[3]
 ASSET_ROOT = ROOT / "crates/ironclaw_first_party_extensions/assets"
-TRACE_ROOT = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
+TRACE_ROOT = ROOT / "tests/fixtures/llm_traces/ironclaw_qa/live_canary"
 
 
 def _production_capability_ids() -> set[str]:

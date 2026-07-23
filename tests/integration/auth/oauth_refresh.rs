@@ -1,4 +1,4 @@
-//! Reborn integration-test framework — slice 8: OAuth credential-refresh sweep.
+//! IronClaw integration-test framework — slice 8: OAuth credential-refresh sweep.
 //!
 //! Proves the proactive keepalive sweep refreshes an idle Google OAuth account
 //! with the token-refresh HTTP scripted through `ScriptedOAuthTokenEgress` (no
@@ -13,18 +13,18 @@
 // slice of it, so suppress dead-code warnings on the includes.
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
 
 use chrono::{Duration, Utc};
 use ironclaw_auth::{AuthProductScope, AuthSurface, CredentialAccountLookupRequest};
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{
+use ironclaw_composition::{
     KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
 };
-use reborn_support::oauth_flow::connect_google_account;
+use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_support::oauth_flow::connect_google_account;
 
 fn test_scope() -> AuthProductScope {
     let resource =

@@ -51,7 +51,7 @@ pub(crate) fn default_capability_io_pair() -> (
     Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) {
-    let capability_io = Arc::new(ironclaw_reborn_composition::ProductLiveCapabilityIo::default());
+    let capability_io = Arc::new(ironclaw_composition::ProductLiveCapabilityIo::default());
     (capability_io.clone(), capability_io)
 }
 

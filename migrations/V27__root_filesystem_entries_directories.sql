@@ -1,4 +1,4 @@
--- Add explicit directory entries for the Reborn RootFilesystem DB backend.
+-- Add explicit directory entries for the IronClaw RootFilesystem DB backend.
 
 ALTER TABLE root_filesystem_entries
     ADD COLUMN IF NOT EXISTS is_dir BOOLEAN NOT NULL DEFAULT FALSE;

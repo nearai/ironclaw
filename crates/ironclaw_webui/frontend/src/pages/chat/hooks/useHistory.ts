@@ -150,7 +150,7 @@ export function useHistory(threadId, options = {}) {
         );
         const nextCursor = data.next_cursor || null;
 
-        // RebornTimelineResponse.next_cursor === null means we reached
+        // IronClawTimelineResponse.next_cursor === null means we reached
         // the start of the thread.
         if (!cursor) setPendingMessages?.([]);
 

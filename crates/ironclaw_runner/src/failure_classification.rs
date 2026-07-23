@@ -7,7 +7,7 @@
 
 use crate::{
     failure_lane::{FailureLane, failure_lane},
-    failure_summary::reborn_failure_summary_for_category,
+    failure_summary::ironclaw_failure_summary_for_category,
     retry_disposition::{RetryDisposition, retry_disposition},
 };
 
@@ -30,7 +30,7 @@ pub fn classify_run_failure(category: Option<&str>, retryable: bool) -> RunFailu
     RunFailureClassification {
         lane: failure_lane(category, retryable),
         retry,
-        user_message: reborn_failure_summary_for_category(Some(category)),
+        user_message: ironclaw_failure_summary_for_category(Some(category)),
     }
 }
 

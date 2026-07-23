@@ -9,6 +9,7 @@ use ironclaw_event_projections::{
     ProjectionReplay, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
     ReplayEventProjectionService, RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
 };
+use ironclaw_event_store::FilesystemDurableEventLog;
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
@@ -23,7 +24,6 @@ use ironclaw_host_api::{
     MountGrant, MountPermissions, MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind,
     ScopedPath, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
-use ironclaw_reborn_event_store::FilesystemDurableEventLog;
 
 #[test]
 fn audit_projection_stage_wire_strings_stay_compatible_with_audit_stage() {

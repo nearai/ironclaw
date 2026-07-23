@@ -1,7 +1,7 @@
 //! Base-URL SSRF validation for provider model-discovery requests.
 //!
 //! This is the operator base-URL policy applied at the model-listing **egress
-//! point** in [`crate::rig_adapter`] — which both the Reborn provider
+//! point** in [`crate::rig_adapter`] — which both the IronClaw provider
 //! probe/list/test path and the v1 `/v1/models` proxy reach through
 //! `LlmProvider::list_models`. It mirrors the binary's `validate_operator_base_url`
 //! (`src/config/helpers.rs`, `AllowPrivateNetwork` posture) so the same policy
@@ -41,7 +41,7 @@ pub(crate) struct ValidatedModelsUrl {
 /// Validate a base/endpoint URL before issuing an outbound model-discovery
 /// request. This is the operator base-URL SSRF policy applied at the egress
 /// point (mirrors the binary's `validate_operator_base_url` with the
-/// `AllowPrivateNetwork` posture), so the Reborn provider probe/list/test path
+/// `AllowPrivateNetwork` posture), so the IronClaw provider probe/list/test path
 /// and the v1 `/v1/models` proxy — which both reach `LlmProvider::list_models`
 /// — are covered in one place.
 ///

@@ -21,8 +21,8 @@ Generates and maintains the animated architecture overview video in `docs/archit
 Read these files to understand the current system architecture:
 
 - `CLAUDE.md` — top-level project structure, module specs, key traits, principles
-- `crates/Architecture.md` — **the Reborn stack thesis and component map (the current architecture; lead the video with this)**
-- `crates/AGENTS.md` — the Reborn crate routing map
+- `crates/Architecture.md` — **the IronClaw stack thesis and component map (the current architecture; lead the video with this)**
+- `crates/AGENTS.md` — the IronClaw crate routing map
 - `crates/ironclaw_engine/CLAUDE.md` — engine v2 primitives (v1-only legacy; present as the retiring stack, not the target)
 - `src/agent/CLAUDE.md` — v1 agent loop architecture (legacy)
 - `crates/ironclaw_llm/CLAUDE.md` — canonical LLM provider architecture

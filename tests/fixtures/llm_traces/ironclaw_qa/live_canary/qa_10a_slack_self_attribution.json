@@ -1,0 +1,55 @@
+{
+  "model_name": "ironclaw-qa-qa_10a_slack_self_attribution",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Using my connected Slack account, read the recent messages in the Slack conversation with ID SLACK_ID_REDACTED and list the exact marker codes of only the messages that I myself sent — do not include or mention any code from messages sent by anyone else. Include the exact marker IRONCLAW_QA_10A_SELF_ATTRIBUTION_1784642672972 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, read the recent messages in the Slack conversa",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_7e90f894d8884b759bfec0a6",
+            "name": "slack__whoami",
+            "arguments": {}
+          },
+          {
+            "id": "call_3a497fd48d344bb0a16655b7",
+            "name": "slack__get_conversation_history",
+            "arguments": {
+              "channel": "SLACK_ID_REDACTED",
+              "limit": 50
+            }
+          }
+        ],
+        "input_tokens": 17445,
+        "output_tokens": 107
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, read the recent messages in the Slack conversa",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "text",
+        "content": "I am connected as **Canary User** (user ID `SLACK_ID_REDACTED`). Now I'll extract the exact marker codes from messages where `is_current_user=true`.\n\nFrom the history, here are the marker codes found in my own messages (yours, as Canary User):\n\n1. `SELFMSG_B_1784642672972`\n2. `SELFMSG_A_1784642672972`\n3. `TOPLEVEL_1784640131932`\n4. `THREADROOT_1784640131932`\n5. `SELFMSG_B_1784640084808`\n6. `SELFMSG_A_1784640084808`\n7. `LASTSENT_GLOBAL_1784638147141`\n8. `LASTSENT_GLOBAL_1784638078036`\n9. `LASTSENT_1784638060639`\n10. `MENTION_1784638015661`\n11. `TOPLEVEL_1784637895401`\n12. `THREADROOT_1784637895401`\n13. `SELFMSG_B_1784637821841`\n14. `SELFMSG_A_1784637821841`\n15. `LASTSENT_GLOBAL_1784628271014`\n16. `LASTSENT_1784628249998`\n17. `MENTION_1784628228929`\n18. `TOPLEVEL_1784628149996`\n19. `THREADROOT_1784628149996`\n20. `SELFMSG_B_1784627982892`\n21. `SELFMSG_A_1784627982892`\n22. `SELFMSG_B_1784627738640`\n23. `SELFMSG_A_1784627738640`\n24. `LASTSENT_GLOBAL_1784617524046`\n25. `LASTSENT_1784617507855`\n26. `MENTION_1784617479417`\n27. `TOPLEVEL_1784617347128`\n28. `THREADROOT_1784617347128`\n29. `SELFMSG_B_1784617265271`\n30. `SELFMSG_A_1784617265271`\n31. `LASTSENT_GLOBAL_1784607332073`\n32. `LASTSENT_1784607299438`\n33. `MENTION_1784607281824`\n\nAnd, as required: **IRONCLAW_QA_10A_SELF_ATTRIBUTION_1784642672972**",
+        "input_tokens": 21239,
+        "output_tokens": 536
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_conversation_history",
+      "slack.whoami"
+    ]
+  }
+}

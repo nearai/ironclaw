@@ -13,7 +13,7 @@ use ironclaw_threads::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum RebornThreadHarnessError {
+pub enum IronClawThreadHarnessError {
     #[error("invalid mount view: {0}")]
     MountView(#[from] ironclaw_host_api::HostApiError),
     #[error("thread service failed: {0}")]
@@ -26,9 +26,9 @@ pub enum RebornThreadHarnessError {
 ///
 /// Defaults to `InMemoryBackend` (CAS-capable, models the production DB-backed filesystem)
 /// rather than the byte-only `DiskFilesystem` (see e3e155803). The integration tier uses
-/// `RebornThreadHarness<CompositeRootFilesystem>` via `filesystem_shared_composite`, mounted
+/// `IronClawThreadHarness<CompositeRootFilesystem>` via `filesystem_shared_composite`, mounted
 /// on the per-`build()` production-path composite.
-pub struct RebornThreadHarness<F = InMemoryBackend>
+pub struct IronClawThreadHarness<F = InMemoryBackend>
 where
     F: RootFilesystem,
 {
@@ -43,8 +43,8 @@ where
     root_prefix: String,
 }
 
-impl<F: RootFilesystem> RebornThreadHarness<F> {
-    pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
+impl<F: RootFilesystem> IronClawThreadHarness<F> {
+    pub fn reopened(&self) -> Result<Self, IronClawThreadHarnessError> {
         let scoped = scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
@@ -58,7 +58,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
 
     pub fn service_instance(
         &self,
-    ) -> Result<FilesystemSessionThreadService<F>, RebornThreadHarnessError> {
+    ) -> Result<FilesystemSessionThreadService<F>, IronClawThreadHarnessError> {
         let scoped = scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend))?;
         Ok(FilesystemSessionThreadService::new(scoped))
     }
@@ -66,7 +66,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
     pub async fn history(
         &self,
         thread_id: ThreadId,
-    ) -> Result<Vec<ThreadMessageRecord>, RebornThreadHarnessError> {
+    ) -> Result<Vec<ThreadMessageRecord>, IronClawThreadHarnessError> {
         Ok(self
             .service
             .list_thread_history(ThreadHistoryRequest {
@@ -81,7 +81,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
         &self,
         thread_id: ThreadId,
         text: &str,
-    ) -> Result<(), RebornThreadHarnessError> {
+    ) -> Result<(), IronClawThreadHarnessError> {
         let history = self.history(thread_id).await?;
         let found = history
             .iter()
@@ -99,7 +99,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
         if found {
             Ok(())
         } else {
-            Err(RebornThreadHarnessError::MissingFinalReply(
+            Err(IronClawThreadHarnessError::MissingFinalReply(
                 text.to_string(),
             ))
         }
@@ -107,8 +107,8 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
 }
 
 /// `InMemoryBackend`-specific constructors (default tier).
-impl RebornThreadHarness<InMemoryBackend> {
-    pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, RebornThreadHarnessError> {
+impl IronClawThreadHarness<InMemoryBackend> {
+    pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, IronClawThreadHarnessError> {
         let backend = Arc::new(InMemoryBackend::new());
         Self::filesystem_shared_backend(scope, backend)
     }
@@ -116,7 +116,7 @@ impl RebornThreadHarness<InMemoryBackend> {
     pub fn filesystem_shared_backend(
         scope: ThreadScope,
         backend: Arc<InMemoryBackend>,
-    ) -> Result<Self, RebornThreadHarnessError> {
+    ) -> Result<Self, IronClawThreadHarnessError> {
         let scoped = scoped_threads_fs_at("/engine", Arc::clone(&backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
@@ -130,7 +130,7 @@ impl RebornThreadHarness<InMemoryBackend> {
 }
 
 /// `CompositeRootFilesystem`-specific constructor (integration tier).
-impl RebornThreadHarness<CompositeRootFilesystem> {
+impl IronClawThreadHarness<CompositeRootFilesystem> {
     /// Harness backed by a shared production-path composite; threads land at
     /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_local_dev_database_roots`).
     /// `root` (also held by `GroupSharedStorage::turn_root`) keeps the `TempDir` alive so
@@ -139,7 +139,7 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
         scope: ThreadScope,
         backend: Arc<CompositeRootFilesystem>,
         root: Arc<tempfile::TempDir>,
-    ) -> Result<Self, RebornThreadHarnessError> {
+    ) -> Result<Self, IronClawThreadHarnessError> {
         let scoped = scoped_threads_fs_at("", Arc::clone(&backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {

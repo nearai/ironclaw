@@ -22,7 +22,7 @@ Placement decision, in order:
    concept: `ironclaw_turns`, `ironclaw_threads`, `ironclaw_resources`,
    `ironclaw_events`, `ironclaw_run_state`, `ironclaw_host_api`, ...
 3. **API contract type** (request/response/config for a trait or HTTP surface)
-   → the crate that **defines the trait/route** (e.g. `RebornServicesApi`
+   → the crate that **defines the trait/route** (e.g. `IronClawServicesApi`
    types live in `ironclaw_product_workflow`). Both sides of the boundary
    import from the contract owner.
 4. **Cross-domain primitive** (identity newtypes, paths, hashing, attachment
@@ -102,7 +102,7 @@ path-preservation re-export §-item-1 and item-4 above forbid. A plain private
 import, not a re-export); a crate-root `pub use` that keeps the old public path
 alive is not. Worked example: the LLM cost table moved
 `ironclaw_llm::costs` → `ironclaw_common::llm_costs`, and each consumer
-(`ironclaw_llm` providers, `ironclaw_runner`, `ironclaw_reborn_composition`,
+(`ironclaw_llm` providers, `ironclaw_runner`, `ironclaw_composition`,
 the root crate) had its import repointed — no shim was left behind.
 
 ## Duplicate detection — signatures, not names
@@ -155,6 +155,6 @@ out to be mocked seams).
 
 Field-addition pain ("one new field touches trait + facade + wire + JS") is
 NOT a placement problem — those are distinct contract layers, each defined
-once. That cost is addressed by splitting `RebornServicesApi` into domain
-ports (JIT) and by the reborn-feature scaffold/recipes, not by moving types.
+once. That cost is addressed by splitting `IronClawServicesApi` into domain
+ports (JIT) and by the ironclaw-feature scaffold/recipes, not by moving types.
 Do not respond to that pain by relocating or merging types.

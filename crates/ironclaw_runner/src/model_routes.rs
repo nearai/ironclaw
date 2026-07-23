@@ -9,7 +9,7 @@ use ironclaw_turns::run_profile::{
 const DEFAULT_CONFIG_VERSION: &str = "config:default";
 const DEFAULT_AUTH_VERSION: &str = "auth:default";
 
-/// Internal Reborn model purpose. Users choose provider/model routes; drivers
+/// Internal IronClaw model purpose. Users choose provider/model routes; drivers
 /// request purpose slots instead of raw provider identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,7 +82,7 @@ impl ModelRoute {
     }
 }
 
-/// Minimal bridge from existing active IronClaw model settings into Reborn's
+/// Minimal bridge from existing active IronClaw model settings into IronClaw's
 /// structured default model route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveModelRouteSettings {

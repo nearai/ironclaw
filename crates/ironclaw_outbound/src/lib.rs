@@ -1,6 +1,6 @@
 //! Outbound egress and projection subscription policy storage.
 //!
-//! This crate stores metadata-only Reborn outbound state: per-thread
+//! This crate stores metadata-only IronClaw outbound state: per-thread
 //! notification policy, projection subscription cursors, and delivery attempt
 //! status. It never owns transport delivery, transcript content, projection
 //! payloads, prompts, tool I/O, secrets, host paths, or backend detail strings.

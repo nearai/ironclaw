@@ -15,7 +15,7 @@
 //! independently of the live process, mirroring `assert_reply_persists_after_reopen`'s
 //! established idiom — it does not additionally tear down and rebuild the
 //! `TurnCoordinator`/`TurnRunScheduler` themselves (that would require
-//! duplicating `RebornIntegrationGroupBuilder::into_group`'s full ~150-line
+//! duplicating `IronClawIntegrationGroupBuilder::into_group`'s full ~150-line
 //! production-composition wiring, including the product-workflow binding
 //! service, as a second construction path — a materially larger enabler than
 //! this pair; see `tests/integration/support/group.rs:601` for the wiring this
@@ -25,23 +25,23 @@
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
 
 use ironclaw_run_state::ApprovalStatus;
+use ironclaw_support::builder::StorageMode;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
-use reborn_support::builder::StorageMode;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 const CAPABILITY_ID: &str = "builtin.write_file";
 
 #[tokio::test]
 async fn gate_survives_storage_reopen_and_resumes_to_completion() {
-    let g = RebornIntegrationGroup::builder()
+    let g = IronClawIntegrationGroup::builder()
         .storage(StorageMode::LibSql)
         .live_approvals()
         .await
@@ -49,11 +49,11 @@ async fn gate_survives_storage_reopen_and_resumes_to_completion() {
     let h = g
         .thread("conv-reopen-resume")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 CAPABILITY_ID,
                 json!({"path": "/workspace/reopen.txt", "content": "survives reopen"}),
             ),
-            RebornScriptedReply::text("file written after reopen"),
+            IronClawScriptedReply::text("file written after reopen"),
         ])
         .build()
         .await
@@ -79,7 +79,7 @@ async fn gate_survives_storage_reopen_and_resumes_to_completion() {
         .approval_request_scope_for_test(&gate_ref)
         .expect("gate ref resolves to a request scope");
     let reopened_approvals =
-        ironclaw_reborn_composition::test_support::open_local_dev_approval_request_store_for_test(
+        ironclaw_composition::test_support::open_local_dev_approval_request_store_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await

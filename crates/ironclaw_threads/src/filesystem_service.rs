@@ -2776,7 +2776,7 @@ where
         // Derive titles in parallel from each thread's first user
         // message. v1's libSQL list path did the same thing in SQL
         // (`SELECT substr(content, 1, 100) FROM conversation_messages
-        // WHERE role='user' ORDER BY created_at LIMIT 1`); Reborn's
+        // WHERE role='user' ORDER BY created_at LIMIT 1`); IronClaw's
         // filesystem layout reads via `RootFilesystem` instead. Errors
         // are silent-ok — the sidebar entry simply falls back to its
         // thread-id label, matching the WebUI fallback path.

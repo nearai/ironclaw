@@ -8,9 +8,9 @@ extension-registry crate that needs a policy-validated trust ceiling)
 
 This document is the source-of-truth contract for the trust-policy
 substrate. It is co-located with the crate so changes to the contract
-are reviewed alongside changes to the implementation. The Reborn-track
-docs at `docs/reborn/contracts/host-api.md` and `extensions.md` (in the
-staging branch) cover the broader Reborn vocabulary; this file is the
+are reviewed alongside changes to the implementation. The IronClaw-track
+docs at `docs/ironclaw/contracts/host-api.md` and `extensions.md` (in the
+staging branch) cover the broader IronClaw vocabulary; this file is the
 authoritative description of *how trust evaluation works* and how the
 `PackageIdentity` / `RequestedTrustClass` / `EffectiveTrustClass` /
 `AuthorityCeiling` types compose.
@@ -61,7 +61,7 @@ evaluation.
 Rules:
 
 - The `package_id` field in `PackageIdentity` is the same `PackageId`
-  newtype the rest of Reborn uses for `ExtensionId`. The two names
+  newtype the rest of IronClaw uses for `ExtensionId`. The two names
   describe the same value at different layers — `ExtensionId` when
   the identity reaches the extension registry /
   `CapabilityDescriptor.provider`, `PackageId` when it reaches the
@@ -257,9 +257,9 @@ Trust class on its own grants nothing. `ironclaw_authorization`
 declared effects against `allowed_effects`, and any `ResourceProfile`
 against `max_resource_ceiling`, before authorizing dispatch.
 
-This matches the broader Reborn rule that registered capabilities are
+This matches the broader IronClaw rule that registered capabilities are
 only possibilities; dispatch still requires grants/leases (see
-`docs/reborn/contracts/capability-access.md` §2 in the staging-track
+`docs/ironclaw/contracts/capability-access.md` §2 in the staging-track
 docs).
 
 ---
@@ -392,7 +392,7 @@ a matching `CapabilityDescriptor`:
 | memory / workspace | `Bundled` | `FirstParty` | `ReadFilesystem`, `WriteFilesystem` |
 
 Migration is **out of scope for V1** — this PR ships the substrate.
-Per-built-in PRs migrate them through the unified path so Reborn
+Per-built-in PRs migrate them through the unified path so IronClaw
 ends with one authorization model rather than two parallel ones
 (legacy `ToolRegistry` + new policy engine).
 

@@ -4,20 +4,20 @@
 //!
 //! Distinct from the outbound delivery sink (E-OUTBOUND): this covers prompt
 //! context, not a delivery recorder. The facade→context mapping itself is
-//! unit-tested at crate tier (`ironclaw_reborn_composition::communication_context`);
+//! unit-tested at crate tier (`ironclaw_composition::communication_context`);
 //! this binary covers only that the field threads through the coordinator path
 //! into the model request.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::comm_context::RecordingCommunicationContextProvider;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::comm_context::RecordingCommunicationContextProvider;
+use ironclaw_support::reply::IronClawScriptedReply;
 
 /// A configured delivery target + connected channel supplied by the wired
 /// provider both appear in the model-visible request, proving the communication
@@ -29,9 +29,9 @@ async fn communication_context_slice_reaches_model_request() {
         "slack",
         "reborn-commctx-channel",
     );
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_communication_context_provider(provider)
-        .script([RebornScriptedReply::text("ok")])
+        .script([IronClawScriptedReply::text("ok")])
         .build()
         .await
         .expect("harness builds");
@@ -49,8 +49,8 @@ async fn communication_context_slice_reaches_model_request() {
 /// that the default path is behavior-identical (no comm slice).
 #[tokio::test]
 async fn no_communication_section_without_provider() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("ok")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("ok")])
         .build()
         .await
         .expect("harness builds");

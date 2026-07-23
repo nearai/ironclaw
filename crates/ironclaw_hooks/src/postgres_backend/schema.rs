@@ -10,7 +10,7 @@
 //! `ironclaw_filesystem::PostgresRootFilesystem::run_migrations` uses. We
 //! deliberately do NOT route through the legacy main-binary refinery
 //! `migrations/` directory: that system is scoped to `src/db/` and the
-//! reborn durable crates each own their schema.
+//! IronClaw durable crates each own their schema.
 //!
 //! # DB-clock decision (cross-host correctness)
 //!

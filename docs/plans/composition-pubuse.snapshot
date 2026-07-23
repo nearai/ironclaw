@@ -1,7 +1,7 @@
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::facade::IronClawAutomationProductFacade;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
-pub use error::RebornBuildError;
+pub use error::IronClawBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 pub use extension_host::channel_identity::{
     ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
@@ -15,27 +15,27 @@ pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
 };
 pub use extension_host::extension_lifecycle_command::{
-    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
+    IronClawExtensionLifecycleCommand, IronClawExtensionLifecycleCommandError,
+    execute_ironclaw_extension_lifecycle_command, render_ironclaw_extension_lifecycle_response,
 };
 pub use extension_host::gsuite::{
     bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
 };
-pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
+pub use extension_host::skill_listing::{IronClawSkillListError, list_ironclaw_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::ChannelHostAssemblyTestWiring;
-pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
-pub use factory::RebornApprovalTestParts;
+pub use factory::IronClawApprovalTestParts;
+pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
+pub use factory::{IronClawServices, build_ironclaw_services, builtin_first_party_trust_policy};
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
-pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
-    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+    ChannelExtensionBinding, IronClawBuildInput, IronClawRuntimeProcessBinding, OAuthClientConfig,
 };
 pub use ironclaw_auth::OAuthRedirectUri;
 pub use ironclaw_host_api::{
@@ -45,7 +45,7 @@ pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
 pub use ironclaw_product_workflow::PreferenceTargetCodec;
 pub use ironclaw_product_workflow::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornChannelConnectStrategy,
+    IronClawChannelConnectStrategy,
 };
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
@@ -53,41 +53,41 @@ pub use ironclaw_product_workflow::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
+pub use ironclaw_runner::failure_summary::ironclaw_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
 pub use ironclaw_skills::{
-    ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
-    skill_summary_json as reborn_skill_summary_json,
+    ManagedSkillSource as IronClawSkillSource, SkillSummary as IronClawSkillSummary,
+    skill_summary_json as ironclaw_skill_summary_json,
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
 pub use llm_admin::llm_catalog::{
-    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
-    resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
-    resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
+    IronClawLlmCatalogError, ProviderCatalogValidationError, resolve_against_registry,
+    resolve_ironclaw_runtime_llm, resolve_llm_selection_against_catalog,
+    resolve_llm_selection_allow_missing_key, validate_ironclaw_provider_catalog_contents,
 };
-pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
+pub use llm_admin::llm_config_service::{IronClawLlmConfigService, LlmReloadTrigger};
 pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use deployment::{
-    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    IronClawRuntimeProfileError, IronClawRuntimeProfileOptions,
+    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
+    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 pub use llm_admin::provider_admin::{
-    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
+    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, IronClawModelRoutesState, IronClawProviderAdmin,
+    IronClawProviderAdminError, IronClawProviderInfo, IronClawProviderList,
+    IronClawProviderMetadata, IronClawProviderSelection, IronClawProviderStatus,
+    IronClawProviderWriteOutcome, IronClawV1State, ProviderMenuEntry, ProviderProbeOutcome,
 };
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
+pub use llm_admin::provider_admin_product_command::IronClawProviderAdminProductCommandService;
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
@@ -101,29 +101,29 @@ pub use observability::hooks::{
 pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
-pub use observability::trajectory_observer::RebornTrajectoryObserver;
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
+pub use observability::trajectory_observer::IronClawTrajectoryObserver;
+pub use product_auth::api::auth::IronClawAuthContinuationDispatcher;
 pub use product_auth::api::auth::{
-    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
-    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
+    IronClawAuthProductError, IronClawCredentialLifecycleError, IronClawManualTokenChallenge,
+    IronClawManualTokenError, IronClawManualTokenSetupRequest, IronClawManualTokenSubmitRequest,
+    IronClawManualTokenSubmitResponse, IronClawOAuthCallbackError, IronClawOAuthCallbackOutcome,
+    IronClawOAuthCallbackRequest, IronClawOAuthCallbackResponse, IronClawProductAuthServicePorts,
+    IronClawProductAuthServices,
 };
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
-pub use production_runtime_policy::RebornProductionRuntimePolicy;
+pub use production_runtime_policy::IronClawProductionRuntimePolicy;
 pub use provider_identity::{
-    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+    IronClawIdentityProviderId, IronClawIdentityProviderUserId, IronClawUserIdentityBinding,
+    IronClawUserIdentityBindingDeleteStore, IronClawUserIdentityBindingError,
+    IronClawUserIdentityBindingStore, IronClawUserIdentityLookup, IronClawUserIdentityLookupError,
+    ProviderIdentityActorResolver, installation_scoped_provider_user_id,
 };
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
+    IronClawFacadeReadiness, IronClawReadiness, IronClawReadinessDiagnostic,
+    IronClawReadinessDiagnosticComponent, IronClawReadinessDiagnosticReason,
+    IronClawReadinessDiagnosticStatus, IronClawReadinessState, IronClawWorkerReadiness,
 };
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -131,28 +131,29 @@ pub use root::product_live_adapters::{
     ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
     capability_allowlist, visible_capability_request_for_run,
 };
-pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
+pub use root::profile::{IronClawCompositionProfile, IronClawCompositionProfileParseError};
 #[cfg(any(test, feature = "test-support"))]
-pub use runtime::RebornTurnDriveOutcome;
+pub use runtime::IronClawTurnDriveOutcome;
 pub use runtime::{
-    AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
-    RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
+    AssistantReply, ConversationId, IronClawRuntime, IronClawRuntimeError, IronClawSkillActivation,
+    IronClawSkillActivationMode, IronClawSkillAsset, IronClawSkillBundle,
+    IronClawSkillExecutionPlan, IronClawSkillExecutionResult, IronClawSkillSourceKind,
+    build_ironclaw_runtime,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
-    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    IronClawRuntimeIdentity, IronClawRuntimeInput, KeepaliveSweepSettings, PollSettings,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
     TurnRunnerSettings,
 };
-pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
+pub use runtime_input::{IronClawProviderFactory, ResolvedIronClawLlm};
 pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::facade::{RebornWebuiBundle, build_webui_services};
+pub use webui::facade::{IronClawWebuiBundle, build_webui_services};
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
 };
-pub use ironclaw_reborn_identity::{
-    ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
-    RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
+pub use ironclaw_identity::{
+    ExternalSubjectId, IdentityKeyError, IronClawIdentityError, IronClawIdentityResolver,
+    ProviderInstanceId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
 };

@@ -1,6 +1,6 @@
 # ironclaw_memory guardrails
 
-This is the **provider-neutral memory contract** crate for IronClaw Reborn. It
+This is the **provider-neutral memory contract** crate for IronClaw. It
 owns the host-facing memory vocabulary and nothing else:
 
 - The `MemoryService` trait and its operation request/response DTOs.

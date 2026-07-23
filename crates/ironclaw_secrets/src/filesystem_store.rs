@@ -4,7 +4,7 @@
 //! Routes persistence through the unified
 //! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) surface so secrets,
 //! credential accounts, and credential sessions all share the same dispatch
-//! fabric as the rest of Reborn (`ironclaw_processes`, `ironclaw_authorization`,
+//! fabric as the rest of IronClaw (`ironclaw_processes`, `ironclaw_authorization`,
 //! `ironclaw_outbound`, `ironclaw_run_state`).
 //!
 //! All paths are alias-relative [`ScopedPath`] strings under the `/secrets`
@@ -38,7 +38,7 @@
 //! applied here so the on-disk material does not leak through any backend
 //! mounted at `/secrets/*`. The crypto seam is intentionally narrow so the
 //! decorator port can later strip these calls without touching trait surface.
-//! TODO(reborn/fs-secrets): once `EncryptedBackend` ships, replace the inline
+//! TODO(ironclaw/fs-secrets): once `EncryptedBackend` ships, replace the inline
 //! `encrypt`/`decrypt` calls with plaintext writes wrapped by the decorator.
 
 use std::{collections::HashSet, sync::Arc};
@@ -383,7 +383,7 @@ impl FilesystemSecretStore<InMemoryBackend> {
     /// `/tenants/<tenant>/users/<user>/secrets`), matching production
     /// composition's `invocation_mount_view` shape so cross-tenant isolation
     /// stays structural. Replaces the deleted `InMemorySecretStore` (§4.3 of
-    /// `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+    /// `docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`).
     pub fn ephemeral() -> Self {
         Self::ephemeral_over(Arc::new(InMemoryBackend::new()))
     }

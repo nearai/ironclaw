@@ -5,17 +5,17 @@
 //! proves that cross-thread state written by one conversation is visible to a
 //! completely different conversation over the shared store.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: writer ────────────────────────────────────────────────────
     // Write a distinctive marker string to MEMORY.md via `target: "memory"`.
     let writer = g
         .thread("conv-memory-writer")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.memory_write",
                 json!({
                     "target": "memory",
@@ -23,7 +23,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "append": false
                 }),
             ),
-            RebornScriptedReply::text("saved"),
+            IronClawScriptedReply::text("saved"),
         ])
         .build()
         .await?;
@@ -37,8 +37,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let reader = g
         .thread("conv-memory-reader")
         .script([
-            RebornScriptedReply::tool_call("builtin.memory_read", json!({"path": "MEMORY.md"})),
-            RebornScriptedReply::text("recalled"),
+            IronClawScriptedReply::tool_call("builtin.memory_read", json!({"path": "MEMORY.md"})),
+            IronClawScriptedReply::text("recalled"),
         ])
         .build()
         .await?;
