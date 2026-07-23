@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from emulate_provider import google_headers, slack_headers, slack_post
+from emulate_provider import google_headers, github_headers, slack_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
 from provider_capability_inventory import (
     EMULATE_SUPPORTED_TOOLS,
@@ -43,6 +43,11 @@ pytest_plugins = ["reborn_webui_harness"]
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
+
+GITHUB_RELEASE_WRITE_UNAVAILABLE = {
+    403,
+    404,
+}
 GOOGLE_EXTENSIONS = (
     "gmail",
     "google-calendar",
@@ -930,6 +935,19 @@ def _raw_trace_uses_tool_prefix(trace_path: Path, prefix: str) -> bool:
     )
 
 
+async def _emulate_github_supports_release_writes(emulate_url: str) -> bool:
+    async with httpx.AsyncClient(headers=github_headers(), timeout=15) as client:
+        response = await client.post(
+            f"{emulate_url}/repos/nearai/ironclaw/releases",
+            json={},
+        )
+    if response.status_code in GITHUB_RELEASE_WRITE_UNAVAILABLE:
+        return False
+    if response.status_code not in {201, 422}:
+        response.raise_for_status()
+    return True
+
+
 async def _assert_google_provider_outcome(
     emulate_url: str, case: str, trace: dict
 ) -> None:
@@ -1362,6 +1380,11 @@ async def test_provider_operation_case_executes_with_provider_readback(
     emulate_url = reborn_provider_operation_server[
         f"emulate_{operation_case.provider_service}_url"
     ]
+    if (
+        operation_case.provider_service == "github"
+        and not await _emulate_github_supports_release_writes(emulate_url)
+    ):
+        pytest.skip("Selected Emulate GitHub fixture does not expose repo write APIs")
     source = f"provider-operation-{operation_case.case_id}.json"
     trace = _provider_operation_trace(operation_case)
     await operation_case.assert_baseline(emulate_url)

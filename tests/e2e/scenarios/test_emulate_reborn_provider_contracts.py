@@ -26,6 +26,25 @@ from helpers import (
     EMULATE_SLACK_LIMITED_BEARER,
 )
 
+GITHUB_RELEASE_WRITE_UNAVAILABLE = {
+    403,
+    404,
+}
+
+
+async def _skip_if_github_release_writes_unavailable(
+    client: httpx.AsyncClient, base_url: str
+) -> None:
+    probe = await client.post(
+        f"{base_url}/repos/nearai/ironclaw/releases",
+        headers=github_headers(),
+        json={},
+    )
+    if probe.status_code in GITHUB_RELEASE_WRITE_UNAVAILABLE:
+        pytest.skip("Selected Emulate GitHub fixture does not expose repo write APIs")
+    if probe.status_code not in {201, 422}:
+        probe.raise_for_status()
+
 
 async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_server):
     base_url = emulate_google_server["url"]
@@ -484,6 +503,8 @@ async def test_emulate_slack_covers_reborn_search_messages(emulate_slack_server)
 async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server):
     base_url = emulate_github_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
+        await _skip_if_github_release_writes_unavailable(client, base_url)
+
         user = await github_json(client, base_url, "GET", "/user")
         assert user["login"] == "reborn-dev"
 
@@ -1208,6 +1229,8 @@ async def test_emulate_github_distinguishes_repositories_and_private_accounts(
 ):
     base_url = emulate_github_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
+        await _skip_if_github_release_writes_unavailable(client, base_url)
+
         second_repo = await github_json(
             client,
             base_url,
