@@ -3,16 +3,16 @@
 # Run one instrumented Reborn integration-tier coverage lane and produce that
 # lane's lcov tracefile.
 #
-# The 34 tests/integration/ suites (see reborn-coverage-int-tier-tests.sh for
-# the canonical enumeration) are split across 5 lanes in
+# The tests/integration/ suites (see reborn-coverage-int-tier-tests.sh for the
+# canonical enumeration) are split across 5 lanes in
 # .github/workflows/reborn-tests.yml's `reborn-integration-coverage` matrix
-# job: 4 modulo-partitions of the 27 flat `reborn_integration_*` suites, plus
-# one dedicated lane for all 7 `reborn_group_*` suites.
+# job: 4 modulo-partitions of every non-`reborn_group_*` suite, plus one
+# dedicated lane for all `reborn_group_*` suites.
 #
-# This script is the SINGLE execution of the 34 int-tier suites for pass/fail
+# This script is the SINGLE execution of the discovered int-tier suites for pass/fail
 # purposes too: `cargo llvm-cov ... test` has the same pass/fail semantics as
-# `cargo test`, so there is no separate uninstrumented run of the 27 flat
-# suites. (The 7 group suites also still have their own uninstrumented
+# `cargo test`, so there is no separate uninstrumented run of the non-group
+# suites. (The group suites also still have their own uninstrumented
 # `reborn-group-tests` job via run-reborn-group-tests.sh, which stays as the
 # fast low-contention pass/fail signal for that suite; this lane additionally
 # runs them once more, instrumented, for coverage.)
@@ -32,16 +32,16 @@
 # other workspace crates' coverage.
 #
 # Reuses reborn-coverage-int-tier-tests.sh as the single source of truth for
-# suite discovery/naming (the tests/integration/ -> reborn_integration_*/
-# reborn_group_* rewrite rules), so this script never re-derives that mapping.
+# manifest-resolved suite discovery and names. Group targets retain their
+# dedicated lane; every other discovered target is modulo-partitioned.
 #
 # Modes (REBORN_COV_LANE_MODE):
-#   flat-partition  Modulo-partitions the 27 reborn_integration_* suites
+#   flat-partition  Modulo-partitions every non-reborn_group_* suite
 #                   across REBORN_COV_LANE_PARTITIONS lanes; REBORN_COV_LANE_INDEX
 #                   (0-based) selects this lane's slice — mirrors
 #                   scripts/ci/run-reborn-root-partition.sh's partitioning.
-#   group           Runs all reborn_group_* suites (7 total) — the one
-#                   dedicated group coverage lane.
+#   group           Runs all reborn_group_* suites in the dedicated group
+#                   coverage lane.
 #
 # Usage: REBORN_COV_LANE_MODE=... [other env] reborn-coverage-lane-run.sh <output-lcov-path>
 
@@ -87,7 +87,7 @@ case "${mode}" in
       exit 1
     fi
 
-    mapfile -t flat_names < <(printf '%s\n' "${all_names[@]}" | grep '^reborn_integration_' | LC_ALL=C sort)
+    mapfile -t flat_names < <(printf '%s\n' "${all_names[@]}" | grep -v '^reborn_group_' | LC_ALL=C sort)
 
     for index in "${!flat_names[@]}"; do
       if (( index % partition_count_int != partition_index_int )); then
