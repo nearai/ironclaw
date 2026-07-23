@@ -18,8 +18,7 @@ use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeFailureKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -64,12 +63,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     let input = json!({"message":"status"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            capability_id(),
-            estimate.clone(),
-            input.clone(),
-        ))
+        .invoke_capability((context, capability_id(), estimate.clone(), input.clone()))
         .await
         .unwrap();
 
@@ -141,7 +135,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
     stage_http_secret(&secret_store, &scope, &handle).await;
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default()
@@ -425,7 +419,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default().set_network_egress_bytes(100),
@@ -470,7 +464,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let invocation_id = context.invocation_id;
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let outcome = AssertUnwindSafe(runtime.invoke_capability(RuntimeCapabilityRequest::new(
+    let outcome = AssertUnwindSafe(runtime.invoke_capability((
         context,
         capability_id(),
         ResourceEstimate::default().set_network_egress_bytes(100),
@@ -519,7 +513,7 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     });
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -806,7 +800,7 @@ async fn invoke_http_fixture(
     input: Value,
 ) -> RuntimeCapabilityOutcome {
     runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default()
@@ -819,7 +813,7 @@ async fn invoke_http_fixture(
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -827,7 +821,9 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {

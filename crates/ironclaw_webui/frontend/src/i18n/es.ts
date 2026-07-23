@@ -1111,6 +1111,8 @@ registerPack("es", {
   "admin.users.member": "Miembro",
   "admin.users.admin": "Administrador",
   "admin.users.suspend": "Suspender",
+  "admin.users.actionFailed": "La acción falló: {message}",
+  "admin.users.lastAdminRequired": "Se requiere al menos un administrador activo. Añade o activa otro administrador antes de cambiar este usuario.",
   "admin.users.activate": "Activar",
   "admin.users.promote": "Promover",
   "admin.users.demote": "Degradar",
@@ -1254,6 +1256,13 @@ registerPack("es", {
   "extensions.removeFailed": "Error al quitar",
   "extensions.openingAuth": "Abriendo autenticación...",
   "extensions.configurationRequired": "Configuración requerida",
+  "extensions.setupFailed": "Error de configuración",
+  "extensions.oauthSetupFailed": "Error al configurar OAuth",
+  "extensions.oauthInvalidAuthorizationUrl": "La URL de autorización debe usar HTTPS.",
+  "extensions.oauthFailed": "La autorización falló. Intenta conectarte de nuevo.",
+  "extensions.oauthExpired": "La autorización caducó. Intenta conectarte de nuevo.",
+  "extensions.oauthCanceled": "La autorización fue cancelada. Intenta conectarte de nuevo.",
+  "extensions.oauthTimedOut": "Se agotó el tiempo de autorización. Intenta conectarte de nuevo.",
   "extensions.getCredentials": "Obtener credenciales",
   "extensions.keepSecretPlaceholder": "••••••• (deja en blanco para conservarla)",
   "extensions.runtime.wasm": "Herramienta WASM",
@@ -1362,6 +1371,10 @@ registerPack("es", {
 
 registerPack("es", {
   "app.checkingSession": "Comprobando sesión...",
+  "app.sessionCheckFailedTitle": "No se pudo verificar tu sesión",
+  "app.sessionCheckFailedDescription":
+    "No pudimos verificar tu sesión en este momento. Tu inicio de sesión sigue guardado. Inténtalo de nuevo en unos instantes.",
+  "app.retrySession": "Reintentar",
   "common.close": "Cerrar",
   "common.download": "Descargar",
   "common.copy": "Copiar",

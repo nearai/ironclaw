@@ -9,12 +9,11 @@ use ironclaw_loop_host::{LoopCapabilityInputResolver, LoopCapabilityResultWriter
 use ironclaw_turns::{
     CapabilityActivityId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-        LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -148,7 +147,7 @@ impl SyntheticCapabilityDescriptor {
 
 pub(super) struct SyntheticCapabilityInvocation {
     pub(super) run_context: LoopRunContext,
-    pub(super) request: CapabilityInvocation,
+    pub(super) request: LoopRequest,
     pub(super) input: serde_json::Value,
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
 }
@@ -489,7 +488,7 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(capability) = self.capabilities_by_id.get(&request.capability_id) else {
             return self.inner.invoke_capability(request).await;
@@ -580,7 +579,7 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
@@ -880,7 +879,7 @@ mod tests {
             .expect("provider call registers");
 
         let error = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: different_activity_id(activity_id),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,

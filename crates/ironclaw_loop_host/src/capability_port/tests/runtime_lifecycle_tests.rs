@@ -15,16 +15,16 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeGateId, RuntimeProcessHandle,
-    RuntimeResourceGate, RuntimeStatusRequest, VisibleCapabilitySurface,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
+    RuntimeAuthGate, RuntimeAuthResume, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityUnknown, RuntimeGateId,
+    RuntimeInvocation, RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest,
+    VisibleCapabilitySurface,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-    CapabilityBatchInvocation, CapabilityFailureKind, CapabilityInputRef, CapabilityResumeToken,
-    LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext, RegisterProviderToolCallRequest,
+    CapabilityFailureKind, CapabilityInputRef, CapabilityResumeToken, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopRequestBatch, LoopRunContext, RegisterProviderToolCallRequest,
 };
 
 #[tokio::test]
@@ -256,7 +256,7 @@ async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome(
     let invocation = visible_runtime_invocation(&port).await;
 
     let batch = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![invocation],
             stop_on_first_suspension: false,
         })
@@ -336,9 +336,9 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
         .expect("second provider tool call registers");
 
     let batch = port
-        .invoke_capability_batch(CapabilityBatchInvocation {
+        .invoke_capability_batch(LoopRequestBatch {
             invocations: vec![
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: first.activity_id,
                     surface_version: first.surface_version,
                     capability_id: first.capability_id,
@@ -346,7 +346,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                     approval_resume: None,
                     auth_resume: None,
                 },
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: second.activity_id,
                     surface_version: second.surface_version,
                     capability_id: second.capability_id,
@@ -694,7 +694,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
 
     let activity_id = ironclaw_turns::CapabilityActivityId::new();
     let auth_blocked = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id,
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
@@ -727,7 +727,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
     );
 
     let auth_resumed = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id,
             surface_version: surface.version,
             capability_id,
@@ -749,7 +749,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
     let requests = runtime.auth_resume_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[0].input,
+        requests[0].3,
         serde_json::json!({"query": "is:unread", "max_results": 10}),
         "auth resume runtime request must receive the original input"
     );
@@ -920,7 +920,7 @@ async fn runtime_capability_port(
     .port_for_run_context(run_context)
 }
 
-async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> CapabilityInvocation {
+async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> LoopRequest {
     port.visible_capabilities(VisibleCapabilityRequest {})
         .await
         .expect("visible capabilities load");
@@ -928,7 +928,7 @@ async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> Cap
         .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
         .await
         .expect("provider tool call registers");
-    CapabilityInvocation {
+    LoopRequest {
         activity_id: candidate.activity_id,
         surface_version: candidate.surface_version,
         capability_id: candidate.capability_id,
@@ -1024,7 +1024,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         .await
         .expect("visible capabilities load");
     let resumed = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -1042,24 +1042,18 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     assert_eq!(runtime.invoke_count(), 1);
     let resume_requests = runtime.resume_requests();
     assert_eq!(resume_requests.len(), 1);
-    assert_eq!(resume_requests[0].approval_request_id, approval_request_id);
+    assert_eq!(resume_requests[0].1, approval_request_id);
     let resume_invocation_id = ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
         .expect("resume token carries original invocation id");
+    assert_eq!(resume_requests[0].0.invocation_id, resume_invocation_id);
     assert_eq!(
-        resume_requests[0].context.invocation_id,
+        resume_requests[0].0.resource_scope.invocation_id,
         resume_invocation_id
     );
-    assert_eq!(
-        resume_requests[0].context.resource_scope.invocation_id,
-        resume_invocation_id
-    );
-    assert_eq!(
-        resume_requests[0].context.correlation_id,
-        resume.correlation_id
-    );
+    assert_eq!(resume_requests[0].0.correlation_id, resume.correlation_id);
     assert_eq!(resume.input_ref, first_invocation.input_ref);
     assert_eq!(
-        resume_requests[0].input,
+        resume_requests[0].4,
         serde_json::json!({ "message": "hello" })
     );
 }
@@ -1144,7 +1138,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         .await
         .expect("visible capabilities load");
     let auth_blocked = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: first_invocation.activity_id,
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
@@ -1164,7 +1158,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
     // Use a stable correlation_id so we can assert it arrives at the runtime.
     let original_correlation_id = resume.correlation_id;
     let auth_resumed = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -1195,21 +1189,21 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
     let auth_resume_requests = runtime.auth_resume_requests();
     assert_eq!(auth_resume_requests.len(), 1);
     assert_eq!(
-        auth_resume_requests[0].context.invocation_id, original_invocation_id,
+        auth_resume_requests[0].0.invocation_id, original_invocation_id,
         "auth re-dispatch must reuse the original invocation id"
     );
     assert_eq!(
-        auth_resume_requests[0].context.resource_scope.invocation_id, original_invocation_id,
+        auth_resume_requests[0].0.resource_scope.invocation_id, original_invocation_id,
         "lease matching scope must carry the original invocation id"
     );
     assert_eq!(
-        auth_resume_requests[0].approval_request_id,
+        auth_resume_requests[0].4,
         Some(approval_request_id),
         "the granted approval must travel with the auth re-dispatch"
     );
     // Original correlation identifier must be restored onto the invocation context.
     assert_eq!(
-        auth_resume_requests[0].context.correlation_id, original_correlation_id,
+        auth_resume_requests[0].0.correlation_id, original_correlation_id,
         "auth re-dispatch must restore the original correlation_id"
     );
     assert_eq!(runtime.invoke_count(), 1, "no fresh first-call invocation");
@@ -1281,7 +1275,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
         .await
         .expect("visible capabilities load");
     let resumed = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -1370,9 +1364,9 @@ struct ApprovalResumeRecordingRuntime {
     capability: VisibleCapability,
     approval_request_id: ApprovalRequestId,
     invoke_count: AtomicUsize,
-    resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
+    resume_requests: Mutex<Vec<RuntimeApprovalResume>>,
     resume_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
-    auth_resume_requests: Mutex<Vec<RuntimeCapabilityAuthResumeRequest>>,
+    auth_resume_requests: Mutex<Vec<RuntimeAuthResume>>,
 }
 
 impl ApprovalResumeRecordingRuntime {
@@ -1399,14 +1393,14 @@ impl ApprovalResumeRecordingRuntime {
         self.invoke_count.load(Ordering::SeqCst)
     }
 
-    fn resume_requests(&self) -> Vec<RuntimeCapabilityResumeRequest> {
+    fn resume_requests(&self) -> Vec<RuntimeApprovalResume> {
         self.resume_requests
             .lock()
             .expect("resume requests lock")
             .clone()
     }
 
-    fn auth_resume_requests(&self) -> Vec<RuntimeCapabilityAuthResumeRequest> {
+    fn auth_resume_requests(&self) -> Vec<RuntimeAuthResume> {
         self.auth_resume_requests
             .lock()
             .expect("auth resume requests lock")
@@ -1418,13 +1412,13 @@ impl ApprovalResumeRecordingRuntime {
 impl HostRuntime for ApprovalResumeRecordingRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.invoke_count.fetch_add(1, Ordering::SeqCst);
         Ok(RuntimeCapabilityOutcome::ApprovalRequired(
             RuntimeApprovalGate {
                 approval_request_id: self.approval_request_id,
-                capability_id: request.capability_id,
+                capability_id: request.1,
                 reason: RuntimeBlockedReason::ApprovalRequired,
             },
         ))
@@ -1432,7 +1426,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.resume_requests
             .lock()
@@ -1448,7 +1442,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
         }
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
-                capability_id: request.capability_id,
+                capability_id: request.2,
                 output: serde_json::json!({"resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
@@ -1458,7 +1452,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.auth_resume_requests
             .lock()
@@ -1466,7 +1460,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
             .push(request.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
-                capability_id: request.capability_id,
+                capability_id: request.1,
                 output: serde_json::json!({"auth_resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
@@ -1507,7 +1501,7 @@ struct QueuedHostRuntime {
     capabilities: Vec<VisibleCapability>,
     outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
     auth_resume_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
-    auth_resume_requests: Mutex<Vec<RuntimeCapabilityAuthResumeRequest>>,
+    auth_resume_requests: Mutex<Vec<RuntimeAuthResume>>,
 }
 
 impl QueuedHostRuntime {
@@ -1534,7 +1528,7 @@ impl QueuedHostRuntime {
         self
     }
 
-    fn auth_resume_requests(&self) -> Vec<RuntimeCapabilityAuthResumeRequest> {
+    fn auth_resume_requests(&self) -> Vec<RuntimeAuthResume> {
         self.auth_resume_requests
             .lock()
             .expect("auth resume requests lock")
@@ -1546,7 +1540,7 @@ impl QueuedHostRuntime {
 impl HostRuntime for QueuedHostRuntime {
     async fn invoke_capability(
         &self,
-        _request: RuntimeCapabilityRequest,
+        _request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.outcomes
             .lock()
@@ -1557,14 +1551,14 @@ impl HostRuntime for QueuedHostRuntime {
 
     async fn resume_capability(
         &self,
-        _request: RuntimeCapabilityResumeRequest,
+        _request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         unreachable!("queued host runtime should not resume")
     }
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.auth_resume_requests
             .lock()

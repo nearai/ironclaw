@@ -74,7 +74,7 @@ middleware with v1's `src/channels/web/`.
 
 | Symbol | Role |
 |---|---|
-| `RebornWebuiBundle` (in [`src/webui/facade.rs`](src/webui/facade.rs)) | `{ api: Arc<dyn RebornServicesApi>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 facade, optional product-auth route service, plus readiness snapshot |
+| `RebornWebuiBundle` (in [`src/webui/facade.rs`](src/webui/facade.rs)) | `{ api: Arc<dyn ProductSurface>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 product surface, optional product-auth route service, plus readiness snapshot |
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
@@ -397,6 +397,13 @@ at most once per 75 ms, and any non-text milestone flushes the pending value
 before that milestone is projected. Reasoning, capability, and lifecycle
 milestones remain ordered and uncoalesced. The in-memory source still records
 the latest projection for replay when no browser subscriber is active.
+
+The opaque WebUI projection cursor stamps its process-local live position with
+the projection-services epoch. On an epoch mismatch, resume preserves durable
+runtime and turn positions but clears the volatile live position so a browser
+cursor retained across a deployment cannot suppress the restarted process's
+interim updates. This is enforced by
+`WebuiRuntimeProjectionStream::runtime_subscription` in `src/projection.rs`.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —

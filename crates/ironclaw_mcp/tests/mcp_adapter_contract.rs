@@ -1,3 +1,4 @@
+// arch-exempt: large_file, whole-handshake catalog regression reuses the existing mediated HTTP fixture, plan #4088
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -799,6 +800,46 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
     );
 }
 
+#[tokio::test]
+async fn concrete_mcp_http_client_bounds_long_provider_descriptions_without_dropping_catalog() {
+    let egress = RecordingRuntimeEgress::long_tool_description();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({}),
+            max_output_bytes: 16_384,
+        })
+        .await
+        .expect("a valid provider catalog must survive an overlong description");
+
+    assert_eq!(output.tools.len(), 2);
+    assert_eq!(output.tools[0].name, "search");
+    assert_eq!(output.tools[0].description.len(), 2_048);
+    assert!(
+        output.tools[0].description.ends_with("..."),
+        "bounded descriptions must make truncation explicit"
+    );
+    assert_eq!(
+        egress
+            .requests()
+            .iter()
+            .map(|request| json_rpc_method(&request.body))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "notifications/initialized", "tools/list"]
+    );
+}
+
 /// Coverage gap noted in review of the SSE contract tests: the loopback MCP
 /// path predeclares its tool schemas, so `discover_tools` (host-mediated HTTP
 /// path) is only ever exercised over JSON-framed `tools/list` responses
@@ -1308,6 +1349,7 @@ enum RecordedResponseMode {
     Json,
     AuthRequired,
     JsonMissingProtocolVersion,
+    LongToolDescription,
     Sse,
 }
 
@@ -1342,6 +1384,14 @@ impl RecordingRuntimeEgress {
     fn json_rpc_without_protocol_version() -> Self {
         Self {
             mode: RecordedResponseMode::JsonMissingProtocolVersion,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn long_tool_description() -> Self {
+        Self {
+            mode: RecordedResponseMode::LongToolDescription,
             protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1411,13 +1461,12 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 let id = json_rpc_id(&request.body);
                 match self.mode {
                     RecordedResponseMode::Json
-                    | RecordedResponseMode::JsonMissingProtocolVersion => {
-                        Ok(runtime_json_response(
-                            id,
-                            json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
-                            vec![],
-                        ))
-                    }
+                    | RecordedResponseMode::JsonMissingProtocolVersion
+                    | RecordedResponseMode::LongToolDescription => Ok(runtime_json_response(
+                        id,
+                        json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                        vec![],
+                    )),
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
@@ -1429,11 +1478,16 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
             }
             "tools/list" => {
                 let id = json_rpc_id(&request.body);
+                let search_description = if self.mode == RecordedResponseMode::LongToolDescription {
+                    "x".repeat(7_115)
+                } else {
+                    "Search GitHub issues\nacross repositories".to_string()
+                };
                 let result = json!({
                     "tools": [
                         {
                             "name": "search",
-                            "description": "Search GitHub issues\nacross repositories",
+                            "description": search_description,
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -1462,7 +1516,8 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 });
                 match self.mode {
                     RecordedResponseMode::Json
-                    | RecordedResponseMode::JsonMissingProtocolVersion => {
+                    | RecordedResponseMode::JsonMissingProtocolVersion
+                    | RecordedResponseMode::LongToolDescription => {
                         Ok(runtime_json_response(id, result, vec![]))
                     }
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(id, result)),
@@ -1932,6 +1987,10 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         self.inner.reconcile(reservation_id, actual)
+    }
+
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        self.inner.validate_reservation(reservation)
     }
 
     fn release(

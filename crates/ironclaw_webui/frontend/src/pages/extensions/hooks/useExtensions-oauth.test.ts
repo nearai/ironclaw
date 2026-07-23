@@ -28,8 +28,87 @@ function useExtensionsOauthSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup };`;
+  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup, useSetupSubmit };`;
 }
+
+function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
+  const mutationConfigs = [];
+  const context = {
+    Date,
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    removeExtension: () => {},
+    startExtensionOauth,
+    submitExtensionSetup,
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => `localized:${key}`,
+    window: {
+      clearInterval: () => {},
+      setInterval: () => 1,
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  return { context, mutationConfigs };
+}
+
+test("extension setup fallbacks use translated client-generated errors", async () => {
+  const { context, mutationConfigs } = loadLocalizedMutationHooks({
+    startExtensionOauth: () => Promise.resolve({ success: false }),
+    submitExtensionSetup: () => Promise.resolve({ success: false }),
+  });
+
+  context.globalThis.__testExports.useSetupSubmit({ id: "slack" });
+  context.globalThis.__testExports.useOauthSetup({ id: "slack" });
+
+  await assert.rejects(
+    mutationConfigs[0].mutationFn({ secrets: {}, fields: {} }),
+    { message: "localized:extensions.setupFailed" },
+  );
+  await assert.rejects(
+    mutationConfigs[1].mutationFn({ secret: null, popup: null }),
+    { message: "localized:extensions.oauthSetupFailed" },
+  );
+});
+
+test("OAuth setup rejects an insecure authorization URL with translated copy", async () => {
+  const { context, mutationConfigs } = loadLocalizedMutationHooks({
+    startExtensionOauth: () =>
+      Promise.resolve({ success: true, authorization_url: "http://provider.example/authorize" }),
+    submitExtensionSetup: () => Promise.resolve({ success: true }),
+  });
+
+  context.globalThis.__testExports.useOauthSetup({ id: "slack" });
+
+  await assert.rejects(
+    mutationConfigs[0].mutationFn({ secret: null, popup: null }),
+    { message: "localized:extensions.oauthInvalidAuthorizationUrl" },
+  );
+});
 
 test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
   const stateUpdates = [];
@@ -613,7 +692,7 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /authorization failed/i.test(update.value),
+        update.value === "extensions.oauthFailed",
     ),
     "a flow-matched failure must surface a retryable error",
   );
@@ -646,7 +725,7 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
         (update) =>
           update.index === 1 &&
           typeof update.value === "string" &&
-          /authorization failed/i.test(update.value),
+          update.value === "extensions.oauthFailed",
       ),
     "a foreign flow's failure must not error this watcher",
   );
@@ -1043,13 +1122,14 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
   ]);
 });
 
-test("useOauthSetup surfaces an expired flow-status poll as a retryable error when no browser signal arrives", async () => {
+test("useOauthSetup translates expired and canceled flow-status failures", async () => {
   const stateUpdates = [];
   const intervals = [];
   const storage = new Map();
   let mutationConfig = null;
   let stateIndex = 0;
   let configuredCount = 0;
+  let flowStatus = "expired";
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
     Date,
@@ -1073,7 +1153,7 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchOauthFlowStatus: () => Promise.resolve({ status: "expired" }),
+    fetchOauthFlowStatus: () => Promise.resolve({ status: flowStatus }),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -1160,9 +1240,37 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /authorization expired/i.test(update.value),
+        update.value === "extensions.oauthExpired",
     ),
     "an expired flow-status poll must surface a retryable error",
+  );
+
+  flowStatus = "canceled";
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-canceled",
+        callback_scope: { invocation_id: "invocation-canceled" },
+      },
+      popup,
+    },
+    {
+      secret: {
+        provider: "oauth_test_provider",
+        provided: true,
+      },
+    },
+  );
+
+  intervals.at(-1)();
+  await flushAsyncWork();
+
+  assert.ok(
+    stateUpdates.some(
+      (update) => update.index === 1 && update.value === "extensions.oauthCanceled",
+    ),
+    "a canceled flow-status poll must surface translated retryable copy",
   );
 });
 
@@ -1392,7 +1500,7 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /timed out/i.test(update.value),
+        update.value === "extensions.oauthTimedOut",
     ),
     "a persistent status outage must surface a retryable timeout",
   );

@@ -13,12 +13,11 @@ use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, Principal,
-    ResourceEstimate, ResourceScope, RuntimeKind, ThreadId, TrustClass, UserId,
+    ResourceEstimate, ResourceScope, RunId, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
-    RuntimeApprovalGate, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, SHELL_CAPABILITY_ID,
+    RuntimeApprovalGate, RuntimeCapabilityOutcome, RuntimeFailureKind, SHELL_CAPABILITY_ID,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 
@@ -47,7 +46,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             estimate.clone(),
@@ -71,7 +70,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
     approve_shell_dispatch(runtime_surfaces, &context, &gate).await;
 
     let resumed = host_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             capability_id,
@@ -119,7 +118,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             estimate.clone(),
@@ -132,7 +131,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     };
     approve_shell_dispatch(runtime_surfaces, &context, &gate).await;
     let resumed = host_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             capability_id,
@@ -184,7 +183,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             ResourceEstimate::default(),
@@ -236,7 +235,7 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
         .expect("auto-approve setting update");
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id,
             ResourceEstimate::default(),
@@ -277,7 +276,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
         echo_spawn_execution_context("local-dev-echo-default-on", "thread-echo-default-on");
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id,
             ResourceEstimate::default(),
@@ -315,7 +314,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             ResourceEstimate::default(),
@@ -367,7 +366,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
         .expect("tool permission override update");
 
     let blocked = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             estimate.clone(),
@@ -387,7 +386,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     );
 
     let premature_resume = host_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             capability_id.clone(),
@@ -438,7 +437,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     );
 
     let resumed = host_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             capability_id,
@@ -500,7 +499,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
         .expect("legacy persistent approval policy");
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             ResourceEstimate::default(),
@@ -567,7 +566,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
         .expect("settings-page persistent echo policy");
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id,
             ResourceEstimate::default(),
@@ -634,7 +633,7 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
         .expect("settings-page persistent approval policy");
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id,
             ResourceEstimate::default(),
@@ -689,7 +688,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
         .expect("tool permission override update");
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             ResourceEstimate::default(),
@@ -757,7 +756,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             estimate.clone(),
@@ -785,7 +784,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
         .expect("deny approval");
 
     let resumed = host_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             capability_id,
@@ -841,6 +840,7 @@ fn shell_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {
     let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
+    context.run_id = Some(RunId::new());
     context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }
@@ -982,7 +982,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             ResourceEstimate::default(),
@@ -1020,7 +1020,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id,
             ResourceEstimate::default(),
@@ -1067,7 +1067,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             capability_id.clone(),
             estimate.clone(),
@@ -1094,7 +1094,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     .expect("approval issues spawn lease"); // safety: test-only helper in #[cfg(test)] module.
 
     let resumed = host_runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             gate.approval_request_id,
             capability_id,
@@ -1135,7 +1135,7 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context,
             capability_id,
             ResourceEstimate::default(),
@@ -1183,6 +1183,7 @@ fn echo_spawn_execution_context(user_id: &str, thread_id: &str) -> ExecutionCont
     let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
+    context.run_id = Some(RunId::new());
     context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }
@@ -1218,7 +1219,7 @@ async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
         CapabilityId::new(APPLY_PATCH_CAPABILITY_ID).expect("apply_patch capability"); // safety: test-only helper in #[cfg(test)] module.
 
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id,
             ResourceEstimate::default(),
@@ -1255,7 +1256,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
 
     // First invocation — expect approval gate.
     let first_blocked = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability_id.clone(),
             estimate.clone(),
@@ -1270,7 +1271,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     // Approve and resume the first invocation.
     approve_shell_dispatch(runtime_surfaces, &context, &first_gate).await;
     let first_resumed = host_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             first_gate.approval_request_id,
             capability_id.clone(),
@@ -1289,12 +1290,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     // context would conflict with the completed first-invocation record.
     let context2 = shell_execution_context("local-dev-regate-owner", "thread-regate");
     let second = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context2,
-            capability_id,
-            estimate,
-            input,
-        ))
+        .invoke_capability((context2, capability_id, estimate, input))
         .await
         .expect("second invocation"); // safety: test-only helper in #[cfg(test)] module.
     // Spent one-shot lease must not bypass approval on second invocation.

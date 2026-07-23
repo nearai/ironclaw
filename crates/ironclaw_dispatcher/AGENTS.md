@@ -13,7 +13,7 @@
 
 - The neutral runtime dispatch port that routes already-authorized capability requests to prebound bindings resolved by capability id.
 - `RuntimeDispatcher<'a, G>` consumes a snapshot-shaped `ToolResolver`; package, manifest, and runtime selection happen when a binding is published, never per invocation. The concrete WASM/MCP/process/first-party lane set remains closed behind host-runtime's exhaustive `RuntimeLaneExecutor` match (arch-simplification §4.2), with no `HashMap<RuntimeKind, dyn RuntimeAdapter>` production router.
-- The re-exported `ironclaw_host_api` dispatch contracts: `CapabilityDispatcher`, `CapabilityDispatchRequest`, `CapabilityDispatchResult`, `DispatchError`, `RuntimeDispatchErrorKind` (runtime errors redacted to stable kinds at the public surface).
+- The re-exported `ironclaw_host_api` dispatch contracts: `CapabilityDispatcher`, `Authorized`, `CapabilityDispatchRequest`, `CapabilityDispatchResult`, `DispatchError`, `RuntimeDispatchErrorKind` (runtime errors redacted to stable kinds at the public surface).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

@@ -594,7 +594,13 @@ pub(crate) fn build_runtime_input_with_options(
                     base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
-                runtime_input = runtime_input.with_resolved_llm(llm);
+                // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
+                // serve/run turn provider is built via `wrap_swappable_gateway`,
+                // which never wires `RecordingLlm` itself; this seam attaches the
+                // recorder factory over the gateway's swappable provider so the
+                // live QA lane can harvest replayable per-case traces. No-op when
+                // the env var is unset (production default).
+                runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
             }
             None => {
                 tracing::warn!(
@@ -1806,6 +1812,45 @@ mod tests {
             });
             assert_eq!(boot.home().path(), config.home().path());
         }
+    }
+
+    #[test]
+    fn serve_runtime_input_attaches_trace_recorder_from_environment() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _api_key = EnvGuard::set("NEARAI_API_KEY", "test-api-key");
+        let _record_trace = EnvGuard::set("IRONCLAW_RECORD_TRACE", "1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[llm.default]
+provider_id = "nearai"
+model = "deepseek-ai/DeepSeek-V4-Flash"
+api_key_env = "NEARAI_API_KEY"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        let resolved = runtime_input.llm.expect("resolved LLM");
+
+        assert!(
+            resolved.has_provider_factory(),
+            "serve must attach the recording decorator at the caller seam"
+        );
     }
 
     #[test]

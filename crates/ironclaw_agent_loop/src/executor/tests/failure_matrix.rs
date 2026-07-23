@@ -136,12 +136,13 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "DriverBug <- Approval gate SkipAndContinue",
         setup: FailureSetup::DriverBugApprovalSkip,
-        // matrix-divergence: GateOutcome::validate_for_gate_kind marks
-        // Approval+SkipAndContinue as DriverBug, but GateStage does not enforce
-        // that validator today; the planned executor skips the gate and can
-        // continue to a normal completion.
-        expected_kind: ExpectedTerminal::CompletedDivergence {
-            planned_kind: LoopFailureKind::DriverBug,
+        // §5a.1 closed: GateStage now enforces
+        // GateOutcome::validate_for_gate_kind — a SkipAndContinue outcome on an
+        // Approval gate is a strategy-contract violation and fails the run as
+        // DriverBug instead of silently skipping the gated call and completing.
+        expected_kind: ExpectedTerminal::Failed {
+            kind: LoopFailureKind::DriverBug,
+            safe_summary: None,
         },
         expects_explanation: false,
     },
@@ -152,10 +153,11 @@ const ROWS: &[MatrixRow] = &[
             kind: LoopFailureKind::NoProgressDetected,
             safe_summary: None,
         },
-        // matrix-divergence: NoProgressDetected is listed as explainable, but
-        // the StopKind::NoProgressDetected exit path writes the failed exit
-        // directly instead of calling attach_failure_explanation.
-        expects_explanation: false,
+        // §5a.2 closed: the StopKind::NoProgressDetected failed branch now
+        // attaches a failure explanation (same path as other explainable
+        // kinds) after the final-answer nudge declines — the nudge itself is
+        // untouched (a successful nudge still completes with no explanation).
+        expects_explanation: true,
     },
     MatrixRow {
         label: "PolicyDenied <- scripted Denied capability outcome",
@@ -262,7 +264,7 @@ matrix_row_test!(matrix_capability_invalid_input_recovers, 2);
 matrix_row_test!(matrix_capability_invalid_output_recovers, 3);
 matrix_row_test!(matrix_iteration_limit, 4);
 matrix_row_test!(matrix_invalid_model_output, 5);
-matrix_row_test!(matrix_driver_bug_approval_skip_diverges, 6);
+matrix_row_test!(matrix_driver_bug_approval_skip_fails_as_driver_bug, 6);
 matrix_row_test!(matrix_no_progress_detected, 7);
 matrix_row_test!(matrix_policy_denied_outcome_diverges, 8);
 matrix_row_test!(matrix_capability_policy_denied_recovers, 9);
@@ -377,12 +379,20 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .await
         }
         FailureSetup::NoProgressDetected => {
-            let host = MockHost::new(vec![calls_response(), calls_response(), calls_response()])
-                .with_batch_outcomes(vec![
-                    batch_outcome(no_change_result("result:no-progress-1")),
-                    batch_outcome(no_change_result("result:no-progress-2")),
-                    batch_outcome(no_change_result("result:no-progress-3")),
-                ]);
+            // The 4th scripted response feeds the failure-explanation model
+            // call that fires after the no-progress stop (nudges are disabled
+            // in this profile, so the nudge path declines without a model call).
+            let host = MockHost::new(vec![
+                calls_response(),
+                calls_response(),
+                calls_response(),
+                reply_response_with_text("no progress explanation"),
+            ])
+            .with_batch_outcomes(vec![
+                batch_outcome(no_change_result("result:no-progress-1")),
+                batch_outcome(no_change_result("result:no-progress-2")),
+                batch_outcome(no_change_result("result:no-progress-3")),
+            ]);
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::PolicyDenied => {

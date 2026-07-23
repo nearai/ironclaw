@@ -34,9 +34,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
     HostRuntimeError, HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus,
-    RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId,
+    RuntimeApprovalGate, RuntimeApprovalResume, RuntimeAuthGate, RuntimeBlockedReason,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId, RuntimeInvocation,
     RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
     VisibleCapability, VisibleCapabilityAccess,
 };
@@ -123,23 +123,23 @@ use ironclaw_turns::{
     TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, CommunicationContextFetch, CommunicationContextProvider,
-        CommunicationRuntimeContext, CompactionInitiator, ConnectedChannelSummary,
-        ConnectedChannelsState, DeliveryTargetState, FinalizeAssistantMessage,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopInput,
-        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        BatchPolicyKind, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
+        CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+        CompactionInitiator, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+        LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+        LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
+        LoopInput, LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
         LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelWorkKind, ModelWorkOutcome, ModelWorkRequest,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopRequest, LoopRunContext, LoopSafeSummary, ModelWorkKind, ModelWorkOutcome,
+        ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput,
+        PersonalContextPolicy, PromptMode, SkillVisibility, StageCheckpointPayloadRequest,
+        SystemInferenceTaskId, UserProfileContext, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -3460,7 +3460,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
     let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
@@ -3817,7 +3817,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
@@ -4218,7 +4218,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
         },
     )));
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
@@ -4262,7 +4262,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
         },
     )));
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
@@ -4299,7 +4299,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
     // No input staged and no outcome pushed: the hook must deny before the
     // capability port resolves input or reaches the inner runtime.
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
@@ -4336,7 +4336,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
     )
     .await;
     let outcome_a = host_a
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_a,
             capability_id: allowed_id.clone(),
@@ -4366,7 +4366,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
         },
     )));
     let outcome_b = host_b
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_b,
             capability_id: allowed_id.clone(),
@@ -6096,8 +6096,8 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         .unwrap();
     assert!(surface.descriptors.is_empty());
     let outcome = host
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -6227,7 +6227,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
     );
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
@@ -6253,8 +6253,8 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
     assert_eq!(message.summary.as_str(), "capability completed");
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
-    assert_eq!(invocations[0].capability_id, capability_id);
-    assert_eq!(invocations[0].input, json!({"message": "hello tool"}));
+    assert_eq!(invocations[0].1, capability_id);
+    assert_eq!(invocations[0].3, json!({"message": "hello tool"}));
     assert_eq!(io.results(), vec![(capability_id, json!({"echoed": true}))]);
     assert!(fixture.milestone_names().contains(&"capability_invoked"));
 }
@@ -6301,7 +6301,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
     let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
@@ -6379,7 +6379,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
     // Invoking tool_b must be denied — the host profile filter wins over the
     // strategy's implicit `All` permit.
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: tool_b_id,
@@ -6455,7 +6455,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
 
     for input_ref in [first_input, second_input] {
         let outcome = host
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
@@ -6470,44 +6470,32 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
 
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 2);
-    assert_ne!(
-        invocations[0].context.invocation_id,
-        invocations[1].context.invocation_id
+    let first_context = &invocations[0].0;
+    let second_context = &invocations[1].0;
+    assert_ne!(first_context.invocation_id, second_context.invocation_id);
+    assert_eq!(
+        first_context.resource_scope.invocation_id,
+        first_context.invocation_id
     );
     assert_eq!(
-        invocations[0].context.resource_scope.invocation_id,
-        invocations[0].context.invocation_id
-    );
-    assert_eq!(
-        invocations[1].context.resource_scope.invocation_id,
-        invocations[1].context.invocation_id
+        second_context.resource_scope.invocation_id,
+        second_context.invocation_id
     );
     for invocation in invocations {
+        let context = invocation.0;
+        assert_eq!(context.tenant_id, visible_request.context.tenant_id);
+        assert_eq!(context.user_id, visible_request.context.user_id);
+        assert_eq!(context.agent_id, visible_request.context.agent_id);
+        assert_eq!(context.project_id, visible_request.context.project_id);
+        assert_eq!(context.thread_id, visible_request.context.thread_id);
         assert_eq!(
-            invocation.context.tenant_id,
-            visible_request.context.tenant_id
-        );
-        assert_eq!(invocation.context.user_id, visible_request.context.user_id);
-        assert_eq!(
-            invocation.context.agent_id,
-            visible_request.context.agent_id
-        );
-        assert_eq!(
-            invocation.context.project_id,
-            visible_request.context.project_id
-        );
-        assert_eq!(
-            invocation.context.thread_id,
-            visible_request.context.thread_id
-        );
-        assert_eq!(
-            invocation.context.extension_id,
+            context.extension_id,
             ExtensionId::new(fixture.context.loop_driver_id.as_str()).unwrap()
         );
-        assert_eq!(invocation.context.runtime, RuntimeKind::Wasm);
-        assert_eq!(invocation.context.trust, TrustClass::UserTrusted);
-        assert_eq!(invocation.context.grants, visible_request.context.grants);
-        assert_eq!(invocation.context.mounts, visible_request.context.mounts);
+        assert_eq!(context.runtime, RuntimeKind::Wasm);
+        assert_eq!(context.trust, TrustClass::UserTrusted);
+        assert_eq!(context.grants, visible_request.context.grants);
+        assert_eq!(context.mounts, visible_request.context.mounts);
     }
 }
 
@@ -6545,7 +6533,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         .await
         .unwrap();
     let denied = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: hidden_id,
@@ -6564,7 +6552,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
     assert!(runtime.invocations().is_empty());
 
     let stale = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("sha256:stale").unwrap(),
             capability_id: visible_id,
@@ -6620,7 +6608,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
         .unwrap();
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -6728,7 +6716,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     let mut outcomes = Vec::new();
     for (capability_id, input_ref) in cases {
         outcomes.push(
-            host.invoke_capability(CapabilityInvocation {
+            host.invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id,
@@ -6813,7 +6801,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
         .unwrap();
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -6880,7 +6868,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
         .unwrap();
 
     let invalid = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
@@ -6891,7 +6879,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
         .await
         .unwrap_err();
     let unavailable = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -6966,9 +6954,9 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         .unwrap();
 
     let batch = host
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
             invocations: vec![
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version.clone(),
                     capability_id: approval_id,
@@ -6976,7 +6964,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                     approval_resume: None,
                     auth_resume: None,
                 },
-                CapabilityInvocation {
+                LoopRequest {
                     activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version,
                     capability_id: echo_id,
@@ -7036,7 +7024,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    let invocation = CapabilityInvocation {
+    let invocation = LoopRequest {
         activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
@@ -7163,7 +7151,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    let invocation = CapabilityInvocation {
+    let invocation = LoopRequest {
         activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
@@ -7245,7 +7233,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
 
     for input_ref in input_refs.iter().cloned() {
         let outcome = host
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
@@ -7258,7 +7246,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
     }
     let retried = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -7362,7 +7350,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    let invocation = CapabilityInvocation {
+    let invocation = LoopRequest {
         activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
@@ -7431,7 +7419,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
         .unwrap();
 
     let error = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: requested_id,
@@ -7503,7 +7491,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
     assert_ne!(first_surface.version, second_surface.version);
 
     let stale = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: first_surface.version,
             capability_id: first_id,
@@ -7528,8 +7516,8 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
         .unwrap();
 
     let outcome = host
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -7549,7 +7537,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
     ));
 
     let stale = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("other:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -7620,7 +7608,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
     );
 
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: e2e_script_capability_id(),
@@ -7683,7 +7671,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
         .unwrap();
 
     let denied = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -7745,7 +7733,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    let invocation = CapabilityInvocation {
+    let invocation = LoopRequest {
         activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
@@ -8148,7 +8136,7 @@ struct RecordingHostRuntime {
     surface: Mutex<ironclaw_host_runtime::VisibleCapabilitySurface>,
     outcomes: Mutex<Vec<RuntimeCapabilityOutcome>>,
     errors: Mutex<Vec<HostRuntimeError>>,
-    invocations: Mutex<Vec<RuntimeCapabilityRequest>>,
+    invocations: Mutex<Vec<RuntimeInvocation>>,
     visible_requests: Mutex<usize>,
 }
 
@@ -8175,7 +8163,7 @@ impl RecordingHostRuntime {
         *self.surface.lock().unwrap() = surface;
     }
 
-    fn invocations(&self) -> Vec<RuntimeCapabilityRequest> {
+    fn invocations(&self) -> Vec<RuntimeInvocation> {
         self.invocations.lock().unwrap().clone()
     }
 
@@ -8188,7 +8176,7 @@ impl RecordingHostRuntime {
 impl HostRuntime for RecordingHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         tokio::task::yield_now().await;
         self.invocations.lock().unwrap().push(request);
@@ -8202,7 +8190,7 @@ impl HostRuntime for RecordingHostRuntime {
 
     async fn resume_capability(
         &self,
-        _request: RuntimeCapabilityResumeRequest,
+        _request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         unreachable!("resume is not used by loop capability tests")
     }
@@ -8634,7 +8622,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .await
             .map_err(driver_host_error)?;
         let capability = host
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: self.capability_id.clone(),

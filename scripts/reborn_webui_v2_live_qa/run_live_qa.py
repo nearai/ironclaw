@@ -769,6 +769,44 @@ def server_env(
     return env
 
 
+def case_llm_trace_env(output_dir: Path, case_name: str) -> dict[str, str]:
+    """Per-case env that makes the spawned ``ironclaw serve`` record a
+    replayable ``LlmTrace`` for this case.
+
+    The lane restarts a fresh serve process per case (see ``run_cases``), so a
+    per-case ``IRONCLAW_TRACE_OUTPUT`` path attributes every trace to exactly one
+    case with no timestamp/turn correlation needed. Recording flushes
+    incrementally after each model step, so the trace still lands even though the
+    process is signalled (not gracefully drained) at case teardown. These traces
+    are harvested as CI artifacts for fixture curation and cross-run drift
+    detection; the harness does not replay them in-line."""
+    trace_path = output_dir / "llm-traces" / f"{case_name}.json"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    return {
+        "IRONCLAW_RECORD_TRACE": "1",
+        "IRONCLAW_TRACE_OUTPUT": str(trace_path),
+        "IRONCLAW_TRACE_MODEL_NAME": f"reborn-qa-{case_name}",
+    }
+
+
+def validate_case_llm_trace(output_dir: Path, case_name: str) -> Path:
+    """Require a complete, parseable trace for a successful model-driving case."""
+    trace_path = output_dir / "llm-traces" / f"{case_name}.json"
+    try:
+        payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LiveQaError(
+            f"expected LLM trace for {case_name} is missing or invalid: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("steps"), list):
+        raise LiveQaError(
+            f"expected LLM trace for {case_name} does not contain a steps list"
+        )
+    if not payload["steps"]:
+        raise LiveQaError(f"expected LLM trace for {case_name} contains no steps")
+    return trace_path
+
+
 async def start_reborn_server(
     binary: Path,
     reborn_home: Path,
@@ -8078,6 +8116,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_3a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),
     "qa_3c_endpoint_status_slack_routine": CaseSpec(
@@ -8114,6 +8153,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_5a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_5b_drive_connect": CaseSpec(
         case_qa_5b_drive_connect,
@@ -8161,6 +8201,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_7a_slack_product_channel_connect,
         requires_slack=True,
         requires_slack_target=True,
+        expects_llm_trace=False,
     ),
     "qa_7b_sheets_connect": CaseSpec(
         case_qa_7b_sheets_connect,
@@ -8189,6 +8230,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_8a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_8b_hn_keyword_live_chat": CaseSpec(case_qa_8b_hn_keyword_live_chat),
     "qa_8c_hn_keyword_slack_routine": CaseSpec(
@@ -8205,6 +8247,7 @@ CASES: dict[str, CaseSpec] = {
         case_qa_9a_slack_connect,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        expects_llm_trace=False,
     ),
     "qa_9b_routine_dm_delivery_exactly_once": CaseSpec(
         case_qa_9b_routine_dm_delivery_exactly_once,
@@ -8342,6 +8385,7 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "requires_google_runtime_access": spec.requires_google_runtime_access,
                 "requires_telegram": spec.requires_telegram,
                 "requires_github_auth": spec.requires_github_auth,
+                "expects_llm_trace": spec.expects_llm_trace,
                 "implemented": spec.implemented,
                 "status": (
                     "default"
@@ -8768,14 +8812,22 @@ async def run_cases(args: argparse.Namespace) -> int:
                 flush=True,
             )
             continue
+        # Merge per-case trace-recording env over the prepared home env without
+        # mutating `prepared_home.env` (reused below for the context and Slack
+        # setup). This is what switches on replayable per-case LlmTrace capture.
+        server_extra_env = {
+            **prepared_home.env,
+            **case_llm_trace_env(args.output_dir, name),
+        }
         proc, base_url = await start_reborn_server(
             binary,
             prepared_home.path,
             args.output_dir,
-            prepared_home.env,
+            server_extra_env,
         )
         if not first_base_url:
             first_base_url = base_url
+        completed_result: ProbeResult | None = None
         try:
             ctx = LiveQaContext(
                 base_url=base_url,
@@ -8822,6 +8874,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                 is_retriable=_is_case_retriable,
             )
             result = _attach_browser_diagnostics(args.output_dir, result)
+            completed_result = result
             results.append(result)
             print(
                 f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
@@ -8865,6 +8918,30 @@ async def run_cases(args: argparse.Namespace) -> int:
                 break
         finally:
             stop_process(proc)
+            if (
+                completed_result is not None
+                and completed_result.success
+                and case_spec.expects_llm_trace
+            ):
+                try:
+                    trace_path = validate_case_llm_trace(args.output_dir, name)
+                    completed_result.details["llm_trace_path"] = str(trace_path)
+                except LiveQaError as exc:
+                    completed_result.success = False
+                    completed_result.details.update(
+                        {
+                            "blocking": True,
+                            "failure_class": "infrastructure",
+                            "failure_category": "trace_harvest",
+                            "failure_status": "failed",
+                            "error": str(exc),
+                        }
+                    )
+                    print(
+                        f"[reborn-webui-v2-live-qa] case={name} success=False "
+                        "blocked=trace_harvest",
+                        flush=True,
+                    )
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
             trace_exports.append(trace_export)
             print(

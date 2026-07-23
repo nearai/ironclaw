@@ -18,10 +18,10 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityFailureKind, CapabilityInputRef,
+        CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+        LoopRequestBatch, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
         VisibleCapabilitySurface, resolution,
     },
 };
@@ -37,7 +37,7 @@ pub struct RecordingTestCapabilityPort {
     mode: CapabilityMode,
     expose_spawn_subagent: bool,
     use_subagent_allowed_tool: bool,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     next_result: Arc<AtomicUsize>,
     approval_calls: Arc<AtomicUsize>,
 }
@@ -48,6 +48,7 @@ enum CapabilityMode {
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
     InvocationError,
+    InvalidInputThenEcho,
 }
 
 impl RecordingTestCapabilityPort {
@@ -59,6 +60,13 @@ impl RecordingTestCapabilityPort {
     /// (fault-matrix P4: non-model capability-stage failure).
     pub fn invocation_error() -> Self {
         Self::new(CapabilityMode::InvocationError, false, false)
+    }
+
+    /// First invocation is a model-actionable invalid input; a changed second
+    /// invocation succeeds. Used to prove the whole-turn correction loop
+    /// independently of any one capability producer.
+    pub fn invalid_input_then_echo() -> Self {
+        Self::new(CapabilityMode::InvalidInputThenEcho, false, false)
     }
 
     pub fn echo_with_spawn_subagent() -> Self {
@@ -141,7 +149,7 @@ impl RecordingTestCapabilityPort {
         ))
     }
 
-    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<LoopRequest> {
         self.invocations.lock().unwrap().clone()
     }
 
@@ -260,13 +268,22 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request);
         if matches!(self.mode, CapabilityMode::InvocationError) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "scripted capability invocation failure",
+            ));
+        }
+        if matches!(self.mode, CapabilityMode::InvalidInputThenEcho)
+            && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Ok(resolution::failed(
+                CapabilityFailureKind::InvalidInput,
+                "capability input failed validation".to_string(),
+                None,
             ));
         }
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)
@@ -300,7 +317,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let stop_on_first_suspension = request.stop_on_first_suspension;
         let mut resolutions = Vec::new();

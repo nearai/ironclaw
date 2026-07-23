@@ -27,7 +27,13 @@
 //! the explicit security milestone); this slice lands the structural witness so
 //! `dispatch()`'s signature can demand it.
 
-use crate::{Blocked, DenyRef, Invocation, MountView, ResourceReservation, RuntimeLane, Timestamp};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    ActivityId, Actor, Blocked, CapabilityId, CorrelationId, DenyRef, Invocation, InvocationOrigin,
+    MountView, ProcessId, ResourceEstimate, ResourceReservation, ResourceScope, RuntimeLane,
+    Timestamp,
+};
 
 /// Proof of authority to mint an [`Authorized`]. The kernel authorizer implements
 /// this trait on its own type; no one else legitimately does (enforced by an
@@ -137,6 +143,40 @@ impl Authorized {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_for_test(
+        invocation: Invocation,
+        lane: RuntimeLane,
+        mounts: MountView,
+        reservation: Option<ResourceReservation>,
+        deadline: Timestamp,
+    ) -> Self {
+        Self {
+            invocation,
+            lane,
+            mounts: Some(mounts),
+            reservation,
+            deadline,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_for_test_with_mounts(
+        invocation: Invocation,
+        lane: RuntimeLane,
+        mounts: Option<MountView>,
+        reservation: Option<ResourceReservation>,
+        deadline: Timestamp,
+    ) -> Self {
+        Self {
+            invocation,
+            lane,
+            mounts,
+            reservation,
+            deadline,
+        }
+    }
+
     /// The exact invocation this witness authorized.
     pub fn invocation(&self) -> &Invocation {
         &self.invocation
@@ -198,6 +238,81 @@ impl Authorized {
     /// Never `Drop`.
     pub fn abort(self) -> Option<ResourceReservation> {
         self.reservation
+    }
+}
+
+/// Durable process-lifetime continuation of an allowed spawn decision.
+///
+/// Unlike [`Authorized`], this record is not single-use and is not bounded by a
+/// short witness deadline. It persists the authority facts produced at spawn so
+/// the process executor can re-mint a fresh witness when detached execution
+/// begins, without re-running policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessAuthorizedContinuation {
+    pub invocation: ProcessAuthorizedInvocation,
+    pub lane: RuntimeLane,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+}
+
+/// The invocation facts persisted with a spawned process authority record.
+///
+/// Raw `input` is intentionally not stored here; the process start path already
+/// owns the execution payload and supplies it when re-minting the short-lived
+/// [`Invocation`] carried by [`Authorized`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessAuthorizedInvocation {
+    pub activity_id: ActivityId,
+    pub capability: CapabilityId,
+    pub scope: ResourceScope,
+    pub actor: Actor,
+    pub origin: InvocationOrigin,
+    pub estimate: ResourceEstimate,
+    pub correlation_id: CorrelationId,
+    pub process_id: ProcessId,
+    pub parent_process_id: Option<ProcessId>,
+}
+
+impl ProcessAuthorizedContinuation {
+    /// Convert the one-shot spawn witness into the durable process-lifetime
+    /// continuation record. The process id is generated after authorization, so
+    /// it is bound here before the process store persists the record.
+    pub fn from_authorized(
+        authorized: Authorized,
+        now: Timestamp,
+        process_id: ProcessId,
+    ) -> Result<Self, Box<Authorized>> {
+        let (invocation, lane, mounts, resource_reservation) = authorized.into_parts(now)?;
+        let Invocation {
+            activity_id,
+            capability,
+            input: _, // intentionally not persisted; ProcessStart owns execution input.
+            scope,
+            actor,
+            origin,
+            estimate,
+            correlation_id,
+            // The original process id is the direct spawner for nested process
+            // starts; the new spawned process id is bound below.
+            process_id: parent_process_id,
+            parent_process_id: _,
+        } = invocation;
+        Ok(Self {
+            invocation: ProcessAuthorizedInvocation {
+                activity_id,
+                capability,
+                scope,
+                actor,
+                origin,
+                estimate,
+                correlation_id,
+                process_id,
+                parent_process_id,
+            },
+            lane,
+            mounts,
+            resource_reservation,
+        })
     }
 }
 

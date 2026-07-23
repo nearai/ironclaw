@@ -149,6 +149,15 @@ impl OriginGateMatrix {
             automation: OriginGatePolicy::Forbidden,
         }
     }
+
+    /// Product-origin-only matrix for first-party product API capabilities.
+    pub fn product_consent_only() -> Self {
+        Self {
+            loop_run: OriginGatePolicy::Forbidden,
+            product: OriginGatePolicy::ConsentSufficient,
+            automation: OriginGatePolicy::Forbidden,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -433,5 +442,13 @@ mod origin_gate_wire_tests {
             )),
             OriginGatePolicy::GatedUnlessGranted
         );
+    }
+
+    #[test]
+    fn product_consent_only_is_for_product_api_capabilities() {
+        let matrix = OriginGateMatrix::product_consent_only();
+        assert_eq!(matrix.loop_run, OriginGatePolicy::Forbidden); // safety: test-only ratchet assertion.
+        assert_eq!(matrix.product, OriginGatePolicy::ConsentSufficient); // safety: test-only ratchet assertion.
+        assert_eq!(matrix.automation, OriginGatePolicy::Forbidden); // safety: test-only ratchet assertion.
     }
 }

@@ -7,8 +7,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    EffectKind, HostApiError, OriginGateMatrix, PermissionMode, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind,
+    EffectKind, HostApiError, OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate,
+    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -124,12 +124,21 @@ fn lifecycle_manifest(
                 .set_output_bytes(16 * 1024),
             hard_ceiling: None,
         }),
-        // §5.3 S3 (behavior-neutral): mirror today's effect gate for `LoopRun`
-        // (Ungated iff id is in the reviewed `UNGATED_LOOP_RUN_CAPABILITIES`
-        // allowlist — only `extension_search` qualifies), Product/Automation
-        // deny-by-default. Nothing reads this yet (fold is S4).
-        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(id)),
+        origin_gate_matrix: Some(lifecycle_origin_gate_matrix(id)),
     })
+}
+
+fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
+    let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+    if matches!(
+        id,
+        EXTENSION_INSTALL_CAPABILITY_ID
+            | EXTENSION_ACTIVATE_CAPABILITY_ID
+            | EXTENSION_REMOVE_CAPABILITY_ID
+    ) {
+        matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    matrix
 }
 
 struct ExtensionLifecycleToolHandler {
@@ -400,7 +409,7 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         }
         ProductWorkflowError::Transient { .. } => {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
     }
@@ -474,8 +483,9 @@ mod tests {
     /// §5.3 S3 (behavior-neutral): the four extension-lifecycle capabilities
     /// declare an `origin_gate_matrix`. `extension_search` is read-only and thus
     /// Ungated for LoopRun (it is in the reviewed allowlist); install/activate/
-    /// remove carry write/network effects and gate. Product/Automation are
-    /// deny-by-default.
+    /// remove carry write/network effects and gate for LoopRun. The direct
+    /// WebUI ProductSurface path is consent-sufficient for install/activate/
+    /// remove; automation remains deny-by-default.
     #[test]
     fn extension_lifecycle_capabilities_declare_behavior_neutral_origin_gate_matrix() {
         let manifests = manifests().expect("lifecycle manifests build");
@@ -484,12 +494,17 @@ mod tests {
                 .origin_gate_matrix
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", manifest.id));
-            assert_eq!(
-                matrix.product,
-                OriginGatePolicy::Forbidden,
-                "{}",
-                manifest.id
-            );
+            let expected_product = if matches!(
+                manifest.id.as_str(),
+                EXTENSION_INSTALL_CAPABILITY_ID
+                    | EXTENSION_ACTIVATE_CAPABILITY_ID
+                    | EXTENSION_REMOVE_CAPABILITY_ID
+            ) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
+            assert_eq!(matrix.product, expected_product, "{}", manifest.id);
             assert_eq!(
                 matrix.automation,
                 OriginGatePolicy::Forbidden,
@@ -1331,7 +1346,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let discovery_script = std::sync::Arc::new(
-            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search"),
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
+                // Real hosted MCP providers may return verbose prose. The
+                // generic MCP boundary must bound it without dropping the
+                // entire catalog or preventing activation.
+                .with_tool_description("provider documentation ".repeat(320)),
         );
         let services = build_runtime_substrate(
             RebornBuildInput::local_dev("extension-tools-hosted-mcp-owner", storage_root.clone())
@@ -1580,6 +1599,7 @@ mod tests {
         )
         .expect("valid execution context");
         context.authenticated_actor_user_id = Some(user_id);
+        context.run_id = Some(ironclaw_host_api::RunId::new());
         context
     }
 
@@ -1719,6 +1739,18 @@ mod tests {
             panic!("expected a Diagnostic detail, got {detail:?}");
         };
         assert!(text.contains("mounted host"));
+    }
+
+    #[test]
+    fn transient_lifecycle_errors_map_to_retryable_backend_failure() {
+        let mapped = lifecycle_error(ProductWorkflowError::Transient {
+            reason: "temporary lifecycle store outage".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { kind, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::Backend);
     }
 
     /// The provenance regression itself, at the unit seam: a reason carrying

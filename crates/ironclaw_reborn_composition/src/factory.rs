@@ -29,8 +29,16 @@ use crate::extension_host::{
     },
     extension_removal_cleanup::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry},
     first_party::{FirstPartyRegistrarContext, first_party_reserved_extension_ids},
+    operator_config_capability::{
+        extend_builtin_first_party_package as extend_builtin_operator_config_package,
+        insert_handler as insert_operator_config_handler,
+    },
     provider_instance_readiness::{
         ProviderInstanceReadinessInput, provider_instance_readiness_map,
+    },
+    skill_auto_activate_capability::{
+        extend_builtin_first_party_package as extend_builtin_skill_auto_activate_package,
+        insert_handler as insert_skill_auto_activate_handler,
     },
 };
 use crate::input::{
@@ -41,6 +49,10 @@ use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_au
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+};
+use crate::outbound::outbound_preferences_capability::{
+    extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
+    insert_handler as insert_outbound_preferences_handler,
 };
 use crate::product_auth::credentials::product_auth_providers::{
     OAuthProviderComposition, compose_provider_client,
@@ -103,7 +115,7 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
-    ProductAuthTurnGateResumeDispatcher, ProjectService,
+    OutboundPreferencesProductFacade, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::FilesystemBudgetGateStore;
@@ -2195,6 +2207,21 @@ fn production_builtin_extension_registry(
             reason: format!("administrator configuration package is invalid: {error}"),
         }
     })?;
+    let package = extend_builtin_operator_config_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("operator configuration package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_outbound_preferences_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("outbound preferences package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_skill_auto_activate_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("skill auto-activation package is invalid: {error}"),
+        }
+    })?;
     registry
         .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -2280,7 +2307,7 @@ pub fn production_first_party_trust_policy(
 /// their trust policy from `production_first_party_trust_policy` plus bundles
 /// they convert themselves (see `tests/support/first_party.rs`).
 #[cfg(test)]
-pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+pub(crate) fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
     production_first_party_trust_policy(
         &crate::extension_host::first_party::first_party_bundles_from_inventory(),
     )
@@ -3272,7 +3299,7 @@ where
     .await
 }
 
-fn production_skill_management_mount_view(
+pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
     MountView::new(vec![
@@ -3913,6 +3940,31 @@ async fn build_backend_production(
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
+    })?;
+    let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        Arc::clone(&auto_approve_settings)
+            as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>;
+    insert_operator_config_handler(&mut first_party_registry, operator_auto_approve_settings)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("operator configuration handler is invalid: {error}"),
+        })?;
+    let outbound_target_provider = Arc::clone(&outbound_delivery_targets)
+        as Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>;
+    let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
+        Arc::new(crate::outbound::RebornOutboundPreferencesFacade::new(
+            Arc::clone(&outbound_stores.outbound_preferences),
+            outbound_target_provider,
+        ));
+    insert_outbound_preferences_handler(&mut first_party_registry, outbound_preferences_facade)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("outbound preferences handler is invalid: {error}"),
+        })?;
+    insert_skill_auto_activate_handler(
+        &mut first_party_registry,
+        Arc::clone(&skill_auto_activate_learned),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("skill auto-activation handler is invalid: {error}"),
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     let channel_config_for_generic = Arc::clone(&channel_config_service);

@@ -11,12 +11,12 @@ use ironclaw_turns::{
     LoopFailureKind, LoopGateRef, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
-        CapabilityAuthResume, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityFailure, CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
-        LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
-        ObservationTrust, ToolObservationDetail, ToolObservationStatus, VisibleCapabilitySurface,
+        CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
+        CapabilityFailureKind, CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage,
+        CapabilityResumeToken, ContentDigest, LoopDriverNoteKind, LoopProcessRef,
+        LoopProgressEvent, LoopRequestBatch, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+        ToolObservationStatus, VisibleCapabilitySurface,
     },
 };
 
@@ -274,7 +274,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let mut pending_auth_resume = state.pending_auth_resume.clone();
         let batch_result = ctx
             .host
-            .invoke_capability_batch(CapabilityBatchInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
                 invocations: visible_calls
                     .iter()
                     .cloned()
@@ -880,6 +880,11 @@ impl CapabilityStage {
                 .on_capability_error(&state, &summary)
                 .await
             {
+                RecoveryOutcome::ModelErrorObservation { .. } => {
+                    return Err(AgentLoopExecutorError::PlannerContract {
+                        detail: "ModelErrorObservation on capability error",
+                    });
+                }
                 RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
                     append_blocked_capability_error_result(

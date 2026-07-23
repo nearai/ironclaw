@@ -504,8 +504,8 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
 use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal, ResourceScope, TenantId,
-    ThreadId, UserId,
+    ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal, Resolution,
+    ResourceScope, TenantId, ThreadId, UserId,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -521,8 +521,9 @@ use ironclaw_loop_host::{
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
-    RebornExtensionCredentialSetup, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    ProductCapabilityInput, RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornSkillListResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_gate_ref,
@@ -2362,6 +2363,53 @@ async fn provider_factory_survives_live_reload() {
         2,
         "the instrumentation wrapper must still observe model calls after a live reload"
     );
+}
+
+/// Regression guard for the trace-recording gap: `IRONCLAW_RECORD_TRACE=1` on
+/// the serve/run path must place a `RecordingLlm` in the turn provider chain.
+/// The runtime builds turns through `wrap_swappable_gateway`, which never calls
+/// `RecordingLlm::from_env`, and hot-reloads through
+/// `build_provider_chain_components`, which also does not — so the recorder is
+/// wired *only* via `ResolvedRebornLlm::with_env_trace_recording`. Nothing
+/// pinned "serve + IRONCLAW_RECORD_TRACE ⇒ recorder attached" before, which is
+/// exactly why the env "enabled" recording yet serve emitted nothing (the
+/// committed reborn_qa fixtures were recorded through the in-process harness,
+/// whose `build_provider_chain` path *does* wire the recorder).
+///
+/// This asserts the gate at the exact serve/run resolution seam. That the
+/// attached factory actually wraps a recorder which records and flushes to disk
+/// incrementally (no explicit `flush()`, matching serve's signalled shutdown)
+/// is proven in
+/// `ironclaw_llm::recording::tests::complete_flushes_incrementally_without_explicit_flush`
+/// — the crate that owns `RecordingLlm` and can set real env vars, which this
+/// `#![forbid(unsafe_code)]` crate cannot.
+#[tokio::test]
+async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
+    let session_dir = tempfile::tempdir().expect("session tempdir");
+    let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+
+    // Disabled: no factory attached; the resolved LLM is returned unchanged.
+    {
+        let _guard = RuntimeEnvGuard::with([("IRONCLAW_RECORD_TRACE", None)]).await;
+        let disabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+            .with_env_trace_recording();
+        assert!(
+            disabled.provider_factory.is_none(),
+            "no recording factory should attach when IRONCLAW_RECORD_TRACE is unset"
+        );
+    }
+
+    // Enabled: the serve/run resolution path attaches the recording factory.
+    {
+        let _guard = RuntimeEnvGuard::set("IRONCLAW_RECORD_TRACE", "1").await;
+        let enabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_env_trace_recording();
+        assert!(
+            enabled.provider_factory.is_some(),
+            "IRONCLAW_RECORD_TRACE must attach the recording provider factory on the \
+             serve/run resolution path"
+        );
+    }
 }
 
 /// Regression guard for the benchmark instrumentation seam: a
@@ -5020,6 +5068,58 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+async fn query_webui_extension_setup(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+) -> RebornSetupExtensionResponse {
+    let page = api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::EXTENSION_SETUP_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({ "package_id": package_id }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("setup extension lifecycle projection");
+    serde_json::from_value(page.payload).expect("setup extension payload")
+}
+
+async fn submit_webui_extension_setup(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+    request: WebUiSetupExtensionRequest,
+) -> RebornSetupExtensionResponse {
+    let mut input = serde_json::to_value(request).expect("setup request serializes");
+    input
+        .as_object_mut()
+        .expect("setup request serializes as object")
+        .insert(
+            "extension_id".to_string(),
+            serde_json::Value::String(package_id.to_string()),
+        );
+    let resolution = api
+        .invoke(
+            caller.clone(),
+            CapabilityId::new(ironclaw_product_workflow::EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
+                .expect("setup submit capability id"),
+            ProductCapabilityInput::json(input),
+            ActivityId::new(),
+        )
+        .await
+        .expect("submit extension setup");
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("extension setup submit did not succeed: {other:?}"),
+    }
+    query_webui_extension_setup(api, caller, package_id).await
+}
+
 #[tokio::test]
 async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5055,16 +5155,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         None,
     );
 
-    let setup = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
-        .await
-        .expect("setup extension lifecycle projection");
+    let setup = query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
     assert_eq!(setup.phase, InstallationState::Installed);
@@ -5078,16 +5169,8 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
-    let google_setup = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
-        .await
-        .expect("google setup extension lifecycle projection");
+    let google_setup =
+        query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
     let google_secret = &google_setup.secrets[0];
     assert_eq!(google_secret.provider, "google");
@@ -5170,22 +5253,129 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
 
     let cleared = bundle
         .api
-        .set_outbound_preferences(
+        .invoke(
             caller.clone(),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: None,
-            },
+            ironclaw_host_api::CapabilityId::new(
+                ironclaw_product_workflow::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+            )
+            .expect("outbound preferences capability id"),
+            ProductCapabilityInput::json(serde_json::json!({})),
+            ActivityId::new(),
         )
         .await
         .expect("outbound preference clear uses composed facade");
-    assert!(cleared.final_reply_target.is_none());
-
-    let targets = bundle
+    assert!(matches!(cleared, Resolution::Done(_)));
+    let cleared_page = bundle
         .api
-        .list_outbound_delivery_targets(caller)
+        .query(
+            caller.clone(),
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::OUTBOUND_PREFERENCES_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("outbound preference read-back uses composed view");
+    let cleared_preferences: RebornOutboundPreferencesResponse =
+        serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
+    assert!(cleared_preferences.final_reply_target.is_none());
+
+    let targets_page = bundle
+        .api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::OUTBOUND_DELIVERY_TARGETS_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("outbound target listing uses composed facade");
+    let targets: ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert!(targets.targets.is_empty());
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "webui skill ok".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        RebornBuildInput::local_dev("runtime-webui-skill-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-webui-skill-tenant".to_string(),
+        agent_id: "runtime-webui-skill-agent".to_string(),
+        source_binding_id: "runtime-webui-skill-source".to_string(),
+        reply_target_binding_id: "runtime-webui-skill-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(3),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("runtime-webui-skill-tenant").unwrap(),
+        UserId::new("runtime-webui-skill-owner").unwrap(),
+        Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+        None,
+    );
+
+    let installed = bundle
+        .api
+        .invoke(
+            caller.clone(),
+            ironclaw_host_api::CapabilityId::new(
+                ironclaw_product_workflow::SKILL_INSTALL_CAPABILITY_ID,
+            )
+            .expect("skill install capability id"),
+            ProductCapabilityInput::json(serde_json::json!({
+                "name": "product-surface-skill",
+                "content": "---\nname: product-surface-skill\n---\n# Product Surface\n"
+            })),
+            ActivityId::new(),
+        )
+        .await
+        .expect("skill install uses product capability path");
+    match installed {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("skill install did not succeed: {other:?}"),
+    }
+    let skills_page = bundle
+        .api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::SKILLS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("skill list uses product view");
+    let skills: RebornSkillListResponse =
+        serde_json::from_value(skills_page.payload).expect("skills payload");
+    assert!(
+        skills
+            .skills
+            .iter()
+            .any(|skill| skill.name == "product-surface-skill")
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -5378,12 +5568,22 @@ async fn build_webui_services_without_local_runtime_still_lists_automations_from
 
     let response = bundle
         .api
-        .list_automations(caller, WebUiListAutomationsRequest::default())
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::AUTOMATIONS_VIEW.id.to_string(),
+                params: serde_json::to_value(WebUiListAutomationsRequest::default())
+                    .expect("automation list params"),
+                cursor: None,
+            },
+        )
         .await
         .expect("automation facade reads the core trigger repository");
 
-    assert!(response.automations.is_empty());
-    assert!(!response.scheduler_enabled);
+    let automations: ironclaw_product_workflow::RebornListAutomationsResponse =
+        serde_json::from_value(response.payload).expect("automations payload");
+    assert!(automations.automations.is_empty());
+    assert!(!automations.scheduler_enabled);
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
@@ -5421,25 +5621,21 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
-    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
-
-    let first = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            package_ref.clone(),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(serde_json::json!({
-                    "secrets": {
-                        "github_runtime_token": "ghp_first_token"
-                    },
-                    "fields": {}
-                })),
-            },
-        )
-        .await
-        .expect("submit github runtime token");
+    let first = submit_webui_extension_setup(
+        bundle.api.as_ref(),
+        caller.clone(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(serde_json::json!({
+                "secrets": {
+                    "github_runtime_token": "ghp_first_token"
+                },
+                "fields": {}
+            })),
+        },
+    )
+    .await;
     assert_eq!(first.secrets.len(), 1);
     assert!(first.secrets[0].provided);
     let first_credential_ref = first.secrets[0]
@@ -5447,23 +5643,21 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         .clone()
         .expect("credential ref");
 
-    let second = bundle
-        .api
-        .setup_extension(
-            caller,
-            package_ref,
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(serde_json::json!({
-                    "secrets": {
-                        "github_runtime_token": "ghp_second_token"
-                    },
-                    "fields": {}
-                })),
-            },
-        )
-        .await
-        .expect("rotate github runtime token");
+    let second = submit_webui_extension_setup(
+        bundle.api.as_ref(),
+        caller,
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(serde_json::json!({
+                "secrets": {
+                    "github_runtime_token": "ghp_second_token"
+                },
+                "fields": {}
+            })),
+        },
+    )
+    .await;
     assert_eq!(second.secrets.len(), 1);
     assert!(second.secrets[0].provided);
     assert_eq!(

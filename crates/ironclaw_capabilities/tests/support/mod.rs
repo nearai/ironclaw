@@ -243,12 +243,14 @@ where
 
 #[derive(Default)]
 pub struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
+    request: Mutex<Option<ironclaw_host_api::dispatch_test_support::AuthorizedDispatchRecord>>,
     dispatch_count: AtomicUsize,
 }
 
 impl RecordingDispatcher {
-    pub fn take_request(&self) -> CapabilityDispatchRequest {
+    pub fn take_request(
+        &self,
+    ) -> ironclaw_host_api::dispatch_test_support::AuthorizedDispatchRecord {
         self.request
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -272,15 +274,37 @@ impl RecordingDispatcher {
 impl CapabilityDispatcher for RecordingDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let deadline = authorized.deadline();
+        let (invocation, lane, mounts, resource_reservation) = authorized
+            .into_parts(chrono::Utc::now())
+            .map_err(|authorized| {
+                let capability = authorized.invocation().capability.clone();
+                let _ = authorized.abort();
+                DispatchError::AuthorizationExpired { capability }
+            })?;
+        let request = ironclaw_host_api::dispatch_test_support::AuthorizedDispatchRecord {
+            authenticated_actor_user_id: invocation.actor.user_id().cloned(),
+            run_id: match &invocation.origin {
+                InvocationOrigin::LoopRun(run_id) if invocation.process_id.is_none() => {
+                    Some(*run_id)
+                }
+                _ => None,
+            },
+            mounts,
+            invocation,
+            lane,
+            resource_reservation,
+            deadline,
+        };
         self.dispatch_count.fetch_add(1, Ordering::SeqCst);
         *self
             .request
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
         Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
+            capability_id: request.invocation.capability.clone(),
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
@@ -288,9 +312,9 @@ impl CapabilityDispatcher for RecordingDispatcher {
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
-                scope: request.scope,
+                scope: request.invocation.scope,
                 status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
+                estimate: request.invocation.estimate,
                 actual: Some(ResourceUsage::default()),
             },
         })
@@ -304,18 +328,20 @@ pub use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 /// The standard success dispatch result, echoing the request's capability id,
 /// scope, and estimate — the exact shape the retired hand-rolled
 /// `RecordingDispatcher` returned.
-pub fn ok_dispatch_result(request: &CapabilityDispatchRequest) -> CapabilityDispatchResult {
+pub fn ok_dispatch_result(
+    request: &ironclaw_host_api::dispatch_test_support::AuthorizedDispatchRecord,
+) -> CapabilityDispatchResult {
     dispatch_result_with_output(request, json!({"ok": true}))
 }
 
 /// Like [`ok_dispatch_result`] but with a caller-supplied output payload — the
 /// replacement for the retired `OutputDispatcher`.
 pub fn dispatch_result_with_output(
-    request: &CapabilityDispatchRequest,
+    request: &ironclaw_host_api::dispatch_test_support::AuthorizedDispatchRecord,
     output: serde_json::Value,
 ) -> CapabilityDispatchResult {
     CapabilityDispatchResult {
-        capability_id: request.capability_id.clone(),
+        capability_id: request.invocation.capability.clone(),
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,
         output,
@@ -323,9 +349,9 @@ pub fn dispatch_result_with_output(
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {
             id: ResourceReservationId::new(),
-            scope: request.scope.clone(),
+            scope: request.invocation.scope.clone(),
             status: ReservationStatus::Reconciled,
-            estimate: request.estimate.clone(),
+            estimate: request.invocation.estimate.clone(),
             actual: Some(ResourceUsage::default()),
         },
     }
@@ -458,7 +484,7 @@ pub fn registry_with_github_comment_capability() -> ExtensionRegistry {
 }
 
 pub fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -466,7 +492,11 @@ pub fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.origin = Some(InvocationOrigin::Product(
+        ProductKind::new("tests").unwrap(),
+    ));
+    context
 }
 
 pub fn dispatch_grant() -> CapabilityGrant {

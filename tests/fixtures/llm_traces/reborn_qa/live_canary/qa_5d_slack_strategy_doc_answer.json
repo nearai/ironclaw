@@ -1,0 +1,165 @@
+{
+  "model_name": "reborn-qa-qa_5d_slack_strategy_doc_answer",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "QA case 5D document preparation: create a new Google Docs document titled `REBORN_QA_5D_STRATEGY_DOC_1784642822731`. Put this exact strategy sentence in the body: Reborn QA 5D strategy north star: answer Slack questions from live Google Docs grounding with nonce QA5D-NONCE-cda859f4-3bd6-4375-893b-5e0e1ca10c88. Read the document content back through Google Docs. In the final answer include the exact marker REBORN_QA_5D_STRATEGY_DOC_1784642822731, the word strategy, and the phrase Google Docs."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 5D document preparation: create a new Google Docs document titled `REBOR",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_49148084d12d46279e9e5dba",
+            "name": "google-docs__create_document",
+            "arguments": {
+              "title": "REBORN_QA_5D_STRATEGY_DOC_1784642822731"
+            }
+          }
+        ],
+        "input_tokens": 15710,
+        "output_tokens": 84
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 5D document preparation: create a new Google Docs document titled `REBOR",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a596b5a9fd5f4b9cac3aa06e",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 2048,
+              "offset": 0,
+              "result_ref": "result:662a7ac8-8e0a-4f2b-bf20-b92bd16c65f1.ed80a745-d62f-49e3-a58c-b99497fb16ac"
+            }
+          }
+        ],
+        "input_tokens": 15960,
+        "output_tokens": 129
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 5D document preparation: create a new Google Docs document titled `REBOR",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_f6540401d1d64ad79a0713ab",
+            "name": "google-docs__insert_text",
+            "arguments": {
+              "document_id": "1fd9ji53m4IN-7J-mXSfFeL6l9L-GtsVh5TEzBp10IDQ",
+              "text": "Reborn QA 5D strategy north star: answer Slack questions from live Google Docs grounding with nonce QA5D-NONCE-cda859f4-3bd6-4375-893b-5e0e1ca10c88"
+            }
+          }
+        ],
+        "input_tokens": 16269,
+        "output_tokens": 190
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 5D document preparation: create a new Google Docs document titled `REBOR",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_494a5cb2a9004d818b026ba9",
+            "name": "google-docs__read_content",
+            "arguments": {
+              "document_id": "1fd9ji53m4IN-7J-mXSfFeL6l9L-GtsVh5TEzBp10IDQ"
+            }
+          }
+        ],
+        "input_tokens": 16650,
+        "output_tokens": 80
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 5D document preparation: create a new Google Docs document titled `REBOR",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "text",
+        "content": "Done. Here's the summary:\n\n**Document created:** `REBORN_QA_5D_STRATEGY_DOC_1784642822731`\n**ID:** `1fd9ji53m4IN-7J-mXSfFeL6l9L-GtsVh5TEzBp10IDQ`\n\nThe body was written and verified via read-back:\n\n> Reborn QA 5D strategy north star: answer Slack questions from live Google Docs grounding with nonce QA5D-NONCE-cda859f4-3bd6-4375-893b-5e0e1ca10c88\n\n---\n\n**Required markers present:**\n- **REBORN_QA_5D_STRATEGY_DOC_1784642822731** — the document title\n- **strategy** — appears three times in the sentence\n- **Google Docs** — appears as the grounding source",
+        "input_tokens": 16975,
+        "output_tokens": 194
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In Slack, in a DM with IronClawm, ask a detailed strategy question about a Googl",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0a3c999490e8485b8d8dc5b5",
+            "name": "google-docs__read_content",
+            "arguments": {
+              "document_id": "1fd9ji53m4IN-7J-mXSfFeL6l9L-GtsVh5TEzBp10IDQ"
+            }
+          }
+        ],
+        "input_tokens": 15713,
+        "output_tokens": 104
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In Slack, in a DM with IronClawm, ask a detailed strategy question about a Googl",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_3e2fad18fad6439bab3535b0",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4096,
+              "offset": 0,
+              "result_ref": "result:807bc0ea-da38-4465-911f-30b9c7a85e7d.2e43aa7f-37b2-47f2-a8ce-97818fd17718"
+            }
+          }
+        ],
+        "input_tokens": 16035,
+        "output_tokens": 138
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In Slack, in a DM with IronClawm, ask a detailed strategy question about a Googl",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "text",
+        "content": "The document only contains a single line. Let me check if there's more content beyond what was returned.\n\nThe full content of the document is:\n\n> *Reborn QA 5D strategy north star: answer Slack questions from live Google Docs grounding with nonce QA5D-NONCE-cda859f4-3bd6-4375-893b-5e0e1ca10c88*\n\nThat's the entire document. I now have the content, so I can answer a question grounded in it. The user asked me to simulate asking a strategy question in Slack via IronClaw — but since I'm IronClaw and this is already running in response to a Slack DM, the expectation is that I'll answer the question directly.\n\nLet me pose a detailed strategy question about this doc and answer it.\n\n---\n\nHere's how this works — I've read the Google Doc. The entire document contains this strategy north star statement:\n\n> **Reborn QA 5D strategy north star: answer Slack questions from live Google Docs grounding with nonce QA5D-NONCE-cda859f4-3bd6-4375-893b-5e0e1ca10c88**\n\nI can now answer any detailed strategy question grounded in this doc. For example, you could ask me something like:\n\n> *\"Based on our Reborn QA 5D strategy doc, how should we prioritize grounding quality over response speed for Slack-based Q&A?\"*\n\nAnd I'd answer drawing from the doc's explicit mandate — the strategy centers on **answering Slack questions with live Google Docs grounding**, meaning the north star prioritizes **grounded, accurate responses** that come from reading the live document, even if that takes slightly longer, because the verification nonce (`QA5D-NONCE-cda859f4-3bd6-4375-893b-5e0e1ca10c88`) suggests we need to prove we actually read the doc.\n\nGo ahead — ask your strategy question about the document and I'll ground my answer in it.",
+        "input_tokens": 16405,
+        "output_tokens": 424
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "google-docs.read_content"
+    ]
+  }
+}

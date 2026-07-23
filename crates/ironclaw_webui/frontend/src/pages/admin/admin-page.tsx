@@ -34,7 +34,6 @@ export function AdminPage() {
     users: selectedUserId
       ? (<UserDetail userId={selectedUserId} onBack={handleBack} />)
       : (<AdminUsersTab
-          selectedUserId={selectedUserId}
           onSelectUser={handleSelectUser}
         />),
     configuration: (<AdminConfigurationTab />),

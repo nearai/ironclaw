@@ -22,6 +22,9 @@ pub enum AgentLoopHostErrorKind {
     Invalid,
     /// The model/provider output was structurally invalid for the active loop contract.
     InvalidOutput,
+    /// The provider refused to produce the completion because its content
+    /// filter rejected the request or response.
+    ContentFiltered,
     PolicyDenied,
     BudgetExceeded,
     /// The model call would push utilization past the configured pause
@@ -50,6 +53,7 @@ impl AgentLoopHostErrorKind {
             Self::InvalidInvocation => "invalid_invocation",
             Self::Invalid => "invalid",
             Self::InvalidOutput => "invalid_output",
+            Self::ContentFiltered => "content_filtered",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::BudgetApprovalRequired => "budget_approval_required",

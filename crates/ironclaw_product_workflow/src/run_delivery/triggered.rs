@@ -55,6 +55,10 @@ pub struct TriggeredRunDeliveryRequest {
     pub project_scoped: bool,
     /// The trigger prompt; its first line becomes the short footer label.
     pub prompt: String,
+    /// Optional per-trigger target resolved from the creator-scoped outbound
+    /// target registry. When present, ordinary results route here instead of
+    /// consulting the user's mutable global default.
+    pub delivery_target: Option<ironclaw_turns::ReplyTargetBindingRef>,
     pub trigger_context: TriggerCommunicationContext,
 }
 
@@ -67,6 +71,17 @@ struct TriggeredNotification {
     /// AuthPrompt payloads carrying an OAuth URL must only land in a
     /// personal DM; enforced by the resolver at send time.
     require_direct_message_target: bool,
+}
+
+/// Stable run and routing inputs shared by each notification attempt for one
+/// triggered run.
+struct TriggeredNotificationContext<'a> {
+    scope: &'a TurnScope,
+    actor: &'a TurnActor,
+    run_id: TurnRunId,
+    trigger_context: &'a TriggerCommunicationContext,
+    delivery_target: Option<&'a ironclaw_turns::ReplyTargetBindingRef>,
+    authority: &'a TriggeredReplyTargetAuthority<'a>,
 }
 
 /// Typed failure classification for a single triggered-run notification
@@ -276,6 +291,7 @@ async fn deliver_triggered_run(
         creator_user_id,
         project_scoped: _,
         prompt,
+        delivery_target,
         trigger_context,
     } = request;
     let actor = TurnActor::new(creator_user_id);
@@ -378,16 +394,16 @@ async fn deliver_triggered_run(
         let event_kind = notification.event_kind;
         let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
 
-        let delivery_result = deliver_triggered_notification(
-            services,
-            &scope,
-            &actor,
+        let notification_context = TriggeredNotificationContext {
+            scope: &scope,
+            actor: &actor,
             run_id,
-            &trigger_context,
-            &authority,
-            notification,
-        )
-        .await;
+            trigger_context: &trigger_context,
+            delivery_target: delivery_target.as_ref(),
+            authority: &authority,
+        };
+        let delivery_result =
+            deliver_triggered_notification(services, &notification_context, notification).await;
 
         match delivery_result {
             Ok(delivered_messages) => {
@@ -475,29 +491,22 @@ async fn deliver_triggered_run(
                     gate_ref_for_routing: None,
                     require_direct_message_target: false,
                 };
-                let outcome = match deliver_triggered_notification(
-                    services,
-                    &scope,
-                    &actor,
-                    run_id,
-                    &trigger_context,
-                    &authority,
-                    notice,
-                )
-                .await
-                {
-                    Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                    Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    Err(TriggeredNotificationFailure::Denied) => {
-                        TriggeredRunDeliveryOutcomeKind::Denied
-                    }
-                    Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                    | Err(TriggeredNotificationFailure::Other(_)) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
-                };
+                let outcome =
+                    match deliver_triggered_notification(services, &notification_context, notice)
+                        .await
+                    {
+                        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+                        Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
+                            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                        }
+                        Err(TriggeredNotificationFailure::Denied) => {
+                            TriggeredRunDeliveryOutcomeKind::Denied
+                        }
+                        Err(TriggeredNotificationFailure::OAuthTargetNotDm)
+                        | Err(TriggeredNotificationFailure::Other(_)) => {
+                            TriggeredRunDeliveryOutcomeKind::Failed
+                        }
+                    };
                 // Only after a successful cancel and the replacement notice:
                 // remove the now-stale OAuth prompts.
                 for message in messages_to_delete_after_final.drain(..) {
@@ -693,36 +702,39 @@ async fn triggered_notification_for_state(
 /// returning the delivered channel messages.
 async fn deliver_triggered_notification(
     services: &RunDeliveryServices,
-    scope: &TurnScope,
-    actor: &TurnActor,
-    run_id: TurnRunId,
-    trigger_context: &TriggerCommunicationContext,
-    authority: &TriggeredReplyTargetAuthority<'_>,
+    context: &TriggeredNotificationContext<'_>,
     notification: TriggeredNotification,
 ) -> Result<Vec<DeliveredChannelMessage>, TriggeredNotificationFailure> {
     let projection_access_policy = AllowNoProjectionAccess;
     let outbound_policy = OutboundPolicyService::new(
         services.outbound_store.as_ref(),
         &projection_access_policy,
-        authority,
+        context.authority,
     );
-    let projection_id = prompts::run_notification_projection_id(run_id, notification.event_kind);
+    let projection_id =
+        prompts::run_notification_projection_id(context.run_id, notification.event_kind);
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;
     let delivery = PrepareCommunicationDeliveryRequest {
         resolution_request: CommunicationDeliveryResolutionRequest {
-            scope: scope.clone(),
-            actor: actor.clone(),
+            scope: context.scope.clone(),
+            actor: context.actor.clone(),
             modality: CommunicationModality::Text,
             intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                 event_kind: notification.event_kind,
-                origin: RunNotificationOrigin::Triggered {
-                    trigger: trigger_context.clone(),
+                origin: match context.delivery_target {
+                    Some(target) => RunNotificationOrigin::TriggeredWithTarget {
+                        trigger: context.trigger_context.clone(),
+                        target: target.clone(),
+                    },
+                    None => RunNotificationOrigin::Triggered {
+                        trigger: context.trigger_context.clone(),
+                    },
                 },
             }),
         },
-        turn_run_id: Some(run_id),
+        turn_run_id: Some(context.run_id),
         projection_ref,
         attempted_at: Utc::now(),
     };
@@ -732,7 +744,7 @@ async fn deliver_triggered_notification(
         .deliver(
             &outbound_policy,
             services.communication_preferences.as_ref(),
-            authority,
+            context.authority,
             CoordinatedDeliveryRequest {
                 intent: notification.intent,
                 delivery,

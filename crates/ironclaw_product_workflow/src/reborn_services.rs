@@ -24,9 +24,10 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId,
-    PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle, TenantId,
-    ThreadId, UserId,
+    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
+    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution,
+    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle,
+    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -44,21 +45,21 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
+    ListPendingApprovalsRequest, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -79,6 +80,9 @@ mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
+mod operator_command_views;
+mod operator_config_views;
+mod outbound_views;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -87,8 +91,8 @@ mod types;
 mod views;
 
 pub use admin_configuration::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW,
-    RebornAdminConfigurationField, RebornAdminConfigurationGroup,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
+    ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
 use admin_users::{
@@ -105,28 +109,38 @@ pub use admin_users::{
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW,
 };
 
+pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
 };
 use ironclaw_approvals::{
-    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
-    AutoApproveSettingStore, PersistentApprovalAction, PersistentApprovalPolicyError,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
-    ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStore,
+    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    ToolPermissionState, permission_mode_allows_persistent_approval,
 };
+pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
-    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
+    ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
     UpsertLlmProviderRequest,
 };
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
+pub use operator_command_views::{
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+};
+pub use operator_config_views::{
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+};
+pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -182,7 +196,7 @@ pub use types::{
     RebornTimelineResponse, RebornVendorAuthAccounts,
 };
 pub use views::{
-    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
     UnavailableRebornViewProvider,
 };
 
@@ -193,6 +207,71 @@ type SkillActivationClearer =
 
 const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
+pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
+    "builtin.operator_config_set_auto_approve";
+pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID);
+pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
+pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
+pub const LLM_PROVIDER_UPSERT_CAPABILITY_ID: &str = "builtin.llm_provider_upsert";
+pub const LLM_PROVIDER_UPSERT_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_PROVIDER_UPSERT_CAPABILITY_ID);
+pub const LLM_PROVIDER_DELETE_CAPABILITY_ID: &str = "builtin.llm_provider_delete";
+pub const LLM_PROVIDER_DELETE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_PROVIDER_DELETE_CAPABILITY_ID);
+pub const LLM_ACTIVE_SET_CAPABILITY_ID: &str = "builtin.llm_active_set";
+pub const LLM_ACTIVE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_ACTIVE_SET_CAPABILITY_ID);
+pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
+pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_INSTALL_CAPABILITY_ID);
+pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
+pub const EXTENSION_IMPORT_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_IMPORT_CAPABILITY_ID);
+pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
+pub const EXTENSION_ACTIVATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_ACTIVATE_CAPABILITY_ID);
+pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
+pub const EXTENSION_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_REMOVE_CAPABILITY_ID);
+pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
+pub const EXTENSION_SETUP_SUBMIT_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID);
+pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
+    ProductView::paginated("threads");
+pub const AUTOMATIONS_VIEW: ProductView<
+    WebUiListAutomationsRequest,
+    RebornListAutomationsResponse,
+> = ProductView::unpaginated("automations");
+pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
+pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
+pub const SKILL_UPDATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_UPDATE_CAPABILITY_ID);
+pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
+pub const SKILL_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_REMOVE_CAPABILITY_ID);
+pub const SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID: &str = "builtin.skill_auto_activate_set";
+pub const SKILL_AUTO_ACTIVATE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID);
+pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID: &str =
+    "builtin.skill_auto_activate_learned_set";
+pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID);
+pub const SKILLS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "skills",
+    paginated: false,
+};
+pub const SKILL_SEARCH_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "skill_search",
+    paginated: false,
+};
+pub const SKILL_CONTENT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "skill_content",
+    paginated: false,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -472,66 +551,12 @@ pub trait SkillsProductFacade: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn read_skill_content(
         &self,
         caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
         let _ = (caller, name);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Toggle a skill's automatic activation. Disabling keeps the skill
-    /// invokable via an explicit `/name` mention but excludes it from criteria
-    /// (keyword/regex) selection.
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, enabled);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Toggle the global default criteria-based skill auto-activation master
-    /// switch. Disabling leaves skills invokable via an explicit `/name`
-    /// mention but turns off keyword/criteria auto-activation for all skills.
-    async fn set_auto_activate_learned(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, enabled);
         Err(RebornServicesError::service_unavailable(false))
     }
 }
@@ -1138,6 +1163,81 @@ fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesE
     RebornServicesError::internal_from(error)
 }
 
+fn operator_config_capability_forbidden() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+}
+
+fn product_view_forbidden() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+}
+
+fn product_view_requires_operator_webui_config(view_id: &str) -> bool {
+    matches!(
+        view_id,
+        id if id == ADMIN_CONFIGURATION_VIEW.id
+            || id == OPERATOR_LOGS_VIEW.id
+            || id == LLM_CONFIG_VIEW.id
+            || id == OPERATOR_SETUP_VIEW.id
+            || id == OPERATOR_DIAGNOSTICS_VIEW.id
+            || id == OPERATOR_STATUS_VIEW.id
+    )
+}
+
+fn authorize_product_view(
+    caller: &WebUiAuthenticatedCaller,
+    view_id: &str,
+) -> Result<(), RebornServicesError> {
+    if product_view_requires_operator_webui_config(view_id) && !caller.operator_webui_config {
+        return Err(product_view_forbidden());
+    }
+    Ok(())
+}
+
+fn operator_config_auto_approve_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    enabled: bool,
+) -> ActivityId {
+    let mut seed = Vec::new();
+    for segment in [
+        "product-surface-operator-config-auto-approve",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        if enabled { "enabled" } else { "disabled" },
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    ActivityId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed))
+}
+
+fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput) => Err(operator_config_invalid_value("value")),
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(operator_config_capability_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(RebornServicesError::service_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "operator config capability returned a non-success result",
+            )),
+        },
+        Resolution::Denied(_) => Err(operator_config_capability_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(RebornServicesError::service_unavailable(true))
+        }
+    }
+}
+
 async fn auto_approve_config_entry(
     config: &RebornOperatorApprovalConfig,
     scope: &ResourceScope,
@@ -1664,20 +1764,6 @@ fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic
     }
 }
 
-fn operator_config_diagnostic_command_plane_response(
-    area: RebornOperatorArea,
-) -> RebornOperatorCommandPlaneResponse {
-    RebornOperatorCommandPlaneResponse {
-        area,
-        status: RebornOperatorSurfaceStatus::Unavailable,
-        message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
-        operator_status: None,
-        logs: None,
-        service_lifecycle: None,
-        diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
-    }
-}
-
 fn operator_doctor_status_diagnostic(
     check: &RebornOperatorStatusCheck,
 ) -> Option<RebornOperatorConfigDiagnostic> {
@@ -1856,13 +1942,14 @@ pub trait RebornServicesApi: Send + Sync {
     /// `caller` is trusted ingress input. `capability` and `input` are
     /// designators only; a wired implementation must resolve and authorize
     /// them rather than treating either as authority. `activity_id` is the
-    /// client-minted idempotency identity and must be preserved across retries.
+    /// stable idempotency identity for this mutation and must be preserved
+    /// across retries.
     /// The unwired default fails closed without performing any side effect.
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
         capability: CapabilityId,
-        input: serde_json::Value,
+        input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
         let _ = (caller, capability, input, activity_id);
@@ -2121,24 +2208,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// List the caller-scoped threads. Pagination is opaque: callers
-    /// echo back the `next_cursor` from a prior response to retrieve
-    /// the next page; the cursor encoding is implementation-defined.
-    ///
-    /// Returns an empty list + `next_cursor: None` when no threads
-    /// exist for the caller's scope.
-    async fn list_threads(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError>;
-
-    async fn list_automations(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
-
     async fn pause_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2174,59 +2243,6 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         let _ = (caller, automation_id);
         Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Read-only Trace Commons credit summary for the authenticated
-    /// caller.
-    ///
-    /// The trace scope derives from the caller's user id only — never
-    /// from request input. Missing or unreadable contributor-local
-    /// state is the normal "not enrolled / nothing submitted yet"
-    /// zero response, never an error. The aggregates are a local view
-    /// as of the last credit sync; the authoritative ledger is
-    /// server-side.
-    ///
-    /// The default body is the production implementation: every facade
-    /// reads the same caller-scoped contributor-local state through
-    /// `ironclaw_reborn_traces`, so impls (including test fakes) only
-    /// override this when they need a non-local credits source.
-    async fn trace_credits(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornTraceCreditsResponse, RebornServicesError> {
-        let actor = caller.actor();
-        // Tenant-scope the local state key so the same user id in two tenants
-        // does not share Trace Commons credit/hold state.
-        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
-            caller.tenant_id.as_str(),
-            actor.user_id.as_str(),
-        );
-        // A genuine local-state read failure must surface as a sanitized 500,
-        // not a misleading zero/not-enrolled view (carry the cause for the
-        // server-side trail per error-handling.md).
-        trace_credits::local_trace_credits_for_user(&scope)
-            .map_err(RebornServicesError::internal_from)
-    }
-
-    /// Read-only list of the authenticated caller's submitted Trace Commons
-    /// traces, fetched directly from the server (not a local view).
-    ///
-    /// The scope is always derived from the authenticated caller's tenant +
-    /// user id — never from request input. A user who is not enrolled gets the
-    /// unenrolled zero-state (`{ enrolled: false, traces: [] }`), never an
-    /// error. Transport failures surface as an internal error.
-    ///
-    /// The default body is the production implementation using the crate-local
-    /// hardened reqwest path (no host-egress sink), so impls (including test
-    /// fakes) only override this when they need a non-standard fetch path.
-    async fn trace_account_traces(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
-        let actor = caller.actor();
-        trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
-            .await
-            .map_err(RebornServicesError::internal_from)
     }
 
     /// Mint a one-time Trace Commons browser login link for the
@@ -2281,202 +2297,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    /// Return the authenticated caller's scoped outbound preferences.
-    ///
-    /// Implementations must scope stored preferences by the caller's
-    /// tenant/user identity. Unsupported behavior belongs in
-    /// `UnsupportedOutboundPreferencesProductFacade`, not in trait defaults.
-    async fn get_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
-
-    /// Persist the authenticated caller's outbound delivery preference.
-    ///
-    /// Implementations must scope mutations by the caller's tenant/user
-    /// identity and fail closed when no writable outbound-preferences facade is
-    /// wired.
-    async fn set_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
-
-    /// List delivery targets available to the authenticated caller.
-    ///
-    /// Implementations must scope target inventory by the caller's tenant/user
-    /// identity and fail closed when no outbound target inventory facade is
-    /// wired.
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
-
-    async fn list_extensions(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError>;
-
-    async fn list_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError>;
-
-    async fn search_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError>;
-
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
-
-    async fn read_skill_content(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError>;
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
-
-    /// Toggle a skill's automatic activation (see
-    /// [`SkillsProductFacade::set_skill_auto_activate`]). Defaults to
-    /// unavailable so impls that do not surface skill management inherit a
-    /// fail-closed response.
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, enabled);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Toggle the global default criteria-based skill auto-activation master
-    /// switch (see [`SkillsProductFacade::set_auto_activate_learned`]).
-    /// Defaults to unavailable so impls that do not surface skill management
-    /// inherit a fail-closed response.
-    async fn set_auto_activate_learned(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, enabled);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn list_extension_registry(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError>;
-
-    async fn install_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
-
-    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
-    /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
-    /// test stubs need no change.
-    async fn import_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _bundle: Vec<u8>,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn activate_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
-
-    async fn remove_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
-
-    /// Run a step in a v2-native extension onboarding flow. Today the
-    /// facade returns
-    /// [`RebornSetupExtensionStatus::NotImplemented`](types::RebornSetupExtensionStatus::NotImplemented)
-    /// because the underlying extension lifecycle is still v1-only.
-    /// The route exists so the WebUI v2 entrypoint inventory is
-    /// complete and so future onboarding port work has a fixed surface
-    /// to fill in.
-    ///
-    /// `package_ref` is the validated lifecycle package identity from
-    /// the route path or request body. The browser can still render
-    /// display names from registry metadata, but lifecycle side effects
-    /// use package refs end to end.
-    async fn setup_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
-
-    /// LLM provider configuration: merged catalog + active selection.
-    ///
-    /// The six LLM-config methods default to "service unavailable" so facade
-    /// impls (and test fakes) that don't wire an [`LlmConfigService`] inherit a
-    /// safe surface; the default `RebornServices` overrides them all.
-    async fn get_llm_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = caller;
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Add or update a custom LLM provider (and optionally its key / active state).
-    async fn upsert_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Remove a custom LLM provider and any stored key for it.
-    async fn delete_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = (caller, provider_id);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Select the active LLM provider + model.
-    async fn set_active_llm(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
     /// Probe an LLM provider's credentials/endpoint without persisting.
     async fn test_llm_connection(
         &self,
@@ -2526,47 +2346,12 @@ pub trait RebornServicesApi: Send + Sync {
         Err(llm_config::llm_config_unavailable())
     }
 
-    async fn get_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let _ = caller;
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn run_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorSetupRequest,
     ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
         let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Return the effective operator config projection.
-    ///
-    /// Until the effective config backend is wired, read-only operator config/status/diagnostic
-    /// surfaces intentionally return typed diagnostic payloads so the browser can explain
-    /// what is unsupported. Mutating or side-effecting operator routes remain fail-closed
-    /// with sanitized service-unavailable errors until their owning service is wired.
-    async fn list_operator_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(RebornOperatorConfigListResponse {
-            entries: Vec::new(),
-            precedence: Vec::new(),
-            diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
-        })
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let _ = (caller, key);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -2578,39 +2363,6 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
         let _ = (caller, key, request);
         Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn validate_operator_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorConfigValidateRequest,
-    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
-        let _ = caller;
-        let diagnostics = operator_config_validation_diagnostics(request.keys);
-        Ok(RebornOperatorConfigValidateResponse {
-            valid: diagnostics.is_empty(),
-            diagnostics,
-        })
-    }
-
-    async fn get_operator_diagnostics(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Diagnostics,
-        ))
-    }
-
-    async fn get_operator_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Status,
-        ))
     }
 
     async fn run_operator_service_lifecycle(
@@ -2723,6 +2475,87 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
         let _ = (caller, user_id, handle);
         Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+/// Transitional name for the §5.2 product boundary.
+///
+/// `RebornServicesApi` is the current proto-ProductSurface while the migration
+/// ratchet shrinks per-feature methods into capability descriptors and view
+/// descriptors. Product adapters should depend on this trait name so the
+/// eventual method-set collapse is localized to the facade owner.
+pub trait ProductSurface: RebornServicesApi {}
+
+impl<T> ProductSurface for T where T: RebornServicesApi + ?Sized {}
+
+/// Input carried by the generic ProductSurface command conduit.
+///
+/// Most capabilities are ordinary JSON payloads. Secret-bearing ProductSurface
+/// requests use typed variants so they do not cross the WebUI/product boundary
+/// as raw, debug-printable JSON values.
+pub enum ProductCapabilityInput {
+    Json(serde_json::Value),
+    LlmProviderUpsert(UpsertLlmProviderRequest),
+}
+
+impl ProductCapabilityInput {
+    pub fn json(input: serde_json::Value) -> Self {
+        Self::Json(input)
+    }
+
+    pub fn llm_provider_upsert(request: UpsertLlmProviderRequest) -> Self {
+        Self::LlmProviderUpsert(request)
+    }
+
+    pub fn into_json(self) -> Result<serde_json::Value, RebornServicesError> {
+        match self {
+            Self::Json(input) => Ok(input),
+            Self::LlmProviderUpsert(_) => Err(RebornServicesError::internal_from(
+                "secret-bearing product capability input cannot be delegated as JSON",
+            )),
+        }
+    }
+}
+
+/// ProductSurface command descriptor.
+///
+/// Capability declarations stay as one stable id plus origin/policy metadata
+/// elsewhere; inputs remain ordinary serializable values so simple API-only
+/// mappings do not require one request struct per capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductCapabilityDescriptor {
+    pub id: &'static str,
+}
+
+impl ProductCapabilityDescriptor {
+    pub const fn api_only(id: &'static str) -> Self {
+        Self { id }
+    }
+
+    pub fn capability_id(&self) -> Result<CapabilityId, RebornServicesError> {
+        CapabilityId::new(self.id).map_err(RebornServicesError::internal_from)
+    }
+
+    pub async fn invoke_on<T, S>(
+        &self,
+        surface: &S,
+        caller: WebUiAuthenticatedCaller,
+        input: T,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError>
+    where
+        T: Serialize,
+        S: ProductSurface + ?Sized,
+    {
+        let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+        surface
+            .invoke(
+                caller,
+                self.capability_id()?,
+                ProductCapabilityInput::json(input),
+                activity_id,
+            )
+            .await
     }
 }
 
@@ -3043,6 +2876,102 @@ where
         self
     }
 
+    async fn invoke_json_capability<T>(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: ProductCapabilityDescriptor,
+        input: T,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError>
+    where
+        T: Serialize,
+    {
+        let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+        self.product_capability_invoker
+            .invoke(caller, capability.capability_id()?, input, activity_id)
+            .await
+    }
+
+    fn api_capability_success(
+        &self,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, RebornServicesError> {
+        Ok(Resolution::Done(Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::from_uuid(activity_id.as_uuid()),
+                byte_len: 0,
+                preview: None,
+                preview_meta: ResultPreviewMeta::default(),
+                origin: None,
+                output_digest: None,
+            },
+            verdict: ToolVerdict::Success,
+            summary: SafeSummary::new(summary).map_err(RebornServicesError::internal_from)?,
+            progress: ResultProgress::MadeProgress,
+            terminate_hint: TerminateHint::Continue,
+        }))
+    }
+
+    async fn build_automations_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let limit = clamp_automation_list_limit(request.limit);
+        let run_limit = clamp_automation_run_limit(request.run_limit);
+        let scheduler_enabled = self.automation_facade.scheduler_enabled();
+        let automations = self
+            .automation_facade
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit,
+                    run_limit,
+                    include_completed: request.include_completed,
+                },
+            )
+            .await?;
+        Ok(RebornListAutomationsResponse {
+            automations,
+            scheduler_enabled,
+        })
+    }
+
+    async fn build_threads_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        // Reuse the same scope-construction shape the other v2 facade
+        // methods use: fail-closed when the caller has no agent
+        // binding, owner-scope to the caller's user_id so the listing
+        // is per-caller.
+        let Some(agent_id) = caller.agent_id.clone() else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let scope = ThreadScope {
+            tenant_id: caller.tenant_id.clone(),
+            agent_id,
+            project_id: caller.project_id.clone(),
+            owner_user_id: Some(caller.user_id.clone()),
+            mission_id: None,
+        };
+        self.list_visible_threads_for_scope(scope, request, caller)
+            .await
+    }
+
     /// Wire the generic channel-config configure port. Without it, the
     /// setup facade renders no channel-config fields and rejects
     /// channel-config submissions as unavailable.
@@ -3279,9 +3208,47 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
         capability: CapabilityId,
-        input: serde_json::Value,
+        input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
+            let ProductCapabilityInput::LlmProviderUpsert(request) = input else {
+                return Err(RebornServicesError::validation(
+                    WebUiInboundValidationError::new(
+                        "input",
+                        WebUiInboundValidationCode::InvalidValue,
+                    ),
+                ));
+            };
+            self.invoke_llm_provider_upsert(caller, request).await?;
+            return self.api_capability_success(activity_id, "llm provider updated");
+        }
+
+        let input = input.into_json()?;
+        if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID {
+            self.invoke_llm_provider_delete(caller, input).await?;
+            return self.api_capability_success(activity_id, "llm provider deleted");
+        }
+        if capability.as_str() == LLM_ACTIVE_SET_CAPABILITY_ID {
+            self.invoke_llm_active_set(caller, input).await?;
+            return self.api_capability_success(activity_id, "llm active provider updated");
+        }
+        if capability.as_str() == EXTENSION_IMPORT_CAPABILITY_ID {
+            extensions::import_extension_capability(self.lifecycle_facade.as_ref(), caller, input)
+                .await?;
+            return self.api_capability_success(activity_id, "extension imported");
+        }
+        if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
+            lifecycle_setup::submit_extension_setup_capability(
+                self.lifecycle_facade.as_ref(),
+                self.extension_credentials.as_deref(),
+                self.channel_config_facade.as_deref(),
+                caller,
+                input,
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "extension setup updated");
+        }
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)
             .await
@@ -3544,24 +3511,6 @@ where
             })
     }
 
-    async fn get_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let Some(llm_config) = &self.llm_config else {
-            return Err(llm_config::llm_config_unavailable());
-        };
-        let snapshot = llm_config
-            .snapshot(caller)
-            .await
-            .map_err(llm_config::map_llm_config_error)?;
-        Ok(setup_response_from_llm_snapshot(
-            snapshot,
-            Vec::new(),
-            OperatorSetupHostState::default(),
-        ))
-    }
-
     async fn run_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3637,61 +3586,6 @@ where
         ))
     }
 
-    async fn list_operator_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let Some(config) = &self.operator_approval_config else {
-            return Ok(operator_config_not_wired_response());
-        };
-        let scope = caller_resource_scope(&caller);
-        let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        let tools = config
-            .tool_catalog
-            .list_operator_tools(&scope.user_id)
-            .await;
-        let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
-        entries.extend(
-            try_join_all(
-                tools
-                    .iter()
-                    .map(|tool| tool_config_entry_with_context(&tool_context, tool)),
-            )
-            .await?,
-        );
-        Ok(RebornOperatorConfigListResponse {
-            entries,
-            precedence: vec![
-                "locked".to_string(),
-                "override".to_string(),
-                "global".to_string(),
-                "default".to_string(),
-            ],
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let Some(config) = &self.operator_approval_config else {
-            let _ = (caller, key);
-            return Err(RebornServicesError::service_unavailable(false));
-        };
-        let scope = caller_resource_scope(&caller);
-        let entry = if key == AUTO_APPROVE_CONFIG_KEY {
-            auto_approve_config_entry(config, &scope).await?
-        } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
-            tool_config_entry(config, &scope, &tool).await?
-        } else {
-            return Err(operator_config_unknown_key_error("key"));
-        };
-        Ok(RebornOperatorConfigGetResponse { entry })
-    }
-
     async fn set_operator_config_key(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3703,24 +3597,27 @@ where
             return Err(RebornServicesError::service_unavailable(false));
         };
         let scope = caller_resource_scope(&caller);
-        let actor = caller.actor();
-        let entry = if key == AUTO_APPROVE_CONFIG_KEY {
+        if key == AUTO_APPROVE_CONFIG_KEY {
             let enabled = request
                 .value
                 .as_bool()
                 .ok_or_else(|| operator_config_invalid_value("value"))?;
-            let operator_scope = operator_tool_permission_scope(&scope);
-            config
-                .auto_approve
-                .set(AutoApproveSettingInput {
-                    scope: operator_scope,
-                    enabled,
-                    updated_by: Principal::User(actor.user_id.clone()),
-                })
-                .await
-                .map_err(operator_config_store_error)?;
-            auto_approve_config_entry(config, &scope).await?
-        } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
+            let resolution = self
+                .invoke_json_capability(
+                    caller.clone(),
+                    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
+                    serde_json::json!({ "enabled": enabled }),
+                    operator_config_auto_approve_activity_id(&caller, enabled),
+                )
+                .await?;
+            operator_config_mutation_succeeded(resolution)?;
+            return self
+                .build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
+                .await;
+        }
+
+        let actor = caller.actor();
+        let entry = if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
             let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));
@@ -4082,6 +3979,7 @@ where
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
+        authorize_product_view(&caller, &query.view_id)?;
         if self.view_provider.descriptor().id == query.view_id {
             return self
                 .view_provider
@@ -4094,12 +3992,7 @@ where
                     .map_err(RebornServicesError::internal_from)?;
                 let response = self.build_logs_view(caller, request, query.cursor).await?;
                 let next_cursor = response.next_cursor.clone();
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor,
-                })
+                views::view_page_with_cursor(response, next_cursor)
             }
             id if id == OPERATOR_LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
@@ -4111,23 +4004,129 @@ where
                     .logs
                     .as_ref()
                     .and_then(|logs| logs.next_cursor.clone());
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor,
-                })
+                views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == LLM_CONFIG_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_llm_config_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == THREADS_VIEW.id => {
+                let mut request: WebUiListThreadsRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self.build_threads_view(caller, request).await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == AUTOMATIONS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.build_automations_view(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_outbound_preferences_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_outbound_delivery_targets_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == TRACE_CREDITS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_trace_credits_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == TRACE_ACCOUNT_TRACES_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_trace_account_traces_view(caller).await?;
+                views::view_page(response)
             }
             id if id == RUN_ARTIFACT_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
                 let artifact = self.build_run_artifact(caller, request).await?;
-                let payload =
-                    serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(artifact)
+            }
+            id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_operator_config_list_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_CONFIG_KEY_VIEW.id => {
+                let response = self
+                    .build_operator_config_key_view(caller, query.params)
+                    .await?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_CONFIG_VALIDATE_VIEW.id => {
+                let response = self.build_operator_config_validate_view(query.params)?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_SETUP_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_operator_setup_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == EXTENSIONS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = extensions::list_extensions(
+                    Arc::clone(&self.lifecycle_facade),
+                    self.extension_credentials.clone(),
+                    Arc::clone(&self.channel_connection_facade),
+                    caller,
+                )
+                .await?;
+                views::view_page(response)
+            }
+            id if id == EXTENSION_REGISTRY_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response =
+                    extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller)
+                        .await?;
+                views::view_page(response)
+            }
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let response = lifecycle_setup::setup_extension_view(
+                    self.lifecycle_facade.as_ref(),
+                    self.extension_credentials.as_deref(),
+                    self.channel_config_facade.as_deref(),
+                    caller,
+                    query.params,
+                )
+                .await?;
+                views::view_page(response)
+            }
+            id if id == SKILLS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.skills_facade.list_skills(caller).await?;
+                views::view_page(response)
+            }
+            id if id == SKILL_SEARCH_VIEW.id => {
+                let search_query = views::required_string_view_param(query.params, "query")?;
+                let response = self
+                    .skills_facade
+                    .search_skills(caller, search_query)
+                    .await?;
+                views::view_page(response)
+            }
+            id if id == SKILL_CONTENT_VIEW.id => {
+                let name = views::required_string_view_param(query.params, "name")?;
+                let response = self.skills_facade.read_skill_content(caller, name).await?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_operator_diagnostics_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_STATUS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_operator_status_view(caller).await?;
+                views::view_page(response)
             }
             _ => Err(RebornServicesError::not_found()),
         }
@@ -4768,65 +4767,6 @@ where
         ))
     }
 
-    async fn list_threads(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        // Reuse the same scope-construction shape the other v2 facade
-        // methods use: fail-closed when the caller has no agent
-        // binding, owner-scope to the caller's user_id so the listing
-        // is per-caller.
-        let Some(agent_id) = caller.agent_id.clone() else {
-            return Err(RebornServicesError::from_status(
-                RebornServicesErrorCode::InvalidRequest,
-                400,
-                false,
-            ));
-        };
-        let scope = ThreadScope {
-            tenant_id: caller.tenant_id.clone(),
-            agent_id,
-            project_id: caller.project_id.clone(),
-            owner_user_id: Some(caller.user_id.clone()),
-            mission_id: None,
-        };
-        self.list_visible_threads_for_scope(scope, request, caller)
-            .await
-    }
-
-    async fn list_automations(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
-            return Err(RebornServicesError::from_status(
-                RebornServicesErrorCode::InvalidRequest,
-                400,
-                false,
-            ));
-        };
-        let limit = clamp_automation_list_limit(request.limit);
-        let run_limit = clamp_automation_run_limit(request.run_limit);
-        let scheduler_enabled = self.automation_facade.scheduler_enabled();
-        let automations = self
-            .automation_facade
-            .list_automations(
-                caller,
-                AutomationListRequest {
-                    limit,
-                    run_limit,
-                    include_completed: request.include_completed,
-                },
-            )
-            .await?;
-        Ok(RebornListAutomationsResponse {
-            automations,
-            scheduler_enabled,
-        })
-    }
-
     async fn pause_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4897,260 +4837,6 @@ where
             .await
     }
 
-    async fn get_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        self.outbound_preferences_facade
-            .get_outbound_preferences(caller)
-            .await
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        self.outbound_preferences_facade
-            .set_outbound_preferences(caller, request)
-            .await
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        self.outbound_preferences_facade
-            .list_outbound_delivery_targets(caller)
-            .await
-    }
-
-    async fn list_extensions(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        extensions::list_extensions(
-            Arc::clone(&self.lifecycle_facade),
-            self.extension_credentials.clone(),
-            Arc::clone(&self.channel_connection_facade),
-            caller,
-        )
-        .await
-    }
-
-    async fn list_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        self.skills_facade.list_skills(caller).await
-    }
-
-    async fn search_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        self.skills_facade.search_skills(caller, query).await
-    }
-
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade
-            .install_skill(caller, name, content)
-            .await
-    }
-
-    async fn read_skill_content(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        self.skills_facade.read_skill_content(caller, name).await
-    }
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade.update_skill(caller, name, content).await
-    }
-
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade
-            .set_skill_auto_activate(caller, name, enabled)
-            .await
-    }
-
-    async fn set_auto_activate_learned(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade
-            .set_auto_activate_learned(caller, enabled)
-            .await
-    }
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade.remove_skill(caller, name).await
-    }
-
-    async fn list_extension_registry(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller).await
-    }
-
-    async fn install_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
-    }
-
-    async fn import_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        bundle: Vec<u8>,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
-    }
-
-    async fn activate_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::activate_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
-    }
-
-    async fn remove_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
-    }
-
-    async fn setup_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        lifecycle_setup::setup_extension(
-            self.lifecycle_facade.as_ref(),
-            self.extension_credentials.as_deref(),
-            self.channel_config_facade.as_deref(),
-            caller,
-            package_ref,
-            request,
-        )
-        .await
-    }
-
-    async fn get_operator_diagnostics(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let mut diagnostics = Vec::new();
-        let mut operator_status = None;
-
-        match self.operator_status.status(caller.clone()).await {
-            Ok(status) => {
-                diagnostics.extend(
-                    status
-                        .checks
-                        .iter()
-                        .filter_map(operator_doctor_status_diagnostic),
-                );
-                operator_status = Some(operator_doctor_status_response(status));
-            }
-            Err(err) => {
-                tracing::debug!(
-                    error = ?err,
-                    "Failed to retrieve operator status for diagnostics"
-                );
-                diagnostics.push(operator_doctor_status_unavailable_diagnostic());
-            }
-        }
-
-        if let Some(llm_config) = &self.llm_config {
-            match llm_config.snapshot(caller).await {
-                Ok(snapshot) => {
-                    diagnostics.extend(
-                        setup_response_from_llm_snapshot(
-                            snapshot,
-                            Vec::new(),
-                            OperatorSetupHostState::default(),
-                        )
-                        .diagnostics,
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        error = ?err,
-                        "Failed to retrieve LLM config snapshot for diagnostics"
-                    );
-                    diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
-                        "operator_setup_snapshot_unavailable",
-                        "Operator setup state could not be inspected.",
-                    ));
-                }
-            }
-        } else {
-            diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
-                "operator_setup_service_not_wired",
-                "Operator setup diagnostics are unavailable because the LLM config service is not wired.",
-            ));
-        }
-
-        diagnostics.push(operator_config_surface_not_wired_diagnostic());
-
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Diagnostics,
-            status: operator_diagnostics_surface_status(&diagnostics),
-            message: "operator diagnostics completed".to_string(),
-            operator_status,
-            logs: None,
-            service_lifecycle: None,
-            diagnostics,
-        })
-    }
-
-    async fn get_operator_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let status = self.operator_status.status(caller).await?;
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Status,
-            status: RebornOperatorSurfaceStatus::Available,
-            message: "operator status is available".to_string(),
-            operator_status: Some(status),
-            logs: None,
-            service_lifecycle: None,
-            diagnostics: Vec::new(),
-        })
-    }
-
     async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -5190,66 +4876,6 @@ where
             service_lifecycle: Some(service_lifecycle),
             diagnostics: Vec::new(),
         })
-    }
-
-    async fn get_llm_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        service
-            .snapshot(caller)
-            .await
-            .map_err(llm_config::map_llm_config_error)
-    }
-
-    async fn upsert_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        validate_llm_base_url(request.base_url.as_deref())?;
-        service
-            .upsert_provider(caller, request)
-            .await
-            .map_err(llm_config::map_llm_config_error)
-    }
-
-    async fn delete_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        service
-            .delete_provider(caller, provider_id)
-            .await
-            .map_err(llm_config::map_llm_config_error)
-    }
-
-    async fn set_active_llm(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        service
-            .set_active(caller, request)
-            .await
-            .map_err(llm_config::map_llm_config_error)
     }
 
     async fn test_llm_connection(

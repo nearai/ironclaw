@@ -30,16 +30,17 @@ use ironclaw_host_runtime::{
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend,
@@ -86,6 +87,8 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SHELL_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
@@ -211,10 +214,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{}: ConsentSufficient is Product-only; not valid on automation",
             descriptor.id
         );
+        let expected_product =
+            if product_surface_builtin_capabilities().contains(&descriptor.id.as_str()) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
         assert_eq!(
-            matrix.product,
-            OriginGatePolicy::Forbidden,
-            "{} product must be deny-by-default",
+            matrix.product, expected_product,
+            "{} product origin policy mismatch",
             descriptor.id
         );
         assert_eq!(
@@ -270,6 +278,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{gated}"
         );
     }
+}
+
+fn product_surface_builtin_capabilities() -> &'static [&'static str] {
+    &[
+        SKILL_INSTALL_CAPABILITY_ID,
+        "builtin.skill_update",
+        "builtin.skill_auto_activate_set",
+        SKILL_REMOVE_CAPABILITY_ID,
+    ]
 }
 
 #[tokio::test]
@@ -2505,7 +2522,7 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
 #[tokio::test]
 async fn builtin_rejects_oversized_inputs_before_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -2523,7 +2540,7 @@ async fn builtin_rejects_oversized_inputs_before_dispatch() {
 #[tokio::test]
 async fn builtin_rejects_oversized_outputs_before_return() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3362,7 +3379,7 @@ async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
 #[tokio::test]
 async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
             capability_id(SHELL_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3493,6 +3510,51 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
     assert_eq!(output["output"], json!("process port: echo in sandbox"));
     assert!(local_process.requests.lock().unwrap().is_empty());
     assert_eq!(sandbox_transport.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+    let local_process = Arc::new(RecordingProcessPort::default());
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let runtime = runtime_with_local_and_sandbox_process_ports(
+        Arc::clone(&local_process),
+        Arc::clone(&sandbox_process),
+        tenant_sandbox_process_policy(),
+    );
+    let user_a = UserId::new("user-a").unwrap();
+    let user_b = UserId::new("user-b").unwrap();
+    let tenant = TenantId::new("tenant-shared").unwrap();
+    let mut context = execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy());
+    context.run_id = Some(RunId::new());
+    let agent_id = context.agent_id.clone();
+    let project_id = context.project_id.clone();
+    set_context_scope(
+        &mut context,
+        tenant.clone(),
+        user_b.clone(),
+        agent_id,
+        project_id,
+    );
+    let expected_scope = context.resource_scope.clone();
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /workspace/user-a-secret.txt"}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["sandboxed"], json!(true));
+    assert!(local_process.requests.lock().unwrap().is_empty());
+    let requests = sandbox_transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].scope, expected_scope);
+    assert_eq!(requests[0].scope.tenant_id, tenant);
+    assert_eq!(requests[0].scope.user_id, user_b);
+    assert_ne!(requests[0].scope.user_id, user_a);
 }
 
 #[tokio::test]
@@ -3947,7 +4009,7 @@ async fn builtin_json_stringify_rejects_invalid_json_strings() {
 #[tokio::test]
 async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -6106,16 +6168,11 @@ async fn builtin_skill_install_url_path_accounts_wall_clock_time() {
     });
     let runtime = runtime_with_filesystem_and_http_egress(filesystem, egress);
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            execution_context_with_mounts_and_network(
+        .invoke_capability((execution_context_with_mounts_and_network(
                 [SKILL_INSTALL_CAPABILITY_ID],
                 mounts,
                 http_test_policy(),
-            ),
-            capability_id(SKILL_INSTALL_CAPABILITY_ID),
-            ResourceEstimate::default(),
-            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})
-        ))
+            ), capability_id(SKILL_INSTALL_CAPABILITY_ID), ResourceEstimate::default(), json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})))
         .await
         .unwrap();
 
@@ -6155,7 +6212,7 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
             capability_id(HTTP_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8119,7 +8176,7 @@ async fn builtin_coding_write_is_denied_by_read_only_mount() {
 #[tokio::test]
 async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(std::iter::empty::<&str>()),
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8157,7 +8214,7 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> Result<Value, RuntimeFailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -8179,7 +8236,7 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> RuntimeCapabilityFailure {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -9266,6 +9323,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         APPLY_PATCH_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
@@ -9718,7 +9777,7 @@ where
             .map(|grant| dispatch_grant(grant.as_ref()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9726,7 +9785,9 @@ where
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext
@@ -9740,7 +9801,7 @@ where
             .map(|grant| dispatch_grant_with_mounts(grant.as_ref(), mounts.clone()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9748,7 +9809,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_network<I>(grants: I, network: NetworkPolicy) -> ExecutionContext
@@ -9780,7 +9843,7 @@ where
             })
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9788,7 +9851,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn set_context_scope(

@@ -37,7 +37,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
 
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
@@ -50,7 +50,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello dispatcher"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -69,6 +69,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
         CapabilityId::new("echo.say").unwrap()
     );
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].mounts, None);
     assert_eq!(requests[0].input, json!({"message": "hello dispatcher"}));
 }
 
@@ -118,7 +119,7 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
 
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
@@ -127,7 +128,7 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "nope"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -149,7 +150,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
 
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
@@ -158,7 +159,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
             mounts: None,
             resource_reservation: Some(reservation),
             input: json!({"message": "release on resolution failure"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -186,7 +187,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
 
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
@@ -195,7 +196,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
             mounts: None,
             resource_reservation: Some(reservation),
             input: json!({}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -211,6 +212,92 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
     );
     assert_eq!(result.receipt.id, reservation_id);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn dispatcher_rejects_stale_authorized_lane_before_binding_dispatch() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let binding = RecordingBinding::new(json!({}), Arc::clone(&governor));
+    let resolver = ScriptedResolver::from_entries([(
+        "echo.say",
+        resolved("echo", RuntimeKind::Wasm, binding.clone()),
+    )]);
+
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
+    let err = dispatcher
+        .dispatch_json(authorized_with_lane(
+            CapabilityDispatchRequest {
+                run_id: None,
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope,
+                authenticated_actor_user_id: None,
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "stale lane"}),
+            },
+            RuntimeLane::Process,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Wasm
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+    assert!(binding.requests().is_empty());
+}
+
+#[tokio::test]
+async fn dispatcher_fails_closed_when_prepared_reservation_was_revoked_before_binding_dispatch() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
+    let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    governor.release(reservation.id).unwrap();
+    let binding = RecordingBinding::new(json!({}), Arc::clone(&governor));
+    let resolver = ScriptedResolver::from_entries([(
+        "echo.say",
+        resolved("echo", RuntimeKind::Wasm, binding.clone()),
+    )]);
+
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
+    let err = dispatcher
+        .dispatch_json(authorized(CapabilityDispatchRequest {
+            run_id: None,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope,
+            authenticated_actor_user_id: None,
+            estimate,
+            mounts: None,
+            resource_reservation: Some(reservation),
+            input: json!({"message": "revoked reservation"}),
+        }))
+        .await
+        .unwrap_err();
+
+    let DispatchError::Wasm {
+        kind: RuntimeDispatchErrorKind::Resource,
+        model_visible_cause: Some(cause),
+    } = &err
+    else {
+        panic!("expected resource failure with preserved cause, got {err:?}");
+    };
+    assert!(cause.contains("resource reservation"));
+    assert!(
+        err.to_string().contains("WASM dispatch failed: Resource"),
+        "dispatch error remains redacted at the public surface"
+    );
+    assert!(binding.requests().is_empty());
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
 
 #[tokio::test]
@@ -320,6 +407,7 @@ struct RecordingBinding {
 struct RecordedBindingRequest {
     capability_id: CapabilityId,
     scope: ResourceScope,
+    mounts: Option<MountView>,
     resource_reservation: Option<ResourceReservation>,
     input: Value,
 }
@@ -360,6 +448,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
         self.requests.lock().unwrap().push(RecordedBindingRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
+            mounts: request.mounts.clone(),
             resource_reservation: request.resource_reservation.clone(),
             input: request.input.clone(),
         });
@@ -398,8 +487,46 @@ impl BoundCapabilityAdapter for RecordingBinding {
     }
 }
 
-fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
+fn authorized(request: CapabilityDispatchRequest) -> Authorized {
+    let lane = match request.capability_id.as_str() {
+        id if id.contains("mcp") => RuntimeLane::Mcp,
+        id if id.contains("script") => RuntimeLane::Process,
+        id if id.contains("first_party") => RuntimeLane::FirstParty,
+        _ => RuntimeLane::Wasm,
+    };
+    authorized_with_lane(request, lane)
+}
+
+fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -> Authorized {
+    let invocation = Invocation {
+        activity_id: ActivityId::new(),
+        capability: request.capability_id,
+        input: request.input,
+        scope: request.scope,
+        actor: request
+            .authenticated_actor_user_id
+            .map(Actor::Sealed)
+            .unwrap_or(Actor::System),
+        origin: request
+            .run_id
+            .map(InvocationOrigin::LoopRun)
+            .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
+        estimate: request.estimate,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+    };
+    Authorized::seal_for_test_with_mounts(
+        invocation,
+        lane,
+        request.mounts,
+        request.resource_reservation,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
+    )
+}
+
+fn sample_request(capability_id: &str, input: Value) -> Authorized {
+    authorized(CapabilityDispatchRequest {
         run_id: None,
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
@@ -411,7 +538,7 @@ fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchReques
         mounts: None,
         resource_reservation: None,
         input,
-    }
+    })
 }
 
 fn sample_scope() -> ResourceScope {

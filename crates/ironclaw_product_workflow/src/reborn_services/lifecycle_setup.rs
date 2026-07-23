@@ -4,24 +4,89 @@ use ironclaw_auth::AuthProductScope;
 use ironclaw_host_api::ExtensionId;
 
 use crate::{
-    ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageRef,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
+    ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
     LifecycleProductSurfaceContext, ProductWorkflowError, RebornChannelConfigField,
     RebornExtensionCredentialSetup, RebornExtensionSetupField, RebornExtensionSetupSecret,
     RebornServicesError, RebornServicesErrorCode, RebornSetupExtensionResponse,
-    WebUiAuthenticatedCaller, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiSetupExtensionRequest,
+    RebornViewDescriptor, WebUiAuthenticatedCaller, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiSetupExtensionRequest,
 };
 
 use super::{
     ExtensionCredentialSetupService, extension_credentials::credential_scope, extension_onboarding,
-    extension_setup_credentials, extension_setup_credentials::SetupSubmitPayload,
+    extension_setup_credentials, extension_setup_credentials::SetupSubmitPayload, views,
+};
+
+pub const EXTENSION_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "extension_setup",
+    paginated: false,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SetupAction {
     View,
     Submit,
+}
+
+pub(super) async fn setup_extension_view(
+    facade: &dyn LifecycleProductFacade,
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    channel_config: Option<&dyn ChannelConfigFacade>,
+    caller: WebUiAuthenticatedCaller,
+    params: serde_json::Value,
+) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+    let package_id = views::required_string_view_param(params, "package_id")?;
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+        .map_err(map_lifecycle_error)?;
+    setup_extension(
+        facade,
+        extension_credentials,
+        channel_config,
+        caller,
+        package_ref,
+        WebUiSetupExtensionRequest::default(),
+    )
+    .await
+}
+
+pub(super) async fn submit_extension_setup_capability(
+    facade: &dyn LifecycleProductFacade,
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    channel_config: Option<&dyn ChannelConfigFacade>,
+    caller: WebUiAuthenticatedCaller,
+    input: serde_json::Value,
+) -> Result<(), RebornServicesError> {
+    let mut object = match input {
+        serde_json::Value::Object(object) => object,
+        _ => {
+            return Err(validation_error(
+                "input",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
+    };
+    let package_id = object
+        .remove("extension_id")
+        .or_else(|| object.remove("package_id"))
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .ok_or_else(|| {
+            validation_error("extension_id", WebUiInboundValidationCode::MissingField)
+        })?;
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+        .map_err(map_lifecycle_error)?;
+    let request = serde_json::from_value(serde_json::Value::Object(object))
+        .map_err(|_| validation_error("input", WebUiInboundValidationCode::InvalidValue))?;
+    setup_extension(
+        facade,
+        extension_credentials,
+        channel_config,
+        caller,
+        package_ref,
+        request,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub(super) async fn setup_extension(

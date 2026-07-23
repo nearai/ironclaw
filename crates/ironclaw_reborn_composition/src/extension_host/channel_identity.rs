@@ -294,9 +294,11 @@ pub(crate) struct DiscoveredChannelExtension {
     pub(crate) providers: Vec<String>,
 }
 
-/// Installed extensions whose manifest declares a channel surface and at
-/// least one auth vendor, excluding `overridden` extension ids (their lane
-/// owns identity binding).
+/// Installed extensions whose manifest declares a channel surface, excluding
+/// `overridden` extension ids (their lane owns identity binding). OAuth
+/// channels expose one or more auth vendors; proof-code paired channels expose
+/// none but must still be discoverable by the generic connection facade so
+/// removal can revoke their pairing-owned state.
 pub(crate) async fn discover_channel_extensions(
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     overridden: &BTreeSet<String>,
@@ -308,7 +310,7 @@ pub(crate) async fn discover_channel_extensions(
     let mut discovered = Vec::new();
     for record in manifests {
         let resolved = record.resolved();
-        if resolved.channel.is_none() || resolved.auth.is_empty() {
+        if resolved.channel.is_none() {
             continue;
         }
         let extension_id = resolved.id.as_str().to_string();

@@ -1,5 +1,5 @@
 // arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
     ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName,
@@ -14,18 +14,20 @@ use ironclaw_turns::{
         CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind,
         LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
         LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary,
-        LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, SameCallRetryConstraint, ToolObservationDetail,
-        ToolObservationStatus, VisibleCapabilityRequest, resolution,
+        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+        ObservationTrust, ParentLoopOutput, PromptMode, ProviderToolCallReplay,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest, resolution,
     },
 };
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
-    LoopExecutionState, MessageIndexEntry, PendingApprovalResume, PendingAuthResume,
-    RepeatedCallWarningPhase, RepeatedCallWarningState,
+    LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
+    ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
+    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -43,9 +45,10 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, PromptStep,
-    StageContext, StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, PendingInputAck, PromptInput,
+    PromptStage, PromptStep, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
+    synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -1329,6 +1332,38 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
 }
 
 #[tokio::test]
+async fn model_context_overflow_exhaustion_gives_model_one_observation_assisted_attempt() {
+    let overflow = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )
+    };
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        overflow(),
+        overflow(),
+        overflow(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("context-overflow observation should let the model recover");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("context overflowed; use the available context and continue")
+    }));
+}
+
+#[tokio::test]
 async fn model_budget_approval_required_with_gate_ref_blocks_resource_gate() {
     let gate_ref = LoopGateRef::new("gate:budget-test-approval").expect("gate ref");
     let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
@@ -2089,9 +2124,10 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
 async fn exit_stage_no_progress_fails_when_nudge_disabled() {
     // Production default: the driver-specific nudge gate is off, so a no-progress
     // stop produces a typed `NoProgressDetected` failure with a Final checkpoint —
-    // NOT a canned "I stopped" reply finalized as a completed turn. No assistant
-    // reply is issued (no model call), and the failure carries the honest category
-    // the product layer renders deterministically.
+    // NOT a canned "I stopped" reply finalized as a completed turn. The failed
+    // branch attaches a best-effort failure explanation (§5a.2); with no model
+    // response available the explanation fails soft and the typed failure still
+    // carries the honest category the product layer renders deterministically.
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -2117,13 +2153,64 @@ async fn exit_stage_no_progress_fails_when_nudge_disabled() {
             // Final checkpoint is mandatory for the failed exit to validate
             // through `verify_failure_evidence` (parity with the Aborted arm).
             assert!(failed.checkpoint_id.is_some());
+            assert!(
+                failed.explanation_message_refs.is_empty(),
+                "a failed explanation model call must fail soft with no refs"
+            );
         }
         other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    assert!(
-        host.model_requests().is_empty(),
-        "nudge gate disabled must not issue a model call"
+    // The single model call is the best-effort failure explanation (§5a.2),
+    // never the nudge: the nudge gate is off, so the nudge counter stays 0 —
+    // and no assistant reply was finalized.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "only the best-effort failure-explanation call may be issued"
     );
+    assert_eq!(
+        final_staged_state(&host).final_answer_nudges_used,
+        0,
+        "nudge gate disabled must not attempt a nudge"
+    );
+    assert!(
+        host.finalized_assistant_messages().is_empty(),
+        "no assistant reply is finalized when the explanation call fails"
+    );
+}
+
+#[tokio::test]
+async fn no_progress_explanation_cancellation_returns_cancelled_before_final_checkpoint() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Cancelled,
+        "cancelled during no-progress explanation",
+    )]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(AgentLoopExecutorError::Cancelled)),
+        "cancellation during the no-progress explanation must propagate before failure finalization: {result:?}"
+    );
+    assert!(
+        host.checkpoint_kinds().is_empty(),
+        "cancellation must not write a Final checkpoint for a failed no-progress exit"
+    );
+    assert!(host.finalized_assistant_messages().is_empty());
 }
 
 #[tokio::test]
@@ -2174,10 +2261,13 @@ async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
 
 #[tokio::test]
 async fn no_progress_skips_nudge_when_gate_disabled() {
-    // Gate OFF: even with a model reply available, no tool-free nudge call is
-    // issued and the no-progress stop terminates as a typed failure (production
-    // default) — not a canned reply, not a completed turn.
-    let host = MockHost::new(vec![reply_response_with_text("unused")]);
+    // Gate OFF: no tool-free nudge call is issued and the no-progress stop
+    // terminates as a typed failure (production default) — not a canned reply,
+    // not a completed turn. The available model reply is consumed by the
+    // failure-explanation call (§5a.2) and referenced from the failed exit.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "explanation after no progress",
+    )]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2196,11 +2286,26 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
         .await
         .expect("exit stage");
 
-    assert!(
-        host.model_requests().is_empty(),
-        "no nudge model call when gate disabled"
+    // Exactly one model call — the failure explanation, not a nudge (the nudge
+    // counter stays 0 and the run still FAILS; a successful nudge would have
+    // completed the run instead).
+    assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(
+        final_staged_state(&host).final_answer_nudges_used,
+        0,
+        "no nudge attempt when the gate is disabled"
     );
-    assert!(matches!(exit, LoopExit::Failed(_)));
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert_eq!(
+                failed.explanation_message_refs.len(),
+                1,
+                "the failure explanation must be referenced from the failed exit"
+            );
+        }
+        other => panic!("expected typed no-progress failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2247,8 +2352,13 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
 #[tokio::test]
 async fn nudge_respects_one_shot_cap() {
     // With the cap already spent, the no-progress exit must not issue another
-    // model call and terminates as a typed failure (no canned reply).
-    let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
+    // NUDGE model call and terminates as a typed failure (no canned reply).
+    // The failed branch still runs its failure-explanation call (§5a.2), which
+    // consumes the scripted reply as the explanation message.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "explanation after capped nudge",
+    )])
+    .with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2268,11 +2378,22 @@ async fn nudge_respects_one_shot_cap() {
         .await
         .expect("exit stage");
 
-    assert!(
-        host.model_requests().is_empty(),
-        "capped nudge must not issue another model call"
+    // The nudge cap held: the counter did not advance, the run FAILED (a
+    // successful nudge would have completed it), and the single model call is
+    // the failure explanation.
+    assert_eq!(
+        final_staged_state(&host).final_answer_nudges_used,
+        1,
+        "capped nudge must not attempt another nudge"
     );
-    assert!(matches!(exit, LoopExit::Failed(_)));
+    assert_eq!(host.model_requests().len(), 1);
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert_eq!(failed.explanation_message_refs.len(), 1);
+        }
+        other => panic!("expected typed no-progress failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2433,10 +2554,13 @@ async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
         .await
         .expect("nudge model failure must not propagate out of the exit stage");
 
+    // Two model calls: the nudge attempt (scripted error) and the best-effort
+    // failure-explanation attempt (§5a.2, script exhausted → fails soft).
     assert_eq!(
         host.model_requests().len(),
-        1,
-        "nudge attempted exactly one model call before failing open"
+        2,
+        "nudge attempts one model call before failing open; the failed branch \
+         then attempts its best-effort failure explanation"
     );
     assert!(
         matches!(exit, LoopExit::Failed(_)),
@@ -3374,9 +3498,203 @@ async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
     );
 }
 
+/// A typed stale surface is model-fixable-by-rebuild: an iteration-scoped retry
+/// rebuilds the capability surface and prompt bundle, so a surface refreshed
+/// mid-iteration no longer hard-borks the run invisible to the model.
 #[tokio::test]
-async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
+async fn model_stale_surface_retries_iteration_with_fresh_bundle_and_completes() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            "model request surface version does not match the host-built prompt bundle",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("typed stale surface must be recoverable");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.prompt_requests().len(),
+        2,
+        "stale-surface retry must rebuild the host prompt bundle"
+    );
+}
+
+#[tokio::test]
+async fn model_invalid_request_kinds_are_terminal_without_retry() {
+    for kind in [
+        AgentLoopHostErrorKind::InvalidInvocation,
+        AgentLoopHostErrorKind::Invalid,
+    ] {
+        let host =
+            MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+                kind,
+                "model request is deterministically invalid",
+            )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let error = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect_err("deterministic invalid model requests must terminate");
+
+        assert!(matches!(
+            error,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: HostStage::Model,
+                kind: actual_kind,
+                ..
+            } if actual_kind == kind
+        ));
+        assert_eq!(
+            host.model_requests().len(),
+            1,
+            "{kind:?} must not consume a retry"
+        );
+        assert_eq!(
+            host.prompt_requests().len(),
+            1,
+            "{kind:?} must not rebuild the prompt for a deterministic failure"
+        );
+    }
+}
+
+/// When the stale-request retry budget is exhausted the run fails gracefully
+/// with the precise `model_stale_request` category — not a terminal
+/// `HostUnavailableWithDiagnostics` that collapses to a generic
+/// model-unavailable failure.
+#[tokio::test]
+async fn model_stale_request_exhaustion_fails_with_stale_request_category() {
+    let stale = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            "model request surface version does not match the host-built prompt bundle",
+        )
+    };
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![stale(), stale(), stale()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("stale-request exhaustion must fail gracefully, not hard-bork");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            let summary = failed.safe_summary.expect("stale-request failure summary");
+            assert_eq!(summary.category(), "model_stale_request");
+        }
+        other => panic!("expected stale-request failed exit, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        3,
+        "stale-request retries are bounded by the per-class budget"
+    );
+}
+
+/// A model-path `Unauthorized` host error terminates immediately with the
+/// pinned, user-actionable `model_credentials_unavailable` category (fix the
+/// key/permissions) instead of a generic model-unavailable failure, and is
+/// never silently retried.
+#[tokio::test]
+async fn model_unauthorized_fails_with_credentials_category_without_retry() {
     let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unauthorized,
+            "model access was unauthorized",
+        )
+        .with_detail("HTTP 401 from provider"),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("unauthorized model errors must fail gracefully with a precise category");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            let summary = failed.safe_summary.expect("unauthorized failure summary");
+            assert_eq!(summary.category(), "model_credentials_unavailable");
+            assert_eq!(summary.detail(), Some("HTTP 401 from provider"));
+        }
+        other => panic!("expected unauthorized failed exit, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "unauthorized model errors must not be silently retried"
+    );
+}
+
+/// Model-path checkpoint/transcript host error kinds terminate with their
+/// precise failure kinds and categories instead of the generic host-stage
+/// unavailability collapse.
+#[tokio::test]
+async fn model_checkpoint_and_transcript_kinds_fail_with_precise_categories() {
+    for (kind, expected_failure_kind, expected_category) in [
+        (
+            AgentLoopHostErrorKind::CheckpointRejected,
+            LoopFailureKind::CheckpointRejected,
+            "checkpoint_rejected",
+        ),
+        (
+            AgentLoopHostErrorKind::TranscriptWriteFailed,
+            LoopFailureKind::TranscriptWriteFailed,
+            "transcript_write_failed",
+        ),
+    ] {
+        let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+            kind,
+            "model stage host persistence failed",
+        )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("model-path {kind:?} must fail gracefully, got hard error {error:?}")
+            });
+
+        match exit {
+            LoopExit::Failed(failed) => {
+                assert_eq!(
+                    failed.reason_kind, expected_failure_kind,
+                    "kind for {kind:?}"
+                );
+                let summary = failed.safe_summary.expect("failure summary");
+                assert_eq!(
+                    summary.category(),
+                    expected_category,
+                    "category for {kind:?}"
+                );
+            }
+            other => panic!("expected {kind:?} failed exit, got {other:?}"),
+        }
+        assert_eq!(
+            host.model_requests().len(),
+            1,
+            "{kind:?} model errors must not be silently retried"
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_invalid_output_exhaustion_gives_model_structured_repair_attempt() {
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidOutput,
             "model returned an empty assistant response",
@@ -3398,6 +3716,37 @@ async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
         .await
         .expect("execute");
 
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].inline_messages.iter().any(|message| {
+        let body = message.safe_body.as_str();
+        body.contains("invalid_output") && body.contains("empty_assistant_response")
+    }));
+}
+
+#[tokio::test]
+async fn model_error_observation_attempt_is_bounded_before_terminal_failure() {
+    let invalid = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model returned an empty assistant response",
+        )
+    };
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        invalid(),
+        invalid(),
+        invalid(),
+        invalid(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("bounded observation retry should end in a typed failure");
+
     match exit {
         LoopExit::Failed(failed) => {
             assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
@@ -3410,6 +3759,254 @@ async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
         }
         other => panic!("expected invalid-model-output failed exit, got {other:?}"),
     }
+    assert_eq!(host.model_requests().len(), 4);
+    assert_eq!(
+        host.model_requests()
+            .iter()
+            .flat_map(|request| &request.inline_messages)
+            .filter(|message| message
+                .safe_body
+                .as_str()
+                .contains("model error observation"))
+            .count(),
+        1,
+        "the exhausted class gets exactly one observation-assisted attempt"
+    );
+}
+
+#[tokio::test]
+async fn model_retry_transition_survives_checkpoint_reload_before_retry() {
+    let content_filtered = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContentFiltered,
+            "model completion was filtered",
+        )
+    };
+    let host = Arc::new(
+        MockHost::new(Vec::new())
+            .with_model_errors(vec![content_filtered(), content_filtered()])
+            .crash_after_checkpoint_progress(LoopCheckpointKind::BeforeModel),
+    );
+    let crashed_host = Arc::clone(&host);
+    let crash = match tokio::spawn(async move {
+        let family = crate::families::default();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host: crashed_host.as_ref(),
+        };
+        let state = LoopExecutionState::initial_for_run(crashed_host.run_context());
+        ModelStage
+            .process(
+                ctx,
+                ModelInput {
+                    state,
+                    messages: Vec::new(),
+                    inline_messages: Vec::new(),
+                    surface_version: surface_version(),
+                    capability_view: LoopModelCapabilityView {
+                        visible_capability_ids: Vec::new(),
+                    },
+                },
+            )
+            .await
+    })
+    .await
+    {
+        Err(join_error) => join_error,
+        Ok(_) => panic!("scripted worker crash must stop before the retry"),
+    };
+    assert!(crash.is_panic());
+
+    let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    assert!(
+        restored
+            .recovery_state
+            .observation_attempted_for(ModelErrorObservationClass::ContentFiltered)
+    );
+    assert_eq!(
+        restored.pending_model_error_observation,
+        Some(ModelErrorRecoveryObservation::content_filtered())
+    );
+
+    // Simulate a new worker loading the last committed BeforeModel payload.
+    // The same provider failure must now abort instead of granting a second
+    // observation-assisted attempt.
+    let family = crate::families::default();
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&family, host.as_ref(), restored)
+        .await
+        .expect("reloaded retry state should fail through the typed exit");
+
+    assert!(matches!(
+        exit,
+        LoopExit::Failed(ref failed) if failed.reason_kind == LoopFailureKind::ModelError
+    ));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("provide a policy compliant alternative")
+    }));
+}
+
+#[tokio::test]
+async fn invalid_output_repair_directive_survives_checkpoint_reload_before_retry() {
+    let host = Arc::new(
+        MockHost::new(vec![reply_response()])
+            .with_model_errors(vec![AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidOutput,
+                "model returned an empty assistant response",
+            )])
+            .crash_after_checkpoint_progress(LoopCheckpointKind::BeforeModel),
+    );
+    let crashed_host = Arc::clone(&host);
+    let crash = match tokio::spawn(async move {
+        let family = crate::families::default();
+        ModelStage
+            .process(
+                StageContext {
+                    planner: family.planner(),
+                    host: crashed_host.as_ref(),
+                },
+                ModelInput {
+                    state: LoopExecutionState::initial_for_run(crashed_host.run_context()),
+                    messages: Vec::new(),
+                    inline_messages: Vec::new(),
+                    surface_version: surface_version(),
+                    capability_view: LoopModelCapabilityView {
+                        visible_capability_ids: Vec::new(),
+                    },
+                },
+            )
+            .await
+    })
+    .await
+    {
+        Err(join_error) => join_error,
+        Ok(_) => panic!("scripted worker crash must stop before the retry"),
+    };
+    assert!(crash.is_panic());
+
+    let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    assert_eq!(
+        restored.pending_model_retry_directive,
+        Some(PendingModelRetryDirective::RepairInvalidOutput)
+    );
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), host.as_ref(), restored)
+        .await
+        .expect("reloaded repair directive should reach the retry request");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("previous model response was empty or structurally invalid")
+    }));
+}
+
+#[tokio::test]
+async fn retry_transition_checkpoint_failure_stops_before_second_model_call() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContentFiltered,
+            "model completion was filtered",
+        )])
+        .fail_checkpoint_on_occurrence(LoopCheckpointKind::BeforeModel, 2);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("retry-transition checkpoint failure must stop the run");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::CheckpointFailed {
+            stage: CheckpointKind::BeforeModel
+        }
+    ));
+    assert_eq!(host.model_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn unsupported_checkpointed_model_observation_stops_before_model_call() {
+    let host = MockHost::new(vec![reply_response()]);
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let mut observation = ModelErrorRecoveryObservation::content_filtered();
+    observation.schema_version += 1;
+    state.pending_model_error_observation = Some(observation);
+    let payload = serde_json::to_vec(&state).expect("checkpoint state serializes");
+    let restored =
+        LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+            .expect("checkpoint state reloads before semantic validation");
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, restored)
+        .await
+        .expect_err("unsupported observation must fail prompt construction");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "model-error observation control text was invalid"
+        }
+    ));
+    assert!(host.model_requests().is_empty());
+}
+
+#[tokio::test]
+async fn model_content_filter_gives_model_one_rephrase_attempt() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContentFiltered,
+            "model completion was filtered",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("content-filter observation should let the model rephrase");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("provide a policy compliant alternative")
+    }));
+
+    let before_model_states = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .collect::<Vec<_>>();
+    assert!(before_model_states.iter().any(|state| {
+        state.pending_model_error_observation
+            == Some(ModelErrorRecoveryObservation::content_filtered())
+    }));
+    assert!(
+        final_staged_state(&host)
+            .pending_model_error_observation
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -5400,123 +5997,23 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
     );
 }
 
-// ---------------------------------------------------------------------------
-// F13 — AwaitDependentRunGateStage::SkipAndContinue byte_len accumulation
-// ---------------------------------------------------------------------------
-
-/// Exercises the `SkipAndContinue` arm in `AwaitDependentRunGateStage::process`
-/// (gates.rs:177) via the full executor turn. When the gate strategy returns
-/// `SkipAndContinue` for an `AwaitDependentRun` outcome, `push_completed_result`
-/// must be called: it accumulates `byte_len` into `pending_capability_bytes` and
-/// appends the result ref to `state.result_refs`.
-///
-/// This path is normally guarded against by `validate_for_gate_kind`, but that
-/// check is enforcement-only (test-only call site in strategies/gate.rs). The
-/// `SkipAndContinue` arm of `AwaitDependentRunGateStage::process` is reachable
-/// through a custom gate strategy that bypasses the guard — e.g. Reborn-hosted
-/// gate resolvers that derive their outcome from external policy. This test
-/// drives the arm through `CanonicalAgentLoopExecutor` using `FixedGateStrategy`
-/// (which returns the outcome directly without validation).
-///
-/// Note: `PostCapabilityStage` always clears `pending_capability_bytes` at the
-/// end of a capability turn (line 96, to avoid cross-turn accumulation). To
-/// verify the bytes were accumulated BEFORE the clear, we use a `byte_len` that
-/// exceeds the default 32 000-byte threshold. If `push_completed_result` is
-/// called, the bytes accumulate inside the turn → `PostCapabilityStage`'s policy
-/// check evaluates them → sets `force_compact_on_next_iteration = true` (which
-/// DOES persist in the checkpoint). If `push_completed_result` is NOT called,
-/// `pending_capability_bytes` is empty, the policy never fires, and
-/// `force_compact_on_next_iteration` remains false.
-///
-/// Scenario (single-iteration):
-///   - Model → `AwaitDependentRun` capability outcome with `byte_len = 33 001`.
-///   - Gate returns `SkipAndContinue` → loop continues.
-///   - `terminate_hint = true` in the outcome causes `StopStage` to exit after
-///     this iteration, giving us a deterministic Final checkpoint to inspect.
-///
-/// Asserts:
-///   - Loop completes (not blocked — confirms SkipAndContinue worked).
-///   - Final `force_compact_on_next_iteration = true`: bytes accumulated by
-///     `push_completed_result` were seen by `PostCapabilityStage`'s policy.
-///   - Final `result_refs` contains the `AwaitDependentRun` result ref:
-///     second proof that `push_completed_result` was called in the
-///     `SkipAndContinue` arm (result_refs are retained across turns).
-///   - `force_compact_initiator == CapabilityResultOverflow`: the D-A initiator
-///     threading also works correctly for the `SkipAndContinue` arm.
+/// `GateOutcome::validate_for_gate_kind` is the owning contract for every gate
+/// stage. A custom strategy cannot use `SkipAndContinue` to discard an
+/// `AwaitDependentRun` suspension and report a normal completion; that would
+/// orphan the child-run relationship and hide a planner bug.
 #[tokio::test]
-async fn await_dependent_run_gate_skip_and_continue_accumulates_byte_len() {
-    let result_ref_str = "result:await-skip";
-    // byte_len exceeds the default 32 000-byte threshold to make the policy trip.
-    // See note in docstring: we cannot inspect pending_capability_bytes in the
-    // Final checkpoint directly (PostCapabilityStage clears it), so we rely on
-    // force_compact_on_next_iteration being set as an indirect proof.
-    let byte_len: u64 = 33_001;
+async fn await_dependent_run_gate_skip_and_continue_fails_as_driver_bug() {
     let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
         gate: empty_gate_state(),
     });
-    // Single iteration: model → AwaitDependentRun (SkipAndContinue), terminate_hint=true.
-    // The resolved_result constructed inside AwaitDependentRunGateStage from the
-    // AwaitDependentRun outcome carries byte_len; terminate_hint is set to false
-    // internally (capabilities.rs line 467), but stop.decide exits on the
-    // TerminateHint StopKind from DefaultStopConditionStrategy — which uses the
-    // batch summary's terminate_hint flag, not the result message's. To force
-    // a 1-iteration exit we instead use a terminate_hint=true outcome so that
-    // StopStage exits, giving us a stable Final checkpoint. Since AwaitDependentRun
-    // outcomes set terminate_hint=false in the resolved_result (line 467,
-    // capabilities.rs), the actual CapabilityResultMessage has terminate_hint=false;
-    // the StopStage terminate path is driven by CapabilityBatchTurnSummary which
-    // we can't directly override here. Use terminate_hint via the batch outcome.
-    // Simplest: use the default stop strategy and provide only one model response
-    // (calls_response) and no reply_response — the loop exits after the batch
-    // because DefaultStopConditionStrategy.should_stop_after_observed_turn returns
-    // GracefulStop when there are no more model responses pending AND the only
-    // model response was a capability call that resulted in a SkipAndContinue batch
-    // with a completed result summary. Actually — the simplest approach is two
-    // model responses: calls + reply. After SkipAndContinue, iteration 2 has the
-    // reply and exits. The SkipModel path does NOT fire here because byte_len
-    // accumulates and PostCapabilityStage would set force_compact flags, but we
-    // check the FIRST iteration's contribution via Final state after 2 iterations.
-    // Use terminate_hint=false on the outcome and a second model response (reply).
-    // After iteration 1 (SkipAndContinue + PostCapabilityStage trip):
-    //   state.compaction_state.force_compact_on_next_iteration = true (persists)
-    // After iteration 2 (SkipModel — skip_model_this_iteration was set):
-    //   PromptCompactionStep runs; message_index is empty → Skipped path →
-    //   force_compact_on_next_iteration cleared to false (prompt.rs line 207).
-    // After iteration 3 (reply — provided by second model response):
-    //   Final checkpoint: force_compact_on_next_iteration = false (already cleared).
-    //
-    // To avoid the clearing on the SkipModel iteration we use terminate_hint=true
-    // on the batch outcome (not the result message; terminate_hint on the result
-    // message is set to false by AwaitDependentRunGateStage internally). We achieve
-    // this by using the CapabilityBatchOutcome's StopKind pathway. The cleanest
-    // approach: set terminate_hint=true on a SIBLING completed result in the batch,
-    // but that adds complexity. Instead we use a one-shot check: since
-    // force_compact_on_next_iteration is set in iteration 1's PostCapabilityStage
-    // and only cleared in iteration 2's PromptStage (SkipModel path, when
-    // message_index is empty), and iteration 2 immediately clears the flag before
-    // writing any checkpoint, the flag value in any checkpoint after iteration 2
-    // will be false regardless.
-    //
-    // Resolution: use terminate_hint=true as the capability outcome's own field
-    // which IS propagated to CapabilityBatchTurnSummary. The AwaitDependentRun
-    // CapabilityResultMessage has terminate_hint=false (hardcoded in capabilities.rs)
-    // so the DefaultStopStrategy won't act on it. We cannot set terminate_hint=true
-    // on AwaitDependentRun via the public API without modifying test fixtures.
-    //
-    // Pragmatic solution: check result_refs instead (persists across turns).
-    // Provide 2 model responses so iter 1 is capability + SkipAndContinue and
-    // iter 2 is SkipModel (forced by PostCapabilityStage) and iter 3 is reply.
-    // The force_compact_on_next_iteration is set in iter 1 and cleared in iter 2
-    // — so we check result_refs as the persistent proof and also assert the
-    // SkipModel iteration fired (model count == 2 for 3 total iterations).
-    let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::ResolutionBatch {
             resolutions: vec![
                 resolution::await_dependent_run(
                     LoopGateRef::new("gate:await-skip").expect("valid"),
-                    LoopResultRef::new(result_ref_str).expect("valid"),
+                    LoopResultRef::new("result:await-skip").expect("valid"),
                     "dependent run skip and continue".to_string(),
-                    byte_len,
+                    33_001,
                     None,
                 )
                 .resolution,
@@ -5532,39 +6029,59 @@ async fn await_dependent_run_gate_skip_and_continue_accumulates_byte_len() {
         .await
         .expect("execute");
 
-    // SkipAndContinue must allow the loop to complete, not block.
-    assert!(
-        matches!(exit, LoopExit::Completed(_)),
-        "SkipAndContinue must allow the loop to continue to completion; \
-         if Blocked, the AwaitDependentRunGateStage SkipAndContinue arm returned \
-         BatchStep::Exit instead of BatchStep::Continue"
-    );
-
-    // push_completed_result was called in iteration 1's SkipAndContinue arm.
-    // The result ref must appear in state.result_refs (set by push_completed_result).
-    let final_state = final_staged_state(&host);
-    assert!(
-        final_state
-            .result_refs
-            .iter()
-            .any(|r| r.as_str() == result_ref_str),
-        "state.result_refs must contain the AwaitDependentRun result ref; \
-         push_completed_result in the SkipAndContinue arm must call \
-         state.result_refs.push(result.result_ref) — if missing, the \
-         SkipAndContinue arm is not calling push_completed_result"
-    );
-
-    // byte_len = 33 001 exceeds the threshold; PostCapabilityStage set
-    // force_compact_on_next_iteration=true and skip_model_this_iteration=true
-    // after iteration 1. Iteration 2 is therefore a SkipModel iteration, and
-    // the model is called only twice (iter 1 + iter 3 reply). This confirms the
-    // bytes reached the PostCapabilityStage policy evaluator via push_completed_result.
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::DriverBug);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("invalid AwaitDependentRun skip must fail as DriverBug, got {other:?}"),
+    }
     assert_eq!(
         host.model_requests().len(),
-        2,
-        "model must be called exactly twice (capability turn iter 1 + reply turn iter 3); \
-         byte_len=33_001 must have tripped ByteCapStrategy via push_completed_result, \
-         causing iter 2 to be a SkipModel iteration"
+        1,
+        "a driver contract violation must stop before another model turn"
+    );
+}
+
+/// An external-tool suspension cannot be silently discarded by a custom gate
+/// strategy. Drive the full executor so the assertion covers the GateStage
+/// caller path, not only `GateOutcome::validate_for_gate_kind`.
+#[tokio::test]
+async fn external_tool_gate_skip_and_continue_fails_as_driver_bug() {
+    let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
+        gate: empty_gate_state(),
+    });
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![
+                resolution::external_tool_pending(
+                    LoopGateRef::new("gate:external-tool-skip").expect("valid"),
+                    "external tool skip and continue".to_string(),
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::DriverBug);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("invalid ExternalTool skip must fail as DriverBug, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "a driver contract violation must stop before another model turn"
     );
 }
 
@@ -6336,10 +6853,15 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
 #[tokio::test]
 async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
     // Bug scenario: auth record stored for capability A → resume re-dispatches A
-    // → re-dispatch returns ApprovalRequired → GateStage runs with kind Approval
-    // → planner returns SkipAndContinue. Without the fix, pending_auth_resume
-    // for A survives, and the next prompt iteration re-dispatches A again —
-    // potential infinite re-dispatch loop with no model turn.
+    // → re-dispatch blocks again → GateStage runs → planner returns
+    // SkipAndContinue. Without the fix, pending_auth_resume for A survives, and
+    // the next prompt iteration re-dispatches A again — potential infinite
+    // re-dispatch loop with no model turn.
+    //
+    // Driven through an Auth gate: SkipAndContinue is only a valid outcome for
+    // Auth/Resource gates now that GateStage enforces
+    // `GateOutcome::validate_for_gate_kind` (§5a.1) — an Approval-gate skip
+    // fails the run as DriverBug (covered by the executor failure matrix).
     //
     // This test exercises GateStage directly (not the full executor) so we can
     // seed pending_auth_resume before the gate runs, mirroring the existing
@@ -6373,7 +6895,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
     };
-    let gate_ref = LoopGateRef::new("gate:approval-skip").expect("valid");
+    let gate_ref = LoopGateRef::new("gate:auth-skip-stale").expect("valid");
 
     let step = GateStage
         .process(
@@ -6381,7 +6903,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
             GateInput {
                 state,
                 call,
-                kind: GateKind::Approval,
+                kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
@@ -6474,6 +6996,8 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
 async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
     // The clear is capability-scoped: a SkipAndContinue for capability B must NOT
     // erase a pending_auth_resume record belonging to capability A.
+    // Driven through an Auth gate (a valid skip kind) since GateStage now
+    // enforces `GateOutcome::validate_for_gate_kind` (§5a.1).
     let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
         gate: empty_gate_state(),
     });
@@ -6504,7 +7028,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
     };
-    let gate_ref = LoopGateRef::new("gate:approval-skip-other").expect("valid");
+    let gate_ref = LoopGateRef::new("gate:auth-skip-other").expect("valid");
 
     let step = GateStage
         .process(
@@ -6512,7 +7036,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
             GateInput {
                 state,
                 call,
-                kind: GateKind::Approval,
+                kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,

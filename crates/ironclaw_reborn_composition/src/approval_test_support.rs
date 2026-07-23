@@ -1,10 +1,7 @@
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore};
 use ironclaw_host_api::MountView;
 use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
-use ironclaw_host_runtime::{
-    HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-};
+use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_run_state::ApprovalRequestStore;
 use std::sync::Arc;
 
@@ -135,7 +132,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
     let capability = CapabilityId::new(capability_id).expect("valid capability id"); // safety: test-only helper in #[cfg(test)] module.
     let estimate = ResourceEstimate::default();
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability.clone(),
             estimate.clone(),
@@ -188,7 +185,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
             };
 
             host_runtime
-                .resume_capability(RuntimeCapabilityResumeRequest::new(
+                .resume_capability((
                     context,
                     gate.approval_request_id,
                     capability,

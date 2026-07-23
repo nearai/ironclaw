@@ -43,8 +43,8 @@ use super::{
     HostRuntimeHttpEgressPort, HostRuntimeServices, LocalInvocationServicesResolver,
     McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore,
     ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeLaneExecutor,
-    RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
+    RuntimeAdapter, RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile,
+    SecretMode, ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
 use crate::CommandExecutionRequest;
@@ -704,7 +704,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -761,7 +761,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -823,7 +823,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -880,7 +880,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -944,7 +944,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -1075,7 +1075,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -1233,7 +1233,7 @@ async fn assert_first_party_denies_before_handler(
     let package = test_package(WASM_MANIFEST, "test-wasm");
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -1274,7 +1274,7 @@ impl RecordingRuntimeAdapter {
 impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeLaneRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         *self.calls.lock().unwrap() += 1;
         let usage = ResourceUsage::default();

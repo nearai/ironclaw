@@ -131,6 +131,10 @@ pub struct RunNotificationContext {
 pub enum RunNotificationOrigin {
     LiveSourceRoute { source_route: SourceRouteContext },
     Triggered { trigger: TriggerCommunicationContext },
+    TriggeredWithTarget {
+        trigger: TriggerCommunicationContext,
+        target: ReplyTargetBindingRef,
+    },
     TriggeredFromSourceRoute {
         trigger: TriggerCommunicationContext,
         source_route: SourceRouteContext,
@@ -140,10 +144,15 @@ pub enum RunNotificationOrigin {
 ```
 
 `SourceRouteContext` carries the validated reply target for a live inbound
-conversation. `TriggerCommunicationContext` identifies the trigger fire without
-turning that trigger into a communication destination. The trigger reference is
-an outbound-local correlation value; the canonical trigger identity belongs to
-the future `ironclaw_triggers::TriggerId` in PR 9.
+conversation. `TriggeredWithTarget` carries the creator-owned binding resolved
+at fire time from the trigger's durable opaque target id; it routes ordinary
+results without changing the creator's global default. Approval and auth prompts
+continue to use their dedicated preference fields, so an ordinary delivery
+target cannot select an authority-bearing prompt destination.
+`TriggerCommunicationContext` identifies the trigger fire without turning that
+trigger into a communication destination. The trigger reference is an
+outbound-local correlation value; the canonical trigger identity belongs to the
+future `ironclaw_triggers::TriggerId` in PR 9.
 
 `SystemEventReasonCode` is a stable, redacted enum/code. Human-readable backend
 details, raw tool input, prompt material, OAuth state, approval payloads, and
@@ -175,6 +184,14 @@ optional `ReplyTargetBindingRef` candidate fields:
 Preference fields are candidates only. The outbound service must revalidate
 tenant ownership, exact owner where required, target capability, delivery kind,
 and modality before recording a delivery attempt.
+
+Product-facing outbound reads are descriptor-backed ProductSurface query views:
+`outbound_preferences` for the authenticated caller's preference projection and
+`outbound_delivery_targets` for the caller-scoped target inventory. The legacy
+`get_outbound_preferences` and `list_outbound_delivery_targets` facade methods
+are compatibility wrappers over those views while `RebornServicesApi` shrinks
+toward the generic read conduit. Preference writes remain side-effecting and
+must move through the capability path.
 
 ---
 

@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch};
 use ironclaw_turns::CapabilityActivityId;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityDeniedReasonKind, CapabilityInvocation, CapabilitySurfaceProfileId,
-    LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+    CapabilityDeniedReasonKind, CapabilitySurfaceProfileId, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
@@ -132,7 +132,7 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
             self.permits(capability_id)
@@ -144,7 +144,7 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         invoke_filtered_batch(
             &*self.inner,
@@ -265,7 +265,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
             self.permits(capability_id)
@@ -277,7 +277,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         invoke_filtered_batch(
             &*self.inner,
@@ -425,7 +425,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
             self.allow_set.permits(capability_id)
@@ -437,7 +437,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         if matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
             return self.inner.invoke_capability_batch(request).await;
@@ -461,8 +461,8 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
 
 async fn invoke_filtered_batch(
     inner: &(dyn LoopCapabilityPort + Send + Sync),
-    request: CapabilityBatchInvocation,
-    permits: impl Fn(&CapabilityInvocation) -> Result<bool, AgentLoopHostError>,
+    request: LoopRequestBatch,
+    permits: impl Fn(&LoopRequest) -> Result<bool, AgentLoopHostError>,
     denied_outcome: fn() -> Resolution,
 ) -> Result<ResolutionBatch, AgentLoopHostError> {
     let mut slots: Vec<Option<Resolution>> = Vec::with_capacity(request.invocations.len());
@@ -483,7 +483,7 @@ async fn invoke_filtered_batch(
         (Vec::new(), false)
     } else {
         let inner_batch = inner
-            .invoke_capability_batch(CapabilityBatchInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
                 invocations: allowed,
                 stop_on_first_suspension: request.stop_on_first_suspension,
             })
@@ -615,7 +615,7 @@ fn record_staged_invocation(
 
 fn invocation_capability_permitted(
     staged_invocations: &Mutex<HashMap<StagedInvocationKey, Vec<CapabilityId>>>,
-    invocation: &CapabilityInvocation,
+    invocation: &LoopRequest,
     permits: impl Fn(&CapabilityId) -> bool,
 ) -> Result<bool, AgentLoopHostError> {
     if !capability_info::is_capability_id(&invocation.capability_id) {
@@ -653,7 +653,7 @@ impl StagedInvocationKey {
         }
     }
 
-    fn from_invocation(invocation: &CapabilityInvocation) -> Self {
+    fn from_invocation(invocation: &LoopRequest) -> Self {
         Self {
             surface_version: invocation.surface_version.as_str().to_string(),
             capability_id: invocation.capability_id.as_str().to_string(),
@@ -746,8 +746,8 @@ mod tests {
         validated_provider_calls: Mutex<Vec<ProviderToolCall>>,
         provider_calls: Mutex<Vec<ProviderToolCall>>,
         visible_calls: Mutex<usize>,
-        invocations: Mutex<Vec<CapabilityInvocation>>,
-        batches: Mutex<Vec<CapabilityBatchInvocation>>,
+        invocations: Mutex<Vec<LoopRequest>>,
+        batches: Mutex<Vec<LoopRequestBatch>>,
     }
 
     #[async_trait]
@@ -843,7 +843,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             self.invocations
                 .lock()
@@ -854,7 +854,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.batches.lock().expect("batch lock").push(request);
             Ok(self
@@ -885,8 +885,8 @@ mod tests {
         ProviderToolName::new(value).expect("provider tool name")
     }
 
-    fn invocation(capability: &str, input: &str) -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn invocation(capability: &str, input: &str) -> LoopRequest {
+        LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(capability),
@@ -1341,7 +1341,7 @@ mod tests {
             .expect("allowed capability_info target should stage");
 
         filter
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -1395,7 +1395,7 @@ mod tests {
             .expect("allowed capability_info target should stage");
 
         let outcome = filter
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: CapabilityActivityId::new(),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
@@ -1457,8 +1457,8 @@ mod tests {
             .expect("allowed capability_info target should stage");
 
         filter
-            .invoke_capability_batch(CapabilityBatchInvocation {
-                invocations: vec![CapabilityInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![LoopRequest {
                     activity_id: candidate.activity_id,
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
@@ -1606,7 +1606,7 @@ mod tests {
         );
 
         let outcome = filter
-            .invoke_capability_batch(CapabilityBatchInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
                 invocations: vec![
                     invocation("demo.first", "input:first"),
                     invocation("demo.denied", "input:denied"),
@@ -1653,7 +1653,7 @@ mod tests {
         );
 
         let outcome = filter
-            .invoke_capability_batch(CapabilityBatchInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
                 invocations: vec![
                     invocation("demo.first", "input:first"),
                     invocation("demo.denied", "input:denied"),
@@ -1687,7 +1687,7 @@ mod tests {
         );
 
         let outcome = filter
-            .invoke_capability_batch(CapabilityBatchInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
                 invocations: vec![
                     invocation("demo.first", "input:first"),
                     invocation("demo.denied", "input:denied"),

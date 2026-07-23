@@ -2,12 +2,12 @@
 //! (extension-runtime §5.4, P6 c-rest).
 //!
 //! One composition-owned [`PostSubmitDeliveryHook`] serves every channel
-//! extension: on a settled trigger fire it reads the creator's personal
-//! communication preference, routes the stored reply-target binding ref to
-//! the extension whose registered [`PreferenceTargetCodec`] decodes it, and
-//! drives that extension's generic [`TriggeredRunDeliveryDriver`]. The
-//! single poller hook slot stays — multiplexing happens inside this hook,
-//! by extension id.
+//! extension: on a settled trigger fire it resolves the fire's optional
+//! creator-owned target id, otherwise reads the creator's personal
+//! communication preference, routes that reply-target binding ref to the
+//! extension whose registered [`PreferenceTargetCodec`] decodes it, and drives
+//! that extension's generic [`TriggeredRunDeliveryDriver`]. The single poller
+//! hook slot stays — multiplexing happens inside this hook, by extension id.
 //!
 //! Fail-closed routing: with no stored preference the fire routes to the
 //! only active codec-bearing channel extension when exactly one exists (its
@@ -23,14 +23,15 @@ use ironclaw_outbound::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 use ironclaw_product_workflow::{
-    PreferenceTargetCodec, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    triggered_run_delivery_settings,
+    PreferenceTargetCodec, RebornOutboundDeliveryTargetId, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, WebUiAuthenticatedCaller, triggered_run_delivery_settings,
 };
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 
 use crate::automation::trigger_poller::PostSubmitDeliveryHook;
 use crate::extension_host::channel_host::GenericChannelHostAssembly;
+use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 
 /// The generic post-submit delivery hook: routes each settled trigger fire
 /// to the owning extension's triggered-delivery driver.
@@ -38,6 +39,7 @@ pub(crate) struct GenericTriggeredRunDeliveryHook {
     assembly: Arc<GenericChannelHostAssembly>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     preferences: Arc<dyn CommunicationPreferenceRepository>,
+    delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
     drivers: tokio::sync::Mutex<HashMap<String, Arc<TriggeredRunDeliveryDriver>>>,
 }
 
@@ -46,11 +48,13 @@ impl GenericTriggeredRunDeliveryHook {
         assembly: Arc<GenericChannelHostAssembly>,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
         preferences: Arc<dyn CommunicationPreferenceRepository>,
+        delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
     ) -> Self {
         Self {
             assembly,
             delivery_store,
             preferences,
+            delivery_targets,
             drivers: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -64,12 +68,17 @@ impl GenericTriggeredRunDeliveryHook {
         &self,
         scope: &TurnScope,
         creator: &ironclaw_host_api::UserId,
+        per_trigger_target: Option<&ReplyTargetBindingRef>,
     ) -> Result<(String, Arc<dyn PreferenceTargetCodec>), String> {
         let codecs = self.assembly.active_preference_codecs();
         if codecs.is_empty() {
             return Err("no active channel extension registered a preference codec".to_string());
         }
-        if let Some(target) = self.stored_preference_target(scope, creator).await? {
+        let target = match per_trigger_target {
+            Some(target) => Some(target.clone()),
+            None => self.stored_preference_target(scope, creator).await?,
+        };
+        if let Some(target) = target {
             for (extension_id, codec) in &codecs {
                 if codec.conversation_for_target(&target).is_some() {
                     return Ok((extension_id.clone(), Arc::clone(codec)));
@@ -89,6 +98,37 @@ impl GenericTriggeredRunDeliveryHook {
              delivery routing is ambiguous"
                 .to_string(),
         )
+    }
+
+    /// Resolve the fire's durable opaque target id at fire time through the
+    /// same creator-scoped registry used at trigger creation. This both turns
+    /// the public id into a transport binding and revalidates ownership and
+    /// current availability after any intervening channel disconnect/remove.
+    async fn resolve_per_trigger_target(
+        &self,
+        fire: &TriggerFire,
+        scope: &TurnScope,
+    ) -> Result<Option<ReplyTargetBindingRef>, String> {
+        let Some(target) = fire.delivery_target.as_ref() else {
+            return Ok(None);
+        };
+        let target_id = RebornOutboundDeliveryTargetId::new(target.as_str())
+            .map_err(|error| format!("invalid per-trigger delivery target id: {error}"))?;
+        let caller = WebUiAuthenticatedCaller::new(
+            scope.tenant_id.clone(),
+            fire.creator_user_id.clone(),
+            fire.agent_id.clone(),
+            fire.project_id.clone(),
+        );
+        let entry = self
+            .delivery_targets
+            .resolve_outbound_delivery_target(&caller, &target_id)
+            .await
+            .map_err(|error| format!("per-trigger delivery target lookup failed: {error}"))?
+            .ok_or_else(|| {
+                "per-trigger delivery target is no longer available to its creator".to_string()
+            })?;
+        Ok(Some(entry.reply_target_binding_ref))
     }
 
     /// The creator's first configured personal preference target, in
@@ -180,7 +220,22 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 return;
             }
         };
-        let (extension_id, codec) = match self.route_extension(&scope, &fire.creator_user_id).await
+        let delivery_target = match self.resolve_per_trigger_target(&fire, &scope).await {
+            Ok(target) => target,
+            Err(reason) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::channel_triggered_delivery",
+                    %run_id,
+                    %reason,
+                    "triggered run delivery skipped: per-trigger target could not be resolved"
+                );
+                self.record_failed(run_id).await;
+                return;
+            }
+        };
+        let (extension_id, codec) = match self
+            .route_extension(&scope, &fire.creator_user_id, delivery_target.as_ref())
+            .await
         {
             Ok(routed) => routed,
             Err(reason) => {
@@ -215,6 +270,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 creator_user_id: fire.creator_user_id.clone(),
                 project_scoped: fire.project_id.is_some(),
                 prompt: fire.prompt.clone(),
+                delivery_target,
                 trigger_context,
             })
             .await;

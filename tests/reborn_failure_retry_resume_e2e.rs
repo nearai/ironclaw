@@ -29,19 +29,81 @@ use parity_qa_support::{
 use reborn_support::doubles::RecordingTestCapabilityPort;
 use serde_json::json;
 
-/// First model call fails (provider rejects the request); the run must end as a
-/// sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
-/// checkpoint and the second (resumed) model call succeeds, completing the run.
+/// A stale model request injected at the model gateway is recoverable inside
+/// the same run: the loop re-drives the model from `BeforeModel`, consumes a
+/// second model turn, and persists the recovered reply without requiring an
+/// external retry.
+#[tokio::test]
+async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::StaleRequest,
+            message: "capability surface changed before model dispatch".to_string(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "Recovered after retrying the stale model request.",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-single-stale-model-redrive",
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-single-stale-model-redrive",
+            "Answer using the current capability surface",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("one stale request is recovered in-loop");
+    harness
+        .assert_final_reply("Recovered after retrying the stale model request.")
+        .await
+        .expect("recovered reply persisted to the thread");
+
+    assert_eq!(
+        harness.model_requests().len(),
+        2,
+        "one stale request must cause exactly one same-run model re-drive"
+    );
+    assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
+/// Repeated stale model requests exhaust in-loop recovery; the run must end as
+/// a sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
+/// checkpoint and the next model call succeeds, completing the run.
 #[tokio::test]
 async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        // First model call: the provider rejects the request. This maps to a
-        // model-stage host-unavailable failure with no internal retry loop.
+        // Typed stale requests are retried twice in-loop. Three consecutive
+        // failures exhaust that budget and leave the successful response for
+        // the externally resumed run.
         RebornModelReplayStep::ModelError {
-            kind: HostManagedModelErrorKind::InvalidRequest,
+            kind: HostManagedModelErrorKind::StaleRequest,
             message: "model provider rejected the request".to_string(),
         },
-        // The retry's resumed model call succeeds with a final reply.
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::StaleRequest,
+            message: "model provider rejected the retried request".to_string(),
+        },
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::StaleRequest,
+            message: "model provider rejected the final in-loop retry".to_string(),
+        },
+        // The externally retried run resumes and succeeds with a final reply.
         RebornModelReplayStep::Response {
             response: HostManagedModelResponse::assistant_reply("Recovered: here is your answer."),
             expected_tool_results: Vec::new(),
@@ -68,7 +130,7 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .expect("failed run");
     assert_failure_lane_alignment(
         &failed,
-        "host_stage_unavailable_model",
+        "model_stale_request",
         FailureLane::Retriable,
         RetryDisposition::Auto,
     );
@@ -111,19 +173,59 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .await
         .expect("recovered reply persisted to the thread");
 
-    // Both scripted steps were consumed: the failing call and the recovered
-    // retry call.
+    // All scripted steps were consumed: three in-loop failures and the
+    // recovered external retry call.
     assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn reborn_invalid_model_request_fails_without_in_loop_retry() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::InvalidRequest,
+            message: "model request is deterministically invalid".to_string(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("must remain unused"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-invalid-model-request",
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text("event-invalid-model-request", "Answer my question")
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Failed)
+        .await
+        .expect("invalid request fails the run");
+
+    assert_eq!(
+        harness.remaining_model_responses(),
+        1,
+        "deterministic InvalidRequest must not consume an in-loop retry"
+    );
 
     harness.shutdown().await;
 }
 
 /// A host-managed model call can surface `Cancelled` without any cooperative
 /// cancel signal. `planned_driver` maps that executor error to
-/// `interrupted_unexpectedly`; the binary runner currently projects the
-/// non-allowlisted driver failure as the generic driver category.
+/// `interrupted_unexpectedly`, and the binary runner preserves that category
+/// on the durable failure record (§5a.5 closed — it previously overwrote it
+/// with the generic `driver_failed`).
 #[tokio::test]
-async fn reborn_inflight_model_cancelled_projects_driver_failed_divergence() {
+async fn reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly() {
     let model_gateway =
         RebornTraceReplayModelGateway::with_scripted_steps([RebornModelReplayStep::ModelError {
             kind: HostManagedModelErrorKind::Cancelled,
@@ -149,13 +251,13 @@ async fn reborn_inflight_model_cancelled_projects_driver_failed_divergence() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
-    // matrix-divergence: `map_executor_error` produces
-    // "interrupted_unexpectedly", but `TurnRunnerWorker::sanitized_driver_failure`
-    // only preserves allowlisted driver reason kinds and currently projects the
-    // binary run category as "driver_failed".
+    // §5a.5 closed: `map_executor_error` produces "interrupted_unexpectedly"
+    // and `sanitized_driver_failure` now preserves it end-to-end, so the
+    // durable run failure carries the original category instead of the
+    // masking "driver_failed".
     assert_failure_lane_alignment(
         &failed,
-        "driver_failed",
+        "interrupted_unexpectedly",
         FailureLane::Retriable,
         RetryDisposition::UserInitiated,
     );
@@ -273,7 +375,10 @@ fn assert_failure_lane_alignment(
     let category = failure.category();
     let retryable = state.checkpoint_id.is_some();
 
-    assert_eq!(category, expected_category, "sanitized failure category");
+    assert_eq!(
+        category, expected_category,
+        "sanitized failure category: {failure:?}"
+    );
     assert_eq!(
         failure_lane(category, retryable),
         expected_lane,

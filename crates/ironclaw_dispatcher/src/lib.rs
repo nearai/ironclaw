@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
-pub use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityDisplayOutputPreview, DispatchError, RuntimeDispatchErrorKind,
-};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeKind,
+    Actor, CapabilityId, ExtensionId, InvocationOrigin, ResourceReceipt, ResourceReservation,
+    ResourceScope, ResourceUsage, RuntimeKind, RuntimeLane,
+};
+pub use ironclaw_host_api::{
+    Authorized, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+    CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -164,21 +164,46 @@ where
         self
     }
 
-    #[tracing::instrument(
-        level = "debug",
-        skip(self, request),
-        fields(
-            capability_id = %request.capability_id,
-            scope = ?request.scope,
-        )
-    )]
+    #[tracing::instrument(level = "debug", skip(self, authorized), fields(capability_id, scope))]
     pub async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let mut request = request;
-        let scope = request.scope.clone();
-        let capability_id = request.capability_id.clone();
+        let (invocation, lane, mounts, resource_reservation) =
+            match authorized.into_parts(chrono::Utc::now()) {
+                Ok(parts) => parts,
+                Err(authorized) => {
+                    let capability = authorized.invocation().capability.clone();
+                    let reservation = authorized.abort();
+                    drop(DispatchReservationGuard::new(
+                        self.governor.as_ref(),
+                        reservation,
+                    ));
+                    return Err(DispatchError::AuthorizationExpired { capability });
+                }
+            };
+        let scope = invocation.scope.clone();
+        let capability_id = invocation.capability.clone();
+        tracing::Span::current().record("capability_id", tracing::field::display(&capability_id));
+        tracing::Span::current().record("scope", tracing::field::debug(&scope));
+        let authenticated_actor_user_id = match &invocation.actor {
+            Actor::Sealed(user_id) => Some(user_id.clone()),
+            Actor::System => None,
+        };
+        let run_id = match invocation.origin {
+            InvocationOrigin::LoopRun(run_id) if invocation.process_id.is_none() => Some(run_id),
+            _ => None,
+        };
+        let mut request = CapabilityDispatchRequest {
+            capability_id: invocation.capability,
+            scope: invocation.scope,
+            authenticated_actor_user_id,
+            run_id,
+            estimate: invocation.estimate,
+            mounts,
+            resource_reservation,
+            input: invocation.input,
+        };
         let mut reservation_guard = DispatchReservationGuard::new(
             self.governor.as_ref(),
             request.resource_reservation.take(),
@@ -199,6 +224,19 @@ where
         };
         let provider = resolved.provider.clone();
         let runtime = resolved.runtime;
+        if RuntimeLane::from_runtime_kind(runtime) != Some(lane) {
+            let error = DispatchError::MissingRuntimeBackend { runtime };
+            self.emit_dispatch_failure(scope, capability_id, Some(provider), Some(runtime), &error)
+                .await?;
+            return Err(error);
+        }
+
+        if let Err(error) = reservation_guard.validate() {
+            let error = dispatch_resource_error(runtime, error);
+            self.emit_dispatch_failure(scope, capability_id, Some(provider), Some(runtime), &error)
+                .await?;
+            return Err(error);
+        }
 
         self.emit_event(RuntimeEvent::runtime_selected(
             scope.clone(),
@@ -307,6 +345,13 @@ where
     fn take(&mut self) -> Option<ResourceReservation> {
         self.reservation.take()
     }
+
+    fn validate(&self) -> Result<(), ironclaw_resources::ResourceError> {
+        if let Some(reservation) = &self.reservation {
+            self.governor.validate_reservation(reservation)?;
+        }
+        Ok(())
+    }
 }
 
 impl<G> Drop for DispatchReservationGuard<'_, G>
@@ -326,6 +371,34 @@ where
     }
 }
 
+fn dispatch_resource_error(
+    runtime: RuntimeKind,
+    error: ironclaw_resources::ResourceError,
+) -> DispatchError {
+    tracing::debug!(%error, ?runtime, "reservation validation failed before dispatch");
+    let cause = error.to_string();
+    match runtime {
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Resource,
+            model_visible_cause: Some(cause),
+        },
+        RuntimeKind::Script => DispatchError::Script {
+            kind: RuntimeDispatchErrorKind::Resource,
+            model_visible_cause: Some(cause),
+        },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind: RuntimeDispatchErrorKind::Resource,
+            model_visible_cause: Some(cause),
+        },
+        RuntimeKind::FirstParty => DispatchError::FirstParty {
+            kind: RuntimeDispatchErrorKind::Resource,
+            safe_summary: None,
+            detail: Some(DispatchFailureDetail::Diagnostic { text: cause }),
+        },
+        RuntimeKind::System => DispatchError::MissingRuntimeBackend { runtime },
+    }
+}
+
 #[async_trait]
 impl<G> CapabilityDispatcher for RuntimeDispatcher<'_, G>
 where
@@ -333,8 +406,8 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        RuntimeDispatcher::dispatch_json(self, request).await
+        RuntimeDispatcher::dispatch_json(self, authorized).await
     }
 }

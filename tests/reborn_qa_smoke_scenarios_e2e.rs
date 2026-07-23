@@ -843,9 +843,12 @@ async fn qa_activating_bundled_extensions_exposes_complete_model_surface_e2e() {
         invocations
             .iter()
             .filter(|invocation| invocation.capability_id == activate)
-            .count(),
+            .map(|invocation| invocation.input_ref.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         BUNDLED_EXTENSION_IDS.len(),
-        "each bundled extension should be activated through the lifecycle tool"
+        "each bundled extension should be activated through the lifecycle tool; retryable \
+         lifecycle failures may add duplicate attempts for the same scripted call"
     );
     harness.assert_model_exhausted();
     harness.shutdown().await;
@@ -1051,9 +1054,7 @@ fn call(
     RebornScriptedProviderToolCall::new(capability_id.clone(), call_id, arguments)
 }
 
-fn capability_order(
-    invocations: &[ironclaw_turns::run_profile::CapabilityInvocation],
-) -> Vec<&str> {
+fn capability_order(invocations: &[ironclaw_turns::run_profile::LoopRequest]) -> Vec<&str> {
     invocations
         .iter()
         .map(|invocation| invocation.capability_id.as_str())

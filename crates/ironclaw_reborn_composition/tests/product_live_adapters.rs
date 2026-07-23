@@ -56,11 +56,10 @@ use ironclaw_turns::{
     CheckpointStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
     RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
-        AgentLoopHostError, CapabilityInputRef, CapabilityInvocation,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest,
+        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
+        LoopModelPolicyGuard, LoopRequest, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+        PromptMode, ProviderToolCall, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
 
@@ -506,7 +505,7 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -635,7 +634,7 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -734,7 +733,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -885,7 +884,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id,
@@ -1145,7 +1144,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
         .unwrap();
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,

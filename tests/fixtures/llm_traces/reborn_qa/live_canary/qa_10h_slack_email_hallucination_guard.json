@@ -1,0 +1,69 @@
+{
+  "model_name": "reborn-qa-qa_10h_slack_email_hallucination_guard",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "What email address does Canary Other use on Slack? If you cannot see one, say exactly EMAIL_UNAVAILABLE. Include the exact marker REBORN_QA_10H_EMAIL_GUARD_1784643006397 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What email address does Canary Other use on Slack? If you cannot see one, sa",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4799de152391437490807250",
+            "name": "slack__list_conversations",
+            "arguments": {
+              "limit": 1000,
+              "types": "im"
+            }
+          }
+        ],
+        "input_tokens": 17423,
+        "output_tokens": 84
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What email address does Canary Other use on Slack? If you cannot see one, sa",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_88bda23956254e9ba8f9b62f",
+            "name": "slack__get_user_info",
+            "arguments": {
+              "user_id": "SLACK_ID_REDACTED"
+            }
+          }
+        ],
+        "input_tokens": 19123,
+        "output_tokens": 83
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What email address does Canary Other use on Slack? If you cannot see one, sa",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "text",
+        "content": "I don't see an email address — Slack's `users.info` API for `Canary Other` only returns basic profile fields (name, display name, bot status, timezone), and no email is exposed. Searching the available conversations also didn't surface one.\n\n**EMAIL_UNAVAILABLE** REBORN_QA_10H_EMAIL_GUARD_1784643006397",
+        "input_tokens": 19368,
+        "output_tokens": 82
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_user_info"
+    ]
+  }
+}

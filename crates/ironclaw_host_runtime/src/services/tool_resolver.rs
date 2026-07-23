@@ -25,7 +25,7 @@ use ironclaw_host_api::{
 use ironclaw_resources::ResourceGovernor;
 
 use super::RootFilesystem;
-use super::runtime_adapters::{RuntimeAdapterRequest, RuntimeLaneExecutor};
+use super::runtime_adapters::{RuntimeLaneExecutor, RuntimeLaneRequest};
 
 /// Prebinds every registry capability to its runtime lane, rebuilt only when
 /// the shared registry publishes a new version.
@@ -229,7 +229,7 @@ where
         self.executor
             .dispatch_json(
                 self.lane,
-                RuntimeAdapterRequest {
+                RuntimeLaneRequest {
                     package: &self.package,
                     descriptor: &self.descriptor,
                     filesystem: self.filesystem.as_ref(),

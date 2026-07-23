@@ -27,9 +27,8 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
     HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, builtin_first_party_package,
-    publish_hot_capability_catalog,
+    RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, builtin_first_party_package, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -1030,7 +1029,7 @@ async fn visible_surface_marks_askable_capabilities_without_granting_authority()
     );
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id("echo.say"),
             ResourceEstimate::default(),
@@ -1071,7 +1070,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
     assert!(surface.capabilities.is_empty());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id("echo.say"),
             ResourceEstimate::default(),
@@ -1566,7 +1565,7 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     .with_runtime_policy(network_denied_runtime_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context_with_grants([(
                 capability_id("echo.say"),
                 vec![EffectKind::DispatchCapability, EffectKind::Network],
@@ -1615,7 +1614,7 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
     .with_runtime_policy(secret_denied_runtime_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context_with_secret_grant(),
             capability_id("secret-tool.read"),
             ResourceEstimate::default(),
@@ -1660,7 +1659,7 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
     .with_runtime_policy(network_denied_runtime_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context_with_grants([(
                 capability_id("mcp.search"),
                 vec![EffectKind::DispatchCapability],

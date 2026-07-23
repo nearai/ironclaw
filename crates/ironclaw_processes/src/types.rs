@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProcessAuthorizedContinuation, ProcessId, ProjectId, ResourceEstimate,
+    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeKind, TenantId, ThreadId,
+    UserId, VirtualPath,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,8 @@ pub struct ProcessRecord {
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub error_kind: Option<String>,
 }
 
@@ -73,6 +76,7 @@ pub struct ProcessStart {
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub input: Value,
 }
 
@@ -209,6 +213,7 @@ pub struct ProcessExecutionRequest {
     pub estimate: ResourceEstimate,
     pub mounts: MountView,
     pub resource_reservation: Option<ResourceReservation>,
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub input: Value,
     pub cancellation: ProcessCancellationToken,
 }
@@ -403,6 +408,7 @@ mod tests {
             mounts: MountView::default(),
             estimated_resources: ResourceEstimate::default(),
             resource_reservation_id: None,
+            authorized_continuation: None,
             error_kind: None,
         };
         let mut legacy = serde_json::to_value(record).unwrap();

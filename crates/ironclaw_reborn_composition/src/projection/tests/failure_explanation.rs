@@ -316,6 +316,22 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
             "The run failed because the model returned output the runner could not use. Retry the run or choose a different model.",
         ),
         (
+            "model_stale_request",
+            "The run failed because the available tools changed while a model request was in flight. Retry the run.",
+        ),
+        (
+            MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+            "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        (
+            "checkpoint_rejected",
+            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run.",
+        ),
+        (
+            "transcript_write_failed",
+            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        ),
+        (
             "capability_transient",
             "The run failed after a temporary tool error. Retry the run.",
         ),

@@ -12,6 +12,8 @@
 //!
 //! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
 
+// arch-exempt: large_file, ProductSurface facade-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
+
 mod run_artifact;
 pub use run_artifact::get_run_artifact;
 
@@ -24,23 +26,32 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, CodexLoginStart, FsMount,
-    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, ProductOutboundEnvelope,
-    ProductWorkflowError, ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
-    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, AUTOMATIONS_VIEW,
+    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, ProductCapabilityDescriptor,
+    ProductCapabilityInput, ProductOutboundEnvelope, ProductSurface, ProductWorkflowError,
+    ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
+    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionRegistryResponse, RebornFsListRequest,
     RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse, RebornGetProjectRequest, RebornListAutomationsResponse,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
@@ -53,24 +64,28 @@ use ironclaw_product_workflow::{
     RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
     RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
     RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, SetActiveLlmRequest, SettingsToolPermissionState,
-    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornUpdateProjectRequest, RebornViewDescriptor, RebornViewQuery,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY, SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY, SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState,
+    THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{
-    ActivityId, Blocked, CapabilityId, FailureKind, Resolution, SecretHandle, UserId,
-};
+use ironclaw_host_api::{ActivityId, Blocked, FailureKind, Resolution, SecretHandle, UserId};
+use secrecy::ExposeSecret;
 use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
@@ -900,10 +915,21 @@ pub async fn stream_events(
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let slot = state
-        .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id)
-        .ok_or_else(sse_concurrency_exhausted)?;
+    let connection_id = stream_connection_id(query.connection_id.as_deref());
+    let slot = match state.sse_capacity().try_acquire_ordered(
+        &caller.tenant_id,
+        &caller.user_id,
+        connection_id,
+        connection_id.and(query.connection_generation),
+    ) {
+        crate::webui_v2::sse_capacity::SseAcquireResult::Acquired(slot) => slot,
+        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity => {
+            return Err(sse_concurrency_exhausted());
+        }
+        crate::webui_v2::sse_capacity::SseAcquireResult::StaleGeneration => {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
@@ -949,6 +975,20 @@ fn sse_concurrency_exhausted() -> WebUiV2HttpError {
 pub struct StreamEventsQuery {
     #[serde(default)]
     pub after_cursor: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub connection_generation: Option<u64>,
+}
+
+fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
+    connection_id.filter(|connection_id| {
+        !connection_id.is_empty()
+            && connection_id.len() <= 64
+            && connection_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
 }
 
 /// Redacted SSE error payload. Defined as a typed struct (not built with
@@ -1011,8 +1051,16 @@ fn sse_error_event(error: RebornServicesError) -> Event {
     }
 }
 
+const STREAM_READY_PAYLOAD: &str = r#"{"type":"keep_alive"}"#;
+
+fn sse_ready_event() -> Event {
+    Event::default()
+        .event("keep_alive")
+        .data(STREAM_READY_PAYLOAD)
+}
+
 fn build_sse_stream(
-    services: std::sync::Arc<dyn RebornServicesApi>,
+    services: std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
     thread_id: String,
     initial_cursor: Option<String>,
@@ -1023,7 +1071,7 @@ fn build_sse_stream(
         // the lifetime of this stream. It drops automatically when the
         // generator is dropped (client disconnect, max-lifetime expiry,
         // or facade error), releasing the per-caller concurrency slot.
-        let _slot_guard = slot;
+        let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
         if services.supports_stream_events_subscription() {
@@ -1035,12 +1083,15 @@ fn build_sse_stream(
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            let mut subscription = match tokio::time::timeout(
-                remaining,
-                services.subscribe_events(caller.clone(), request),
-            )
-            .await
-            {
+            let subscription_result = tokio::select! {
+                biased;
+                _ = slot_guard.cancelled() => return,
+                result = tokio::time::timeout(
+                    remaining,
+                    services.subscribe_events(caller.clone(), request),
+                ) => result,
+            };
+            let mut subscription = match subscription_result {
                 Err(_elapsed) => {
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
@@ -1059,12 +1110,23 @@ fn build_sse_stream(
                     return;
                 }
             };
+            // Axum can complete the HTTP handshake before the facade has
+            // admitted its projection subscription. This application frame
+            // proves the stream is actually ready, so a route switch can clear
+            // a stale reconnecting state without waiting for the next model
+            // delta or the transport keep-alive interval.
+            yield Ok(sse_ready_event());
             loop {
                 let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
                 if remaining.is_zero() {
                     return;
                 }
-                match tokio::time::timeout(remaining, subscription.next()).await {
+                let next = tokio::select! {
+                    biased;
+                    _ = slot_guard.cancelled() => return,
+                    result = tokio::time::timeout(remaining, subscription.next()) => result,
+                };
+                match next {
                     Err(_elapsed) => {
                         tracing::debug!(
                             target = "ironclaw_webui_v2::sse",
@@ -1106,12 +1168,15 @@ fn build_sse_stream(
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            match tokio::time::timeout(
-                remaining,
-                services.stream_events(caller.clone(), request),
-            )
-            .await
-            {
+            let drain = tokio::select! {
+                biased;
+                _ = slot_guard.cancelled() => return,
+                result = tokio::time::timeout(
+                    remaining,
+                    services.stream_events(caller.clone(), request),
+                ) => result,
+            };
+            match drain {
                 Err(_elapsed) => {
                     // The facade drain was still pending when SSE_MAX_LIFETIME
                     // ran out. Returning here drops the generator (and the
@@ -1151,7 +1216,11 @@ fn build_sse_stream(
                     if sleep_for.is_zero() {
                         return;
                     }
-                    tokio::time::sleep(sleep_for).await;
+                    tokio::select! {
+                        biased;
+                        _ = slot_guard.cancelled() => return,
+                        _ = tokio::time::sleep(sleep_for) => {}
+                    }
                 }
                 Ok(Err(error)) => {
                     // Surface a redacted error event and close the stream.
@@ -1262,13 +1331,16 @@ pub async fn list_threads(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<RebornListThreadsResponse>, WebUiV2HttpError> {
-    let request = WebUiListThreadsRequest {
+    let mut request = WebUiListThreadsRequest {
         limit: query.limit,
         cursor: query.cursor,
         candidate_thread_id: query.candidate_thread_id,
         needs_approval: query.needs_approval,
     };
-    let response = state.services().list_threads(caller, request).await?;
+    let cursor = request.cursor.take();
+    let response = THREADS_VIEW
+        .query_on(state.services().as_ref(), caller, request, cursor)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1303,7 +1375,9 @@ pub async fn list_automations(
         run_limit: query.run_limit,
         include_completed: query.include_completed,
     };
-    let response = state.services().list_automations(caller, request).await?;
+    let response = AUTOMATIONS_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1395,7 +1469,14 @@ pub async fn trace_credits(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
-    let response = state.services().trace_credits(caller).await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        TRACE_CREDITS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1408,7 +1489,14 @@ pub async fn trace_account_traces(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
-    let response = state.services().trace_account_traces(caller).await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        TRACE_ACCOUNT_TRACES_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1450,7 +1538,14 @@ pub async fn get_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let response = state.services().get_outbound_preferences(caller).await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        OUTBOUND_PREFERENCES_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1463,11 +1558,77 @@ pub async fn set_outbound_preferences(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornSetOutboundPreferencesRequest>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .set_outbound_preferences(caller, body)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    outbound_preferences_mutation_succeeded(resolution)?;
+
+    let response = query_product_view(
+        state.services(),
+        caller,
+        OUTBOUND_PREFERENCES_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
+}
+
+fn outbound_preferences_mutation_succeeded(
+    resolution: Resolution,
+) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: None,
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            }),
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(outbound_preferences_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(outbound_preferences_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "outbound preferences capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(outbound_preferences_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(outbound_preferences_unavailable(true))
+        }
+    }
+}
+
+fn outbound_preferences_forbidden() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn outbound_preferences_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
 }
 
 /// `GET /api/webchat/v2/outbound/targets`
@@ -1475,10 +1636,14 @@ pub async fn list_outbound_delivery_targets(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .list_outbound_delivery_targets(caller)
-        .await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        OUTBOUND_DELIVERY_TARGETS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1487,7 +1652,14 @@ pub async fn list_extensions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
-    let response = state.services().list_extensions(caller).await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        EXTENSIONS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1496,7 +1668,14 @@ pub async fn list_skills(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
-    let response = state.services().list_skills(caller).await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SKILLS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1506,7 +1685,14 @@ pub async fn search_skills(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SearchSkillsBody>,
 ) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
-    let response = state.services().search_skills(caller, body.query).await?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SKILL_SEARCH_VIEW,
+        serde_json::json!({ "query": body.query }),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1516,11 +1702,22 @@ pub async fn install_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<InstallSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .install_skill(caller, body.name, body.content)
-        .await?;
-    Ok(Json(response))
+    let name = body.name;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_INSTALL_CAPABILITY,
+        serde_json::json!({
+            "name": name.clone(),
+            "content": body.content,
+        }),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!("Skill '{name}' installed"),
+    }))
 }
 
 /// `GET /api/webchat/v2/skills/{name}`
@@ -1529,7 +1726,19 @@ pub async fn get_skill_content(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
-    let response = state.services().read_skill_content(caller, name).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: SKILL_CONTENT_VIEW.id.to_string(),
+                params: serde_json::json!({ "name": name }),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1540,11 +1749,21 @@ pub async fn update_skill(
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<UpdateSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .update_skill(caller, name, body.content)
-        .await?;
-    Ok(Json(response))
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_UPDATE_CAPABILITY,
+        serde_json::json!({
+            "name": name.clone(),
+            "content": body.content,
+        }),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!("Skill '{name}' updated"),
+    }))
 }
 
 /// `DELETE /api/webchat/v2/skills/{name}`
@@ -1553,8 +1772,18 @@ pub async fn remove_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state.services().remove_skill(caller, name).await?;
-    Ok(Json(response))
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_REMOVE_CAPABILITY,
+        serde_json::json!({ "name": name.clone() }),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!("Skill '{name}' removed"),
+    }))
 }
 
 /// `POST /api/webchat/v2/skills/{name}/auto-activate`
@@ -1564,11 +1793,26 @@ pub async fn set_skill_auto_activate(
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<SetSkillAutoActivateBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .set_skill_auto_activate(caller, name, body.enabled)
-        .await?;
-    Ok(Json(response))
+    let enabled = body.enabled;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
+        serde_json::json!({
+            "name": name.clone(),
+            "enabled": enabled,
+        }),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!(
+            "Skill '{}' auto-activation {}",
+            name,
+            if enabled { "enabled" } else { "disabled" }
+        ),
+    }))
 }
 
 /// `POST /api/webchat/v2/skills/auto-activate-learned`
@@ -1577,11 +1821,73 @@ pub async fn set_auto_activate_learned(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SetSkillAutoActivateBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .set_auto_activate_learned(caller, body.enabled)
-        .await?;
-    Ok(Json(response))
+    let enabled = body.enabled;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!(
+            "Default skill auto-activation {}",
+            if enabled { "enabled" } else { "disabled" }
+        ),
+    }))
+}
+
+fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
+                Err(RebornServicesError {
+                    code: RebornServicesErrorCode::InvalidRequest,
+                    kind: RebornServicesErrorKind::Validation,
+                    status_code: 400,
+                    retryable: false,
+                    field: None,
+                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                })
+            }
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(skill_mutation_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(skill_mutation_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "skill capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(skill_mutation_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => Err(skill_mutation_unavailable(true)),
+    }
+}
+
+fn skill_mutation_forbidden() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn skill_mutation_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
 }
 
 /// `GET /api/webchat/v2/extensions/registry`
@@ -1589,7 +1895,19 @@ pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionRegistryResponse>, WebUiV2HttpError> {
-    let response = state.services().list_extension_registry(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSION_REGISTRY_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1600,10 +1918,15 @@ pub async fn install_extension(
     Json(body): Json<InstallExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
-    let response = state
-        .services()
-        .install_extension(caller, package_ref)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        EXTENSION_INSTALL_CAPABILITY,
+        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    let response = extension_action_completed("Extension installed.", None);
     Ok(Json(response))
 }
 
@@ -1618,10 +1941,15 @@ pub async fn import_extension(
     body: axum::body::Bytes,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state
-        .services()
-        .import_extension(caller, body.to_vec())
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        EXTENSION_IMPORT_CAPABILITY,
+        serde_json::json!({ "bundle_base64": STANDARD.encode(body.as_ref()) }),
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    let response = extension_action_completed("Extension imported.", None);
     Ok(Json(response))
 }
 
@@ -1635,10 +1963,15 @@ pub async fn activate_extension(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let response = state
-        .services()
-        .activate_extension(caller, package_ref)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        EXTENSION_ACTIVATE_CAPABILITY,
+        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+    )
+    .await?;
+    let response =
+        extension_activation_response(state.services(), caller, package_ref, resolution).await?;
     Ok(Json(response))
 }
 
@@ -1652,11 +1985,154 @@ pub async fn remove_extension(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let response = state
-        .services()
-        .remove_extension(caller, package_ref)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    let response = extension_action_completed("Extension removed.", None);
     Ok(Json(response))
+}
+
+fn extension_lifecycle_mutation_succeeded(
+    resolution: Resolution,
+) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: None,
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            }),
+            Some(FailureKind::OperationFailed) => Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            }),
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(extension_lifecycle_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(extension_lifecycle_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "extension lifecycle capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(extension_lifecycle_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(extension_lifecycle_unavailable(true))
+        }
+    }
+}
+
+async fn extension_activation_response(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: LifecyclePackageRef,
+    resolution: Resolution,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {
+            let activated = query_extension_active_state(services, caller, &package_ref).await?;
+            Ok(extension_action_completed(
+                "Extension activated.",
+                Some(activated),
+            ))
+        }
+        Resolution::Blocked(Blocked::Auth(_)) => Ok(RebornExtensionActionResponse {
+            success: true,
+            message: "Extension authentication required.".to_string(),
+            activated: Some(false),
+            auth_url: None,
+            awaiting_token: None,
+            instructions: Some(
+                "Configure the extension credentials, then activate it again.".to_string(),
+            ),
+            onboarding_state: Some(RebornExtensionOnboardingState::AuthRequired),
+            onboarding: None,
+        }),
+        other => {
+            extension_lifecycle_mutation_succeeded(other)?;
+            Ok(extension_action_completed(
+                "Extension activated.",
+                Some(false),
+            ))
+        }
+    }
+}
+
+async fn query_extension_active_state(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: &LifecyclePackageRef,
+) -> Result<bool, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSIONS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response: RebornExtensionListResponse =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    response
+        .extensions
+        .iter()
+        .find(|extension| extension.package_ref == *package_ref)
+        .map(|extension| extension.active)
+        .ok_or_else(|| extension_lifecycle_unavailable(true))
+}
+
+fn extension_lifecycle_forbidden() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn extension_lifecycle_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn extension_action_completed(
+    message: impl Into<String>,
+    activated: Option<bool>,
+) -> RebornExtensionActionResponse {
+    RebornExtensionActionResponse {
+        success: true,
+        message: message.into(),
+        activated,
+        auth_url: None,
+        awaiting_token: None,
+        instructions: None,
+        onboarding_state: None,
+        onboarding: None,
+    }
 }
 
 /// `GET /api/webchat/v2/extensions/{package_id}/setup`
@@ -1669,10 +2145,19 @@ pub async fn get_extension_setup(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let response = state
+    let page = state
         .services()
-        .setup_extension(caller, package_ref, WebUiSetupExtensionRequest::default())
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+                params: serde_json::json!({ "package_id": package_ref.id.as_str() }),
+                cursor: None,
+            },
+        )
         .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1696,10 +2181,35 @@ pub async fn setup_extension(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let response = state
+    let mut input = serde_json::to_value(body).map_err(RebornServicesError::internal_from)?;
+    let input_object = input
+        .as_object_mut()
+        .ok_or_else(|| RebornServicesError::internal_from("setup request did not encode object"))?;
+    input_object.insert(
+        "extension_id".to_string(),
+        serde_json::Value::String(package_ref.id.as_str().to_string()),
+    );
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        EXTENSION_SETUP_SUBMIT_CAPABILITY,
+        input,
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    let page = state
         .services()
-        .setup_extension(caller, package_ref, body)
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+                params: serde_json::json!({ "package_id": package_ref.id.as_str() }),
+                cursor: None,
+            },
+        )
         .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1718,6 +2228,14 @@ fn require_operator_webui_config(
         validation_code: None,
     }
     .into())
+}
+
+fn operator_webui_config_caller(
+    caller: WebUiAuthenticatedCaller,
+    capabilities: WebUiV2Capabilities,
+) -> Result<WebUiAuthenticatedCaller, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    Ok(caller.with_operator_webui_config(true))
 }
 
 #[derive(Deserialize)]
@@ -1751,7 +2269,7 @@ pub async fn list_extension_admin_configuration(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let payload = query_extension_admin_configuration(&state, caller).await?;
     Ok(Json(payload))
 }
@@ -1769,22 +2287,22 @@ pub async fn replace_extension_admin_configuration(
     Path(path): Path<ExtensionAdminConfigurationPath>,
     Json(body): Json<ReplaceExtensionAdminConfigurationBody>,
 ) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let activity_id =
         admin_configuration_activity_id(&caller, &path.group_id, &body.idempotency_key)?;
     let expected_revision = body.expected_revision;
-    let input = serde_json::to_value(ReplaceExtensionAdminConfigurationInput {
-        group_id: path.group_id.clone(),
-        values: body.values,
-        expected_revision,
-    })
-    .map_err(RebornServicesError::internal_from)?;
-    let capability = CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)
-        .map_err(RebornServicesError::internal_from)?;
-    let resolution = state
-        .services()
-        .invoke(caller.clone(), capability, input, activity_id)
-        .await?;
+    let resolution = invoke_product_capability_with_activity_id(
+        state.services(),
+        caller.clone(),
+        ADMIN_CONFIGURATION_REPLACE_CAPABILITY,
+        ReplaceExtensionAdminConfigurationInput {
+            group_id: path.group_id.clone(),
+            values: body.values,
+            expected_revision,
+        },
+        activity_id,
+    )
+    .await?;
 
     match resolution {
         Resolution::Done(outcome) => {
@@ -1823,6 +2341,131 @@ pub async fn replace_extension_admin_configuration(
         Resolution::Blocked(blocked) => Err(admin_configuration_blocked(blocked).into()),
         Resolution::Suspended(_) => Err(admin_configuration_unavailable(true).into()),
     }
+}
+
+async fn invoke_product_capability<T>(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    input: T,
+) -> Result<Resolution, RebornServicesError>
+where
+    T: Serialize,
+{
+    let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+    let activity_id = product_capability_activity_id(&caller, capability, &input)?;
+    invoke_product_capability_with_activity_id(services, caller, capability, input, activity_id)
+        .await
+}
+
+async fn invoke_product_capability_with_activity_id<T>(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    input: T,
+    activity_id: ActivityId,
+) -> Result<Resolution, RebornServicesError>
+where
+    T: Serialize,
+{
+    capability
+        .invoke_on(services.as_ref(), caller, input, activity_id)
+        .await
+}
+
+fn product_capability_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    input: &serde_json::Value,
+) -> Result<ActivityId, RebornServicesError> {
+    let capability_id = capability.capability_id()?;
+    let input_bytes = serde_json::to_vec(input).map_err(RebornServicesError::internal_from)?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-product-capability",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    seed.extend_from_slice(&(input_bytes.len() as u64).to_be_bytes());
+    seed.extend_from_slice(&input_bytes);
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+fn llm_provider_upsert_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    request: &UpsertLlmProviderRequest,
+) -> Result<ActivityId, RebornServicesError> {
+    let capability_id = LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-product-capability",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+        request.id.as_str(),
+        request.name.as_deref().unwrap_or(""),
+        request.adapter.as_str(),
+        request.base_url.as_deref().unwrap_or(""),
+        request.default_model.as_deref().unwrap_or(""),
+        if request.set_active { "active" } else { "" },
+        request.model.as_deref().unwrap_or(""),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    if let Some(api_key) = request.api_key.as_ref() {
+        let secret = api_key.expose_secret().as_bytes();
+        seed.extend_from_slice(&(secret.len() as u64).to_be_bytes());
+        seed.extend_from_slice(secret);
+    } else {
+        seed.extend_from_slice(&0_u64.to_be_bytes());
+    }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+async fn query_product_view<T>(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    view: RebornViewDescriptor,
+    params: serde_json::Value,
+    cursor: Option<String>,
+) -> Result<T, RebornServicesError>
+where
+    T: DeserializeOwned,
+{
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: view.id.to_string(),
+                params,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
 async fn query_extension_admin_configuration(
@@ -2005,8 +2648,20 @@ pub async fn get_operator_setup(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state.services().get_operator_setup(caller).await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_SETUP_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2028,7 +2683,19 @@ pub async fn list_settings_tools(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
-    let mut response = state.services().list_operator_config(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let mut response: RebornOperatorConfigListResponse =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     response.entries.retain(|entry| {
         entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
             || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
@@ -2131,7 +2798,19 @@ pub async fn list_operator_config(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state.services().list_operator_config(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2177,10 +2856,19 @@ pub async fn get_operator_config_key(
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
-    let response = state
+    let page = state
         .services()
-        .get_operator_config_key(caller, key)
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
+                params: serde_json::json!({ "key": key }),
+                cursor: None,
+            },
+        )
         .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2223,10 +2911,19 @@ pub async fn validate_operator_config(
     Json(body): Json<RebornOperatorConfigValidateRequest>,
 ) -> Result<Json<RebornOperatorConfigValidateResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state
+    let page = state
         .services()
-        .validate_operator_config(caller, body)
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_VALIDATE_VIEW.id.to_string(),
+                params: serde_json::to_value(body).map_err(RebornServicesError::internal_from)?,
+                cursor: None,
+            },
+        )
         .await?;
+    let response: RebornOperatorConfigValidateResponse =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2236,8 +2933,20 @@ pub async fn get_operator_diagnostics(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state.services().get_operator_diagnostics(caller).await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2247,8 +2956,20 @@ pub async fn get_operator_status(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state.services().get_operator_status(caller).await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_STATUS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2262,7 +2983,7 @@ pub async fn query_operator_logs(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(mut query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let cursor = query.cursor.take();
     let params = serde_json::to_value(query).map_err(RebornServicesError::internal_from)?;
     let page = state
@@ -2351,9 +3072,57 @@ pub async fn get_llm_config(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state.services().get_llm_config(caller).await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
+}
+
+async fn query_llm_config_snapshot(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+) -> Result<LlmConfigSnapshot, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: LLM_CONFIG_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+fn llm_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
+                Err(RebornServicesError {
+                    code: RebornServicesErrorCode::InvalidRequest,
+                    kind: RebornServicesErrorKind::Validation,
+                    status_code: 400,
+                    retryable: false,
+                    field: None,
+                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                })
+            }
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(extension_lifecycle_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(extension_lifecycle_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "llm config capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(extension_lifecycle_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(extension_lifecycle_unavailable(true))
+        }
+    }
 }
 
 /// `POST /api/webchat/v2/llm/providers`
@@ -2363,8 +3132,19 @@ pub async fn upsert_llm_provider(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<UpsertLlmProviderRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state.services().upsert_llm_provider(caller, body).await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let activity_id = llm_provider_upsert_activity_id(&caller, &body)?;
+    let resolution = state
+        .services()
+        .invoke(
+            caller.clone(),
+            LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?,
+            ProductCapabilityInput::llm_provider_upsert(body),
+            activity_id,
+        )
+        .await?;
+    llm_config_mutation_succeeded(resolution)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
 
@@ -2375,11 +3155,16 @@ pub async fn delete_llm_provider(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state
-        .services()
-        .delete_llm_provider(caller, provider_id)
-        .await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_PROVIDER_DELETE_CAPABILITY,
+        serde_json::json!({ "provider_id": provider_id }),
+    )
+    .await?;
+    llm_config_mutation_succeeded(resolution)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
 
@@ -2390,8 +3175,16 @@ pub async fn set_active_llm(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SetActiveLlmRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let response = state.services().set_active_llm(caller, body).await?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_ACTIVE_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    llm_config_mutation_succeeded(resolution)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
 
@@ -2551,7 +3344,11 @@ pub async fn stream_events_ws(
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
     let slot = state
         .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id)
+        .try_acquire(
+            &caller.tenant_id,
+            &caller.user_id,
+            stream_connection_id(query.connection_id.as_deref()),
+        )
         .ok_or_else(sse_concurrency_exhausted)?;
     let services = state.services().clone();
     let initial_cursor = headers
@@ -2565,7 +3362,7 @@ pub async fn stream_events_ws(
 }
 
 async fn ws_drain_loop(
-    services: std::sync::Arc<dyn RebornServicesApi>,
+    services: std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
     thread_id: String,
     initial_cursor: Option<String>,
@@ -2588,7 +3385,7 @@ async fn ws_drain_loop(
     //    leave bytes queued indefinitely. Each `socket.send().await`
     //    runs under `ws_send_with_timeout` so the per-caller slot
     //    is released within the lifetime budget regardless.
-    let _slot_guard = slot;
+    let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
     if services.supports_stream_events_subscription() {
@@ -2602,38 +3399,60 @@ async fn ws_drain_loop(
             thread_id: thread_id.clone(),
             after_cursor: after_cursor.clone(),
         };
-        let mut subscription =
-            match tokio::time::timeout(remaining, services.subscribe_events(caller, request)).await
-            {
-                Err(_elapsed) => {
-                    let _ = socket.close().await;
-                    return;
+        let subscription_result = tokio::select! {
+            biased;
+            _ = slot_guard.cancelled() => {
+                let _ = socket.close().await;
+                return;
+            }
+            result = tokio::time::timeout(
+                remaining,
+                services.subscribe_events(caller, request),
+            ) => result,
+        };
+        let mut subscription = match subscription_result {
+            Err(_elapsed) => {
+                let _ = socket.close().await;
+                return;
+            }
+            Ok(Ok(subscription)) => subscription,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    target = "ironclaw_webui_v2::ws",
+                    error = ?error,
+                    "facade rejected WS subscription; closing stream",
+                );
+                let payload = SseErrorPayload {
+                    error: error.code,
+                    kind: error.kind,
+                    retryable: error.retryable,
+                };
+                if let Ok(text) = serde_json::to_string(&payload) {
+                    let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                    let _ = ws_send_with_timeout(
+                        &mut socket,
+                        Some(axum::extract::ws::Message::Text(text.into())),
+                        send_budget,
+                    )
+                    .await;
                 }
-                Ok(Ok(subscription)) => subscription,
-                Ok(Err(error)) => {
-                    tracing::debug!(
-                        target = "ironclaw_webui_v2::ws",
-                        error = ?error,
-                        "facade rejected WS subscription; closing stream",
-                    );
-                    let payload = SseErrorPayload {
-                        error: error.code,
-                        kind: error.kind,
-                        retryable: error.retryable,
-                    };
-                    if let Ok(text) = serde_json::to_string(&payload) {
-                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
-                        let _ = ws_send_with_timeout(
-                            &mut socket,
-                            Some(axum::extract::ws::Message::Text(text.into())),
-                            send_budget,
-                        )
-                        .await;
-                    }
-                    let _ = socket.close().await;
-                    return;
-                }
-            };
+                let _ = socket.close().await;
+                return;
+            }
+        };
+        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if ws_send_with_timeout(
+            &mut socket,
+            Some(axum::extract::ws::Message::Text(
+                STREAM_READY_PAYLOAD.into(),
+            )),
+            send_budget,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
         loop {
             let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
             if remaining.is_zero() {
@@ -2642,6 +3461,10 @@ async fn ws_drain_loop(
             }
             let outcome = tokio::select! {
                 biased;
+                _ = slot_guard.cancelled() => {
+                    let _ = socket.close().await;
+                    return;
+                }
                 incoming = socket.recv() => {
                     match incoming {
                         None | Some(Err(_)) => return,
@@ -2728,6 +3551,10 @@ async fn ws_drain_loop(
         let facade_call = services.stream_events(caller.clone(), request);
         let outcome = tokio::select! {
             biased;
+            _ = slot_guard.cancelled() => {
+                let _ = socket.close().await;
+                return;
+            }
             // Peer close / socket error wins over the facade poll —
             // if the browser already dropped the connection we want
             // to free the slot immediately, not wait for stream_events
@@ -2806,6 +3633,10 @@ async fn ws_drain_loop(
                 // slot immediately.
                 tokio::select! {
                     biased;
+                    _ = slot_guard.cancelled() => {
+                        let _ = socket.close().await;
+                        return;
+                    }
                     incoming = socket.recv() => match incoming {
                         None | Some(Err(_)) => return,
                         Some(Ok(axum::extract::ws::Message::Close(_))) => return,

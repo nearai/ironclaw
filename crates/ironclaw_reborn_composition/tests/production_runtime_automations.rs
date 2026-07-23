@@ -26,7 +26,10 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort,
 };
-use ironclaw_product_workflow::{WebUiAuthenticatedCaller, WebUiListAutomationsRequest};
+use ironclaw_product_workflow::{
+    AUTOMATIONS_VIEW, RebornListAutomationsResponse, RebornViewQuery, WebUiAuthenticatedCaller,
+    WebUiListAutomationsRequest,
+};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
@@ -121,9 +124,19 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // ServiceUnavailable.
     let result = bundle
         .api
-        .list_automations(caller, WebUiListAutomationsRequest::default())
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: AUTOMATIONS_VIEW.id.to_string(),
+                params: serde_json::to_value(WebUiListAutomationsRequest::default())
+                    .expect("automation list params"),
+                cursor: None,
+            },
+        )
         .await
         .expect("production automation facade must be reachable (not 503)");
+    let result: RebornListAutomationsResponse =
+        serde_json::from_value(result.payload).expect("automation list response");
     assert_eq!(
         result.automations.len(),
         0,

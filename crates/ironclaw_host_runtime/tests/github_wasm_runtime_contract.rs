@@ -11,14 +11,14 @@ use ironclaw_host_api::{
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
     GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
     NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
-    VendorId, VirtualPath,
+    ResourceEstimate, ResourceScope, RunId, RuntimeKind, SecretHandle, TenantId, TrustClass,
+    UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeFailureKind, default_host_api_contract_registry,
-    default_host_port_catalog,
+    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeFailureKind, RuntimeInvocation,
+    default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -2302,9 +2302,9 @@ fn wasm_runtime_request_for_scope(
     capability_id: CapabilityId,
     scope: ResourceScope,
     input: serde_json::Value,
-) -> RuntimeCapabilityRequest {
+) -> RuntimeInvocation {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
+    (context, capability_id, wasm_http_estimate(), input)
 }
 
 fn execution_context_with_dispatch_grant_for_scope(
@@ -2312,7 +2312,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
