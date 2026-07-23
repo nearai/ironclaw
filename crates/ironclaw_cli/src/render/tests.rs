@@ -17,6 +17,7 @@ fn sample_status() -> StatusDto {
     StatusDto {
         version: "0.1.0".to_string(),
         ironclaw_home: PathBuf::from("/home/user/.ironclaw/reborn"),
+        reborn_home: PathBuf::from("/home/user/.ironclaw/reborn"),
         home_source: "default",
         profile: "local-dev".to_string(),
         config_file: FilePresence {
@@ -106,7 +107,7 @@ fn status_json_round_trips() {
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["version"], "0.1.0");
     assert_eq!(parsed["ironclaw_home"], "/home/user/.ironclaw/reborn");
-    assert!(parsed.get("reborn_home").is_none());
+    assert_eq!(parsed["reborn_home"], parsed["ironclaw_home"]);
     assert_eq!(parsed["profile"], "local-dev");
     assert_eq!(parsed["config_file"]["present"], true);
     assert_eq!(parsed["providers_file"]["present"], false);

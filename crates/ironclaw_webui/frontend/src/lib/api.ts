@@ -181,6 +181,7 @@ export function listThreads({
   projectId,
   needsApproval,
   candidateThreadId,
+  signal,
 } = {}) {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -188,7 +189,7 @@ export function listThreads({
   if (projectId) url.searchParams.set("project_id", projectId);
   if (needsApproval) url.searchParams.set("needs_approval", "true");
   if (candidateThreadId) url.searchParams.set("candidate_thread_id", candidateThreadId);
-  return apiFetch(url.pathname + url.search);
+  return apiFetch(url.pathname + url.search, { signal });
 }
 
 export function deleteThread({ threadId } = {}) {

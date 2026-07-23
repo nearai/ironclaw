@@ -108,6 +108,19 @@ case "$default_config" in
     ;;
 esac
 
+if ! canonical_default_config="$(realpath -e -- "$default_config" 2>/dev/null)"; then
+  echo "IRONCLAW_DEFAULT_CONFIG must resolve to an existing file: $default_config" >&2
+  exit 1
+fi
+case "$canonical_default_config" in
+  /opt/ironclaw/*) ;;
+  *)
+    echo "IRONCLAW_DEFAULT_CONFIG must resolve under /opt/ironclaw: $default_config -> $canonical_default_config" >&2
+    exit 1
+    ;;
+esac
+default_config="$canonical_default_config"
+
 if [ ! -f "$config_path" ]; then
   mkdir -p "$IRONCLAW_HOME"
   tmp_config="${config_path}.tmp.$$"
@@ -282,10 +295,10 @@ port="${PORT:-${IRONCLAW_SERVE_PORT:-3000}}"
 
 resolve_env_placeholder_arg() {
   case "$1" in
-    '$IRONCLAW_SERVE_HOST'|'${IRONCLAW_SERVE_HOST}')
+    '$IRONCLAW_SERVE_HOST'|'${IRONCLAW_SERVE_HOST}'|'$IRONCLAW_REBORN_SERVE_HOST'|'${IRONCLAW_REBORN_SERVE_HOST}')
       printf '%s\n' "$host"
       ;;
-    '$PORT'|'${PORT}'|'$IRONCLAW_SERVE_PORT'|'${IRONCLAW_SERVE_PORT}')
+    '$PORT'|'${PORT}'|'$IRONCLAW_SERVE_PORT'|'${IRONCLAW_SERVE_PORT}'|'$IRONCLAW_REBORN_SERVE_PORT'|'${IRONCLAW_REBORN_SERVE_PORT}')
       printf '%s\n' "$port"
       ;;
     *)

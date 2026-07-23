@@ -54,10 +54,12 @@ fn build_status_dto_with_service_state(
     let (login_link, login_note) =
         resolve_login_link_and_note(home, &config_path_for_webui_lookup)?;
     let (login_link, login_note) = apply_service_suppression(service, login_link, login_note);
+    let ironclaw_home = home.path().to_path_buf();
 
     Ok(StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        ironclaw_home: home.path().to_path_buf(),
+        ironclaw_home: ironclaw_home.clone(),
+        reborn_home: ironclaw_home,
         home_source: home.source_label(),
         profile: profile.as_str().to_string(),
         config_file: FilePresence {

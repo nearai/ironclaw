@@ -58,6 +58,7 @@ fn setup_fake_entrypoint() -> FakeEntrypoint {
         &bin_dir.join("cp"),
         "#!/bin/sh\nprintf '%s\\n' 'api_version = \"ironclaw.runtime/v1\"' > \"$2\"\n",
     );
+    install_fake_realpath(&bin_dir);
 
     FakeEntrypoint {
         _temp: temp,
@@ -84,6 +85,7 @@ fn setup_fake_entrypoint_recording_cp() -> FakeEntrypoint {
         &bin_dir.join("cp"),
         "#!/bin/sh\nprintf '%s\\n[storage]\\n' \"$1\" > \"$2\"\n",
     );
+    install_fake_realpath(&bin_dir);
 
     FakeEntrypoint {
         _temp: temp,
@@ -102,6 +104,14 @@ fn write_executable(path: &std::path::Path, content: &str) {
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).expect("executable permissions");
+}
+
+#[cfg(unix)]
+fn install_fake_realpath(bin_dir: &std::path::Path) {
+    write_executable(
+        &bin_dir.join("realpath"),
+        "#!/bin/sh\n[ \"${1:-}\" != \"-e\" ] || shift\n[ \"${1:-}\" != \"--\" ] || shift\nprintf '%s\\n' \"$1\"\n",
+    );
 }
 
 #[test]
@@ -566,6 +576,40 @@ fn ironclaw_entrypoint_resolves_known_env_placeholders_in_explicit_args() {
 
 #[test]
 #[cfg(unix)]
+fn ironclaw_entrypoint_resolves_legacy_env_placeholders_in_explicit_args() {
+    let fake = setup_fake_entrypoint();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/ironclaw/entrypoint.sh"))
+        .args([
+            "serve",
+            "--host",
+            "$IRONCLAW_REBORN_SERVE_HOST",
+            "--port",
+            "${IRONCLAW_REBORN_SERVE_PORT}",
+        ])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_REBORN_SERVE_HOST", "0.0.0.0")
+        .env("IRONCLAW_REBORN_SERVE_PORT", "4321")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
+        "serve\n--host\n0.0.0.0\n--port\n4321\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn ironclaw_entrypoint_preserves_existing_config() {
     let fake = setup_fake_entrypoint();
     std::fs::create_dir_all(&fake.home_dir).expect("home dir");
@@ -663,6 +707,32 @@ fn ironclaw_entrypoint_rejects_default_config_outside_opt_ironclaw() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("IRONCLAW_DEFAULT_CONFIG must be under /opt/ironclaw"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn ironclaw_entrypoint_rejects_default_config_that_resolves_outside_opt_ironclaw() {
+    let fake = setup_fake_entrypoint();
+    write_executable(
+        &fake.bin_dir.join("realpath"),
+        "#!/bin/sh\nprintf '%s\\n' '/etc/passwd'\n",
+    );
+    let output = Command::new("sh")
+        .arg(repo_file("docker/ironclaw/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", "/opt/ironclaw/config.toml")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should reject path");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_DEFAULT_CONFIG must resolve under /opt/ironclaw"),
         "stderr: {stderr}"
     );
 }

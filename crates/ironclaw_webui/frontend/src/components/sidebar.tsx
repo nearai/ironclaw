@@ -47,9 +47,13 @@ export function Sidebar({
         <SidebarThreads
           threads={threadsState.threads}
           activeThreadId={threadsState.activeThreadId}
+          hasMore={threadsState.hasMore}
+          isLoadingMore={threadsState.isLoadingMore}
+          loadMoreError={threadsState.loadMoreError}
           rebornProjectsEnabled={rebornProjectsEnabled}
           onSelect={onSelectThread}
           onDelete={onDeleteThread}
+          onLoadMore={threadsState.loadMore}
           onNavigate={onClose}
         />
       </div>

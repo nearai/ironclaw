@@ -30,14 +30,21 @@ def gmail_header(message: dict, name: str) -> str | None:
     return None
 
 
-def raw_mime(*, to: str, subject: str, body: str) -> str:
-    message = (
-        f"To: {to}\r\n"
-        f"Subject: {subject}\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "\r\n"
-        f"{body}"
-    )
+def raw_mime(
+    *,
+    to: str,
+    subject: str,
+    body: str,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> str:
+    headers = [f"To: {to}", f"Subject: {subject}"]
+    if in_reply_to:
+        headers.append(f"In-Reply-To: {in_reply_to}")
+    if references:
+        headers.append(f"References: {references}")
+    headers.append("Content-Type: text/plain; charset=utf-8")
+    message = "\r\n".join([*headers, "", body])
     return base64.urlsafe_b64encode(message.encode("utf-8")).decode("ascii").rstrip("=")
 
 
