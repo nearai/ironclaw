@@ -15,14 +15,14 @@
 //! value — only a boolean `api_key_set`.
 
 use async_trait::async_trait;
+use ironclaw_host_api::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode,
+};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use super::{ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider};
-use crate::{
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode,
-};
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "llm_config",

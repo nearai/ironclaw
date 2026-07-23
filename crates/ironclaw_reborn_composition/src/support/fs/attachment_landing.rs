@@ -15,12 +15,12 @@ use ironclaw_attachments::{
     DEFAULT_MAX_ATTACHMENT_BYTES, InboundAttachment, land_inbound_attachments,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
-use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
-use ironclaw_product::{
-    InboundAttachmentLander, InboundAttachmentReader, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind,
+use ironclaw_host_api::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
+    ScopedPath,
 };
+use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
+use ironclaw_product::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
 use crate::local_dev_mounts::WORKSPACE_ALIAS;
@@ -186,10 +186,10 @@ mod tests {
     use super::*;
 
     use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::ProductSurfaceErrorCode;
     use ironclaw_host_api::{
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
     };
-    use ironclaw_product::ProductSurfaceErrorCode;
 
     fn workspace_fs(permissions: MountPermissions) -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let view = MountView::new(vec![MountGrant::new(

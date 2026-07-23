@@ -1,6 +1,10 @@
 //! Host/kernel-facing product surface contract.
 
+#[cfg(feature = "test-support")]
+use std::collections::VecDeque;
 use std::sync::Arc;
+#[cfg(feature = "test-support")]
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -9,7 +13,7 @@ use crate::{
     ActivityId, AdapterInstallationId, AgentId, CapabilityId, ChannelInboundClassification,
     NormalizedInboundMessage, ProductAdapterError, ProductAdapterId, ProductInboundAck,
     ProductInboundEnvelope, ProductSourceChannel, ProjectId, ProtocolAuthEvidence, RedactedString,
-    TenantId, UserId,
+    TenantId, ThreadId, TurnActor, TurnScope, UserId,
 };
 
 /// One verified, normalized channel message admitted through a product surface.
@@ -100,6 +104,20 @@ impl ProductSurfaceCaller {
     pub fn with_operator_config(mut self, operator_config: bool) -> Self {
         self.operator_config = operator_config;
         self
+    }
+
+    pub fn actor(&self) -> TurnActor {
+        TurnActor::new(self.user_id.clone())
+    }
+
+    pub fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
+        TurnScope::new_with_owner(
+            self.tenant_id.clone(),
+            self.agent_id.clone(),
+            self.project_id.clone(),
+            thread_id,
+            Some(self.user_id.clone()),
+        )
     }
 }
 
@@ -217,6 +235,16 @@ pub struct ProductSurfaceError {
     pub validation_code: Option<ProductSurfaceValidationCode>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductSurfaceHttpErrorParts {
+    pub code: ProductSurfaceErrorCode,
+    pub kind: ProductSurfaceErrorKind,
+    pub status_code: u16,
+    pub retryable: bool,
+    pub field: Option<String>,
+    pub validation_code: Option<ProductSurfaceValidationCode>,
+}
+
 impl ProductSurfaceError {
     pub fn from_status(code: ProductSurfaceErrorCode, status_code: u16, retryable: bool) -> Self {
         Self::from_status_kind(code, default_kind_for_code(code), status_code, retryable)
@@ -280,6 +308,28 @@ impl ProductSurfaceError {
     pub fn internal_from(source: impl std::fmt::Display) -> Self {
         tracing::error!(error = %source, "internal product surface error");
         Self::internal()
+    }
+
+    pub fn http_parts(&self) -> ProductSurfaceHttpErrorParts {
+        ProductSurfaceHttpErrorParts {
+            code: self.code,
+            kind: self.kind,
+            status_code: self.status_code,
+            retryable: self.retryable,
+            field: self.field.clone(),
+            validation_code: self.validation_code,
+        }
+    }
+
+    pub fn into_http_parts(self) -> ProductSurfaceHttpErrorParts {
+        ProductSurfaceHttpErrorParts {
+            code: self.code,
+            kind: self.kind,
+            status_code: self.status_code,
+            retryable: self.retryable,
+            field: self.field,
+            validation_code: self.validation_code,
+        }
     }
 }
 
@@ -359,5 +409,200 @@ impl BoundProductSurface {
         self.surface
             .stream_events(self.caller.clone(), request)
             .await
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedProductSurfaceInvoke {
+    pub caller: ProductSurfaceCaller,
+    pub request: ProductSurfaceInvokeRequest,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedProductSurfaceQuery {
+    pub caller: ProductSurfaceCaller,
+    pub request: ProductSurfaceQueryRequest,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedProductSurfaceStream {
+    pub caller: ProductSurfaceCaller,
+    pub request: ProductSurfaceStreamRequest,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+pub struct RecordingProductSurface {
+    invokes: Mutex<Vec<RecordedProductSurfaceInvoke>>,
+    queries: Mutex<Vec<RecordedProductSurfaceQuery>>,
+    streams: Mutex<Vec<RecordedProductSurfaceStream>>,
+    invoke_responses: Mutex<VecDeque<Result<ProductSurfaceInvokeResponse, ProductSurfaceError>>>,
+    query_responses: Mutex<VecDeque<Result<ProductSurfaceQueryPage, ProductSurfaceError>>>,
+    stream_responses: Mutex<VecDeque<Result<ProductSurfaceStreamResponse, ProductSurfaceError>>>,
+}
+
+#[cfg(feature = "test-support")]
+impl RecordingProductSurface {
+    pub fn enqueue_invoke(
+        &self,
+        response: Result<ProductSurfaceInvokeResponse, ProductSurfaceError>,
+    ) {
+        self.invoke_responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(response);
+    }
+
+    pub fn enqueue_query(&self, response: Result<ProductSurfaceQueryPage, ProductSurfaceError>) {
+        self.query_responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(response);
+    }
+
+    pub fn enqueue_stream(
+        &self,
+        response: Result<ProductSurfaceStreamResponse, ProductSurfaceError>,
+    ) {
+        self.stream_responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(response);
+    }
+
+    pub fn invokes(&self) -> Vec<RecordedProductSurfaceInvoke> {
+        self.invokes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn queries(&self) -> Vec<RecordedProductSurfaceQuery> {
+        self.queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn streams(&self) -> Vec<RecordedProductSurfaceStream> {
+        self.streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn next_invoke_response(&self) -> Result<ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        let mut responses = self
+            .invoke_responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        responses
+            .pop_front()
+            .unwrap_or_else(|| Err(ProductSurfaceError::unavailable(false)))
+    }
+
+    fn next_query_response(&self) -> Result<ProductSurfaceQueryPage, ProductSurfaceError> {
+        let mut responses = self
+            .query_responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        responses
+            .pop_front()
+            .unwrap_or_else(|| Err(ProductSurfaceError::unavailable(false)))
+    }
+
+    fn next_stream_response(&self) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let mut responses = self
+            .stream_responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        responses
+            .pop_front()
+            .unwrap_or_else(|| Err(ProductSurfaceError::unavailable(false)))
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl ProductSurface for RecordingProductSurface {
+    async fn invoke(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductSurfaceInvokeRequest,
+    ) -> Result<ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        self.invokes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(RecordedProductSurfaceInvoke { caller, request });
+        self.next_invoke_response()
+    }
+
+    async fn query(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductSurfaceQueryRequest,
+    ) -> Result<ProductSurfaceQueryPage, ProductSurfaceError> {
+        self.queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(RecordedProductSurfaceQuery { caller, request });
+        self.next_query_response()
+    }
+
+    async fn stream_events(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductSurfaceStreamRequest,
+    ) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError> {
+        self.streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(RecordedProductSurfaceStream { caller, request });
+        self.next_stream_response()
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::{AgentId, ProjectId, TenantId, UserId};
+
+    fn caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("user-alpha").expect("user"),
+            Some(AgentId::new("agent-alpha").expect("agent")),
+            Some(ProjectId::new("project-alpha").expect("project")),
+        )
+    }
+
+    #[tokio::test]
+    async fn recording_surface_records_bound_invoke_caller_and_request() {
+        let surface = Arc::new(RecordingProductSurface::default());
+        surface.enqueue_invoke(Ok(ProductSurfaceInvokeResponse {
+            output: json!({ "ok": true }),
+        }));
+        let caller = caller();
+        let bound = BoundProductSurface::new(surface.clone(), caller.clone());
+        let request = ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new("demo.invoke").expect("operation"),
+            input: json!({ "value": 1 }),
+            activity_id: ActivityId::new(),
+        };
+
+        let response = bound.invoke(request.clone()).await.expect("invoke");
+
+        assert_eq!(response.output, json!({ "ok": true }));
+        assert_eq!(
+            surface.invokes(),
+            vec![RecordedProductSurfaceInvoke { caller, request }]
+        );
     }
 }

@@ -1,13 +1,14 @@
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountProjection, ProviderScope,
 };
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope};
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceScope,
+};
 use uuid::Uuid;
 
 use crate::{
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecyclePackageRef, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup, LifecyclePackageRef,
 };
 
 use super::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};

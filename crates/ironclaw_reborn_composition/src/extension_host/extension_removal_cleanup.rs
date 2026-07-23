@@ -8,8 +8,8 @@ pub(crate) use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
-use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_product::{ProductSurfaceError, ProductWorkflowError};
+use ironclaw_host_api::{ProductSurfaceError, ResourceScope, UserId};
+use ironclaw_product::ProductWorkflowError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtensionRemovalCleanupContext {
@@ -111,8 +111,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
-    use ironclaw_product::{ProductSurfaceError, ProductWorkflowError};
+    use ironclaw_host_api::{
+        AgentId, InvocationId, ProductSurfaceError, ProjectId, ResourceScope, TenantId, UserId,
+    };
+    use ironclaw_product::ProductWorkflowError;
 
     use super::*;
 

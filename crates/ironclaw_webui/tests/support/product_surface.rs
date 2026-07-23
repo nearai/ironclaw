@@ -4,10 +4,12 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ActivityId, CapabilityId, Resolution};
+use ironclaw_host_api::{
+    ActivityId, CapabilityId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, Resolution,
+};
 use ironclaw_product::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, RebornGetRunStateRequest,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornViewPage, RebornViewQuery,
+    RebornGetRunStateRequest, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornViewPage, RebornViewQuery,
 };
 
 type InvokeHandler = dyn Fn(
@@ -192,7 +194,7 @@ impl ProductSurface for ProgrammableProductSurface {
             thread_id: request.stream_id.ok_or_else(|| {
                 ProductSurfaceError::validation(
                     "stream_id",
-                    ironclaw_product::ProductSurfaceValidationCode::MissingField,
+                    ironclaw_host_api::ProductSurfaceValidationCode::MissingField,
                 )
             })?,
             after_cursor: request

@@ -8,7 +8,7 @@
 //! **view descriptor**, never a product-local facade method.
 //!
 //! This test freezes that shared host API method set and asserts the
-//! product-local `ironclaw_product::ProductSurface` trait stays retired. The
+//! old product-local facade trait stays retired. The
 //! ratchet fails on any subsequent change:
 //!
 //! - a **new** host `ProductSurface` method fails — the feature belongs in a

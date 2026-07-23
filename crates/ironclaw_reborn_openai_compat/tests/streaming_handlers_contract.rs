@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{TenantId, ThreadId, UserId};
-use ironclaw_product::ProductSurface;
+use ironclaw_host_api::{ProductSurface, TenantId, ThreadId, UserId};
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalConversationRef, FinalReplyView,
     ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload,

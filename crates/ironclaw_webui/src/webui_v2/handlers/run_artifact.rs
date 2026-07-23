@@ -1,9 +1,7 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
-use ironclaw_product::{
-    ProductSurfaceCaller, ProductSurfaceError, RUN_ARTIFACT_VIEW, RebornRunArtifact,
-    RebornRunArtifactRequest,
-};
+use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError};
+use ironclaw_product::{RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest};
 use serde::Deserialize;
 
 use crate::webui_v2::error::WebUiV2HttpError;

@@ -7,8 +7,9 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceErrorCode;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-use ironclaw_product::{AutomationProductFacade, ProductAgentBoundCaller, ProductSurfaceErrorCode};
+use ironclaw_product::{AutomationProductFacade, ProductAgentBoundCaller};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,

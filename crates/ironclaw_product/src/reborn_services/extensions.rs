@@ -6,14 +6,16 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_auth::{CredentialAccountStatus, project_auth_account_state};
-use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
+use ironclaw_host_api::{
+    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceValidationCode,
+};
 
 use crate::{
     ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceValidationCode, ProductView, RebornAccountBindingSource, RebornAuthAccount,
+    LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
     RebornVendorAuthAccounts,
@@ -472,9 +474,10 @@ mod tests {
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary, ProductSurfaceCaller, ProductSurfaceError,
-        ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductWorkflowError,
-        RebornExtensionOnboardingState,
+        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
+    };
+    use ironclaw_host_api::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };
 
     #[derive(Default)]

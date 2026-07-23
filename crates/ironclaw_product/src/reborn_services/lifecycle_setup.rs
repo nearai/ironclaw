@@ -1,16 +1,17 @@
 use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{
+    ExtensionId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceValidationCode,
+};
 
 use crate::{
     ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductSetupExtensionRequest, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceValidationCode,
-    ProductWorkflowError, RebornChannelConfigField, RebornExtensionCredentialSetup,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
-    RebornViewDescriptor,
+    LifecycleProductSurfaceContext, ProductSetupExtensionRequest, ProductWorkflowError,
+    RebornChannelConfigField, RebornExtensionCredentialSetup, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornSetupExtensionResponse, RebornViewDescriptor,
 };
 
 use super::{

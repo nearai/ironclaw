@@ -23,8 +23,11 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
-use ironclaw_host_api::{ExtensionId, RecipeSecretField, ResourceScope, SecretHandle};
-use ironclaw_product::{ProductSurfaceError, ProductWorkflowError};
+use ironclaw_host_api::{
+    ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    RecipeSecretField, ResourceScope, SecretHandle,
+};
+use ironclaw_product::ProductWorkflowError;
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 
 use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
@@ -597,7 +600,6 @@ impl ironclaw_product::ChannelConfigFacade for RebornChannelConfigFacade {
 }
 
 fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
-    use ironclaw_product::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
     match error {
         ChannelConfigError::NotInstalled { .. } => ProductSurfaceError {
             code: ProductSurfaceErrorCode::NotFound,

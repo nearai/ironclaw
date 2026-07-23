@@ -1873,7 +1873,7 @@ impl RebornRuntime {
         self.admin_api_token_minter.clone()
     }
 
-    pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
+    pub(crate) fn product_thread_service(&self) -> Arc<dyn SessionThreadService> {
         self.thread_service.clone()
     }
 
@@ -1888,19 +1888,19 @@ impl RebornRuntime {
         Arc::clone(&self.thread_service)
     }
 
-    pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
+    pub(crate) fn product_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
     }
 
     /// The runtime's turn coordinator — the same `Arc` production wiring hands
     /// to the WebUI facade and the channel hosts
-    /// ([`RebornRuntime::webui_turn_coordinator`]) — so downstream integration
+    /// ([`RebornRuntime::product_turn_coordinator`]) — so downstream integration
     /// tests can poll `GetRunStateRequest` for runs submitted through the
     /// composed surfaces (e.g. waiting on a `BlockedAuth` park and its resume).
     /// For tests only — ships zero bytes in production builds.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn webui_turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
-        self.webui_turn_coordinator()
+    pub fn product_turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
+        self.product_turn_coordinator()
     }
 
     /// The generic post-OAuth channel-identity binding config for this
@@ -1995,8 +1995,8 @@ impl RebornRuntime {
         ))
     }
 
-    pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
-        self.projection_services.webui_event_stream()
+    pub(crate) fn product_event_stream(&self) -> Arc<dyn ProjectionStream> {
+        self.projection_services.product_event_stream()
     }
 
     pub(crate) fn webui_approval_interaction_service(&self) -> Arc<dyn ApprovalInteractionService> {

@@ -13,11 +13,11 @@ mod tests {
         CredentialOwnership, EngineCallbackBase, NewCredentialAccount, ProviderScope,
         ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
+    use ironclaw_host_api::ProductSurfaceCaller;
     use ironclaw_host_api::{
         MissionId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId, VendorAuthRecipe,
     };
-    use ironclaw_product::ProductSurfaceCaller;
     use ironclaw_secrets::FilesystemSecretStore;
     use serde_json::json;
     use std::sync::Arc;

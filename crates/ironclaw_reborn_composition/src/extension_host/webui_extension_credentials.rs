@@ -6,10 +6,10 @@ use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthProductError, CredentialAccountLabel,
     CredentialAccountSelectionRequest,
 };
+use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
 };
 
 use crate::{

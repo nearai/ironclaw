@@ -4,11 +4,13 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_host_api::{ExtensionId, InstallationState, InvocationId, ResourceScope};
+use ironclaw_host_api::{
+    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceScope,
+};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind,
+    LifecyclePackageRef, LifecycleProductPayload,
 };
 use secrecy::{ExposeSecret, SecretString};
 

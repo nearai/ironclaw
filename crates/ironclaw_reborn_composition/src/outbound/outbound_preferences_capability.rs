@@ -9,15 +9,17 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    PermissionMode, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade, ProductSurfaceCaller,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornSetOutboundPreferencesRequest,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade,
+    RebornSetOutboundPreferencesRequest,
 };
 
 pub(crate) fn extend_builtin_first_party_package(
@@ -129,7 +131,7 @@ fn ensure_declared(
     }
 }
 
-fn map_services_error(error: ironclaw_product::ProductSurfaceError) -> RuntimeDispatchErrorKind {
+fn map_services_error(error: ProductSurfaceError) -> RuntimeDispatchErrorKind {
     match (error.code, error.kind) {
         (ProductSurfaceErrorCode::InvalidRequest, _) | (ProductSurfaceErrorCode::NotFound, _) => {
             RuntimeDispatchErrorKind::InputEncode

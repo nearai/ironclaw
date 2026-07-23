@@ -25,10 +25,11 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, RebornCreateThreadResponse,
+use ironclaw_host_api::{
+    AgentId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProjectId, TenantId,
+    ThreadId, UserId,
 };
+use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 
 /// Host-installation tenant the audit apps are composed with.

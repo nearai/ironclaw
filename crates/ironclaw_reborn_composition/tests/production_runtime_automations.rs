@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
     AgentId, TenantId, UserId,
     runtime_policy::{
@@ -27,8 +28,7 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_product::{
-    AUTOMATIONS_VIEW, ProductListAutomationsRequest, ProductSurfaceCaller,
-    RebornListAutomationsResponse,
+    AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -123,7 +123,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
     let result = ironclaw_host_api::ProductSurface::query(
-        bundle.api.as_ref(),
+        bundle.product_surface.as_ref(),
         caller,
         ironclaw_host_api::ProductSurfaceQueryRequest {
             view_id: AUTOMATIONS_VIEW.id.to_string(),

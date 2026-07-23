@@ -7,14 +7,16 @@ use chrono::Utc;
 use async_trait::async_trait;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_host_api::{
+    InvocationId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
+};
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionFacade, OperatorStatusService, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    ChannelConnectionFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductFacade,
 };
 
@@ -53,7 +55,7 @@ use crate::{
 /// the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
-    pub api: Arc<dyn ProductSurface>,
+    pub product_surface: Arc<dyn ProductSurface>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
 }
@@ -62,7 +64,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RebornWebuiBundle")
-            .field("api", &"Arc<dyn ProductSurface>")
+            .field("product_surface", &"Arc<dyn ProductSurface>")
             .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .finish()
@@ -125,8 +127,8 @@ pub(crate) fn build_webui_services_with_channel_connection(
         runtime.extension_management.installation_store_handle(),
     );
     let mut api = ProductRebornServices::new_with_product_ports(
-        runtime.webui_thread_service(),
-        runtime.webui_turn_coordinator(),
+        runtime.product_thread_service(),
+        runtime.product_turn_coordinator(),
         RuntimeProductCapabilityInvoker::from_runtime(runtime),
         admin_configuration_view,
     )
@@ -290,7 +292,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_facade(channel_connection);
     }
-    api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+    api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.product_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         runtime.readiness.clone(),
     )));
@@ -321,7 +323,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     }
 
     Ok(RebornWebuiBundle {
-        api: Arc::new(api),
+        product_surface: Arc::new(api),
         product_auth: Some(Arc::clone(&runtime.product_auth)),
         readiness: runtime.readiness.clone(),
     })

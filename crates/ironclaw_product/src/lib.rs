@@ -175,11 +175,6 @@ pub use ironclaw_host_api::product_adapter::{
     mark_session_verified, mark_session_verified_for_tenant, mark_shared_secret_header_verified,
     mark_shared_secret_header_verified_for_tenant,
 };
-pub use ironclaw_host_api::{
-    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceInvokeRequest,
-    ProductSurfaceInvokeResponse, ProductSurfaceQueryPage, ProductSurfaceQueryRequest,
-    ProductSurfaceStreamRequest, ProductSurfaceStreamResponse, ProductSurfaceValidationCode,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub use ironclaw_turns::product_adapter::{
     FakeOutboundDeliverySink, FakeProjectionStream, FakeProtocolHttpEgress, RecordedEgressCall,
@@ -203,6 +198,10 @@ pub mod auth {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     pub use ironclaw_host_api::product_adapter::test_support::*;
+    pub use ironclaw_host_api::{
+        RecordedProductSurfaceInvoke, RecordedProductSurfaceQuery, RecordedProductSurfaceStream,
+        RecordingProductSurface,
+    };
 }
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
@@ -296,17 +295,17 @@ pub use reborn_services::{
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, ProductAgentBoundCaller,
     ProductCapabilityDescriptor, ProductCapabilityInvoker, ProductSurfaceCommandDescriptor,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductView,
-    ProjectCaller, ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError,
-    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError, RESOLVE_GATE_COMMAND,
-    RETRY_RUN_COMMAND, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountBindingSource,
-    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
-    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
-    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
-    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
-    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    ProductView, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind,
+    ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError,
+    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
+    RebornAccountBindingSource, RebornAccountLoginLinkResponse, RebornAccountTrace,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminConfigurationField,
+    RebornAdminConfigurationGroup, RebornAdminConfigurationListResponse,
+    RebornAdminConfigurationUse, RebornAdminCreateUserRequest,
+    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
@@ -384,7 +383,6 @@ pub use product_surface_inbound::{
     ProductCreateThreadRequest, ProductGateResolution, ProductInboundAttachment,
     ProductInboundCommand, ProductListAutomationsRequest, ProductListThreadsRequest,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurfaceCallerExt,
-    product_attachment_capabilities,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, product_attachment_capabilities,
 };
 pub use workflow::DefaultProductSurface;

@@ -13,7 +13,7 @@ use ironclaw_turns::{ReplyTargetBindingRef, TurnCoordinator, TurnEventProjection
 /// `RebornServices::with_event_stream` test wiring; see module doc for the
 /// narrowing vs. production's assembly.
 #[cfg(feature = "test-support")]
-pub fn build_webui_event_stream_for_test(
+pub fn build_product_event_stream_for_test(
     event_log: Arc<dyn DurableEventLog>,
     turn_event_source: Arc<dyn TurnEventProjectionSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -21,5 +21,5 @@ pub fn build_webui_event_stream_for_test(
 ) -> Arc<dyn ProjectionStream> {
     crate::projection::build_reborn_projection_services(event_log, reply_target_binding_ref)
         .with_turn_events(turn_event_source, turn_coordinator)
-        .webui_event_stream()
+        .product_event_stream()
 }

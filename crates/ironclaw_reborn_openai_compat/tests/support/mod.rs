@@ -5,13 +5,15 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ThreadId,
+};
 use ironclaw_product::{
     CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller, ProductSurfaceCallerExt,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornCancelRunResponse,
-    RebornCreateThreadResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND,
+    ProductSubmitTurnRequest, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    SUBMIT_TURN_COMMAND,
 };
 use ironclaw_product::{
     ExternalEventId, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,

@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
+use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller};
 use ironclaw_product::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    ProductSurfaceCaller, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetStatus,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -231,15 +231,16 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilitySurfaceKind, InstallationState, ProjectId, TenantId, UserId,
+        AgentId, CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller,
+        ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, TenantId,
+        UserId,
     };
     use ironclaw_product::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
         RebornSetOutboundPreferencesRequest,

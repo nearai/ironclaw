@@ -66,7 +66,7 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_product::ProductSurfaceCaller;
+use ironclaw_host_api::ProductSurfaceCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -546,7 +546,7 @@ pub fn webui_v2_app_with_lifecycle(
             config.default_agent_id.clone(),
             config.default_project_id.clone(),
         )
-        .with_webui_api(bundle.api.clone());
+        .with_product_surface(bundle.product_surface.clone());
         if let Some(channel_identity_binding) = config.channel_identity_binding.clone() {
             state = state.with_provider_identity_hook(channel_identity_binding_hook_factory(
                 channel_identity_binding,
@@ -611,8 +611,11 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_operator_routes()
     };
-    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-        .with_reborn_projects_enabled(reborn_projects_enabled());
+    let v2_state = WebUiV2State::new(
+        bundle.product_surface.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    )
+    .with_reborn_projects_enabled(reborn_projects_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

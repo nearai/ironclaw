@@ -70,7 +70,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
-Handlers consume only `ironclaw_product::ProductSurface`. The bearer
+Handlers consume only `ironclaw_host_api::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
 `ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail

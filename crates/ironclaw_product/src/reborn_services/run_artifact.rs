@@ -17,12 +17,12 @@ use ironclaw_threads::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, ProductSurfaceCaller,
-    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornLogEntry, RebornLogQueryRequest,
-    RebornServices, RebornViewDescriptor, RebornViewProvider, bounded_log_query, map_thread_error,
+    OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornLogEntry, RebornLogQueryRequest, RebornServices,
+    RebornViewDescriptor, RebornViewProvider, bounded_log_query, map_thread_error,
     parse_run_id_field, parse_thread_id_field,
 };
+use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode};
 
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {

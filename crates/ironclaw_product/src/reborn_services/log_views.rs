@@ -1,13 +1,12 @@
 //! Descriptor-backed caller and operator log projections.
 
 use super::{
-    ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceCallerExt, ProductSurfaceError,
-    ProductSurfaceValidationCode, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorLogsQuery,
-    RebornOperatorSurfaceStatus, RebornServices, RebornViewDescriptor, RebornViewProvider,
-    bounded_log_query, bounded_operator_logs_query, parse_thread_id_field,
-    validate_log_query_modes,
+    ProductCapabilityInvoker, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorLogsQuery, RebornOperatorSurfaceStatus,
+    RebornServices, RebornViewDescriptor, RebornViewProvider, bounded_log_query,
+    bounded_operator_logs_query, parse_thread_id_field, validate_log_query_modes,
 };
+use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode};
 
 pub const LOGS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "logs",

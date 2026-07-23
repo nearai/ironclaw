@@ -1608,7 +1608,7 @@ mod tests {
     use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
 
     use crate::binding::ResolveBindingRequest;
-    use crate::reborn_services::ProductSurfaceError;
+    use ironclaw_host_api::ProductSurfaceError;
 
     struct LandingBindingStub;
 

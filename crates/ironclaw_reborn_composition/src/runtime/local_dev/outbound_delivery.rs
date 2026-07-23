@@ -5,14 +5,12 @@ use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, Resolution,
-    ResourceEstimate, ResourceScope, SafeSummary, UserId,
+    GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, Resolution, ResourceEstimate, ResourceScope,
+    SafeSummary, UserId,
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
-use ironclaw_product::{
-    OutboundPreferencesProductFacade, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, RebornOutboundDeliveryTargetId,
-};
+use ironclaw_product::{OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId};
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
@@ -874,7 +872,7 @@ fn approval_lease_outcome(
 mod tests {
     use super::*;
     use crate::runtime::local_dev::assert_recoverable_failure;
-    use ironclaw_product::ProductSurfaceErrorKind;
+    use ironclaw_host_api::ProductSurfaceErrorKind;
     use ironclaw_turns::run_profile::LoopSafeSummary;
 
     fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {

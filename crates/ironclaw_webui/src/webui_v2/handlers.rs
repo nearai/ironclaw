@@ -10,7 +10,7 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_product::ProductSurface
+//! [`ProductSurface`]: ironclaw_host_api::ProductSurface
 
 // arch-exempt: large_file, ProductSurface facade-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
@@ -58,9 +58,7 @@ use ironclaw_product::{
     ProductCapabilityDescriptor, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductOutboundEnvelope, ProductRenameAutomationRequest,
     ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceCommandDescriptor, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ProductSurfaceValidationCode, ProductWorkflowError, ProjectFsFile,
+    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProductWorkflowError, ProjectFsFile,
     ProjectionCursor, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
@@ -107,7 +105,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, Resolution, SecretHandle, ThreadId, UserId,
+    ActivityId, Blocked, FailureKind, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, Resolution,
+    SecretHandle, ThreadId, UserId,
 };
 use uuid::Uuid;
 
@@ -293,7 +293,7 @@ async fn read_admin_user_secret(
     handle: String,
 ) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
     let surface =
-        ironclaw_product::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
     let response = ADMIN_USER_SECRETS_VIEW
         .query_on(&surface, RebornAdminUserRequest { user_id }, None)
         .await?;
@@ -1017,7 +1017,7 @@ async fn read_project_member(
     user_id: String,
 ) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
     let surface =
-        ironclaw_product::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
     let response = PROJECT_MEMBERS_VIEW
         .query_on(&surface, RebornListMembersRequest { project_id }, None)
         .await?;
@@ -1158,7 +1158,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_product::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_host_api::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1318,7 +1318,7 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-        let surface = ironclaw_product::BoundProductSurface::new(services, caller);
+        let surface = ironclaw_host_api::BoundProductSurface::new(services, caller);
 
         let mut idle_polls = 0_u32;
         loop {
@@ -2606,7 +2606,7 @@ where
     T: Serialize,
 {
     let surface =
-        ironclaw_product::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
     capability.invoke_on(&surface, input, activity_id).await
 }
 
@@ -2623,7 +2623,7 @@ where
     let input_value = serde_json::to_value(&input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_surface_activity_id(&caller, command.id, &input_value)?;
     let surface =
-        ironclaw_product::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
     command.invoke_on(&surface, input, activity_id).await
 }
 
@@ -2782,7 +2782,7 @@ async fn query_product_page(
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
     let surface =
-        ironclaw_product::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
     let page = surface
         .query(ironclaw_host_api::ProductSurfaceQueryRequest {
             view_id: query.view_id,
@@ -3771,7 +3771,7 @@ async fn ws_drain_loop(
     let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-    let surface = ironclaw_product::BoundProductSurface::new(services, caller);
+    let surface = ironclaw_host_api::BoundProductSurface::new(services, caller);
 
     let mut idle_polls = 0_u32;
     loop {

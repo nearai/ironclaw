@@ -25,10 +25,10 @@ use ironclaw_auth::{
     SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_extensions::ExtensionInstallationStore;
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
-use ironclaw_product::{
-    ChannelAuthAccountState, ChannelConnectionFacade, ProductSurfaceCaller, ProductSurfaceError,
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ResourceScope, TenantId,
 };
+use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionFacade};
 
 use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
 use crate::extension_host::channel_identity::{

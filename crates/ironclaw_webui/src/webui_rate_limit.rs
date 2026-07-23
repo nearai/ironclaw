@@ -43,8 +43,8 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
-use ironclaw_product::ProductSurfaceCaller;
 use lru::LruCache;
 
 use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};

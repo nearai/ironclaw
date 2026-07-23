@@ -7,7 +7,10 @@ use std::time::Duration;
 use crate::{ProductInboundEnvelope, ProductInboundPayload, ProductRejection, UserMessagePayload};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, TenantId,
+    ThreadId, UserId,
+};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
 use crate::action::{ActionFingerprintKey, ProductInboundAction};
@@ -19,8 +22,6 @@ use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
-use crate::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind};
-
 #[allow(dead_code)]
 pub fn rejecting_product_surface_error() -> ProductSurfaceError {
     ProductSurfaceError {

@@ -33,11 +33,12 @@ use axum::Json;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use ironclaw_attachments::InboundAttachment;
-use ironclaw_host_api::{ActivityId, ThreadId};
+use ironclaw_host_api::{
+    ActivityId, BoundProductSurface, ProductSurface, ProductSurfaceCaller, ThreadId,
+};
 use ironclaw_product::{
-    BoundProductSurface, CREATE_THREAD_COMMAND, ProductCreateThreadRequest,
-    ProductInboundAttachment, ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceCallerExt, SUBMIT_TURN_COMMAND,
+    CREATE_THREAD_COMMAND, ProductCreateThreadRequest, ProductInboundAttachment,
+    ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,
 };
 use ironclaw_product::{
     ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,

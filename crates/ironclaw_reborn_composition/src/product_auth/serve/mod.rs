@@ -50,13 +50,11 @@ use ironclaw_host_api::ingress::{
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ProductSurfaceQueryRequest, ProjectId, ResourceScope,
-    TenantId, ThreadId, UserId,
+    AgentId, BoundProductSurface, ExtensionId, InvocationId, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
+    UserId,
 };
-use ironclaw_product::{
-    BoundProductSurface, EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceError, RebornExtensionListResponse,
-};
+use ironclaw_product::{EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionListResponse};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -190,7 +188,7 @@ trait InstalledExtensionLookup: Send + Sync {
 }
 
 struct RebornServicesInstalledExtensionLookup {
-    api: Arc<dyn ProductSurface>,
+    product_surface: Arc<dyn ProductSurface>,
 }
 
 #[async_trait::async_trait]
@@ -200,7 +198,7 @@ impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
         caller: &ProductSurfaceCaller,
         extension_id: &ExtensionId,
     ) -> Result<bool, ProductSurfaceError> {
-        let surface = BoundProductSurface::new(Arc::clone(&self.api), caller.clone());
+        let surface = BoundProductSurface::new(Arc::clone(&self.product_surface), caller.clone());
         let page = surface
             .query(ProductSurfaceQueryRequest {
                 view_id: EXTENSIONS_VIEW.id.to_string(),
@@ -259,11 +257,11 @@ impl ProductAuthRouteState {
         }
     }
 
-    /// Wire the WebUI facade as the installed-extension inventory source for
+    /// Wire the product surface as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub fn with_webui_api(mut self, webui_api: Arc<dyn ProductSurface>) -> Self {
+    pub fn with_product_surface(mut self, product_surface: Arc<dyn ProductSurface>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
-            api: webui_api,
+            product_surface,
         }));
         self
     }

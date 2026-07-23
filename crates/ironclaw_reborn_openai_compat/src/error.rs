@@ -1,6 +1,6 @@
+use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
 use ironclaw_product::{ProductAdapterError, ProductWorkflowRejectionKind};
 use ironclaw_product::{ProductRejection, ProductRejectionKind};
-use ironclaw_product::{ProductSurfaceError, ProductSurfaceErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -194,7 +194,8 @@ impl OpenAiCompatHttpError {
     }
 
     pub fn from_product_surface_error(error: ProductSurfaceError) -> Self {
-        let kind = match error.code {
+        let parts = error.into_http_parts();
+        let kind = match parts.code {
             ProductSurfaceErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
             ProductSurfaceErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
             ProductSurfaceErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
@@ -204,7 +205,7 @@ impl OpenAiCompatHttpError {
             ProductSurfaceErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
             ProductSurfaceErrorCode::Internal => OpenAiCompatErrorKind::Internal,
         };
-        Self::from_kind(error.status_code, error.retryable, kind, error.field)
+        Self::from_kind(parts.status_code, parts.retryable, kind, parts.field)
     }
 
     pub fn internal() -> Self {

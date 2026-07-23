@@ -22,12 +22,12 @@ use ironclaw_auth::{
     SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, ProductSurfaceCaller, ProjectId, ResourceScope,
-    SecretHandle, TenantId, UserId,
+    AgentId, InstallationState, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId,
+    ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_product::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceError,
-    RebornExtensionInfo, RebornExtensionListResponse, rejecting_product_surface_error,
+    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, RebornExtensionInfo,
+    RebornExtensionListResponse, rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -350,7 +350,7 @@ fn build_app_with_product_auth_service_config_and_extensions(
     installed_package_ids: &[&str],
 ) -> axum::Router {
     let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices::with_installed_extensions(
+        product_surface: Arc::new(UnusedServices::with_installed_extensions(
             installed_package_ids,
         )),
         product_auth: Some(product_auth),

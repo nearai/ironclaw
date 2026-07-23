@@ -1,15 +1,14 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ironclaw_auth::{AuthProductScope, CredentialAccountUpdateBinding};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{ExtensionId, ProductSurfaceError, ProductSurfaceValidationCode};
 use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleProductPayload, LifecycleProductResponse, ProductSetupExtensionRequest,
-    ProductSurfaceError, ProductSurfaceValidationCode, RebornExtensionCredentialSetup,
-    RebornExtensionSetupSecret,
+    RebornExtensionCredentialSetup, RebornExtensionSetupSecret,
 };
 
 use super::{
@@ -221,11 +220,11 @@ pub(super) struct SetupSubmitPayload {
 mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{AuthSurface, CredentialAccountId, CredentialAccountProjection};
-    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-
-    use crate::{
-        ExtensionCredentialStatusRequest, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    use ironclaw_host_api::{
+        InvocationId, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope, UserId,
     };
+
+    use crate::ExtensionCredentialStatusRequest;
 
     use super::*;
 

@@ -4,9 +4,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_product::{
-    OperatorLogsService, ProductSurfaceCaller, ProductSurfaceError, RebornLogEntry, RebornLogLevel,
-    RebornLogQueryRequest, RebornLogQueryResponse, normalize_operator_log_context_value,
+    OperatorLogsService, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, normalize_operator_log_context_value,
 };
 use ironclaw_safety::{LeakDetector, sensitive_paths::is_sensitive_path_str};
 use tracing::field::{Field, Visit};

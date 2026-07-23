@@ -22,7 +22,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, folded from the former
    `ironclaw_webui_v2` crate): axum handlers dispatching to
-   `ironclaw_product::ProductSurface`, the `webui_v2_router` builder,
+   `ironclaw_host_api::ProductSurface`, the `webui_v2_router` builder,
    the `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE + WebSocket streaming with a shared `SseCapacity` budget, and the
    Vite SPA under `frontend/` (built by `build.rs`, served from
@@ -60,8 +60,9 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 `ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
 mount builders + `WebuiAuthenticator` trait + mount vocabulary),
-`ironclaw_product` (`ProductSurface` + wire DTOs), `ironclaw_host_api`
-(identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+`ironclaw_product` (wire DTOs and product command/view descriptors),
+`ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, and identity
+newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test

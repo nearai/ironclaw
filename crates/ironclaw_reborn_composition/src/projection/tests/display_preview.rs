@@ -67,7 +67,7 @@ async fn completed_preview_for_input(
 }
 
 #[tokio::test]
-async fn webui_event_stream_enriches_activity_with_display_preview_from_store() {
+async fn product_event_stream_enriches_activity_with_display_preview_from_store() {
     let tenant_id = TenantId::new("webui-preview-tenant").unwrap();
     let user_id = UserId::new("webui-preview-user").unwrap();
     let agent_id = AgentId::new("webui-preview-agent").unwrap();
@@ -115,7 +115,7 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
     )
     .with_display_previews(Arc::clone(&display_previews));
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone()),

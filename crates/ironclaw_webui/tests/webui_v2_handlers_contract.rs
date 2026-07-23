@@ -25,8 +25,10 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, Outcome,
-    OutcomeRefs, ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind,
-    SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    OutcomeRefs, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, ProjectId,
+    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind, SafeSummary, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -50,11 +52,9 @@ use ironclaw_product::{
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductResolveGateRequest,
-    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat,
-    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAdminCreateUserRequest,
+    ProductRetryRunRequest, ProductSubmitTurnRequest, ProjectFsEntry, ProjectFsEntryKind,
+    ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,

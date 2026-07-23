@@ -2510,6 +2510,15 @@ loop-facing capability result and every result mirror is deleted.
   authority-bearing caller data into `invoke`/`query`/`stream_events` request
   DTOs. File/attachment command bytes remain JSON/base64 pending a later host
   byte-response refinement.
+  r16 tightened the remaining consumer vocabulary: `ProductSurface`,
+  `BoundProductSurface`, `ProductSurfaceCaller`, and `ProductSurfaceError` now
+  live entirely in `ironclaw_host_api`; `ironclaw_product` keeps the
+  product-owned command descriptors, view descriptors, DTOs, and workflow
+  implementation. The former caller helper trait methods are inherent on
+  the host caller, host_api exposes shared HTTP error mapping parts for
+  transports, and the composition projection helpers use product event-stream
+  names instead of WebUI-specific names. WebUI/OpenAI/channel callers now meet
+  on the same host vocabulary and differ only at their wire adapters.
 - **§5.2.10 causal routing / product-terminal path** — design added here and
   vocabulary aligned around terminals/channels, but no first-class duct/path
   event contract or conformance suite exists yet. Until that lands, claims in
@@ -2534,7 +2543,13 @@ mint broken-links
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
 - `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authorized`/`Outcome`); ~124 public types across 21 files (§4.5).
-- `crates/ironclaw_product/src/reborn_services.rs` — `ProductSurface`: the shrinking product facade whose temporary methods are being replaced by matrix-declared capability descriptors + view descriptors.
+- `crates/ironclaw_host_api/src/product_surface.rs` — the host-owned
+  `ProductSurface` conduit (`invoke`, `query`, `stream_events`), sealed caller
+  wrapper, shared caller/error vocabulary, and test support.
+- `crates/ironclaw_product/src/reborn_services.rs` — the product workflow facade
+  behind `ProductSurface`; product-owned command/view descriptors and DTOs stay
+  here while temporary per-feature methods are replaced by matrix-declared
+  capability descriptors + view descriptors.
 - `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
 - `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).

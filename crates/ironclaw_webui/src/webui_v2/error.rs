@@ -9,7 +9,7 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use ironclaw_product::{
+use ironclaw_host_api::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
 };
@@ -25,14 +25,15 @@ pub struct WebUiV2HttpError(ProductSurfaceError);
 
 impl WebUiV2HttpError {
     pub fn into_response_parts(self) -> (StatusCode, WebUiV2HttpErrorBody) {
-        let status = StatusCode::from_u16(self.0.status_code).unwrap_or_else(|_| {
+        let parts = self.0.into_http_parts();
+        let status = StatusCode::from_u16(parts.status_code).unwrap_or_else(|_| {
             // Defensive: every call site in `ironclaw_product` builds
             // status codes from a fixed table (400/401/403/404/409/429/500/503).
             // If a future variant introduces a non-HTTP code, log loudly and
             // fall back to 500 rather than poisoning the response.
             tracing::error!(
                 target = "ironclaw_webui_v2::error",
-                status_code = self.0.status_code,
+                status_code = parts.status_code,
                 "ProductSurfaceError carried a non-HTTP status code; coercing to 500"
             );
             StatusCode::INTERNAL_SERVER_ERROR
@@ -47,18 +48,18 @@ impl WebUiV2HttpError {
         if status.is_server_error() {
             tracing::error!(
                 status = status.as_u16(),
-                code = ?self.0.code,
-                kind = ?self.0.kind,
-                retryable = self.0.retryable,
+                code = ?parts.code,
+                kind = ?parts.kind,
+                retryable = parts.retryable,
                 "WebChat v2 handler returned a server error",
             );
         }
         let body = WebUiV2HttpErrorBody {
-            error: self.0.code,
-            kind: self.0.kind,
-            retryable: self.0.retryable,
-            field: self.0.field.clone(),
-            validation_code: self.0.validation_code,
+            error: parts.code,
+            kind: parts.kind,
+            retryable: parts.retryable,
+            field: parts.field,
+            validation_code: parts.validation_code,
         };
         (status, body)
     }

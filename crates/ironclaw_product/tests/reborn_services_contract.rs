@@ -32,7 +32,11 @@ use ironclaw_host_api::{
     ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
     TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
+use ironclaw_host_api::{
+    CapabilitySurfaceKind, InstallationState, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode,
+};
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -76,13 +80,11 @@ use ironclaw_product::{
     ProductAgentBoundCaller, ProductCancelRunRequest, ProductCapabilityInvoker,
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductListThreadsRequest,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductWorkflowError, ProjectCaller,
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
@@ -3426,7 +3428,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone())
         .with_skill_activation_recorder(|_, _, _| {
-            Err(ironclaw_product::ProductSurfaceError {
+            Err(ironclaw_host_api::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,

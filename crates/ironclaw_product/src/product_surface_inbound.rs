@@ -6,12 +6,10 @@
 
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::{
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ThreadId,
-};
-use ironclaw_turns::{
-    CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnRunId,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ThreadId, TurnActor,
     TurnScope,
 };
+use ironclaw_turns::{CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnRunId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -59,31 +57,6 @@ pub fn product_attachment_capabilities() -> ProductAttachmentCapabilities {
         max_count: MAX_INLINE_ATTACHMENTS,
         max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
         max_total_bytes: MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
-    }
-}
-
-/// Product-surface caller helpers for turn-specific workflow code.
-///
-/// `ironclaw_host_api` intentionally does not depend on `ironclaw_turns`, so
-/// product owns the conversion from shared caller vocabulary to turn vocabulary.
-pub trait ProductSurfaceCallerExt {
-    fn actor(&self) -> TurnActor;
-    fn turn_scope(&self, thread_id: ThreadId) -> TurnScope;
-}
-
-impl ProductSurfaceCallerExt for ProductSurfaceCaller {
-    fn actor(&self) -> TurnActor {
-        TurnActor::new(self.user_id.clone())
-    }
-
-    fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
-        TurnScope::new_with_owner(
-            self.tenant_id.clone(),
-            self.agent_id.clone(),
-            self.project_id.clone(),
-            thread_id,
-            Some(self.user_id.clone()),
-        )
     }
 }
 

@@ -18,19 +18,19 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, InstallationState, NetworkMethod, Outcome, OutcomeRefs, ProjectId,
-    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId, TerminateHint,
-    ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, ProductCreateThreadRequest, ProductListThreadsRequest,
-    ProductResolveGateRequest, ProductSubmitTurnRequest, ProductSurfaceCaller,
-    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornListThreadsResponse, RebornSetupExtensionResponse, RebornSubmitTurnResponse,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewQuery,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
+    RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -90,7 +90,7 @@ fn compose_with_public_descriptor(
     route_pattern: &str,
 ) -> Result<axum::Router, WebuiServeError> {
     let bundle = RebornWebuiBundle {
-        api: Arc::new(StubServices::default()),
+        product_surface: Arc::new(StubServices::default()),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -226,7 +226,7 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
 #[tokio::test]
 async fn health_route_is_public_for_platform_probes() {
     let bundle = RebornWebuiBundle {
-        api: Arc::new(StubServices::default()),
+        product_surface: Arc::new(StubServices::default()),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -300,7 +300,7 @@ mod openai_compat_mount_tests {
             openai_compat_routes(),
         );
         let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
+            product_surface: Arc::new(StubServices::default()),
             product_auth: None,
             readiness: RebornReadiness::disabled(),
         };
@@ -359,7 +359,7 @@ mod openai_compat_mount_tests {
             openai_compat_routes(),
         );
         let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
+            product_surface: Arc::new(StubServices::default()),
             product_auth: None,
             readiness: RebornReadiness::disabled(),
         };
@@ -470,7 +470,7 @@ mod openai_compat_mount_tests {
             openai_compat_routes(),
         );
         let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
+            product_surface: Arc::new(StubServices::default()),
             product_auth: None,
             readiness: RebornReadiness::disabled(),
         };
@@ -1166,7 +1166,7 @@ const PROJECT: &str = "project-default";
 fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -1190,7 +1190,7 @@ fn build_app_with_authenticator(
 ) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -1704,7 +1704,7 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -1979,7 +1979,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -2183,7 +2183,7 @@ async fn rate_limit_is_independent_per_caller() {
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -3054,7 +3054,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services,
+        product_surface: services,
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -3125,7 +3125,7 @@ async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services,
+        product_surface: services,
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };

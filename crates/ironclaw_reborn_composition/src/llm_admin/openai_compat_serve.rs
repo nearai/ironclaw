@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    AgentId, ProductSurfaceStreamRequest, ProjectId, TenantId, ThreadId, VirtualPath,
+    AgentId, BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceStreamRequest, ProjectId, TenantId, ThreadId, VirtualPath,
 };
 use ironclaw_product::{
-    BoundProductSurface, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, RebornTimelineRequest,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,
     TIMELINE_VIEW,
 };
 use ironclaw_product::{
@@ -82,9 +82,10 @@ pub async fn build_openai_compat_route_mount(
             ref_filesystem,
             openai_compat_ref_root(&tenant_id)?,
         ));
-    let projection_stream = runtime.webui_event_stream();
+    let projection_stream = runtime.product_event_stream();
     let product_surface =
-        crate::webui::facade::build_webui_services(runtime, Some(projection_stream.clone()))?.api;
+        crate::webui::facade::build_webui_services(runtime, Some(projection_stream.clone()))?
+            .product_surface;
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
     ));
@@ -95,11 +96,11 @@ pub async fn build_openai_compat_route_mount(
     let external_tool_catalog = runtime.external_tool_catalog.clone();
     let responses_projection_reader = Arc::new(
         OpenAiResponsesThreadProjectionReader::new(
-            runtime.webui_thread_service(),
+            runtime.product_thread_service(),
             projection_stream.clone(),
             external_tool_catalog.clone(),
         )
-        .with_turn_coordinator(runtime.webui_turn_coordinator()),
+        .with_turn_coordinator(runtime.product_turn_coordinator()),
     );
     let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
         product_surface.clone(),
@@ -118,7 +119,7 @@ pub async fn build_openai_compat_route_mount(
         });
     let external_tool_resume: Arc<dyn OpenAiCompatExternalToolResume> =
         Arc::new(OpenAiCompatRuntimeExternalToolResume {
-            coordinator: runtime.webui_turn_coordinator(),
+            coordinator: runtime.product_turn_coordinator(),
         });
     let responses_workflow = Arc::new(
         OpenAiResponsesWorkflow::new(product_surface, ref_store, responses_projection_reader)

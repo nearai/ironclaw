@@ -18,9 +18,10 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    InstallationState, NetworkTargetPattern, PermissionMode, ResourceScope,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VendorId, VirtualPath, sha256_digest_token,
+    InstallationState, NetworkTargetPattern, PermissionMode, ProductSurfaceCaller,
+    ProductSurfaceError, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
+    VendorId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product::{
@@ -28,8 +29,8 @@ use ironclaw_product::{
     ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductSurfaceCaller,
-    ProductSurfaceError, ProductWorkflowError, RebornChannelConnectStrategy,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
+    RebornChannelConnectStrategy,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 

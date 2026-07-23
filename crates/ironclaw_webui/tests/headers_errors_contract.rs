@@ -61,7 +61,7 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
         .expect("env bearer authenticator"),
     );
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };

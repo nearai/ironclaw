@@ -20,9 +20,10 @@ use ironclaw_auth::{
 };
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProductSurfaceCaller, ProjectId, ResourceScope, TenantId, UserId,
+    AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
+    TenantId, UserId,
 };
-use ironclaw_product::{ProductSurfaceError, rejecting_product_surface_error};
+use ironclaw_product::rejecting_product_surface_error;
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
@@ -109,7 +110,7 @@ fn build_fixture() -> AppFixture {
         Arc::new(NoopAuthDispatcher::default()),
     ));
     let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices),
+        product_surface: Arc::new(UnusedServices),
         product_auth: Some(product_auth),
         readiness: RebornReadiness::disabled(),
     };

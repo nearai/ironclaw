@@ -8,7 +8,7 @@
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, TenantId, UserId};
 use ironclaw_reborn_traces::contribution::{
     AccountLoginLinkError, authorize_manual_review_hold_for_scope, fetch_account_traces,
     mint_account_login_link, read_trace_policy_for_scope, resolve_trace_credentials,
@@ -16,10 +16,7 @@ use ironclaw_reborn_traces::contribution::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{
-    ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceCallerExt, ProductSurfaceError,
-    ProductView, RebornServices, RebornViewProvider,
-};
+use super::{ProductCapabilityInvoker, ProductView, RebornServices, RebornViewProvider};
 
 pub const TRACE_CREDITS_VIEW: ProductView<serde_json::Value, RebornTraceCreditsResponse> =
     ProductView::unpaginated("trace_credits");

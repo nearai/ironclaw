@@ -380,7 +380,8 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
         .expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui services build");
 
-    let surface = ironclaw_product::BoundProductSurface::new(bundle.api.clone(), caller("bob"));
+    let surface =
+        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), caller("bob"));
     let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
         .invoke_on(
             &surface,

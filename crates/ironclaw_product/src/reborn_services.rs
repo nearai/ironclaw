@@ -30,9 +30,11 @@ use ironclaw_auth::{
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
     ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
-    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution,
-    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle,
-    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode, ProjectId, Resolution, ResourceScope, ResultPreviewMeta,
+    ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId, TerminateHint, ThreadId,
+    ToolVerdict, UserId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
@@ -57,8 +59,7 @@ use crate::{
     ListPendingApprovalsRequest, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductGateResolution, ProductInboundCommand, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
-    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductSurfaceCaller,
-    ProductSurfaceCallerExt, ProductSurfaceValidationCode, ProductWorkflowError,
+    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductFacade,
@@ -116,8 +117,7 @@ pub use admin_users::{
 };
 pub use ironclaw_host_api::{
     ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, ProductSurface,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
 pub use trace_credits::{
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,

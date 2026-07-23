@@ -8,14 +8,14 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, Timestamp, UserId,
+    AgentId, ApprovalRequestId, CapabilityId, ProductSurfaceCaller, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProjectId, TenantId, ThreadId, Timestamp, UserId,
 };
 use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductListThreadsRequest, ProductSurfaceCaller, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ProductWorkflowError, RebornAutomationHoldReason,
+    ProductListThreadsRequest, ProductWorkflowError, RebornAutomationHoldReason,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornListThreadsResponse, RebornServices,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,

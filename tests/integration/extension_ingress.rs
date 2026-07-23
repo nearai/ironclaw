@@ -30,7 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_product::ProductSurface;
+use ironclaw_host_api::ProductSurface;
 use ironclaw_reborn_composition::{
     ChannelInboundSinkConfig, ChannelIngressRegistration, ExtensionIngressParts,
     GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,

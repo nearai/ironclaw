@@ -32,10 +32,11 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, RebornCreateThreadResponse,
+use ironclaw_host_api::{
+    AgentId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProjectId, TenantId,
+    ThreadId, UserId,
 };
+use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
@@ -206,7 +207,7 @@ fn build_app() -> (
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };

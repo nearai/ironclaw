@@ -31,8 +31,10 @@
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
-use ironclaw_product::{ChannelConnectionFacade, ProductSurfaceCaller};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ResourceScope, TenantId, UserId,
+};
+use ironclaw_product::ChannelConnectionFacade;
 
 use crate::extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionFacade,
