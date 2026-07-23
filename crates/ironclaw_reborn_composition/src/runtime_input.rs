@@ -577,6 +577,28 @@ impl RebornRuntimeInput {
         }
     }
 
+    /// The declarative deployment config (Phase A) — the authoritative "what
+    /// deployment is this" input, read separately from the code-carrying
+    /// `services` bindings. It is sourced from the bindings the caller supplied
+    /// to [`from_build_input`](Self::from_build_input) (that is where the
+    /// profile preset and all declarative DATA are seeded), so existing callers
+    /// keep working while the runtime layer can treat config as a first-class,
+    /// bindings-independent value. Returns `None` only before services are set.
+    pub fn config(&self) -> Option<&crate::deployment::DeploymentConfig> {
+        self.services.as_ref().map(RebornHostBindings::deployment)
+    }
+
+    /// Override the deployment config carried by the bindings. Lets a caller
+    /// install an accurately-resolved config (e.g. one built with the operator's
+    /// yolo host-access disclosure) after constructing the input, without
+    /// reaching into the bindings directly.
+    pub fn with_config(mut self, config: crate::deployment::DeploymentConfig) -> Self {
+        if let Some(services) = self.services.take() {
+            self.services = Some(services.with_deployment_config(config));
+        }
+        self
+    }
+
     /// Supply pre-resolved budget defaults. The caller is responsible
     /// for applying the desired config-layer precedence (compiled,
     /// TOML, env) and calling [`BudgetDefaults::validate`] before

@@ -317,6 +317,16 @@ impl RebornHostBindings {
         &self.deployment
     }
 
+    /// Install an accurately-resolved deployment config (Phase A). Used by
+    /// [`RebornRuntimeInput::with_config`](crate::RebornRuntimeInput::with_config)
+    /// to swap in a config built with the operator's yolo host-access disclosure
+    /// after the bindings were constructed, preserving the declarative DATA the
+    /// config now owns.
+    pub fn with_deployment_config(mut self, deployment: DeploymentConfig) -> Self {
+        self.deployment = deployment;
+        self
+    }
+
     /// Replace the deployment this input was constructed with.
     ///
     /// Test-only: production builds the deployment at construction
