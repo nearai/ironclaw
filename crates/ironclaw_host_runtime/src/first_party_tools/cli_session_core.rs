@@ -54,17 +54,16 @@ pub(super) struct CliSessionName(String);
 impl CliSessionName {
     pub(super) fn parse(raw: &str) -> Result<Self, CliSessionError> {
         let trimmed = raw.trim();
-        if trimmed.is_empty() {
+        let Some(first) = trimmed.chars().next() else {
             return Err(CliSessionError::InvalidParameters(
                 "session must not be empty".to_string(),
             ));
-        }
+        };
         if trimmed.chars().count() > MAX_SESSION_NAME_LEN {
             return Err(CliSessionError::InvalidParameters(format!(
                 "session must be at most {MAX_SESSION_NAME_LEN} characters"
             )));
         }
-        let first = trimmed.chars().next().expect("checked non-empty above");
         if !first.is_ascii_alphanumeric() {
             return Err(CliSessionError::InvalidParameters(
                 "session must start with an ASCII letter or digit".to_string(),
@@ -160,18 +159,27 @@ fn optional_nonempty_string(params: &Value, key: &str) -> Result<Option<String>,
 /// leave the quoted literal.
 pub(super) fn build_tmux_command(request: &CliSessionRequest) -> String {
     let session = shell_single_quote(request.session.as_str());
-    let primary = match request.action {
-        CliSessionAction::Start => {
-            let command =
-                shell_single_quote(request.command.as_deref().expect("validated by parse"));
+    let primary = match (
+        request.action,
+        request.command.as_deref(),
+        request.text.as_deref(),
+    ) {
+        (CliSessionAction::Start, Some(command), _) => {
+            let command = shell_single_quote(command);
             format!("tmux new-session -d -s {session} {command}")
         }
-        CliSessionAction::Send => {
-            let text = shell_single_quote(request.text.as_deref().expect("validated by parse"));
+        (CliSessionAction::Send, _, Some(text)) => {
+            let text = shell_single_quote(text);
             format!("tmux send-keys -t {session} -l -- {text} && tmux send-keys -t {session} Enter")
         }
-        CliSessionAction::Read => format!("tmux capture-pane -t {session} -p"),
-        CliSessionAction::Kill => format!("tmux kill-session -t {session}"),
+        (CliSessionAction::Read, ..) => format!("tmux capture-pane -t {session} -p"),
+        (CliSessionAction::Kill, ..) => format!("tmux kill-session -t {session}"),
+        (CliSessionAction::Start, None, _) => {
+            unreachable!("parse_cli_session_request requires 'command' for action Start")
+        }
+        (CliSessionAction::Send, _, None) => {
+            unreachable!("parse_cli_session_request requires 'text' for action Send")
+        }
     };
     if request.action.includes_session_footer() {
         format!(

@@ -176,11 +176,12 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 
 /// Canonical private/loopback/reserved-range check for an already-resolved
 /// IP. Unwraps IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to their v4 form
-/// before classifying. Public so other crates gating egress on a resolved
-/// dial address (e.g. the sandboxed shell's egress proxy in
-/// `ironclaw_host_runtime`) delegate here instead of maintaining a second,
-/// independently-drifting copy of the same range logic.
-pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
+/// before classifying. Crate-private: other crates gating egress on a
+/// resolved dial address (e.g. the sandboxed shell's egress proxy in
+/// `ironclaw_host_runtime`) go through [`network_denies_resolved_ip`]
+/// instead of maintaining a second, independently-drifting copy of the same
+/// range logic.
+pub(crate) fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
     is_private_or_loopback_ip_impl(ip)
 }
 
