@@ -1171,7 +1171,7 @@ async fn external_wallet_verify_failure_does_not_strand_ledger_at_signing() {
     // (the row is only created after verify + grant claim succeed), so it can
     // never be stranded at an in-flight state.
     assert_eq!(
-        ledger.state(&gate).await,
+        ledger.state(&lk(&gate)).await,
         Err(ironclaw_attestation::LedgerError::NotFound),
         "rejected proof must not create a ledger row at all"
     );
@@ -1227,7 +1227,7 @@ async fn external_wallet_unregistered_provider_is_provider_mismatch() {
     // Verify-before-resume: a provider mismatch is detected before any ledger
     // row is created, so no row exists.
     assert_eq!(
-        ledger.state(&gate).await,
+        ledger.state(&lk(&gate)).await,
         Err(ironclaw_attestation::LedgerError::NotFound),
         "provider mismatch must not create a ledger row"
     );

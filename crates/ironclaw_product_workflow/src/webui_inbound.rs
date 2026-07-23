@@ -381,6 +381,19 @@ pub struct WebUiResolveGateRequest {
     pub always: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
+    /// Attested-signing proof family for `resolution = "attested"`: one of
+    /// `injected_wallet`, `near_redirect`, `wallet_connect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_proof_kind: Option<String>,
+    /// Lowercase-hex of the approved-tx hash the wallet attests to. Carried as
+    /// the untrusted `AttestationClaimRef`; the authoritative binding persisted
+    /// on gate raise is what the proof is verified against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_approved_tx_hash: Option<String>,
+    /// Opaque, provider-specific proof payload. Re-decoded by the composition
+    /// continuation port; never interpreted by this facade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_proof: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -565,7 +578,14 @@ impl WebUiResolveGateRequest {
         let thread_id = parse_thread_id(self.thread_id)?;
         let run_id = parse_run_id(self.run_id)?;
         let gate_ref = parse_gate_ref(self.gate_ref)?;
-        let resolution = parse_gate_resolution(self.resolution, self.always, self.credential_ref)?;
+        let resolution = parse_gate_resolution(
+            self.resolution,
+            self.always,
+            self.credential_ref,
+            self.attested_proof_kind,
+            self.attested_approved_tx_hash,
+            self.attested_proof,
+        )?;
 
         Ok(WebUiInboundCommand::ResolveGate {
             scope: caller.turn_scope(thread_id),
@@ -675,6 +695,9 @@ fn parse_gate_resolution(
     resolution: Option<String>,
     always: Option<bool>,
     credential_ref: Option<String>,
+    attested_proof_kind: Option<String>,
+    attested_approved_tx_hash: Option<String>,
+    attested_proof: Option<serde_json::Value>,
 ) -> Result<WebUiGateResolution, WebUiInboundValidationError> {
     let resolution = required_text("resolution", resolution, 64, TextMode::Token)?;
     match resolution.as_str() {
@@ -682,6 +705,11 @@ fn parse_gate_resolution(
             always: always.unwrap_or(false),
         }),
         "declined" => Ok(WebUiGateResolution::Declined),
+        "attested" => parse_attested_resolution(
+            attested_proof_kind,
+            attested_approved_tx_hash,
+            attested_proof,
+        ),
         "credential_provided" => Ok(WebUiGateResolution::CredentialProvided {
             credential_ref: required_text(
                 "credential_ref",

@@ -37,7 +37,7 @@ use std::any::Any;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
+use ironclaw_turns::{GateRef, TurnActor, TurnRunId, TurnScope};
 
 /// The proof family carried on an attested gate resolution. Mirrors the legacy
 /// monolith `GateResolutionPayload` variants for wire compatibility; the
@@ -192,9 +192,16 @@ pub trait AttestedGateContinuationPort: Send + Sync {
     /// advanced the implementation's own ledger/grant fail-closed state; that is
     /// internal one-shot bookkeeping, never a turn-state transition, and means a
     /// retry of the same gate is refused rather than double-driven.)
+    /// `actor` carries the calling user identity; the implementation MUST
+    /// verify the addressed gate binding is owned by `(scope.tenant_id,
+    /// actor.user_id)` before any cryptographic work, failing closed
+    /// indistinguishably from a missing binding so a member who merely learns
+    /// another user's `gate_ref` cannot drive that user's signing continuation
+    /// (IDOR defense).
     async fn verify_and_claim(
         &self,
         scope: &TurnScope,
+        actor: &TurnActor,
         run_id: TurnRunId,
         gate_ref: &GateRef,
         claim: &AttestedProofClaim,

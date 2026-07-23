@@ -49,9 +49,11 @@ use ironclaw_signing_provider::{
 use ironclaw_threads::{
     EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,
 };
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, ApprovedTxHashRef, AttestedResumePort, BlockedReason,
-    DefaultTurnCoordinator, GateRef, IdempotencyKey, InMemoryTurnStateStore,
+    DefaultTurnCoordinator, FilesystemTurnStateRowStore, GateRef, IdempotencyKey,
     LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
     TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
@@ -67,6 +69,10 @@ const AGENT: &str = "agent1";
 const PROJECT: &str = "project1";
 const USER: &str = "user1";
 const THREAD: &str = "thread-pr11";
+/// A second user in the SAME tenant, used for the cross-user IDOR test
+/// (threat #2). They own their own thread but NOT user1's attested gate.
+const USER_B: &str = "user2";
+const THREAD_B: &str = "thread-pr11-b";
 
 /// The authoritative decoded transaction the binding is approved over. A Solana
 /// (`solana:mainnet`) message so its `chain_network()` matches the binding's
@@ -119,11 +125,15 @@ fn signing_ctx(account_hex: &str) -> SigningContext {
 }
 
 fn turn_scope() -> TurnScope {
-    TurnScope::new(
+    // Must match `caller().turn_scope(THREAD)` exactly — the row store keys on
+    // the FULL scope including `thread_owner`, so a run submitted under a
+    // different owner is `ScopeNotFound` at resolve time.
+    TurnScope::new_with_owner(
         TenantId::new(TENANT).unwrap(),
         Some(AgentId::new(AGENT).unwrap()),
         Some(ProjectId::new(PROJECT).unwrap()),
         ThreadId::new(THREAD).unwrap(),
+        Some(UserId::new(USER).unwrap()),
     )
 }
 
@@ -169,7 +179,7 @@ fn build_composition(bindings: Arc<InMemoryAttestedGateBindingStore>) -> RebornA
 
 /// Submit a turn and block it `BlockedAttested` on `GATE`.
 async fn block_attested(
-    store: &Arc<InMemoryTurnStateStore>,
+    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     expected_tx_hash_ref: &str,
 ) -> TurnRunId {
     let scope = turn_scope();
@@ -184,6 +194,12 @@ async fn block_attested(
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("idem-pr11").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 24, 12, 0, 0).unwrap(),
+            requested_model: None,
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
         })
         .await
         .unwrap();
@@ -207,7 +223,7 @@ async fn block_attested(
             state_ref: LoopCheckpointStateRef::new("checkpoint:block").unwrap(),
             reason: BlockedReason::Attested {
                 gate_ref: GateRef::new(GATE).unwrap(),
-                expected_tx_hash: ApprovedTxHashRef::new(expected_tx_hash_ref).unwrap(),
+                expected_tx_hash: Some(ApprovedTxHashRef::new(expected_tx_hash_ref).unwrap()),
             },
         })
         .await
@@ -300,7 +316,7 @@ async fn resolve_gate_attested_drives_resume_and_continuation() {
         Arc::clone(&bindings),
         Arc::clone(&resume_guard),
     ));
-    let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
+    let store = Arc::new(in_memory_turn_state_store().with_attested_resume_port(port));
 
     // Build the attested composition over the SAME binding store, and wire the
     // continuation port into the facade.
@@ -376,7 +392,7 @@ async fn resolve_gate_attested_without_continuation_port_fails_closed() {
         Arc::clone(&bindings),
         Arc::clone(&resume_guard),
     ));
-    let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
+    let store = Arc::new(in_memory_turn_state_store().with_attested_resume_port(port));
     let composition = build_composition(Arc::clone(&bindings));
     composition
         .register_attested_gate(
@@ -424,6 +440,7 @@ impl AttestedGateContinuationPort for CountingContinuation {
     async fn verify_and_claim(
         &self,
         scope: &TurnScope,
+        actor: &TurnActor,
         run_id: TurnRunId,
         gate_ref: &GateRef,
         claim: &AttestedProofClaim,
@@ -434,7 +451,7 @@ impl AttestedGateContinuationPort for CountingContinuation {
         self.verify_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner
-            .verify_and_claim(scope, run_id, gate_ref, claim)
+            .verify_and_claim(scope, actor, run_id, gate_ref, claim)
             .await
     }
 
@@ -459,7 +476,7 @@ async fn wired_services_with_counting(
     bytes_seed: u8,
 ) -> (
     RebornServices,
-    Arc<InMemoryTurnStateStore>,
+    Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     String,
     EdSigningKey,
     ApprovedTxHash,
@@ -478,7 +495,7 @@ async fn wired_services_with_counting(
         Arc::clone(&bindings),
         Arc::clone(&resume_guard),
     ));
-    let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
+    let store = Arc::new(in_memory_turn_state_store().with_attested_resume_port(port));
     let composition = build_composition(Arc::clone(&bindings));
     composition
         .register_attested_gate(
@@ -637,7 +654,7 @@ async fn resolve_gate_attested_with_no_binding_fails_closed() {
         Arc::clone(&bindings),
         Arc::clone(&resume_guard),
     ));
-    let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
+    let store = Arc::new(in_memory_turn_state_store().with_attested_resume_port(port));
     let composition = build_composition(Arc::clone(&bindings));
 
     let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -670,6 +687,141 @@ async fn resolve_gate_attested_with_no_binding_fails_closed() {
         drive_calls.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "continuation must NOT be driven when the binding is absent"
+    );
+}
+
+/// Threat #2 (cross-user IDOR): a second tenant member who learns another
+/// user's `gate_ref` (returned in the gate-raise response) must NOT be able to
+/// drive that user's attested-signing continuation. The attacker owns their own
+/// thread (so the thread-ownership probe passes), then submits a resolve for
+/// user1's `gate_ref` with their own `thread_id`. `verify_and_claim` must
+/// fail closed on the binding-owner check (surfaced indistinguishably from a
+/// missing binding — a 404, no existence oracle) BEFORE any verify / custodial
+/// sign / grant claim, so the broadcast half is never driven.
+#[tokio::test]
+async fn resolve_gate_attested_cross_user_fails_closed() {
+    let key = EdSigningKey::from_bytes(&[0x77u8; 32]);
+    let account_hex = lower_hex(&key.verifying_key().to_bytes());
+    let hash = bound_hash(&account_hex);
+    let hash_ref = approved_tx_hash_ref_hex(hash.as_bytes());
+
+    let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
+    let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
+    let port: Arc<dyn AttestedResumePort> = Arc::new(RuntimeAttestedResumePort::new(
+        Arc::clone(&bindings),
+        Arc::clone(&resume_guard),
+    ));
+    let store = Arc::new(in_memory_turn_state_store().with_attested_resume_port(port));
+    let composition = build_composition(Arc::clone(&bindings));
+
+    // Raise side: the gate binding is owned by user1 (TENANT/USER).
+    composition
+        .register_attested_gate(
+            SigningGateRef::new(GATE),
+            binding(&account_hex, hash),
+            0,
+            None,
+        )
+        .await
+        .expect("register attested gate");
+
+    // Both users own a thread in the same tenant. user1 (the gate owner) and
+    // user2 (the attacker) each pass their OWN thread-ownership probe.
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    ensure_thread(&thread_service).await;
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: ThreadScope {
+                tenant_id: TenantId::new(TENANT).unwrap(),
+                agent_id: AgentId::new(AGENT).unwrap(),
+                project_id: Some(ProjectId::new(PROJECT).unwrap()),
+                owner_user_id: Some(UserId::new(USER_B).unwrap()),
+                mission_id: None,
+            },
+            thread_id: Some(ThreadId::new(THREAD_B).unwrap()),
+            created_by_actor_id: USER_B.to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("ensure attacker thread");
+
+    let coordinator: Arc<dyn TurnCoordinator> =
+        Arc::new(DefaultTurnCoordinator::new(store.clone()));
+    let verify_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let drive_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counting = CountingContinuation {
+        inner: RebornAttestedContinuation::new(&composition),
+        verify_calls: Arc::clone(&verify_calls),
+        drive_calls: Arc::clone(&drive_calls),
+    };
+    let services = RebornServices::new(thread_service, coordinator)
+        .with_attested_continuation(Arc::new(counting));
+
+    // user1's run is blocked on the gate.
+    let run_id = block_attested(&store, &hash_ref).await;
+
+    // The attacker (user2) crafts a resolve for user1's GATE, but names THEIR
+    // OWN thread so the ownership probe passes. Same tenant; valid proof shape.
+    let caller_b = WebUiAuthenticatedCaller::new(
+        TenantId::new(TENANT).unwrap(),
+        UserId::new(USER_B).unwrap(),
+        Some(AgentId::new(AGENT).unwrap()),
+        Some(ProjectId::new(PROJECT).unwrap()),
+    );
+    let signature = key.sign(hash.as_bytes());
+    let attacker_request = WebUiResolveGateRequest {
+        client_action_id: Some("action-idor".to_string()),
+        thread_id: Some(THREAD_B.to_string()),
+        run_id: Some(run_id.to_string()),
+        gate_ref: Some(GATE.to_string()),
+        resolution: Some("attested".to_string()),
+        always: None,
+        credential_ref: None,
+        attested_proof_kind: Some("injected_wallet".to_string()),
+        attested_approved_tx_hash: Some(approved_tx_hash_ref_hex(hash.as_bytes())),
+        attested_proof: Some(json!({
+            "scheme": "solana",
+            "approved_tx_hash": lower_hex(hash.as_bytes()),
+            "claimed_signer": account_hex,
+            "signature": lower_hex(&signature.to_bytes()),
+            "public_key": account_hex,
+        })),
+    };
+
+    let result = services.resolve_gate(caller_b, attacker_request).await;
+    assert!(
+        result.is_err(),
+        "cross-user attested resolve must fail closed (IDOR), got {result:?}"
+    );
+    // Fail-closed indistinguishably from a missing binding (404), not a 400/409
+    // that could act as an existence/ownership oracle.
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.status_code, 404,
+        "cross-user resolve must surface as NotFound (no existence oracle), got {err:?}"
+    );
+    assert_eq!(
+        drive_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "broadcast must NEVER be driven for a cross-user resolve"
+    );
+
+    // The gate is untouched: user1 (the real owner) can still resolve it.
+    let owner_ok = services
+        .resolve_gate(
+            caller(),
+            attested_request(run_id, &key, &hash, &account_hex, "action-owner"),
+        )
+        .await;
+    assert!(
+        owner_ok.is_ok(),
+        "the real owner can still resolve after the rejected IDOR attempt: {owner_ok:?}"
+    );
+    assert_eq!(
+        drive_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the legitimate owner's resolve drives the broadcast exactly once"
     );
 }
 
