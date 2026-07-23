@@ -4567,7 +4567,10 @@ const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
 /// typo'd value.
 fn bool_env_flag(key: &'static str) -> bool {
     match std::env::var(key) {
-        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ),
         Err(_) => false,
     }
 }
