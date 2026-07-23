@@ -425,8 +425,7 @@ const BACKGROUND_LOG_DIR: &str = "/workspace/.ironclaw";
 /// its own `$$`, that value is the real pid of the process `$!` already
 /// reported, and the two agree.
 fn background_launch_script(command: &str) -> String {
-    let logging_command =
-        format!("exec >>{BACKGROUND_LOG_DIR}/bg-$$.log 2>&1; {command}");
+    let logging_command = format!("exec >>{BACKGROUND_LOG_DIR}/bg-$$.log 2>&1; {command}");
     format!(
         "mkdir -p {BACKGROUND_LOG_DIR} && {} & echo $!",
         wrap_command_for_pgid_isolation(&logging_command),
