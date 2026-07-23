@@ -88,6 +88,10 @@ ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
 ironclaw_attestation = { path = "../ironclaw_attestation" }
 ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+# External-wallet providers (PR7/8/9): the composition decodes the WebUI
+# attested-proof payload into the concrete provider proof and registers the
+# providers that verify it on the signer-continuation driver (PR11).
+ironclaw_wallet_external = { path = "../ironclaw_wallet_external" }
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
 axum = { version = "0.8" }
@@ -113,6 +117,9 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# Crypto-real injected-wallet proof construction for the PR11 attested
+# gate/resolve end-to-end facade test (ed25519 Solana signature over the hash).
+ed25519-dalek = "2"
 
 # Attested-signing composition e2e test (real RebornAttestedComposition): derive
 # a bound EVM signer + proof. alloy/k256 are already in-tree via chain_signing.
