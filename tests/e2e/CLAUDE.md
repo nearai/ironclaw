@@ -112,7 +112,7 @@ full-path Emulate tests still start the legacy gateway binary.
 | File | What it tests |
 |------|--------------|
 | `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
-| `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`. |
+| `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
 | `test_extension_uninstall_cleanup.py` | Install/remove for WASM tools/channels, shared Google tools, MCP; uninstall deletes secrets, preserves shared creds |
@@ -214,13 +214,15 @@ routing, tool execution, and provider mutation together.
 The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
 Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
 GraphQL review threads, and seeded Actions workflows used by the provider
-contract catalog. Of 123 shipped static provider capabilities, 119 now have
-full-path Emulate-backed evidence. The remaining four are intentionally outside
-this runner: `github.handle_webhook` is local ingress normalization, while
-`nearai.web_search`, `web-access.get_content`, and `web-access.search` need a
-separate hermetic web-search/content double. Manual QA rows that mention
-Telegram or Twitter/X also remain model-replay-only unless paired with their own
-provider fixture.
+contract catalog. All 123 shipped static provider capabilities now have
+executable hermetic evidence: 119 cross the standalone Reborn + Emulate path,
+while `github.handle_webhook`, `nearai.web_search`,
+`web-access.get_content`, and `web-access.search` use Reborn integration tests
+at their actual local-WASM or hosted-MCP seams. The inventory records the exact
+Cargo target, source, and test for those non-Emulate cases and fails if that
+evidence stops being executable. Manual QA rows that mention Telegram or
+Twitter/X remain model-replay-only unless paired with their own provider
+fixture.
 
 ### Environment passed to ironclaw in tests
 

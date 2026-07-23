@@ -109,6 +109,62 @@ async fn runs_http_tool_call_through_recorded_egress() {
         .expect("final reply finalized");
 }
 
+/// `github.handle_webhook` is local normalization rather than a provider API
+/// call. Drive it through the real bundled GitHub WASM capability and assert
+/// the emitted event plus the absence of network egress.
+#[tokio::test]
+async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "github.handle_webhook",
+                json!({
+                    "webhook": {
+                        "headers": {
+                            "X-GitHub-Event": "pull_request",
+                            "X-GitHub-Delivery": "delivery-capability-evidence"
+                        },
+                        "body_json": {
+                            "action": "opened",
+                            "repository": {
+                                "full_name": "nearai/ironclaw",
+                                "owner": {"login": "nearai"}
+                            },
+                            "pull_request": {
+                                "number": 6573,
+                                "state": "open",
+                                "base": {"ref": "main"},
+                                "head": {"ref": "codex/provider-evidence"}
+                            },
+                            "sender": {"login": "serrrfirat"}
+                        }
+                    }
+                }),
+            ),
+            RebornScriptedReply::text("webhook normalized"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("normalize this GitHub webhook")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("github.handle_webhook")
+        .await
+        .expect("bundled GitHub WASM capability ran");
+    h.assert_tool_result_contains(r#""event_type":"pr.opened""#)
+        .await
+        .expect("normalized event type reached the model-facing result");
+    h.assert_tool_result_contains(r#""delivery_id":"delivery-capability-evidence""#)
+        .await
+        .expect("delivery identity survived normalization");
+    h.assert_network_egress_count(0)
+        .await
+        .expect("local webhook normalization made no provider request");
+}
+
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A prior assistant refusal is conversation history, not capability truth.

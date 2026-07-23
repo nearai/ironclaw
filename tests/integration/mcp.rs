@@ -15,6 +15,7 @@ mod support;
 
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
 
@@ -46,6 +47,126 @@ fn assert_recorded_tools_call(server: &MockMcpServer, expected_tool: &str, expec
             .and_then(|a| a.get("query"))
             .and_then(|q| q.as_str()),
         Some(expected_query)
+    );
+}
+
+/// The bundled `nearai` package is hosted MCP rather than Emulate-backed.
+/// Install and activate the real first-party manifest, then prove its static
+/// search capability crosses the mediated MCP boundary with its credential
+/// and returns the hermetic server result to the model.
+#[tokio::test]
+async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
+    let group = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("extension-lifecycle group builds");
+    let installer = group
+        .thread("nearai-hosted-mcp-install")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                serde_json::json!({"extension_id": "nearai"}),
+            ),
+            RebornScriptedReply::text("NEAR AI search is installed."),
+        ])
+        .build()
+        .await
+        .expect("installer thread builds");
+
+    installer
+        .seed_capability_credential_account("nearai", "NEAR AI integration account", &[])
+        .await
+        .expect("NEAR AI account is seeded under the dispatching user");
+    installer
+        .submit_turn("install NEAR AI search")
+        .await
+        .expect("install turn completes");
+    installer
+        .assert_tool_result_contains(r#""installed":true"#)
+        .await
+        .expect("NEAR AI package installed");
+
+    let activator = group
+        .thread("nearai-hosted-mcp-activate")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                serde_json::json!({"extension_id": "nearai"}),
+            ),
+            RebornScriptedReply::text("NEAR AI search is ready."),
+        ])
+        .build()
+        .await
+        .expect("activator thread builds");
+
+    activator
+        .submit_turn("activate NEAR AI search")
+        .await
+        .expect("activation turn completes");
+    activator
+        .assert_tool_result_contains(r#""activated":true"#)
+        .await
+        .expect("NEAR AI package activated");
+
+    let search = group
+        .thread("nearai-hosted-mcp-search")
+        .script([
+            RebornScriptedReply::tool_call(
+                "nearai.web_search",
+                serde_json::json!({"query": "IronClaw capability evidence"}),
+            ),
+            RebornScriptedReply::text("search complete"),
+        ])
+        .build()
+        .await
+        .expect("search thread builds");
+
+    search
+        .submit_turn("search for IronClaw capability evidence")
+        .await
+        .expect("search turn completes");
+    search
+        .assert_model_tools_contains("nearai__web_search")
+        .await
+        .expect("activated NEAR AI capability is disclosed to the model");
+    search
+        .assert_tool_invoked("nearai.web_search")
+        .await
+        .expect("canonical NEAR AI capability dispatched");
+    search
+        .assert_tool_result_contains("REBORN_NEARAI_WEB_SEARCH_RESULT")
+        .await
+        .expect("hosted MCP response reached the model-facing result");
+
+    let requests = search.captured_network_requests_for_test();
+    let tools_call = requests
+        .iter()
+        .find(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["method"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("tools/call")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no hosted MCP tools/call captured across {} redacted request(s)",
+                requests.len()
+            )
+        });
+    let body: serde_json::Value =
+        serde_json::from_slice(&tools_call.body).expect("tools/call body is JSON");
+    assert_eq!(body["params"]["name"], "web_search");
+    assert_eq!(
+        body["params"]["arguments"]["query"],
+        "IronClaw capability evidence"
+    );
+    assert!(
+        tools_call.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value.starts_with("Bearer ")
+                && value.len() > "Bearer ".len()
+        }),
+        "hosted MCP tools/call must carry a mediated bearer credential"
     );
 }
 

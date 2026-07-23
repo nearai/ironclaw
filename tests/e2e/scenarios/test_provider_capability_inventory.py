@@ -2,12 +2,16 @@
 
 import json
 from pathlib import Path
+import re
 import tomllib
 
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     EMULATE_SUPPORTED_TOOLS,
+    INTEGRATION_EVIDENCE,
+    INTEGRATION_EVIDENCE_CAPABILITY_IDS,
     INVENTORY,
+    TESTED_CAPABILITY_IDS,
     capability_id_to_wire_name,
 )
 from provider_operation_cases import PROVIDER_OPERATION_CASES
@@ -47,7 +51,7 @@ def test_every_shipped_provider_capability_has_an_owned_classification():
     classified_lists = [
         INVENTORY["classifications"][classification]
         for classification in ("tested", "live_only", "unsupported")
-    ] + [waiver["capabilities"] for waiver in INVENTORY["waivers"]]
+    ] + [waiver["capabilities"] for waiver in INVENTORY.get("waivers", [])]
     flattened = [capability for group in classified_lists for capability in group]
     duplicates = sorted(
         capability for capability in set(flattened) if flattened.count(capability) > 1
@@ -60,19 +64,74 @@ def test_every_shipped_provider_capability_has_an_owned_classification():
         f"stale={sorted(ALL_CLASSIFIED_CAPABILITY_IDS - production)}"
     )
 
-    for waiver in INVENTORY["waivers"]:
+    for waiver in INVENTORY.get("waivers", []):
         for field in ("owner", "reason", "issue", "review_condition"):
             assert waiver.get(field), f"waiver is missing {field}: {waiver}"
         assert waiver["capabilities"], f"waiver has no capabilities: {waiver}"
 
 
+def _cargo_test_targets() -> dict[str, str]:
+    with (ROOT / "Cargo.toml").open("rb") as cargo_file:
+        manifest = tomllib.load(cargo_file)
+    return {
+        target["name"]: target["path"]
+        for target in manifest.get("test", [])
+    }
+
+
+def _assert_integration_evidence_is_executable(
+    evidence: dict, targets: dict[str, str]
+) -> None:
+    required = {"capability", "kind", "target", "source", "test"}
+    assert set(evidence) == required, (
+        f"integration evidence fields must be exactly {sorted(required)}: "
+        f"{evidence}"
+    )
+    assert evidence["kind"] == "reborn_integration", evidence
+
+    assert evidence["target"] in targets, (
+        f"unknown Cargo test target {evidence['target']!r}: {evidence}"
+    )
+    assert targets[evidence["target"]] == evidence["source"], (
+        f"Cargo target {evidence['target']!r} points to "
+        f"{targets[evidence['target']]!r}, not {evidence['source']!r}"
+    )
+
+    source = ROOT / evidence["source"]
+    assert source.is_file(), f"integration evidence source is missing: {source}"
+    test_pattern = re.compile(
+        rf"#\s*\[\s*(?:tokio::)?test(?:\s*\([^]]*\))?\s*\]\s*"
+        rf"(?:pub\s+)?(?:async\s+)?fn\s+{re.escape(evidence['test'])}\s*\("
+    )
+    assert test_pattern.search(source.read_text()), (
+        f"integration test {evidence['test']!r} is missing from "
+        f"{evidence['source']}"
+    )
+
+
 def test_tested_capabilities_have_full_path_evidence():
-    """A tested label must point to a harvested journey or typed operation case."""
+    """A tested label must point to executable evidence at the correct seam."""
     evidence = _recorded_tool_evidence()
     operation_case_tools = {
         capability_id_to_wire_name(case.capability_id)
         for case in PROVIDER_OPERATION_CASES
     }
+    integration_capabilities = [
+        entry["capability"] for entry in INTEGRATION_EVIDENCE
+    ]
+    duplicates = sorted(
+        capability
+        for capability in set(integration_capabilities)
+        if integration_capabilities.count(capability) > 1
+    )
+    assert not duplicates, f"duplicate integration evidence: {duplicates}"
+    assert INTEGRATION_EVIDENCE_CAPABILITY_IDS <= TESTED_CAPABILITY_IDS
+    cargo_targets = _cargo_test_targets()
+    for integration_evidence in INTEGRATION_EVIDENCE:
+        _assert_integration_evidence_is_executable(
+            integration_evidence, cargo_targets
+        )
+
     missing_tested = sorted(
         EMULATE_SUPPORTED_TOOLS - evidence.keys() - operation_case_tools
     )
