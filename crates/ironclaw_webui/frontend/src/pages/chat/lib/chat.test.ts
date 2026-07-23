@@ -81,6 +81,7 @@ function renderChat({
   threadStateUpdates = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
+  onSelectThread = () => {},
 }) {
   const components = {
     ApprovalCard() {},
@@ -138,7 +139,7 @@ function renderChat({
   const tree = context.globalThis.__testExports.Chat({
     threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
-    onSelectThread: () => {},
+    onSelectThread,
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
@@ -695,4 +696,63 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
   assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
+});
+
+test("Chat does not double-navigate when multiple sends resolve before either can navigate away from the empty-thread view", async () => {
+  // Regression test for issue #6581's frontend half: firing several
+  // "new chat" sends before the first one's response has navigated the
+  // view away from the empty-thread state used to make every one of
+  // those sends independently navigate, each tearing down and reopening
+  // the single app-wide SSE stream -- exhausting the rate-limit budget
+  // through genuinely-accepted reconnects even with the backend fix in
+  // place.
+  const selections = [];
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "closed",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => ({ thread_id: `thread-for-${content}` }),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  // No messages yet -> the landing composer (EmptyState), not the
+  // in-thread ChatInput, is what's rendered and wired to handleSend.
+  const emptyState = findComponent(tree, components.EmptyState);
+  const { onSend } = componentProps(emptyState, components.EmptyState);
+
+  const [first, second] = await Promise.all([
+    onSend("weather in NY"),
+    onSend("weather in LA"),
+  ]);
+
+  assert.equal(first.thread_id, "thread-for-weather in NY");
+  assert.equal(second.thread_id, "thread-for-weather in LA");
+  assert.equal(
+    selections.length,
+    1,
+    "only the first concurrent send should navigate the empty-thread view"
+  );
+  assert.equal(selections[0].threadId, "thread-for-weather in NY");
+  // Not deepEqual: the options object is constructed inside the vm-sandboxed
+  // chat.tsx source, so it's a cross-realm object relative to this test file
+  // and fails Node's strict deep-equality identity checks despite matching
+  // structurally.
+  assert.equal(selections[0].options.replace, true);
 });

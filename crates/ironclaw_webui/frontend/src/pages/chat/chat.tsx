@@ -179,6 +179,18 @@ export function Chat({
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
+  // Claims the right to navigate away from the empty-thread view once, for
+  // whichever concurrent send resolves first while no thread is active yet
+  // (e.g. several quick sends fired from the landing composer before the
+  // first response lands). Without this, every one of those sends' stale
+  // "no active thread" closures independently navigates as its own
+  // response arrives, thrashing the URL and tearing down/reopening the
+  // single app-wide SSE stream on each flip. Resets once a real thread is
+  // confirmed active, so a later "+ New" cycle can navigate again.
+  const hasNavigatedToNewThreadRef = React.useRef(false);
+  if (activeThreadId) {
+    hasNavigatedToNewThreadRef.current = false;
+  }
   const composerStatusText =
     approvalSubmitWarning ||
     (cooldownSeconds > 0 ? t("chat.retryIn", { seconds: cooldownSeconds }) : undefined);
@@ -210,7 +222,13 @@ export function Chat({
         threadId: activeThreadId,
       });
       const responseThreadId = response?.thread_id || activeThreadId;
-      if (!activeThreadId && responseThreadId && onSelectThread) {
+      if (
+        !activeThreadId &&
+        !hasNavigatedToNewThreadRef.current &&
+        responseThreadId &&
+        onSelectThread
+      ) {
+        hasNavigatedToNewThreadRef.current = true;
         onSelectThread(responseThreadId, { replace: true });
       }
       return response;
