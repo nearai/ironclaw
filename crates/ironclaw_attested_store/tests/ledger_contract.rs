@@ -21,7 +21,8 @@ use ironclaw_attestation::ledger::contract;
 mod concurrent {
     use std::sync::Arc;
 
-    use ironclaw_attestation::{LedgerError, SigningLedger, SigningLedgerState};
+    use ironclaw_attestation::{LedgerError, LedgerKey, SigningLedger, SigningLedgerState};
+    use ironclaw_signing_provider::TenantId;
     use ironclaw_signing_provider::GateRef;
 
     pub async fn advance_to_broadcast_yields_one_winner<L>(ledger: L)
@@ -30,7 +31,7 @@ mod concurrent {
     {
         use SigningLedgerState::*;
         let ledger = Arc::new(ledger);
-        let gate = GateRef::new("gate:ledger-concurrent");
+        let gate = LedgerKey::new(TenantId::new("tenant-a"), GateRef::new("gate:ledger-concurrent"));
 
         // Drive the row up to `Signed` sequentially.
         ledger.create(&gate).await.expect("create");

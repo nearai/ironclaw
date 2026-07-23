@@ -12,12 +12,6 @@ publish = false
 
 [package.metadata.ironclaw]
 layer = "app"
-default = []
-root-llm-provider = [
-webui-v2-beta = [
-libsql = [
-postgres = [
-attested-broadcast = ["ironclaw_attested_store/broadcast-http"]
 
 [features]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
@@ -30,13 +24,15 @@ test-support = [
     "ironclaw_host_runtime/test-support",
     "ironclaw_runner/test-support",
 ]
+# The real per-chain JSON-RPC broadcaster wired under the signing-ledger (PR12).
+# The durable-store re-exports it gates are inert until a deployment enables it.
+attested-broadcast = ["ironclaw_attested_store/broadcast-http"]
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
 chrono = "0.4"
 deadpool-postgres = "0.14"
 futures = "0.3"
-ironclaw_attested_store = { path = "../ironclaw_attested_store" }
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
@@ -92,6 +88,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
 ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
+ironclaw_attested_store = { path = "../ironclaw_attested_store" }
 ironclaw_attestation = { path = "../ironclaw_attestation" }
 ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }

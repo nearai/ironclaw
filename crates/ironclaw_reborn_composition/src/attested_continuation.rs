@@ -47,7 +47,7 @@ use ironclaw_wallet_external::{
 };
 use serde::Deserialize;
 
-use crate::attested::{LocalDevContinuationDriver, RebornAttestedComposition};
+use crate::attested::{LocalDevAttestedComposition, LocalDevContinuationDriver};
 
 /// Composition-layer [`AttestedGateContinuationPort`].
 ///
@@ -59,7 +59,7 @@ pub struct RebornAttestedContinuation {
 
 impl RebornAttestedContinuation {
     /// Build the port over the runtime's attested-signing composition.
-    pub fn new(composition: &RebornAttestedComposition) -> Self {
+    pub fn new(composition: &LocalDevAttestedComposition) -> Self {
         Self {
             driver: Arc::clone(composition.driver()),
         }

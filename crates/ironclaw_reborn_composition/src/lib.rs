@@ -62,7 +62,10 @@ mod webui;
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
-pub use attested::{NoopBroadcaster, RebornAttestedComposition, RegisterAttestedGateError};
+pub use attested::{
+    LocalDevAttestedComposition, NoopBroadcaster, RebornAttestedComposition,
+    RegisterAttestedGateError,
+};
 pub use attested_continuation::RebornAttestedContinuation;
 #[cfg(all(feature = "libsql", feature = "attested-broadcast"))]
 pub use attested::LibSqlAttestedComposition;

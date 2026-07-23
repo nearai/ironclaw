@@ -176,6 +176,64 @@ async fn binding_is_immutable_after_first_put() {
 }
 
 #[tokio::test]
+async fn async_get_falls_back_to_db_on_cache_miss() {
+    // Simulate a binding written by another process/replica (or after this
+    // instance's `load()` ran): the row is in the durable table but was never
+    // write-through into THIS store's cache. The async `get` must fall back to
+    // the table, return the row, and warm the cache.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bindings.db");
+    let gate = GateRef::new(GATE);
+    let binding = sample_binding();
+
+    // Construct the store first (runs load() over an empty/rowless table).
+    let store = build(&path).await;
+    assert!(
+        store.get_sync(&gate).is_none(),
+        "cache must be empty before the out-of-band write"
+    );
+
+    // Out-of-band write straight to the durable table, bypassing the store's
+    // cache entirely — mimics a second replica's put.
+    {
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("build libsql db for out-of-band write"),
+        );
+        let conn = db.connect().expect("connect for out-of-band write");
+        let json = serde_json::to_string(&binding).expect("serialize binding");
+        conn.execute(
+            "INSERT INTO attested_gate_bindings (gate_ref, binding_json) VALUES (?1, ?2)",
+            libsql::params![gate.as_str(), json],
+        )
+        .await
+        .expect("out-of-band insert");
+    }
+
+    // Sync path still misses (no DB I/O allowed there) — proves the cache was
+    // genuinely not populated for this row.
+    assert!(
+        store.get_sync(&gate).is_none(),
+        "sync read must not see the out-of-band row before async warms the cache"
+    );
+
+    // Async read-through: finds the row in the table and returns it.
+    let via_async = store
+        .get(&gate)
+        .await
+        .expect("async get must fall back to the db on cache miss");
+    assert_eq!(via_async.approved_tx_hash, binding.approved_tx_hash);
+
+    // The read-through warmed the cache, so the sync resume path now sees it.
+    let via_sync = store
+        .get_sync(&gate)
+        .expect("sync read after async read-through warmed the cache");
+    assert_eq!(via_sync.approved_tx_hash, binding.approved_tx_hash);
+}
+
+#[tokio::test]
 async fn binding_survives_store_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("bindings.db");

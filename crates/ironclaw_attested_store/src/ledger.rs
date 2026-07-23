@@ -18,17 +18,19 @@
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use async_trait::async_trait;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-use ironclaw_attestation::{LedgerError, SigningLedger, SigningLedgerState};
+use ironclaw_attestation::{LedgerKey, LedgerError, SigningLedger, SigningLedgerState};
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw_signing_provider::GateRef;
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS attested_signing_ledger (
-    gate_ref           TEXT PRIMARY KEY,
+    tenant             TEXT NOT NULL,
+    gate_ref           TEXT NOT NULL,
     state              TEXT NOT NULL,
     created_at_ms      BIGINT NOT NULL,
-    last_transition_ms BIGINT NOT NULL
+    last_transition_ms BIGINT NOT NULL,
+    PRIMARY KEY (tenant, gate_ref)
 );";
 
 /// snake_case wire token for a ledger state (matches the serde repr).
@@ -109,12 +111,12 @@ mod postgres {
         /// read-then-CAS pair loses its one-connection consistency guarantee.
         async fn read_state_on(
             client: &deadpool_postgres::Object,
-            gate_ref: &GateRef,
+            key: &LedgerKey,
         ) -> Result<SigningLedgerState, LedgerError> {
             let row = client
                 .query_opt(
-                    "SELECT state FROM attested_signing_ledger WHERE gate_ref = $1",
-                    &[&gate_ref.as_str()],
+                    "SELECT state FROM attested_signing_ledger WHERE tenant = $1 AND gate_ref = $2",
+                    &[&key.tenant.as_str(), &key.gate_ref.as_str()],
                 )
                 .await
                 .map_err(|error| backend(&error))?
@@ -134,16 +136,16 @@ mod postgres {
 
     #[async_trait]
     impl SigningLedger for PostgresSigningLedger {
-        async fn create(&self, gate_ref: &GateRef) -> Result<(), LedgerError> {
+        async fn create(&self, key: &LedgerKey) -> Result<(), LedgerError> {
             let client = self.client().await?;
             let now = now_ms();
             let rows = client
                 .execute(
                     "INSERT INTO attested_signing_ledger \
-                     (gate_ref, state, created_at_ms, last_transition_ms) \
-                     VALUES ($1, 'approved', $2, $2) \
-                     ON CONFLICT (gate_ref) DO NOTHING",
-                    &[&gate_ref.as_str(), &now],
+                     (tenant, gate_ref, state, created_at_ms, last_transition_ms) \
+                     VALUES ($1, $2, 'approved', $3, $3) \
+                     ON CONFLICT (tenant, gate_ref) DO NOTHING",
+                    &[&key.tenant.as_str(), &key.gate_ref.as_str(), &now],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
@@ -153,14 +155,14 @@ mod postgres {
             Ok(())
         }
 
-        async fn state(&self, gate_ref: &GateRef) -> Result<SigningLedgerState, LedgerError> {
+        async fn state(&self, key: &LedgerKey) -> Result<SigningLedgerState, LedgerError> {
             let client = self.client().await?;
-            Self::read_state_on(&client, gate_ref).await
+            Self::read_state_on(&client, key).await
         }
 
         async fn advance(
             &self,
-            gate_ref: &GateRef,
+            key: &LedgerKey,
             to: SigningLedgerState,
         ) -> Result<(), LedgerError> {
             let client = self.client().await?;
@@ -173,17 +175,18 @@ mod postgres {
             // between our read and our UPDATE, our UPDATE matches zero rows and
             // we fall into the lost-CAS branch below — the row can never be
             // double-advanced.
-            let from = Self::read_state_on(&client, gate_ref).await?;
+            let from = Self::read_state_on(&client, key).await?;
             if !from.can_advance_to(to) {
                 return Err(LedgerError::InvalidTransition { from, to });
             }
             let updated = client
                 .execute(
                     "UPDATE attested_signing_ledger \
-                     SET state = $3, last_transition_ms = $4 \
-                     WHERE gate_ref = $1 AND state = $2",
+                     SET state = $4, last_transition_ms = $5 \
+                     WHERE tenant = $1 AND gate_ref = $2 AND state = $3",
                     &[
-                        &gate_ref.as_str(),
+                        &key.tenant.as_str(),
+                        &key.gate_ref.as_str(),
                         &state_token(from),
                         &state_token(to),
                         &now_ms(),
@@ -198,7 +201,7 @@ mod postgres {
             // conditional UPDATE (or it vanished). Re-read on the same client and
             // report a distinct ConcurrentAdvance — this is a lost race, NOT a
             // caller-supplied illegal transition.
-            let observed = Self::read_state_on(&client, gate_ref).await?;
+            let observed = Self::read_state_on(&client, key).await?;
             Err(LedgerError::ConcurrentAdvance { observed, to })
         }
     }
@@ -247,12 +250,12 @@ mod libsql_backend {
         async fn read_state(
             &self,
             conn: &libsql::Connection,
-            gate_ref: &GateRef,
+            key: &LedgerKey,
         ) -> Result<SigningLedgerState, LedgerError> {
             let mut rows = conn
                 .query(
-                    "SELECT state FROM attested_signing_ledger WHERE gate_ref = ?1",
-                    libsql::params![gate_ref.as_str()],
+                    "SELECT state FROM attested_signing_ledger WHERE tenant = ?1 AND gate_ref = ?2",
+                    libsql::params![key.tenant.as_str(), key.gate_ref.as_str()],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
@@ -276,15 +279,15 @@ mod libsql_backend {
 
     #[async_trait]
     impl SigningLedger for LibSqlSigningLedger {
-        async fn create(&self, gate_ref: &GateRef) -> Result<(), LedgerError> {
+        async fn create(&self, key: &LedgerKey) -> Result<(), LedgerError> {
             let conn = self.connect().await?;
             let now = now_ms();
             let rows = conn
                 .execute(
                     "INSERT OR IGNORE INTO attested_signing_ledger \
-                     (gate_ref, state, created_at_ms, last_transition_ms) \
-                     VALUES (?1, 'approved', ?2, ?2)",
-                    libsql::params![gate_ref.as_str(), now],
+                     (tenant, gate_ref, state, created_at_ms, last_transition_ms) \
+                     VALUES (?1, ?2, 'approved', ?3, ?3)",
+                    libsql::params![key.tenant.as_str(), key.gate_ref.as_str(), now],
                 )
                 .await
                 .map_err(|error| backend(&error))?;
@@ -294,28 +297,29 @@ mod libsql_backend {
             Ok(())
         }
 
-        async fn state(&self, gate_ref: &GateRef) -> Result<SigningLedgerState, LedgerError> {
+        async fn state(&self, key: &LedgerKey) -> Result<SigningLedgerState, LedgerError> {
             let conn = self.connect().await?;
-            self.read_state(&conn, gate_ref).await
+            self.read_state(&conn, key).await
         }
 
         async fn advance(
             &self,
-            gate_ref: &GateRef,
+            key: &LedgerKey,
             to: SigningLedgerState,
         ) -> Result<(), LedgerError> {
             let conn = self.connect().await?;
-            let from = self.read_state(&conn, gate_ref).await?;
+            let from = self.read_state(&conn, key).await?;
             if !from.can_advance_to(to) {
                 return Err(LedgerError::InvalidTransition { from, to });
             }
             let updated = conn
                 .execute(
                     "UPDATE attested_signing_ledger \
-                     SET state = ?3, last_transition_ms = ?4 \
-                     WHERE gate_ref = ?1 AND state = ?2",
+                     SET state = ?4, last_transition_ms = ?5 \
+                     WHERE tenant = ?1 AND gate_ref = ?2 AND state = ?3",
                     libsql::params![
-                        gate_ref.as_str(),
+                        key.tenant.as_str(),
+                        key.gate_ref.as_str(),
                         state_token(from),
                         state_token(to),
                         now_ms()
@@ -329,7 +333,7 @@ mod libsql_backend {
             // Lost the CAS: another writer moved the row between our read and the
             // conditional UPDATE. Re-read on the same connection and report a
             // distinct ConcurrentAdvance (a lost race, not an illegal transition).
-            let observed = self.read_state(&conn, gate_ref).await?;
+            let observed = self.read_state(&conn, key).await?;
             Err(LedgerError::ConcurrentAdvance { observed, to })
         }
     }

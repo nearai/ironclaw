@@ -137,7 +137,7 @@ mod postgres {
                     "UPDATE attested_sealed_grants \
                      SET status = 'claimed', claimed_at_ms = $2 \
                      WHERE key_hash = $1 AND status = 'sealed' \
-                     RETURNING created_at_ms",
+                     RETURNING created_at_ms, expiry_ms",
                     &[&key_hash, &now_ms()],
                 )
                 .await
@@ -145,9 +145,11 @@ mod postgres {
 
             if let Some(row) = claimed {
                 let created_at_ms: i64 = row.get(0);
+                let expiry_ms: Option<i64> = row.get(1);
                 return Ok(ClaimedGrant {
                     key: key.clone(),
                     created_at_ms,
+                    expiry_ms,
                 });
             }
 
@@ -267,18 +269,24 @@ mod libsql_backend {
                 // Read back created_at for the claimed grant.
                 let mut rows = conn
                     .query(
-                        "SELECT created_at_ms FROM attested_sealed_grants WHERE key_hash = ?1",
+                        "SELECT created_at_ms, expiry_ms FROM attested_sealed_grants \
+                         WHERE key_hash = ?1",
                         libsql::params![key_hash],
                     )
                     .await
                     .map_err(|error| backend(&error))?;
-                let created_at_ms = match rows.next().await.map_err(|error| backend(&error))? {
-                    Some(row) => row.get::<i64>(0).map_err(|error| backend(&error))?,
-                    None => return Err(GrantError::NotFound),
-                };
+                let (created_at_ms, expiry_ms) =
+                    match rows.next().await.map_err(|error| backend(&error))? {
+                        Some(row) => (
+                            row.get::<i64>(0).map_err(|error| backend(&error))?,
+                            row.get::<Option<i64>>(1).map_err(|error| backend(&error))?,
+                        ),
+                        None => return Err(GrantError::NotFound),
+                    };
                 return Ok(ClaimedGrant {
                     key: key.clone(),
                     created_at_ms,
+                    expiry_ms,
                 });
             }
 

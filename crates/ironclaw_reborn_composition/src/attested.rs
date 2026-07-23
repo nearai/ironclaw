@@ -82,7 +82,10 @@ pub(crate) type ComposedContinuationDriver<B, G, L> =
 
 /// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
 /// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
-pub(crate) type LocalDevAttestedComposition =
+pub(crate) type LocalDevContinuationDriver =
+    ComposedContinuationDriver<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
+
+pub type LocalDevAttestedComposition =
     RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 
 /// A dry-run broadcaster that records intent but performs NO network I/O and,
@@ -139,6 +142,10 @@ where
     L: SigningLedger + 'static,
 {
     bindings: Arc<dyn AttestedGateBindingStore>,
+    /// Shared sealed-grant store. Held so `register_attested_gate` (the raise
+    /// path) seals into the SAME store the driver's custodial signer claims from
+    /// — the one-shot CAS is authoritative across raise and continuation.
+    grants: Arc<G>,
     driver: Arc<ComposedContinuationDriver<B, G, L>>,
 }
 
@@ -157,6 +164,10 @@ where
     /// authoritative across both the custodial signer and the external-wallet
     /// providers. The ledger is shared between the custodial signer and the
     /// driver so the broadcast-idempotency guard covers both paths.
+    // arch-exempt: too_many_args, assemble fans the substrate stores
+    // (grants/ledger/broadcaster/providers) plus keystore/ship-gate into one
+    // driver; needs an AttestedSigningServices bundle,
+    // plan docs/plans/2026-05-23-attested-signing-substrate.md
     #[allow(clippy::too_many_arguments)]
     pub fn assemble(
         bindings: Arc<dyn AttestedGateBindingStore>,
@@ -169,7 +180,7 @@ where
     ) -> Self {
         let custodial_signer = Arc::new(CustodialSigner::new(
             keystore,
-            grants,
+            Arc::clone(&grants),
             Arc::clone(&ledger),
             ship_gate,
             Arc::new(DenyFirstCustodyPolicy),
@@ -181,7 +192,11 @@ where
             ledger,
             broadcaster,
         ));
-        Self { bindings, driver }
+        Self {
+            bindings,
+            grants,
+            driver,
+        }
     }
 
     /// Register an attested gate: seal its one-shot grant and persist its
@@ -259,6 +274,10 @@ where
 
     /// The assembled signer-continuation driver dispatched when a turn reaches
     /// `AttestedResolved`.
+    pub fn grants(&self) -> &Arc<G> {
+        &self.grants
+    }
+
     pub fn driver(&self) -> &Arc<ComposedContinuationDriver<B, G, L>> {
         &self.driver
     }
