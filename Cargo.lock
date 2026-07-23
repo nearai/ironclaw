@@ -3385,18 +3385,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_attestation"
-version = "0.1.0"
-dependencies = [
- "ironclaw_attestation",
- "ironclaw_signing_provider",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "ironclaw_auth"
 version = "0.1.0"
 dependencies = [
@@ -4413,7 +4401,9 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
  "ironclaw_reborn_openai_compat",
+ "ironclaw_threads",
  "ironclaw_turns",
  "serde",
  "serde_json",
@@ -4607,17 +4597,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_signing_provider"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
