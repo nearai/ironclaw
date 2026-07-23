@@ -146,6 +146,18 @@ google:
       parent_google_ids:
         - root
       data: "This Drive item belongs only to the secondary identity."
+  drive_permissions:
+    - id: perm_reborn_reader
+      user_email: e2e.google@example.com
+      file_id: drv_reborn_qa_brief
+      role: reader
+      type: user
+      email_address: seeded-reader@example.com
+      display_name: Seeded Reader
+  shared_drives:
+    - id: shared_reborn_engineering
+      user_email: e2e.google@example.com
+      name: Reborn Engineering
   documents:
     - id: doc_reborn_strategy
       user_email: e2e.google@example.com
@@ -161,6 +173,10 @@ google:
           values:
             - [Company, Contact, Source, Status, QA Marker]
             - [NEAR AI, partnerships@near.ai, Gmail, New, REBORN_QA_SEEDED]
+        - id: 7
+          title: DeleteMe
+          values:
+            - [Temporary]
     - id: sheet_reborn_bug_tracker
       user_email: e2e.google@example.com
       title: Reborn QA Bug Tracker
