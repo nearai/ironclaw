@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent-loop termination recovery:** tell the model when no-progress or the
+  iteration limit would otherwise stop a run, preserve that one-shot warning
+  across checkpoints, and allow one normal capability-enabled recovery turn
+  before taking the existing typed failure path.
 - **Model recovery:** preserve typed, sanitized context-overflow,
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider

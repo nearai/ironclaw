@@ -192,12 +192,9 @@ pub(crate) enum StopKind {
     /// Strategy is satisfied; the executor maps this to graceful completion.
     GracefulStop,
     /// Safety-net escape for specific no-progress evidence such as repeated
-    /// call signatures or typed no-change capability results. The executor
-    /// resolves this to one of two honest terminals: if the driver-specific
-    /// final-answer nudge is enabled and the model synthesizes a real closing
-    /// answer, a graceful completion with that answer; otherwise a typed
-    /// `LoopFailureKind::NoProgressDetected` failure (never a canned
-    /// assistant reply finalized as a successful turn).
+    /// call signatures or typed no-change capability results. After the
+    /// bounded terminal-warning recovery turn is exhausted, the executor
+    /// resolves this to a typed `LoopFailureKind::NoProgressDetected` failure.
     NoProgressDetected,
     /// Strategy aborts with an explicit failure kind.
     Aborted(LoopFailureKind),

@@ -42,7 +42,7 @@ pub mod compaction;
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,
-    RecoveryStrategyState,
+    RecoveryStrategyState, TerminalWarningObservation,
 };
 
 /// Scriptable implementation of [`AgentLoopDriverHost`].
@@ -698,6 +698,21 @@ impl Default for LoopExecutionStateBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Returns a state that has already consumed its one no-progress warning.
+///
+/// This exposes a stable scenario setup to downstream integration tests
+/// without making terminal-warning scheduler internals part of the production
+/// API.
+pub fn state_after_no_progress_warning_attempt(context: &LoopRunContext) -> LoopExecutionState {
+    let mut state = LoopExecutionState::initial_for_run(context);
+    let scheduled = state
+        .terminal_warning_state
+        .schedule(TerminalWarningObservation::no_progress(None, None));
+    assert!(scheduled); // safety: test-support scenario construction must fail loudly on invalid static setup.
+    state.terminal_warning_state.clear_pending();
+    state
 }
 
 impl LoopRunInfoPort for MockAgentLoopDriverHost {

@@ -64,7 +64,7 @@ No `cache_control`; we optimize exact-prefix stability and raw size. Assemble th
 1. **Stable session prefix** — identity files (AGENTS/SOUL/USER/IDENTITY), static guidance, frozen skills index, session-frozen snippets. Built once per session / run-profile epoch into a cached `Arc<str>`, reused verbatim.
 2. **Stable tool list** — canonical, append-only `tools=` from §4.1. In deferred steady state this is core + bridges + promoted, stable across turns.
 3. **Stable context** — committed transcript + summaries in sequence order, never re-edited above the compaction watermark.
-4. **Volatile (last)** — timestamp, memory-recall snippets, loop-control/repeat warnings, the final-answer nudge, current user turn + recent tail.
+4. **Volatile (last)** — timestamp, memory-recall snippets, loop-control/repeat warnings, terminal/completion recovery controls, current user turn + recent tail.
 
 Each tier carries a fingerprint (`stable_prefix_digest`, `tool_list_digest`, `context_digest`, `volatile_digest`) + estimated tokens, logged per call. Canonical JSON (sorted keys), integer token estimates, name tie-breaks — determinism everywhere in tiers 1–3.
 

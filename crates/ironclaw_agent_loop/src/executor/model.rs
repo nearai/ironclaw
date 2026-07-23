@@ -104,15 +104,15 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let mut last_error_detail: Option<String> = None;
         for _ in 0..max_model_attempts {
             let model_result = ctx.host.stream_model(request.clone()).await;
-            // Pending controls have now crossed the model gateway boundary.
-            // Keep them through prompt construction and the BeforeModel
-            // checkpoint, then consume them only after issuing the request.
-            // A crash before this in-memory clear may replay the same control
-            // once, which is safer than losing a consumed recovery budget.
-            state.pending_model_error_observation = None;
-            state.pending_model_retry_directive = None;
             match model_result {
                 Ok(response) => {
+                    // A successful response proves the provider saw this
+                    // request. Consume the pending controls only now; a
+                    // gate-shaped error below happens before provider dispatch
+                    // and must preserve them for the approved retry.
+                    state.pending_model_error_observation = None;
+                    state.pending_model_retry_directive = None;
+                    state.terminal_warning_state.mark_delivered();
                     match &response.output {
                         ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(reply) => {
                             debug!(
@@ -143,6 +143,13 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     {
                         return budget_approval_blocked_exit(ctx, state, gate_ref).await;
                     }
+                    // Non-gate errors were returned after the request crossed
+                    // the model boundary. Do not leave stale model-error
+                    // controls pending in a later prompt. A terminal warning,
+                    // however, remains pending until a successful response
+                    // proves the model received its recovery turn.
+                    state.pending_model_error_observation = None;
+                    state.pending_model_retry_directive = None;
                     let Some(class) = model_error_class(&error) else {
                         let raw_summary = error.safe_summary;
                         let (safe_summary, rejected_summary_detail) =

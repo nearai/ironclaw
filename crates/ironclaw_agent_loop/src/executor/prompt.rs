@@ -17,7 +17,7 @@ use crate::state::{
 };
 use crate::strategies::{
     CompactionDecision, invalid_model_output_repair_control_message,
-    model_error_observation_control_message,
+    model_error_observation_control_message, terminal_warning_control_message,
 };
 
 use super::{
@@ -723,6 +723,16 @@ pub(super) async fn build_prompt_bundle_for_surface(
                 debug!(%error, "model-error observation control text rejected");
                 AgentLoopExecutorError::PlannerContract {
                     detail: "model-error observation control text was invalid",
+                }
+            })?,
+        );
+    }
+    if let Some(observation) = state.terminal_warning_state.pending() {
+        context_request.inline_messages.push(
+            terminal_warning_control_message(observation).map_err(|error| {
+                debug!(%error, "terminal-warning control text rejected");
+                AgentLoopExecutorError::PlannerContract {
+                    detail: "terminal warning control text was invalid",
                 }
             })?,
         );

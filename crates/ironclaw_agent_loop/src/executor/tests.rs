@@ -28,6 +28,7 @@ use crate::state::{
     LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
     ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
     PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
+    TerminalWarningObservation,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -241,6 +242,12 @@ async fn budget_stage_exits_at_iteration_limit() {
     };
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.iteration = family.planner().budget().iteration_limit(&state);
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::iteration_limit(state.iteration))
+    );
+    state.terminal_warning_state.clear_pending();
 
     let step = BudgetStage
         .process(
@@ -258,6 +265,100 @@ async fn budget_stage_exits_at_iteration_limit() {
 }
 
 #[tokio::test]
+async fn iteration_limit_gives_model_one_warning_turn_to_finish() {
+    let host = MockHost::new(vec![reply_response_with_text(
+        "completed during the final iteration",
+    )]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &crate::families::default_with_iteration_limit(0),
+            &host,
+            state,
+        )
+        .await
+        .expect("iteration-limit warning turn should execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0]
+            .capability_view
+            .as_ref()
+            .expect("warning request has a capability view")
+            .visible_capability_ids
+            .is_empty(),
+        "the warning uses a normal tool-capable model request"
+    );
+    assert!(requests[0].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("final recovery iteration")
+    }));
+}
+
+#[tokio::test]
+async fn iteration_warning_survives_before_model_checkpoint_reload() {
+    let host = Arc::new(
+        MockHost::new(vec![reply_response_with_text(
+            "completed after checkpoint reload",
+        )])
+        .crash_after_checkpoint_progress(LoopCheckpointKind::BeforeModel),
+    );
+    let crashed_host = Arc::clone(&host);
+    let crash = tokio::spawn(async move {
+        CanonicalAgentLoopExecutor
+            .execute_family(
+                &crate::families::default_with_iteration_limit(0),
+                crashed_host.as_ref(),
+                LoopExecutionState::initial_for_run(crashed_host.run_context()),
+            )
+            .await
+    })
+    .await
+    .expect_err("scripted worker crash must stop before the model request");
+    assert!(crash.is_panic());
+
+    let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    assert!(restored.terminal_warning_state.pending().is_some());
+    assert!(
+        restored
+            .terminal_warning_state
+            .attempted(crate::state::TerminalWarningKind::IterationLimit)
+    );
+    assert!(host.model_requests().is_empty());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &crate::families::default_with_iteration_limit(0),
+            host.as_ref(),
+            restored,
+        )
+        .await
+        .expect("checkpointed warning should reach the resumed model request");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let final_state = final_staged_state(&host);
+    assert!(final_state.terminal_warning_state.pending().is_none());
+    assert!(
+        final_state
+            .terminal_warning_state
+            .attempted(crate::state::TerminalWarningKind::IterationLimit)
+    );
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("final recovery iteration")
+    }));
+}
+
+#[tokio::test]
 async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
     let host = MockHost::new(Vec::new()).with_failing_prompt_bundle();
     let family = crate::families::default();
@@ -267,6 +368,12 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
     };
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.iteration = family.planner().budget().iteration_limit(&state);
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::iteration_limit(state.iteration))
+    );
+    state.terminal_warning_state.clear_pending();
 
     let step = BudgetStage
         .process(
@@ -1403,6 +1510,50 @@ async fn model_budget_approval_required_with_gate_ref_blocks_resource_gate() {
 }
 
 #[tokio::test]
+async fn terminal_warning_survives_model_budget_approval_and_reaches_resumed_request() {
+    let gate_ref = LoopGateRef::new("gate:terminal-warning-budget").expect("gate ref");
+    let host = MockHost::new(vec![reply_response_with_text(
+        "completed after budget approval",
+    )])
+    .with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetApprovalRequired,
+            "budget approval required",
+        )
+        .with_gate_ref(gate_ref),
+    ]);
+    let family = crate::families::default_with_iteration_limit(0);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let blocked = CanonicalAgentLoopExecutor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("warning request should block for budget approval");
+    assert!(matches!(blocked, LoopExit::Blocked(_)));
+
+    let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        restored.terminal_warning_state.pending().is_some(),
+        "a gate raised before provider dispatch must not consume the warning"
+    );
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&family, &host, restored)
+        .await
+        .expect("approved retry should receive the pending warning");
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("final recovery iteration")
+    }));
+}
+
+#[tokio::test]
 async fn model_budget_approval_required_without_gate_ref_fails_diagnostics_not_recovery() {
     let host =
         MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
@@ -2160,18 +2311,12 @@ async fn exit_stage_no_progress_fails_when_nudge_disabled() {
         }
         other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    // The single model call is the best-effort failure explanation (§5a.2),
-    // never the nudge: the nudge gate is off, so the nudge counter stays 0 —
-    // and no assistant reply was finalized.
+    // The single model call is the best-effort failure explanation (§5a.2);
+    // no assistant reply was finalized.
     assert_eq!(
         host.model_requests().len(),
         1,
         "only the best-effort failure-explanation call may be issued"
-    );
-    assert_eq!(
-        final_staged_state(&host).final_answer_nudges_used,
-        0,
-        "nudge gate disabled must not attempt a nudge"
     );
     assert!(
         host.finalized_assistant_messages().is_empty(),
@@ -2214,60 +2359,14 @@ async fn no_progress_explanation_cancellation_returns_cancelled_before_final_che
 }
 
 #[tokio::test]
-async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
-    // Gate ON + a model reply queued for the tool-free nudge call: the
-    // no-progress exit should issue ONE tool-free model call and finalize the
-    // synthesized reply instead of the canned fallback.
-    let host = MockHost::new(vec![reply_response_with_text("Here is the final answer.")])
-        .with_driver_nudges_enabled();
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let state = LoopExecutionState::initial_for_run(host.run_context());
-
-    let exit = ExitStage
-        .process(
-            ctx,
-            ExitInput {
-                state,
-                kind: StopKind::NoProgressDetected,
-            },
-        )
-        .await
-        .expect("exit stage");
-
-    // Exactly one tool-free model call was issued (the nudge), with an empty
-    // capability view so the provider gets no tools.
-    let requests = host.model_requests();
-    assert_eq!(requests.len(), 1, "nudge should issue one model call");
-    assert_eq!(
-        requests[0]
-            .capability_view
-            .as_ref()
-            .map(|v| v.visible_capability_ids.len()),
-        Some(0),
-        "nudge model call must be tool-free (empty capability view)"
-    );
-    match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
-        }
-        other => panic!("expected completed exit with synthesized reply, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn no_progress_skips_nudge_when_gate_disabled() {
-    // Gate OFF: no tool-free nudge call is issued and the no-progress stop
-    // terminates as a typed failure (production default) — not a canned reply,
-    // not a completed turn. The available model reply is consumed by the
-    // failure-explanation call (§5a.2) and referenced from the failed exit.
+async fn no_progress_exit_remains_typed_failure_when_driver_nudges_enabled() {
+    // Driver nudges do not add a second recovery mechanism after the terminal
+    // warning turn. The available model reply is consumed only by the
+    // failure-explanation call (§5a.2).
     let host = MockHost::new(vec![reply_response_with_text(
         "explanation after no progress",
-    )]);
+    )])
+    .with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2286,15 +2385,9 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
         .await
         .expect("exit stage");
 
-    // Exactly one model call — the failure explanation, not a nudge (the nudge
-    // counter stays 0 and the run still FAILS; a successful nudge would have
-    // completed the run instead).
+    // Exactly one model call — the failure explanation — and the run still
+    // fails with the typed no-progress category.
     assert_eq!(host.model_requests().len(), 1);
-    assert_eq!(
-        final_staged_state(&host).final_answer_nudges_used,
-        0,
-        "no nudge attempt when the gate is disabled"
-    );
     match exit {
         LoopExit::Failed(failed) => {
             assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
@@ -2309,13 +2402,8 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
 }
 
 #[tokio::test]
-async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
-    // Gate ON at the iteration-limit boundary: instead of failing closed, issue
-    // one tool-free nudge and complete with the synthesized reply.
-    let host = MockHost::new(vec![reply_response_with_text(
-        "Final answer from budget nudge.",
-    )])
-    .with_driver_nudges_enabled();
+async fn budget_iteration_limit_schedules_normal_warning_turn() {
+    let host = MockHost::new(Vec::new()).with_driver_nudges_enabled();
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
@@ -2338,62 +2426,11 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
         .await
         .expect("budget stage");
 
-    assert_eq!(
-        host.model_requests().len(),
-        1,
-        "budget nudge should issue one model call"
-    );
-    assert!(
-        matches!(step, BudgetStep::Exit(LoopExit::Completed(_))),
-        "budget nudge should complete, not fail closed"
-    );
-}
-
-#[tokio::test]
-async fn nudge_respects_one_shot_cap() {
-    // With the cap already spent, the no-progress exit must not issue another
-    // NUDGE model call and terminates as a typed failure (no canned reply).
-    // The failed branch still runs its failure-explanation call (§5a.2), which
-    // consumes the scripted reply as the explanation message.
-    let host = MockHost::new(vec![reply_response_with_text(
-        "explanation after capped nudge",
-    )])
-    .with_driver_nudges_enabled();
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
+    let BudgetStep::Continue { state, .. } = step else {
+        panic!("first iteration-limit terminal should schedule a warning turn");
     };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.final_answer_nudges_used = 1;
-
-    let exit = ExitStage
-        .process(
-            ctx,
-            ExitInput {
-                state,
-                kind: StopKind::NoProgressDetected,
-            },
-        )
-        .await
-        .expect("exit stage");
-
-    // The nudge cap held: the counter did not advance, the run FAILED (a
-    // successful nudge would have completed it), and the single model call is
-    // the failure explanation.
-    assert_eq!(
-        final_staged_state(&host).final_answer_nudges_used,
-        1,
-        "capped nudge must not attempt another nudge"
-    );
-    assert_eq!(host.model_requests().len(), 1);
-    match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
-            assert_eq!(failed.explanation_message_refs.len(), 1);
-        }
-        other => panic!("expected typed no-progress failure, got {other:?}"),
-    }
+    assert!(state.terminal_warning_state.pending().is_some());
+    assert!(host.model_requests().is_empty());
 }
 
 #[tokio::test]
@@ -2526,59 +2563,8 @@ async fn completion_nudge_skipped_on_clean_reply() {
 }
 
 #[tokio::test]
-async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
-    // Gate ON but the nudge's OWN model call fails (non-cancel host error). The
-    // nudge is best-effort: it must NOT bork the run — the no-progress exit
-    // falls back to the typed failed exit instead of propagating the failure.
-    let host = MockHost::new(Vec::new())
-        .with_driver_nudges_enabled()
-        .with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "nudge model call failed",
-        )]);
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let state = LoopExecutionState::initial_for_run(host.run_context());
-
-    let exit = ExitStage
-        .process(
-            ctx,
-            ExitInput {
-                state,
-                kind: StopKind::NoProgressDetected,
-            },
-        )
-        .await
-        .expect("nudge model failure must not propagate out of the exit stage");
-
-    // Two model calls: the nudge attempt (scripted error) and the best-effort
-    // failure-explanation attempt (§5a.2, script exhausted → fails soft).
-    assert_eq!(
-        host.model_requests().len(),
-        2,
-        "nudge attempts one model call before failing open; the failed branch \
-         then attempts its best-effort failure explanation"
-    );
-    assert!(
-        matches!(exit, LoopExit::Failed(_)),
-        "nudge model failure must fall back to the typed no-progress failure, got {exit:?}"
-    );
-}
-
-#[tokio::test]
-async fn budget_nudge_model_failure_falls_back_to_failed_exit() {
-    // Gate ON at the iteration-limit boundary, but the nudge's model call fails.
-    // The budget stage must fall through to its normal explained-failure exit
-    // (also fail-open) rather than propagating the nudge host error.
-    let host = MockHost::new(Vec::new())
-        .with_driver_nudges_enabled()
-        .with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "nudge model call failed",
-        )]);
+async fn consumed_iteration_warning_falls_back_to_failed_exit() {
+    let host = MockHost::new(vec![reply_response_with_text("iteration explanation")]);
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
@@ -2589,6 +2575,12 @@ async fn budget_nudge_model_failure_falls_back_to_failed_exit() {
     };
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.iteration = family.planner().budget().iteration_limit(&state);
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::iteration_limit(state.iteration))
+    );
+    state.terminal_warning_state.clear_pending();
 
     let step = BudgetStage
         .process(
@@ -2599,49 +2591,16 @@ async fn budget_nudge_model_failure_falls_back_to_failed_exit() {
             },
         )
         .await
-        .expect("nudge model failure must not propagate out of the budget stage");
+        .expect("budget stage should finalize the exhausted warning path");
 
     assert_eq!(
         host.model_requests().len(),
-        2,
-        "budget path attempts the failed nudge model call plus its normal failure explanation"
+        1,
+        "the consumed warning falls through to one best-effort failure explanation"
     );
     assert!(
         matches!(step, BudgetStep::Exit(LoopExit::Failed(_))),
-        "budget nudge model failure must fall back to the failed exit"
-    );
-}
-
-#[tokio::test]
-async fn nudge_model_cancellation_propagates() {
-    // A cancellation surfaced during the nudge model call MUST propagate (the
-    // run is being cancelled), unlike other host failures which fall open.
-    let host = MockHost::new(Vec::new())
-        .with_driver_nudges_enabled()
-        .with_model_errors(vec![AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Cancelled,
-            "cancelled during nudge",
-        )]);
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let state = LoopExecutionState::initial_for_run(host.run_context());
-
-    let result = ExitStage
-        .process(
-            ctx,
-            ExitInput {
-                state,
-                kind: StopKind::NoProgressDetected,
-            },
-        )
-        .await;
-
-    assert!(
-        matches!(result, Err(AgentLoopExecutorError::Cancelled)),
-        "nudge cancellation must propagate, got {result:?}"
+        "an exhausted warning must preserve the typed failed exit"
     );
 }
 
@@ -3962,6 +3921,67 @@ async fn unsupported_checkpointed_model_observation_stops_before_model_call() {
 }
 
 #[tokio::test]
+async fn unsupported_checkpointed_terminal_warning_stops_before_model_call() {
+    let host = MockHost::new(vec![reply_response()]);
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let mut observation = TerminalWarningObservation::iteration_limit(8);
+    observation.schema_version += 1;
+    assert!(state.terminal_warning_state.schedule(observation));
+    let payload = serde_json::to_vec(&state).expect("checkpoint state serializes");
+    let restored =
+        LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+            .expect("checkpoint state reloads before semantic validation");
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, restored)
+        .await
+        .expect_err("unsupported terminal warning must fail prompt construction");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "terminal warning control text was invalid"
+        }
+    ));
+    assert!(host.model_requests().is_empty());
+}
+
+#[tokio::test]
+async fn pending_no_progress_warning_preempts_iteration_warning_until_delivered() {
+    let host = MockHost::new(vec![reply_response_with_text(
+        "completed after the original warning",
+    )]);
+    let family = crate::families::default_with_iteration_limit(0);
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::no_progress(None, None))
+    );
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("the original pending warning should reach the model");
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .inline_messages
+            .iter()
+            .any(|message| { message.safe_body.as_str().contains("no progress detected") })
+    );
+    assert!(
+        !requests[0]
+            .inline_messages
+            .iter()
+            .any(|message| { message.safe_body.as_str().contains("iteration limit") })
+    );
+}
+
+#[tokio::test]
 async fn model_content_filter_gives_model_one_rephrase_attempt() {
     let host =
         MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
@@ -5049,7 +5069,13 @@ async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_st
                 .collect(),
         );
     let executor = CanonicalAgentLoopExecutor;
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::iteration_limit(3))
+    );
+    state.terminal_warning_state.clear_pending();
 
     let exit = executor
         .execute_family(&family_with_iteration_limit(3), &host, state)

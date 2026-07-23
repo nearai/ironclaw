@@ -3,10 +3,10 @@ use super::{
     CanonicalAgentLoopExecutor, CapabilityFailureKind, CheckpointKind, DefaultCompactionStrategy,
     FixedReplyAdmissionPolicy, GateOutcome, HostStage, LoopCheckpointKind, LoopCompactionError,
     LoopExecutionState, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, LoopSafeSummary,
-    MockHost, active_task_preserving_compaction_index, calls_response, empty_gate_state,
-    family_with_compaction_strategy, family_with_gate_outcome, family_with_iteration_limit,
-    family_with_reply_admission, final_staged_state, provider_calls_response, reply_response,
-    reply_response_with_text, resolution,
+    MockHost, TerminalWarningObservation, active_task_preserving_compaction_index, calls_response,
+    empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
+    family_with_iteration_limit, family_with_reply_admission, final_staged_state,
+    provider_calls_response, reply_response, reply_response_with_text, resolution,
 };
 use ironclaw_turns::run_profile::{
     AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
@@ -153,10 +153,9 @@ const ROWS: &[MatrixRow] = &[
             kind: LoopFailureKind::NoProgressDetected,
             safe_summary: None,
         },
-        // §5a.2 closed: the StopKind::NoProgressDetected failed branch now
-        // attaches a failure explanation (same path as other explainable
-        // kinds) after the final-answer nudge declines — the nudge itself is
-        // untouched (a successful nudge still completes with no explanation).
+        // §5a.2 closed: the StopKind::NoProgressDetected failed branch attaches
+        // a failure explanation through the same path as other explainable
+        // kinds.
         expects_explanation: true,
     },
     MatrixRow {
@@ -340,7 +339,14 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
         }
         FailureSetup::IterationLimit => {
             let host = MockHost::new(vec![reply_response_with_text("iteration explanation")]);
-            run_local(family_with_iteration_limit(0), host, None).await
+            let mut state = LoopExecutionState::initial_for_run(host.run_context());
+            assert!(
+                state
+                    .terminal_warning_state
+                    .schedule(TerminalWarningObservation::iteration_limit(0))
+            );
+            state.terminal_warning_state.clear_pending();
+            run_local(family_with_iteration_limit(0), host, Some(state)).await
         }
         FailureSetup::InvalidModelOutput => {
             let host = MockHost::new(vec![
@@ -393,7 +399,14 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 batch_outcome(no_change_result("result:no-progress-2")),
                 batch_outcome(no_change_result("result:no-progress-3")),
             ]);
-            run_local(crate::families::default(), host, None).await
+            let mut state = LoopExecutionState::initial_for_run(host.run_context());
+            assert!(
+                state
+                    .terminal_warning_state
+                    .schedule(TerminalWarningObservation::no_progress(None, None))
+            );
+            state.terminal_warning_state.clear_pending();
+            run_local(crate::families::default(), host, Some(state)).await
         }
         FailureSetup::PolicyDenied => {
             let host = MockHost::new(vec![

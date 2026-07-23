@@ -148,6 +148,13 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Override the canonical default-family iteration limit for a focused
+    /// whole-turn recovery scenario. Production defaults remain unchanged.
+    pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
+        self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's

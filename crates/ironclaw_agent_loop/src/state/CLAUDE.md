@@ -10,6 +10,8 @@ Owns the typed, resumable state carried by the canonical loop executor.
 - `bounded_ring.rs` defines fixed-window observation history.
 - `signature.rs` defines repeat-detection signatures for capability calls.
 - `model_recovery.rs` defines checkpointed, typed model-recovery controls.
+- `terminal_warning.rs` defines checkpointed pre-termination warnings and
+  their pending, active, and one-shot accounting.
 
 ## Boundaries
 
@@ -38,3 +40,7 @@ Owns the typed, resumable state carried by the canonical loop executor.
 - Do not make state mutation implicit through interior mutability.
 - Do not change checkpoint wire shape without updating constructor,
   validation, and resume tests together.
+- Keep terminal-warning observations and scheduling crate-private. Downstream
+  tests should drive the executor or use `test_support` scenario helpers.
+- A delivered warning remains active across capability gates until the stop
+  stage evaluates that warning turn's result; do not clear it at model dispatch.
