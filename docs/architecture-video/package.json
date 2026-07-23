@@ -6,8 +6,8 @@
   "license": "MIT OR Apache-2.0",
   "private": true,
   "dependencies": {
-    "@remotion/cli": "4.0.462",
-    "@remotion/tailwind-v4": "4.0.462",
+    "@remotion/cli": "4.0.498",
+    "@remotion/tailwind-v4": "4.0.498",
     "@remotion/transitions": "4.0.447",
     "react": "19.2.3",
     "react-dom": "19.2.3",
