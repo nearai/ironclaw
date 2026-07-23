@@ -12,7 +12,12 @@
 //! `ironclaw service restart`.
 //!
 //! [`super::ServicePlatform::detect`] resolves to `Container` on Linux when
-//! systemd is not the running init (no `/run/systemd/system`). In that mode:
+//! systemd is not the running init (no `/run/systemd/system`) AND `/.dockerenv`
+//! is present — systemd-absence alone is not enough (WSL2, OpenRC distros, a
+//! plain VM running `ironclaw onboard` directly all lack systemd too, and
+//! `restart`'s kill-and-trust-a-restart-policy behavior would be destructive
+//! on them without a positive container signal; see
+//! [`super::ServicePlatform::linux_platform`]'s doc). In `Container` mode:
 //!
 //! - `restart` terminates the running `serve` process. The container's main
 //!   process exiting makes the container exit, and the restart policy
@@ -142,7 +147,7 @@ pub(super) fn restart_with_runner(
              from your hosting platform."
         );
     }
-    let pid_list = pids
+    let display_pids = pids
         .iter()
         .map(|pid| pid.to_string())
         .collect::<Vec<_>>()
@@ -151,18 +156,27 @@ pub(super) fn restart_with_runner(
     // process exit, which ends this session too — this line may be the last
     // output the operator sees before reconnecting.
     println!(
-        "Terminating `ironclaw serve` (pid {pid_list}). The container will exit and be \
+        "Terminating `ironclaw serve` (pid {display_pids}). The container will exit and be \
          relaunched by its restart policy; active sessions (including SSH) will disconnect. \
          Reconnect once the container is back up."
     );
-    // Direct `kill` invocation, matching launchd.rs/systemd.rs's convention
-    // of calling the target binary directly rather than through a shell —
-    // no shell parsing is involved since every argument is a bare pid.
+    // Through `sh -c`, not a direct `Command::new("kill")`: unlike
+    // `systemctl`/`launchctl`, `kill` is a shell BUILTIN on the shipped
+    // image (debian:bookworm-slim has no `procps`, the only package
+    // providing a standalone `/bin/kill`) — spawning "kill" directly fails
+    // with ENOENT. `/bin/sh` is guaranteed present; it's what boots this
+    // container (the image entrypoint is a `#!/bin/sh` script). Every
+    // argument is a bare numeric pid, so no shell-injection surface.
+    let shell_command = format!(
+        "kill -TERM {}",
+        pids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     runner.run_checked(
         "terminate serve process",
-        Command::new("kill")
-            .arg("-TERM")
-            .args(pids.iter().map(u32::to_string)),
+        Command::new("sh").arg("-c").arg(shell_command),
     )
 }
 
@@ -201,19 +215,30 @@ mod tests {
     #[derive(Default)]
     struct RecordingRunner {
         commands: Vec<(String, String)>,
+        /// When set, `run_checked`/`run_capture_checked` still record the
+        /// call, then return this error instead of `Ok` — used to prove
+        /// `restart_with_runner` propagates a signal-send failure rather
+        /// than reporting success.
+        fail_with: Option<String>,
     }
 
     impl ServiceCommandRunner for RecordingRunner {
         fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()> {
             self.commands
                 .push((label.to_string(), format!("{command:?}")));
-            Ok(())
+            match &self.fail_with {
+                Some(message) => bail!("{message}"),
+                None => Ok(()),
+            }
         }
 
         fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String> {
             self.commands
                 .push((label.to_string(), format!("{command:?}")));
-            Ok(String::new())
+            match &self.fail_with {
+                Some(message) => bail!("{message}"),
+                None => Ok(String::new()),
+            }
         }
     }
 
@@ -295,6 +320,20 @@ mod tests {
     }
 
     #[test]
+    fn find_serve_pids_propagates_missing_proc_root_error() {
+        let missing = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("does-not-exist");
+        let err = find_serve_pids(&missing).expect_err("missing proc root must error");
+        assert!(
+            err.to_string()
+                .contains(&format!("read process table at {}", missing.display())),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
     fn status_message_reuses_the_shared_running_stopped_vocabulary() {
         assert_eq!(
             status_message(&[]),
@@ -331,13 +370,38 @@ mod tests {
         assert_eq!(runner.commands.len(), 1);
         let (label, command) = &runner.commands[0];
         assert_eq!(label, "terminate serve process");
+        // Through `sh -c`, not a direct `Command::new("kill")` — `kill` is a
+        // shell builtin on the shipped image (no `procps`), not a spawnable
+        // binary; see the comment on `restart_with_runner`.
         assert!(
-            command.starts_with("\"kill\""),
-            "must invoke kill directly, not a shell: {command}"
+            command.starts_with("\"sh\" \"-c\""),
+            "must invoke kill through a shell, since kill has no standalone binary on the \
+             shipped image: {command}"
         );
-        assert!(command.contains("\"-TERM\""), "{command}");
-        assert!(command.contains("\"71\""), "{command}");
-        assert!(command.contains("\"72\""), "{command}");
+        assert!(command.contains("kill -TERM 71 72"), "{command}");
+    }
+
+    #[test]
+    fn restart_propagates_terminate_runner_error() {
+        // The success-path test above only proves the happy path. A failure
+        // to spawn or execute the signal command is the operational failure
+        // this command exists to surface — it must not be swallowed.
+        let proc = fake_proc(&[(71, &["/usr/local/bin/ironclaw", "serve"])]);
+        let mut runner = RecordingRunner {
+            fail_with: Some("spawn failed: No such file or directory".to_string()),
+            ..Default::default()
+        };
+        let error = restart_with_runner(&mut runner, proc.path())
+            .expect_err("a runner failure must propagate, not be reported as success");
+        assert!(
+            error.to_string().contains("spawn failed"),
+            "the underlying runner error must survive: {error:#}"
+        );
+        assert_eq!(
+            runner.commands.len(),
+            1,
+            "the attempt must still have been recorded"
+        );
     }
 
     #[test]

@@ -147,20 +147,34 @@ impl ServicePlatform {
         if cfg!(target_os = "macos") {
             Ok(Self::MacOs)
         } else if cfg!(target_os = "linux") {
-            Ok(Self::linux_platform(systemd_booted()))
+            Ok(Self::linux_platform(systemd_booted(), dockerenv_present()))
         } else {
             bail!(UNSUPPORTED_OS_MESSAGE);
         }
     }
 
-    /// The one runtime decision [`Self::detect`] makes: a Linux host manages
-    /// services through systemd only when systemd is actually the running
-    /// init; otherwise this is a container-supervised deployment.
-    fn linux_platform(systemd_booted: bool) -> Self {
+    /// The one runtime decision [`Self::detect`] makes on Linux.
+    /// `Container` requires BOTH signals — systemd absent AND `/.dockerenv`
+    /// present — not systemd-absence alone: a Linux host can lack systemd
+    /// for reasons that have nothing to do with container supervision (WSL2,
+    /// an OpenRC distro like Alpine/Gentoo, a SysV-init host, a plain VM
+    /// running `ironclaw onboard` directly). `restart` in `Container` mode
+    /// kills the running `serve` process and trusts an external restart
+    /// policy to relaunch it — misclassifying one of those hosts as
+    /// `Container` would make `restart` silently kill `serve` with no
+    /// recovery guarantee, which is worse than the old behavior (a clear
+    /// "not installed" error) it replaces for exactly that host. When
+    /// systemd is absent but `/.dockerenv` is too, fall back to `Linux`:
+    /// that host isn't identifiably a container, so it gets the old
+    /// systemd-manager path, which fails loud (a plain `systemctl` ENOENT)
+    /// rather than guessing and taking a destructive action.
+    fn linux_platform(systemd_booted: bool, dockerenv_present: bool) -> Self {
         if systemd_booted {
             Self::Linux
-        } else {
+        } else if dockerenv_present {
             Self::Container
+        } else {
+            Self::Linux
         }
     }
 
@@ -306,6 +320,21 @@ fn systemd_booted() -> bool {
 /// tests can point it at a fake tree instead of the host's real `/run`.
 fn systemd_booted_under(root: &Path) -> bool {
     root.join("run/systemd/system").is_dir()
+}
+
+/// `/.dockerenv` is a file Docker creates unconditionally in the root of
+/// every container it starts, regardless of base image — the standard
+/// external convention for "am I in a Docker container" detection. Combined
+/// with [`systemd_booted`] absence, this is [`ServicePlatform::linux_platform`]'s
+/// second signal for `Container` mode.
+fn dockerenv_present() -> bool {
+    dockerenv_present_under(Path::new("/"))
+}
+
+/// `dockerenv_present`'s actual check, parameterized on the filesystem root
+/// so tests can point it at a fake tree — mirrors [`systemd_booted_under`].
+fn dockerenv_present_under(root: &Path) -> bool {
+    root.join(".dockerenv").is_file()
 }
 
 /// Install then start the OS service in one call — used by `onboard`'s
@@ -687,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_without_systemd_resolves_to_container_not_linux() {
+    fn linux_without_systemd_and_with_dockerenv_resolves_to_container() {
         // Regression: hosted containers (image entrypoint execs `ironclaw
         // serve`, PID 1 = docker-init, no systemctl binary) used to resolve
         // to `Linux`, so every service verb died spawning `systemctl`
@@ -695,21 +724,40 @@ mod tests {
         // `restart` reported "Service not installed" — while the setup docs
         // tell users to finish with `ironclaw service restart`.
         assert_eq!(
-            ServicePlatform::linux_platform(false),
+            ServicePlatform::linux_platform(false, true),
             ServicePlatform::Container
         );
         assert_eq!(
-            ServicePlatform::linux_platform(true),
+            ServicePlatform::linux_platform(true, true),
+            ServicePlatform::Linux
+        );
+        assert_eq!(
+            ServicePlatform::linux_platform(true, false),
+            ServicePlatform::Linux
+        );
+    }
+
+    #[test]
+    fn linux_without_systemd_and_without_dockerenv_falls_back_to_linux() {
+        // Systemd-absence alone must NOT resolve to Container: a host that
+        // is neither systemd-managed nor identifiably a Docker container
+        // (WSL2, an OpenRC distro, a SysV-init host, a plain VM running
+        // `ironclaw onboard` directly) must NOT get Container's destructive
+        // restart (kill + trust an external restart policy) — it falls back
+        // to the old Linux/systemd path, which fails loud (a plain
+        // `systemctl` ENOENT) instead of guessing and taking a destructive
+        // action with no recovery guarantee.
+        assert_eq!(
+            ServicePlatform::linux_platform(false, false),
             ServicePlatform::Linux
         );
     }
 
     #[test]
     fn systemd_booted_under_reads_run_systemd_system_from_the_given_root() {
-        // The detection `linux_without_systemd_resolves_to_container_not_linux`
-        // exercises only the pre-computed bool; this proves the actual
-        // filesystem check that feeds it (the real bug-fix logic) reads the
-        // right path and both directions.
+        // The detection tests above exercise only the pre-computed bools;
+        // this proves the actual filesystem check that feeds one of them
+        // (the real bug-fix logic) reads the right path and both directions.
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(
             !systemd_booted_under(tmp.path()),
@@ -720,6 +768,20 @@ mod tests {
         assert!(
             systemd_booted_under(tmp.path()),
             "run/systemd/system dir must read as booted"
+        );
+    }
+
+    #[test]
+    fn dockerenv_present_under_reads_dockerenv_from_the_given_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !dockerenv_present_under(tmp.path()),
+            "no .dockerenv file must read as not present"
+        );
+        std::fs::write(tmp.path().join(".dockerenv"), "").expect("create .dockerenv");
+        assert!(
+            dockerenv_present_under(tmp.path()),
+            ".dockerenv file must read as present"
         );
     }
 
