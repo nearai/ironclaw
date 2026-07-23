@@ -1,5 +1,5 @@
 // arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> FilesystemOutboundStateStore helper), no logic change, plan #6168
-//! Host-side `ProductWorkflow` implementation.
+//! Host-side product surface implementation.
 //!
 //! This is the top-level product action orchestrator that dispatches inbound
 //! envelopes to the appropriate downstream service based on payload kind.
@@ -12,11 +12,11 @@ use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_host_api::{ThreadId, UserId};
 use ironclaw_product_adapters::{
-    ApprovalDecision, ExternalConversationRef, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ApprovalDecision, ExternalConversationRef, ParsedProductInbound, ProductAdapterError,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
     ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionKind, ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest,
-    ProjectionSubscriptionRequest, RedactedString,
+    ProductRejectionKind, ProductWorkflowRejectionKind, ProjectionReadRequest,
+    ProjectionSubscriptionRequest, RedactedString, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
@@ -52,11 +52,18 @@ use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
+use crate::reborn_services::{
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, ProductOperationId,
+    ProductOperationRequest, ProductOperationResponse, ProductOperationTypedInput, ProductSurface,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+};
+use crate::webui_inbound::WebUiAuthenticatedCaller;
 
-/// Host-side implementation of [`ProductWorkflow`] that dispatches inbound
+/// Host-side [`ProductSurface`] implementation that dispatches inbound
 /// envelopes through the idempotency ledger and routes to the appropriate
 /// downstream service.
-pub struct DefaultProductWorkflow {
+pub struct DefaultProductSurface {
     inbound_turn_service: Arc<dyn InboundTurnService>,
     idempotency_ledger: Arc<dyn IdempotencyLedger>,
     before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
@@ -68,7 +75,7 @@ pub struct DefaultProductWorkflow {
     delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
 }
 
-impl DefaultProductWorkflow {
+impl DefaultProductSurface {
     pub fn new(
         inbound_turn_service: Arc<dyn InboundTurnService>,
         idempotency_ledger: Arc<dyn IdempotencyLedger>,
@@ -136,16 +143,15 @@ impl DefaultProductWorkflow {
     }
 }
 
-#[async_trait]
-impl ProductWorkflow for DefaultProductWorkflow {
-    async fn submit_inbound(
+impl DefaultProductSurface {
+    pub async fn submit_inbound(
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         self.submit_inbound_inner(envelope, Vec::new()).await
     }
 
-    async fn read_projection(
+    pub async fn read_projection(
         &self,
         request: ProductProjectionReadInput,
     ) -> Result<ProjectionReadRequest, ProductAdapterError> {
@@ -167,7 +173,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
         })
     }
 
-    async fn subscribe_projection(
+    pub async fn subscribe_projection(
         &self,
         request: ProductProjectionSubscribeInput,
     ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
@@ -188,8 +194,101 @@ impl ProductWorkflow for DefaultProductWorkflow {
     }
 }
 
-impl DefaultProductWorkflow {
-    /// Shared submit path for both the bytes-free [`ProductWorkflow::submit_inbound`]
+#[async_trait]
+impl ProductSurface for DefaultProductSurface {
+    async fn execute_command(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
+            .ok_or_else(channel_surface_unavailable)?;
+        if operation_id != ProductOperationId::ChannelInboundAdmit {
+            return Err(channel_surface_unavailable());
+        }
+        let Some(ProductOperationTypedInput::ChannelInbound(request)) = request.typed_input else {
+            return Ok(ProductOperationResponse::channel_inbound(
+                ChannelInboundSurfaceOutcome::unavailable(),
+            ));
+        };
+        Ok(ProductOperationResponse::channel_inbound(
+            self.admit_channel_inbound(*request).await,
+        ))
+    }
+}
+
+fn channel_surface_unavailable() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+impl DefaultProductSurface {
+    async fn admit_channel_inbound(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+    ) -> ChannelInboundSurfaceOutcome {
+        let context = match TrustedInboundContext::from_verified_evidence_with_source_channel(
+            request.adapter_id,
+            request.source_channel,
+            request.installation_id,
+            request.received_at,
+            &request.evidence,
+        ) {
+            Ok(context) => context,
+            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
+        };
+        let payload = match request.classification {
+            Some(classification) => ProductInboundPayload::from(classification),
+            None => {
+                let payload = UserMessagePayload::new(
+                    request.message.text.clone(),
+                    request
+                        .message
+                        .attachments
+                        .iter()
+                        .map(|attachment| attachment.descriptor.clone())
+                        .collect(),
+                    request.message.trigger,
+                );
+                match payload {
+                    Ok(payload) => ProductInboundPayload::UserMessage(payload),
+                    Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
+                }
+            }
+        };
+        let parsed = match ParsedProductInbound::new(
+            request.message.event_id,
+            request.message.actor,
+            request.message.conversation,
+            payload,
+        ) {
+            Ok(parsed) => parsed,
+            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
+        };
+        let envelope = match ProductInboundEnvelope::from_trusted_parse(context, parsed) {
+            Ok(envelope) => envelope,
+            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
+        };
+        match self.submit_inbound(envelope.clone()).await {
+            Ok(ack) => {
+                ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
+                    envelope,
+                    ack,
+                }))
+            }
+            Err(error) => ChannelInboundSurfaceOutcome::Rejected(Box::new(
+                ChannelInboundSurfaceRejectedAdmission { envelope, error },
+            )),
+        }
+    }
+
+    /// Shared submit path for both the bytes-free [`Self::submit_inbound`]
     /// door and the inline-attachment [`Self::submit_inbound_with_attachments`] door.
     /// `attachments` carry decoded inline bytes (never serialized into the envelope)
     /// and are landed at message acceptance for `UserMessage` payloads.
@@ -208,7 +307,7 @@ impl DefaultProductWorkflow {
                 status_code: 400,
                 retryable: false,
                 reason: RedactedString::new(
-                    "projection read/subscribe requests must use ProductWorkflow projection doors",
+                    "projection read/subscribe requests must use ProductSurface projection doors",
                 ),
             });
         }
@@ -335,7 +434,7 @@ impl DefaultProductWorkflow {
     }
 }
 
-impl DefaultProductWorkflow {
+impl DefaultProductSurface {
     /// Submit an inbound user message together with host-staged inline
     /// attachment bytes (vision, #4644).
     ///
@@ -344,7 +443,7 @@ impl DefaultProductWorkflow {
     /// at message acceptance (through the wired [`InboundAttachmentLander`]) and
     /// never serialized. Synchronous host surfaces that receive images inline
     /// (e.g. the OpenAI-compatible API, via a composition-owned adapter) call
-    /// this instead of [`ProductWorkflow::submit_inbound`].
+    /// this instead of [`Self::submit_inbound`].
     ///
     /// [`InboundAttachmentLander`]: crate::InboundAttachmentLander
     pub async fn submit_inbound_with_attachments(

@@ -5,77 +5,60 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    CasApply, CompositeRootFilesystem, ContentType, Entry, LibSqlRootFilesystem,
-    PostgresRootFilesystem, RootFilesystem, ScopedFilesystem, cas_update,
+    CasApply, CompositeRootFilesystem, ContentType, Entry, RootFilesystem, ScopedFilesystem,
+    cas_update,
 };
 use ironclaw_host_api::{
     ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
-    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, ExecutionContext, ExtensionId,
-    FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId, InvocationOrigin,
-    MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef, ProcessWaypoint,
-    ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress,
-    ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint,
-    ToolVerdict, TrustClass,
+    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, EffectKind, ExecutionContext,
+    ExtensionId, FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId,
+    InvocationOrigin, MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef,
+    ProcessWaypoint, ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta,
+    ResultProgress, ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension,
+    TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, RebornServicesError, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    WebUiAuthenticatedCaller,
 };
 
-use crate::factory::{RebornProductionRuntimeServices, RebornServices};
+use crate::RebornRuntime;
+use crate::extension_host::lifecycle::SkillManagementMountResolver;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
 const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
 
 #[derive(Clone)]
-pub(crate) enum RuntimeProductCapabilityInvoker {
-    Available {
-        host_runtime: Arc<dyn HostRuntime>,
-        registry: Arc<ExtensionRegistry>,
-        results: ProductResultFilesystem,
-    },
-    Unavailable,
+pub(crate) struct RuntimeProductCapabilityInvoker {
+    host_runtime: Arc<dyn HostRuntime>,
+    registry: Arc<ExtensionRegistry>,
+    results: ProductResultFilesystem,
+    // The scope→mount-view resolver the runtime's skill-management port was
+    // composed with. Reused here (rather than re-deriving a local-dev vs
+    // production branch) so product-surface skill gestures resolve exactly the
+    // mounts the agent loop's skill tools do; the unified runtime graph exposes
+    // a single composite filesystem, so which resolver is live is the only
+    // deployment-shape distinction the invoker still needs.
+    skill_mount_resolver: Arc<SkillManagementMountResolver>,
 }
 
 #[derive(Clone)]
 pub(crate) enum ProductResultFilesystem {
     Composite(Arc<ScopedFilesystem<CompositeRootFilesystem>>),
-    LibSql(Arc<ScopedFilesystem<LibSqlRootFilesystem>>),
-    Postgres(Arc<ScopedFilesystem<PostgresRootFilesystem>>),
 }
 
 impl RuntimeProductCapabilityInvoker {
-    pub(crate) fn from_services(services: &RebornServices) -> Self {
-        let Some(host_runtime) = services.host_runtime.as_ref().map(Arc::clone) else {
-            return Self::Unavailable;
-        };
-        let (results, registry) = if let Some(local) = &services.local_runtime {
-            (
-                ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
-                    &local.extension_filesystem,
-                ))),
-                Arc::clone(&local.extension_registry),
-            )
-        } else if let Some(production) = &services.production_runtime {
-            match production {
-                RebornProductionRuntimeServices::LibSql(graph) => (
-                    ProductResultFilesystem::LibSql(Arc::clone(&graph.scoped_filesystem)),
-                    Arc::clone(&graph.extension_registry),
-                ),
-                RebornProductionRuntimeServices::Postgres(graph) => (
-                    ProductResultFilesystem::Postgres(Arc::clone(&graph.scoped_filesystem)),
-                    Arc::clone(&graph.extension_registry),
-                ),
-            }
-        } else {
-            return Self::Unavailable;
-        };
-        Self::Available {
-            host_runtime,
-            registry,
-            results,
+    pub(crate) fn from_runtime(runtime: &RebornRuntime) -> Self {
+        Self {
+            host_runtime: Arc::clone(&runtime.host_runtime),
+            registry: Arc::clone(&runtime.extension_registry),
+            results: ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
+                &runtime.extension_filesystem,
+            ))),
+            skill_mount_resolver: runtime.skill_management.mount_resolver(),
         }
     }
 }
@@ -89,21 +72,20 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
-        let Self::Available {
+        let Self {
             host_runtime,
             registry,
             results,
-        } = self
-        else {
-            return Err(product_runtime_unavailable());
-        };
+            skill_mount_resolver,
+        } = self;
         // The origin-to-gate matrix is still provisional in today's kernel.
         // Encode the direct user gesture as one exact, host-issued grant. The
         // runtime independently re-resolves the descriptor and authorizes it,
         // so a concurrent stronger replacement no longer fits this attenuated
         // grant and fails closed.
         let descriptor = registry.get_capability(&capability);
-        let context = product_execution_context(&caller, activity_id, descriptor)?;
+        let context =
+            product_execution_context(&caller, activity_id, descriptor, &**skill_mount_resolver)?;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let requested_capability = capability.clone();
@@ -120,6 +102,7 @@ fn product_execution_context(
     caller: &WebUiAuthenticatedCaller,
     activity_id: ActivityId,
     descriptor: Option<&CapabilityDescriptor>,
+    skill_mount_resolver: &SkillManagementMountResolver,
 ) -> Result<ExecutionContext, RebornServicesError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     let scope = ResourceScope {
@@ -133,9 +116,14 @@ fn product_execution_context(
     };
     let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
         .map_err(RebornServicesError::internal_from)?;
+    let invocation_mounts = product_invocation_mounts(&scope, descriptor, skill_mount_resolver)?;
     let grants = descriptor
         .map(|descriptor| CapabilitySet {
-            grants: vec![product_gesture_grant(descriptor, &extension_id)],
+            grants: vec![product_gesture_grant(
+                descriptor,
+                &extension_id,
+                invocation_mounts.clone(),
+            )],
         })
         .unwrap_or_default();
     let context = ExecutionContext {
@@ -160,7 +148,7 @@ fn product_execution_context(
         runtime: RuntimeKind::FirstParty,
         trust: TrustClass::Sandbox,
         grants,
-        mounts: MountView::default(),
+        mounts: invocation_mounts,
         resource_scope: scope,
     };
     context
@@ -172,6 +160,7 @@ fn product_execution_context(
 fn product_gesture_grant(
     descriptor: &CapabilityDescriptor,
     product_ingress: &ExtensionId,
+    mounts: MountView,
 ) -> CapabilityGrant {
     let mut secrets = Vec::new();
     let mut network_targets = descriptor.network_targets.clone();
@@ -183,7 +172,23 @@ fn product_gesture_grant(
             network_targets.push(credential.audience.clone());
         }
     }
-    let has_network_targets = !network_targets.is_empty();
+    let network = if descriptor.effects.contains(&EffectKind::Network) && network_targets.is_empty()
+    {
+        crate::builtin_capability_policy::dev_wildcard_network_policy()
+    } else {
+        let has_network_targets = !network_targets.is_empty();
+        NetworkPolicy {
+            allowed_targets: network_targets,
+            // An empty policy must remain unconstrained. Marking it as
+            // private-range constrained would synthesize an `ApplyNetworkPolicy`
+            // obligation for a capability that has no network surface, and fail
+            // before dispatch when no network-policy store is composed.
+            // Networked capabilities retain the private-IP guard on their
+            // manifest allowlist.
+            deny_private_ip_ranges: has_network_targets,
+            max_egress_bytes: None,
+        }
+    };
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: descriptor.id.clone(),
@@ -191,24 +196,38 @@ fn product_gesture_grant(
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
             allowed_effects: descriptor.effects.clone(),
-            mounts: MountView::default(),
-            network: NetworkPolicy {
-                allowed_targets: network_targets,
-                // An empty policy must remain unconstrained. Marking it as
-                // private-range constrained would synthesize an
-                // `ApplyNetworkPolicy` obligation for a capability that has
-                // no network surface, and fail before dispatch when no
-                // network-policy store is composed. Networked capabilities
-                // retain the private-IP guard on their manifest allowlist.
-                deny_private_ip_ranges: has_network_targets,
-                max_egress_bytes: None,
-            },
+            mounts,
+            network,
             secrets,
             resource_ceiling: None,
             expires_at: None,
             max_invocations: Some(1),
         },
     }
+}
+
+fn product_invocation_mounts(
+    scope: &ResourceScope,
+    descriptor: Option<&CapabilityDescriptor>,
+    skill_mount_resolver: &SkillManagementMountResolver,
+) -> Result<MountView, RebornServicesError> {
+    let Some(descriptor) = descriptor else {
+        return Ok(MountView::default());
+    };
+    if !is_skill_management_capability(&descriptor.id) {
+        return Ok(MountView::default());
+    }
+    skill_mount_resolver(scope).map_err(RebornServicesError::internal_from)
+}
+
+fn is_skill_management_capability(capability: &CapabilityId) -> bool {
+    matches!(
+        capability.as_str(),
+        SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+    )
 }
 
 async fn product_resolution(
@@ -368,12 +387,6 @@ impl ProductResultFilesystem {
             Self::Composite(filesystem) => {
                 persist_product_result(filesystem, scope, result_ref, body).await
             }
-            Self::LibSql(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body).await
-            }
-            Self::Postgres(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body).await
-            }
         }
     }
 }
@@ -416,17 +429,6 @@ where
     .map_err(RebornServicesError::internal_from)
 }
 
-fn product_runtime_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
@@ -444,9 +446,27 @@ mod tests {
         let grant = product_gesture_grant(
             &descriptor,
             &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
         );
 
         assert_eq!(grant.constraints.network, NetworkPolicy::default());
+    }
+
+    #[test]
+    fn product_gesture_grant_uses_dev_wildcard_for_networked_gesture_without_targets() {
+        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
+        descriptor.effects.push(EffectKind::Network);
+
+        let grant = product_gesture_grant(
+            &descriptor,
+            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
+        );
+
+        assert_eq!(
+            grant.constraints.network,
+            crate::builtin_capability_policy::dev_wildcard_network_policy()
+        );
     }
 
     #[test]
@@ -461,6 +481,7 @@ mod tests {
         let grant = product_gesture_grant(
             &descriptor,
             &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
         );
 
         assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
@@ -491,6 +512,7 @@ mod tests {
         let grant = product_gesture_grant(
             &descriptor,
             &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
         );
 
         assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
@@ -516,6 +538,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials,
             network_targets,
+            max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
         }

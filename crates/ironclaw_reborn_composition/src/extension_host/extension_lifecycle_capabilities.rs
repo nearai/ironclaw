@@ -7,8 +7,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    EffectKind, HostApiError, OriginGateMatrix, PermissionMode, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind,
+    EffectKind, HostApiError, OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate,
+    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -117,18 +117,28 @@ fn lifecycle_manifest(
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: Some(ResourceProfile {
             default_estimate: ResourceEstimate::default()
                 .set_wall_clock_ms(100)
                 .set_output_bytes(16 * 1024),
             hard_ceiling: None,
         }),
-        // §5.3 S3 (behavior-neutral): mirror today's effect gate for `LoopRun`
-        // (Ungated iff id is in the reviewed `UNGATED_LOOP_RUN_CAPABILITIES`
-        // allowlist — only `extension_search` qualifies), Product/Automation
-        // deny-by-default. Nothing reads this yet (fold is S4).
-        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(id)),
+        origin_gate_matrix: Some(lifecycle_origin_gate_matrix(id)),
     })
+}
+
+fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
+    let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+    if matches!(
+        id,
+        EXTENSION_INSTALL_CAPABILITY_ID
+            | EXTENSION_ACTIVATE_CAPABILITY_ID
+            | EXTENSION_REMOVE_CAPABILITY_ID
+    ) {
+        matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    matrix
 }
 
 struct ExtensionLifecycleToolHandler {
@@ -370,7 +380,7 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         }
         ProductWorkflowError::Transient { .. } => {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
     }
@@ -396,7 +406,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::{OAuthClientConfig, RebornBuildInput, RebornServices, build_reborn_services};
+    use crate::OAuthClientConfig;
+    use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use ironclaw_host_api::InstallationState;
     use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
@@ -437,8 +448,9 @@ mod tests {
     /// §5.3 S3 (behavior-neutral): the four extension-lifecycle capabilities
     /// declare an `origin_gate_matrix`. `extension_search` is read-only and thus
     /// Ungated for LoopRun (it is in the reviewed allowlist); install/activate/
-    /// remove carry write/network effects and gate. Product/Automation are
-    /// deny-by-default.
+    /// remove carry write/network effects and gate for LoopRun. The direct
+    /// WebUI ProductSurface path is consent-sufficient for install/activate/
+    /// remove; automation remains deny-by-default.
     #[test]
     fn extension_lifecycle_capabilities_declare_behavior_neutral_origin_gate_matrix() {
         let manifests = manifests().expect("lifecycle manifests build");
@@ -447,12 +459,17 @@ mod tests {
                 .origin_gate_matrix
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", manifest.id));
-            assert_eq!(
-                matrix.product,
-                OriginGatePolicy::Forbidden,
-                "{}",
-                manifest.id
-            );
+            let expected_product = if matches!(
+                manifest.id.as_str(),
+                EXTENSION_INSTALL_CAPABILITY_ID
+                    | EXTENSION_ACTIVATE_CAPABILITY_ID
+                    | EXTENSION_REMOVE_CAPABILITY_ID
+            ) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
+            assert_eq!(matrix.product, expected_product, "{}", manifest.id);
             assert_eq!(
                 matrix.automation,
                 OriginGatePolicy::Forbidden,
@@ -561,16 +578,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-surface-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime composed");
+        let runtime = services.host_runtime.as_ref();
 
         let surface = runtime
             .visible_capabilities(visible_request(EXTENSION_LIFECYCLE_CAPABILITY_IDS))
@@ -652,23 +666,17 @@ mod tests {
     async fn local_dev_extension_lifecycle_tools_manage_visible_extension_surface() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-owner",
             storage_root.clone(),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime composed");
+        let runtime = services.host_runtime.as_ref();
         let extension_management = services
-            .local_runtime
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
         let search = invoke_json(
             &services,
@@ -752,7 +760,7 @@ mod tests {
         // Removing an extension whose credential provider it exclusively owns must
         // revoke that credential so re-activation raises the auth gate again.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-remove-revoke-owner",
             dir.path().join("local-dev"),
         ))
@@ -815,8 +823,8 @@ mod tests {
         // share the `google` provider; removing Gmail must leave the Google
         // credential intact so Calendar keeps working.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(
-            RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
                 "extension-tools-remove-shared-owner",
                 dir.path().join("local-dev"),
             )
@@ -890,19 +898,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_for_missing_extension_credentials() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-auth-gate-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -958,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_search_distinguishes_configured_from_active() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-active-search-owner",
             dir.path().join("local-dev"),
         ))
@@ -1113,8 +1118,8 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(
-            RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
                 "extension-tools-scope-gate-owner",
                 dir.path().join("local-dev"),
             )
@@ -1126,12 +1131,9 @@ mod tests {
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1183,8 +1185,8 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(
-            RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
                 "extension-tools-gmail-scope-union-owner",
                 dir.path().join("local-dev"),
             )
@@ -1196,12 +1198,9 @@ mod tests {
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1253,19 +1252,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_maps_corrupt_configured_account_to_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-corrupt-auth-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1321,19 +1317,19 @@ mod tests {
                 // entire catalog or preventing activation.
                 .with_tool_description("provider documentation ".repeat(320)),
         );
-        let services = build_reborn_services(
-            RebornBuildInput::local_dev("extension-tools-hosted-mcp-owner", storage_root.clone())
-                .with_network_http_egress_for_test(discovery_script.clone()),
+        let services = build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
+                "extension-tools-hosted-mcp-owner",
+                storage_root.clone(),
+            )
+            .with_network_http_egress_for_test(discovery_script.clone()),
         )
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1401,7 +1397,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-invalid-owner",
             dir.path().join("local-dev"),
         ))
@@ -1450,7 +1446,7 @@ mod tests {
     }
 
     async fn invoke_json(
-        services: &RebornServices,
+        services: &RebornRuntimeStores,
         capability_id: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeFailureKind> {
@@ -1464,7 +1460,7 @@ mod tests {
     }
 
     async fn invoke_outcome(
-        services: &RebornServices,
+        services: &RebornRuntimeStores,
         capability_id: &str,
         input: serde_json::Value,
     ) -> RuntimeCapabilityOutcome {
@@ -1478,7 +1474,7 @@ mod tests {
     }
 
     async fn seed_configured_account(
-        services: &RebornServices,
+        services: &RebornRuntimeStores,
         scope: &ResourceScope,
         provider: &str,
     ) {
@@ -1486,7 +1482,7 @@ mod tests {
     }
 
     async fn seed_configured_account_with_scopes(
-        services: &RebornServices,
+        services: &RebornRuntimeStores,
         scope: &ResourceScope,
         provider: &str,
         scopes: &[&str],
@@ -1495,7 +1491,6 @@ mod tests {
         services
             .product_auth
             .as_ref()
-            .expect("product auth")
             .credential_account_service()
             .create_account(NewCredentialAccount {
                 scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),
@@ -1664,6 +1659,18 @@ mod tests {
             panic!("expected a Diagnostic detail, got {detail:?}");
         };
         assert!(text.contains("mounted host"));
+    }
+
+    #[test]
+    fn transient_lifecycle_errors_map_to_retryable_backend_failure() {
+        let mapped = lifecycle_error(ProductWorkflowError::Transient {
+            reason: "temporary lifecycle store outage".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { kind, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::Backend);
     }
 
     /// The provenance regression itself, at the unit seam: a reason carrying

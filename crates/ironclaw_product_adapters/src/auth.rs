@@ -1,7 +1,7 @@
 //! Protocol-authentication evidence.
 //!
 //! Webhook/protocol authentication happens in trusted host glue before an
-//! inbound event enters [`crate::ProductWorkflow`]. Verified evidence is an
+//! inbound event enters the host product surface. Verified evidence is an
 //! in-memory capability, not a wire format: production constructors are kept
 //! crate-private so downstream adapter crates cannot mint host-authenticated
 //! claims. Host-minted claims may also carry a resolved tenant scope when the
@@ -123,7 +123,7 @@ fn validate_cookie_name(field: &'static str, value: &str) -> Result<(), ProductA
     validate_http_token(field, value)
 }
 
-/// Verified-claim contents the workflow may consult. Fields are private so the
+/// Verified-claim contents the product surface may consult. Fields are private so the
 /// claim cannot be fabricated with struct literal syntax, and the type is not
 /// deserializable from untrusted input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

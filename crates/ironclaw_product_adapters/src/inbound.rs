@@ -1,5 +1,7 @@
 //! Inbound envelope, payload, and acknowledgement types.
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -23,6 +25,7 @@ const ACTION_ID_MAX_BYTES: usize = 512;
 const ACTION_DATA_MAX_BYTES: usize = 16 * 1024;
 const INTERACTION_REF_MAX_BYTES: usize = 512;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
+const SOURCE_CHANNEL_MAX_BYTES: usize = 512;
 
 fn malformed(reason: impl Into<String>) -> ProductAdapterError {
     ProductAdapterError::MalformedInboundPayload {
@@ -93,6 +96,35 @@ pub enum ProductTriggerReason {
     ReplyToBot,
     BotCommand,
     LinkedThreadAction,
+}
+
+/// Optional host-side reclassification for a normalized channel message before
+/// it enters the product surface.
+///
+/// `None` at the call site means the normalized message is an ordinary user
+/// message. These variants cover only protocol-specific interaction replies
+/// that should not become user turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelInboundClassification {
+    ApprovalResolution(ApprovalResolutionPayload),
+    ScopedApprovalResolution(ScopedApprovalResolutionPayload),
+    AuthResolution(AuthResolutionPayload),
+    NoOp,
+}
+
+impl From<ChannelInboundClassification> for ProductInboundPayload {
+    fn from(classification: ChannelInboundClassification) -> Self {
+        match classification {
+            ChannelInboundClassification::ApprovalResolution(payload) => {
+                Self::ApprovalResolution(payload)
+            }
+            ChannelInboundClassification::ScopedApprovalResolution(payload) => {
+                Self::ScopedApprovalResolution(payload)
+            }
+            ChannelInboundClassification::AuthResolution(payload) => Self::AuthResolution(payload),
+            ChannelInboundClassification::NoOp => Self::NoOp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -621,9 +653,55 @@ impl ParsedProductInbound {
     }
 }
 
+/// Product-facing source channel stamped by ingress before workflow admission.
+///
+/// This is intentionally distinct from adapter installation identity: first-party
+/// ingress can stamp a first-party terminal name, while external adapters
+/// usually default to their adapter id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProductSourceChannel(String);
+
+impl ProductSourceChannel {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_token_string("source_channel", &value, SOURCE_CHANNEL_MAX_BYTES)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ProductSourceChannel {
+    type Error = ProductAdapterError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ProductSourceChannel> for String {
+    fn from(value: ProductSourceChannel) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for ProductSourceChannel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedInboundContext {
     adapter_id: ProductAdapterId,
+    source_channel: ProductSourceChannel,
     installation_id: AdapterInstallationId,
     received_at: DateTime<Utc>,
     auth_claim: VerifiedAuthClaim,
@@ -643,8 +721,33 @@ impl TrustedInboundContext {
                 .ok_or(ProductAdapterError::Authentication(
                     crate::ProtocolAuthFailure::Missing,
                 ))?;
+        let source_channel = ProductSourceChannel::new(adapter_id.as_str())?;
         Ok(Self {
             adapter_id,
+            source_channel,
+            installation_id,
+            received_at,
+            auth_claim,
+        })
+    }
+
+    pub fn from_verified_evidence_with_source_channel(
+        adapter_id: ProductAdapterId,
+        source_channel: ProductSourceChannel,
+        installation_id: AdapterInstallationId,
+        received_at: DateTime<Utc>,
+        auth_evidence: &ProtocolAuthEvidence,
+    ) -> Result<Self, ProductAdapterError> {
+        let auth_claim =
+            auth_evidence
+                .claim()
+                .cloned()
+                .ok_or(ProductAdapterError::Authentication(
+                    crate::ProtocolAuthFailure::Missing,
+                ))?;
+        Ok(Self {
+            adapter_id,
+            source_channel,
             installation_id,
             received_at,
             auth_claim,
@@ -656,6 +759,7 @@ impl TrustedInboundContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductInboundEnvelope {
     adapter_id: ProductAdapterId,
+    source_channel: ProductSourceChannel,
     installation_id: AdapterInstallationId,
     external_event_id: ExternalEventId,
     external_actor_ref: ExternalActorRef,
@@ -672,6 +776,7 @@ impl ProductInboundEnvelope {
     ) -> Result<Self, ProductAdapterError> {
         Ok(Self {
             adapter_id: context.adapter_id,
+            source_channel: context.source_channel,
             installation_id: context.installation_id,
             external_event_id: parsed.external_event_id,
             external_actor_ref: parsed.external_actor_ref,
@@ -684,6 +789,10 @@ impl ProductInboundEnvelope {
 
     pub fn adapter_id(&self) -> &ProductAdapterId {
         &self.adapter_id
+    }
+
+    pub fn source_channel(&self) -> &ProductSourceChannel {
+        &self.source_channel
     }
 
     pub fn installation_id(&self) -> &AdapterInstallationId {
@@ -1090,7 +1199,33 @@ mod tests {
         )
         .expect("envelope");
         assert_eq!(envelope.adapter_id().as_str(), "telegram_v2");
+        assert_eq!(envelope.source_channel().as_str(), "telegram_v2");
         assert_eq!(envelope.payload(), &ProductInboundPayload::NoOp);
+    }
+
+    #[test]
+    fn trusted_context_can_stamp_explicit_source_channel() {
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
+            },
+            "telegram_install_alpha",
+        );
+        let context = TrustedInboundContext::from_verified_evidence_with_source_channel(
+            ProductAdapterId::new("extension_gateway").expect("valid"),
+            ProductSourceChannel::new("vendor_chat").expect("valid"),
+            AdapterInstallationId::new("install_alpha").expect("valid"),
+            Utc::now(),
+            &evidence,
+        )
+        .expect("verified");
+        let envelope = ProductInboundEnvelope::from_trusted_parse(
+            context,
+            sample_parsed(ProductInboundPayload::NoOp),
+        )
+        .expect("envelope");
+        assert_eq!(envelope.adapter_id().as_str(), "extension_gateway");
+        assert_eq!(envelope.source_channel().as_str(), "vendor_chat");
     }
 
     #[test]

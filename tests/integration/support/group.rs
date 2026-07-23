@@ -66,9 +66,10 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
+use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
@@ -426,6 +427,7 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
@@ -646,6 +648,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional observer wired into the group's ONE production
+    /// capability-port factory. Default `None`.
+    trajectory_observer: Option<Arc<dyn RebornTrajectoryObserver>>,
     /// Lease-wedge coverage: overrides the turn-state store's
     /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
     /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
@@ -655,7 +660,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
     lease_recovery_interval_override: Option<Duration>,
     /// When `true`, wire the REAL approval/auth interaction services into
-    /// every thread's `DefaultProductWorkflow` (see
+    /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
@@ -778,6 +783,7 @@ impl RebornIntegrationGroupBuilder {
             milestone_sink.clone(),
             group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             Arc::clone(&turn_store),
+            self.trajectory_observer.clone(),
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
@@ -1328,7 +1334,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
-        let mut workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let mut workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         // Real gate-dispatch seam: wire the harness's own local-dev interaction
         // services, but over the GROUP's shared `turn_store` (not the harness's

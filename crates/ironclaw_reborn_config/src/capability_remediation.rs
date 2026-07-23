@@ -37,7 +37,7 @@ pub fn google_backend_auth_text() -> String {
 /// so remediation coverage cannot silently lapse.
 ///
 /// This exists because of the #6299 regression: one full-path test covered the
-/// google readiness scenario, so when the host_api hop started collapsing
+/// Google setup scenario, so when the host_api hop started collapsing
 /// host-authored text to the safe-summary placeholder, every OTHER producer
 /// degraded silently and nothing went red. A hand-maintained list inside a test
 /// rots the same way. Adding a variant here breaks the exhaustive `match` in

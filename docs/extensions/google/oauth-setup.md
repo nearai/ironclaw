@@ -57,9 +57,9 @@ The configuration is shared by Gmail, Calendar, Drive, Docs, Sheets, and
 Slides. New or rotated values apply to the next OAuth operation without an SSH
 session or IronClaw restart.
 
-This live administrator setup is available on the WebUI-backed local and hosted
-single-tenant runtime. The production-shaped multi-tenant substrate remains
-boot-config only until it exposes scoped extension administration.
+The runtime reads this persisted administrator configuration through the
+tenant-scoped extension-management surface. Only an authorized WebUI
+administrator can save or rotate the shared values.
 
 </Step>
 

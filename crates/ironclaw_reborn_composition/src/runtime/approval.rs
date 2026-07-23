@@ -251,6 +251,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -323,6 +324,7 @@ mod tests {
                     required: true,
                 }],
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -376,6 +378,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -416,6 +419,7 @@ mod tests {
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -485,6 +489,7 @@ mod tests {
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );

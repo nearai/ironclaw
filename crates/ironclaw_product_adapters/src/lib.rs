@@ -18,7 +18,6 @@ mod projection;
 pub mod redaction;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-mod workflow;
 
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
@@ -47,19 +46,18 @@ pub use external::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
-    FakeOutboundDeliverySink, FakeProductWorkflow, FakeProjectionStream, FakeProtocolHttpEgress,
-    RecordedEgressCall,
+    FakeOutboundDeliverySink, FakeProjectionStream, FakeProtocolHttpEgress, RecordedEgressCall,
 };
 pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
-    InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductCommandResultPayload, ProductControlActionPayload,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductSlashCommandParseError,
-    ProductTriggerReason, ProjectionReadPayload, ProjectionSubscriptionPayload,
-    ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
-    parse_product_slash_command,
+    ChannelInboundClassification, InboundCommandPayload, InboundRetryDisposition,
+    LinkedThreadActionPayload, ParsedProductInbound, ProductCommandResultPayload,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ProductSlashCommandParseError, ProductSourceChannel, ProductTriggerReason,
+    ProjectionReadPayload, ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload,
+    TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
 };
 pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
 pub use outbound::{
@@ -83,4 +81,3 @@ pub use projection::{
     ProjectionSubscriptionRequest,
 };
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
-pub use workflow::ProductWorkflow;

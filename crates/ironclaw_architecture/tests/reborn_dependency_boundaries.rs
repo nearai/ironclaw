@@ -569,6 +569,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw",
         [
             "ironclaw_extension_host",
+            "ironclaw_first_party_extensions",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
@@ -2114,7 +2115,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
         },
         ForbiddenUse {
             pattern: "IncomingMessage",
-            reason: "OpenAI-compatible Reborn routes must enter through ProductWorkflow, not legacy channel ingress",
+            reason: "OpenAI-compatible Reborn routes must enter through ProductSurface, not legacy channel ingress",
             exempt: None,
         },
         ForbiddenUse {
@@ -2136,7 +2137,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
 
     assert!(
         violations.is_empty(),
-        "Reborn OpenAI-compatible routes must stay ProductWorkflow/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
+        "Reborn OpenAI-compatible routes must stay ProductSurface/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
         violations.join("\n")
     );
 }
@@ -2582,9 +2583,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // rule's forbidden list.
         BoundaryRule {
             // OpenAI-compatible route surface is a Reborn product/API facade.
-            // It may depend on host ingress vocabulary and ProductWorkflow
-            // adapter contracts, but it must not revive v1 gateway/LLM proxy
-            // paths or reach into runtime/composition services directly.
+            // It may depend on host ingress vocabulary, product adapter
+            // contracts, and the ProductSurface facade, but it must not revive
+            // v1 gateway/LLM proxy paths or reach into runtime/composition
+            // services directly.
             crate_name: "ironclaw_reborn_openai_compat",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -2609,7 +2611,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
@@ -2821,7 +2822,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // the axum serve loop for the composed v2 Router. Since the
             // `ironclaw_webui_v2` route surface was folded into this crate
             // (as its `webui_v2` module), it now legitimately consumes the
-            // `ironclaw_product_workflow` `RebornServicesApi` facade the v2
+            // `ironclaw_product_workflow` `ProductSurface` facade the v2
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through

@@ -226,11 +226,10 @@ URI and hosted-domain metadata remain host-owned because they are not declared
 as admin credential handles. Both sources pass through the typed OAuth client
 validators before provider use.
 
-The WebUI administrator surface and this live source are assembled by the local
-runtime substrate, which includes local development and hosted single-tenant
-deployments. The production-shaped multi-tenant substrate does not yet expose
-extension management or administrator configuration; it remains boot-config
-only until those scoped surfaces are added there.
+The unified Reborn runtime assembles this live source from the same
+tenant-scoped administrator configuration service exposed through extension
+management. The WebUI route remains operator-authorized; provider execution
+only receives the resolved pair through the host-side credential boundary.
 
 The HA-safe PKCE decision for this slice is documented sticky callback routing:
 the mounted WebUI OAuth route keeps raw PKCE verifiers in process-local bounded

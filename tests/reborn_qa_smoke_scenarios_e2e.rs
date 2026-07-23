@@ -843,9 +843,12 @@ async fn qa_activating_bundled_extensions_exposes_complete_model_surface_e2e() {
         invocations
             .iter()
             .filter(|invocation| invocation.capability_id == activate)
-            .count(),
+            .map(|invocation| invocation.input_ref.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         BUNDLED_EXTENSION_IDS.len(),
-        "each bundled extension should be activated through the lifecycle tool"
+        "each bundled extension should be activated through the lifecycle tool; retryable \
+         lifecycle failures may add duplicate attempts for the same scripted call"
     );
     harness.assert_model_exhausted();
     harness.shutdown().await;

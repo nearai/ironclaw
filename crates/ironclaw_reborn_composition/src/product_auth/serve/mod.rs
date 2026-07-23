@@ -53,7 +53,8 @@ use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
+    EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface, RebornExtensionListResponse,
+    RebornServicesError, RebornViewQuery, WebUiAuthenticatedCaller,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -175,8 +176,8 @@ pub struct ProductAuthRouteState {
 }
 
 /// Answers "does this caller have this extension installed?" for the
-/// extension OAuth start guard. Implemented over the WebUI facade
-/// (`RebornServicesApi::list_extensions`) by production wiring; tests may
+/// extension OAuth start guard. Implemented over the descriptor-backed
+/// ProductSurface extension inventory view by production wiring; tests may
 /// substitute a scripted lookup.
 #[async_trait::async_trait]
 trait InstalledExtensionLookup: Send + Sync {
@@ -188,7 +189,7 @@ trait InstalledExtensionLookup: Send + Sync {
 }
 
 struct RebornServicesInstalledExtensionLookup {
-    api: Arc<dyn RebornServicesApi>,
+    api: Arc<dyn ProductSurface>,
 }
 
 #[async_trait::async_trait]
@@ -198,7 +199,19 @@ impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
         caller: &WebUiAuthenticatedCaller,
         extension_id: &ExtensionId,
     ) -> Result<bool, RebornServicesError> {
-        let inventory = self.api.list_extensions(caller.clone()).await?;
+        let page = self
+            .api
+            .query(
+                caller.clone(),
+                RebornViewQuery {
+                    view_id: EXTENSIONS_VIEW.id.to_string(),
+                    params: json!({}),
+                    cursor: None,
+                },
+            )
+            .await?;
+        let inventory: RebornExtensionListResponse =
+            serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
         Ok(inventory.extensions.iter().any(|extension| {
             extension.package_ref.kind == LifecyclePackageKind::Extension
                 && extension.package_ref.id.as_str() == extension_id.as_str()
@@ -244,7 +257,7 @@ impl ProductAuthRouteState {
 
     /// Wire the WebUI facade as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
+    pub fn with_webui_api(mut self, webui_api: Arc<dyn ProductSurface>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
             api: webui_api,
         }));

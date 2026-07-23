@@ -1,6 +1,6 @@
 //! End-to-end coverage for the WebChat v2 admin user-management surface.
 //!
-//! Unlike the crate-tier facade tests (which drive `RebornServicesApi` against
+//! Unlike the crate-tier facade tests (which drive `ProductSurface` against
 //! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
 //! service wired (identity user-directory + admin secret provisioner + a signed
 //! session-store token minter), composes the full `webui_v2_app` with a real
@@ -32,7 +32,7 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
+    AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
     RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
 use ironclaw_webui::{
@@ -138,20 +138,21 @@ struct AdminHarness {
 async fn build_admin_harness() -> AdminHarness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root: PathBuf = root.path().join("local-dev");
-    let build_input = RebornBuildInput::local_dev(OPERATOR_USER, storage_root)
-        .with_runtime_policy(local_dev_effective_policy());
+    let build_input =
+        ironclaw_reborn_composition::local_dev_build_input(OPERATOR_USER, storage_root)
+            .with_runtime_policy(local_dev_effective_policy());
     build_admin_harness_from(root, build_input).await
 }
 
 /// Assemble the full admin HTTP harness over a caller-supplied
-/// `RebornBuildInput` (already carrying its profile, policy, trust, and process
+/// `RebornHostBindings` (already carrying its profile, policy, trust, and process
 /// binding). Everything above the substrate — the shared signed session store /
 /// minter / authenticator, the WebUI bundle, and the composed router — is
 /// profile-agnostic, so the local-dev and production-shaped runs share it and
 /// only differ in the build input.
 async fn build_admin_harness_from(
     root: tempfile::TempDir,
-    build_input: RebornBuildInput,
+    build_input: RebornHostBindings,
 ) -> AdminHarness {
     let tenant = TenantId::new(TENANT).expect("tenant");
 
@@ -164,7 +165,7 @@ async fn build_admin_harness_from(
         store: session_store.clone(),
     });
 
-    let input = RebornRuntimeInput::from_services(build_input)
+    let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -926,10 +927,11 @@ fn production_effective_policy() -> EffectiveRuntimePolicy {
     }
 }
 
+#[path = "support/first_party.rs"]
+mod first_party_support;
+
 async fn build_admin_harness_production() -> AdminHarness {
-    use ironclaw_reborn_composition::{
-        RebornCompositionProfile, RebornRuntimeProcessBinding, builtin_first_party_trust_policy,
-    };
+    use ironclaw_reborn_composition::{RebornCompositionProfile, RebornRuntimeProcessBinding};
 
     let root = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
@@ -939,7 +941,7 @@ async fn build_admin_harness_production() -> AdminHarness {
             .expect("libsql db"),
     );
     let events = root.path().join("events.db").to_string_lossy().to_string();
-    let build_input = RebornBuildInput::libsql(
+    let build_input = RebornHostBindings::libsql(
         RebornCompositionProfile::Production,
         OPERATOR_USER,
         db,
@@ -947,9 +949,7 @@ async fn build_admin_harness_production() -> AdminHarness {
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )
-    .with_production_trust_policy(Arc::new(
-        builtin_first_party_trust_policy().expect("trust policy"),
-    ))
+    .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
     .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
         ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),

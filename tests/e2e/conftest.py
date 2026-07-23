@@ -6,6 +6,7 @@ Function-scoped: fresh browser context and page per test.
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 import json
 import os
 import signal
@@ -532,6 +533,7 @@ async def _run_emulate_server(
     ready_path: str,
     ready_headers: dict[str, str],
     ready_json: dict[str, Any] | None = None,
+    port: int | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """Start a pinned Emulate service and wait for a seeded endpoint."""
     if EMULATE_CLI_PATH:
@@ -552,7 +554,7 @@ async def _run_emulate_server(
     else:
         command = ["npx", "--yes", EMULATE_NPM_PACKAGE]
 
-    port = _find_free_port()
+    port = port or _find_free_port()
     url = f"http://127.0.0.1:{port}"
     env = {
         **os.environ,
@@ -613,6 +615,184 @@ async def _run_emulate_server(
                 await _stop_process(proc, timeout=2)
 
 
+async def _bootstrap_emulate_github_access(
+    client: httpx.AsyncClient, url: str
+) -> None:
+    """Grant the primary fixture actor write access to the seeded org repo."""
+    headers = {"Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}"}
+    team = await client.post(
+        f"{url}/orgs/nearai/teams",
+        headers=headers,
+        json={
+            "name": "Provider Contract",
+            "permission": "push",
+            "privacy": "closed",
+        },
+        timeout=5,
+    )
+    if team.status_code != 201:
+        raise RuntimeError(
+            "Failed to create Emulate GitHub provider team: "
+            f"{team.status_code} {team.text[:400]}"
+        )
+    membership = await client.put(
+        f"{url}/orgs/nearai/teams/provider-contract/memberships/reborn-dev",
+        headers=headers,
+        json={"role": "maintainer"},
+        timeout=5,
+    )
+    if membership.status_code != 200:
+        raise RuntimeError(
+            "Failed to grant Emulate GitHub provider membership: "
+            f"{membership.status_code} {membership.text[:400]}"
+        )
+
+
+@asynccontextmanager
+async def _emulate_service(
+    *,
+    service: str,
+    seed_path: Path,
+    ready_method: str,
+    ready_path: str,
+    ready_headers: dict[str, str],
+    port: int | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    generator = _run_emulate_server(
+        service=service,
+        seed_path=seed_path,
+        ready_method=ready_method,
+        ready_path=ready_path,
+        ready_headers=ready_headers,
+        port=port,
+    )
+    async with aclosing(generator):
+        async for server in generator:
+            yield server
+
+
+@asynccontextmanager
+async def _emulate_github_service(
+    *, port: int | None = None
+) -> AsyncIterator[dict[str, str]]:
+    """Start GitHub Emulate and grant the seeded actor repository access."""
+    async with _emulate_service(
+        service="github",
+        seed_path=EMULATE_GITHUB_SEED,
+        ready_method="GET",
+        ready_path="/user",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+        },
+        port=port,
+    ) as server:
+        async with httpx.AsyncClient() as client:
+            await _bootstrap_emulate_github_access(client, server["url"])
+        yield server
+
+
+class ResettableEmulateProviderWorld:
+    """Restart seeded provider processes on stable ports between journeys."""
+
+    def __init__(self) -> None:
+        reserved = _reserve_loopback_sockets(3)
+        services = ("google", "slack", "github")
+        self._ports = {
+            service: sock.getsockname()[1]
+            for service, sock in zip(services, reserved, strict=True)
+        }
+        self._reservations = dict(zip(services, reserved, strict=True))
+        self._stacks: dict[str, AsyncExitStack] = {}
+
+    @property
+    def servers(self) -> dict[str, dict[str, str]]:
+        return {
+            service: {"url": f"http://127.0.0.1:{port}"}
+            for service, port in self._ports.items()
+        }
+
+    async def start(self, services: set[str] | None = None) -> None:
+        selected = set(self._ports) if services is None else services
+        for service in sorted(selected):
+            if service in self._stacks:
+                raise RuntimeError(f"Emulate {service} provider is already running")
+            await self._start_service(service)
+
+    async def _start_service(self, service: str) -> None:
+        stack = AsyncExitStack()
+        try:
+            if service == "google":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_GOOGLE_SEED,
+                    ready_method="GET",
+                    ready_path="/gmail/v1/users/me/messages",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            elif service == "slack":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_SLACK_SEED,
+                    ready_method="POST",
+                    ready_path="/api/auth.test",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_SLACK_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            elif service == "github":
+                context = _emulate_github_service(port=self._ports[service])
+            else:
+                raise ValueError(f"Unknown Emulate provider service: {service}")
+            reservation = self._reservations.pop(service, None)
+            if reservation is not None:
+                reservation.close()
+            await stack.enter_async_context(context)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stacks[service] = stack
+
+    async def reset(self, services: set[str]) -> None:
+        await self.close(services, reserve=True)
+        await self.start(services)
+
+    async def close(
+        self,
+        services: set[str] | None = None,
+        *,
+        reserve: bool = False,
+    ) -> None:
+        selected = set(self._stacks) if services is None else services
+        for service in sorted(selected, reverse=True):
+            stack = self._stacks.pop(service, None)
+            if stack is not None:
+                await stack.aclose()
+            if reserve:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", self._ports[service]))
+                self._reservations[service] = sock
+        if services is None:
+            reservations, self._reservations = self._reservations, {}
+            for sock in reservations.values():
+                sock.close()
+
+
+@pytest.fixture(scope="module")
+async def resettable_emulate_provider_world():
+    """Keep stable provider URLs while restoring seed state per journey."""
+    world = ResettableEmulateProviderWorld()
+    try:
+        await world.start()
+        yield world
+    finally:
+        await world.close()
+
+
 @pytest.fixture(scope="session")
 async def emulate_google_server():
     """Start Emulate Google with seeded Gmail, Calendar, and Drive data."""
@@ -646,15 +826,7 @@ async def emulate_slack_server():
 @pytest.fixture(scope="session")
 async def emulate_github_server():
     """Start Emulate GitHub with a seeded user, org, and repository."""
-    async for server in _run_emulate_server(
-        service="github",
-        seed_path=EMULATE_GITHUB_SEED,
-        ready_method="GET",
-        ready_path="/user",
-        ready_headers={
-            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
-        },
-    ):
+    async with _emulate_github_service() as server:
         yield server
 
 
@@ -1003,6 +1175,7 @@ async def hosted_google_emulate_server(
     rewrite_map = {
         "gmail.googleapis.com": emulate_google_server["url"],
         "www.googleapis.com": emulate_google_server["url"],
+        "slides.googleapis.com": emulate_google_server["url"],
     }
     async for server in _run_hosted_oauth_refresh_server(
         ironclaw_binary,
@@ -1050,6 +1223,7 @@ async def hosted_provider_emulate_server(
     rewrite_map = {
         "gmail.googleapis.com": emulate_google_server["url"],
         "www.googleapis.com": emulate_google_server["url"],
+        "slides.googleapis.com": emulate_google_server["url"],
         "api.github.com": emulate_github_server["url"],
         "slack.com": emulate_slack_server["url"],
     }

@@ -2,13 +2,13 @@
 //!
 //! Inputs are raw Slack webhook event bytes. Event callbacks become
 //! [`ParsedProductInbound`] values; URL-verification payloads are exposed for
-//! the host to echo before normal ProductWorkflow routing. The host stamps
+//! the host to echo before normal ProductSurface admission. The host stamps
 //! trusted context outside this crate after verifying Slack request signatures.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, NormalizedInboundMessage, ParsedProductInbound, ProductAdapterError,
-    ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
+    AdapterInstallationId, AttachmentRef, ChannelInboundClassification, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ParsedProductInbound,
+    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
     ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
@@ -232,6 +232,25 @@ pub fn classify_interaction_resolution(
         // turn on gate-resolution phrasing.
         Err(_) => Some(ProductInboundPayload::NoOp),
     }
+}
+
+pub fn classify_channel_interaction_resolution(
+    text: &str,
+    trigger: ProductTriggerReason,
+) -> Option<ChannelInboundClassification> {
+    classify_interaction_resolution(text, trigger).and_then(|payload| match payload {
+        ProductInboundPayload::ApprovalResolution(payload) => {
+            Some(ChannelInboundClassification::ApprovalResolution(payload))
+        }
+        ProductInboundPayload::ScopedApprovalResolution(payload) => Some(
+            ChannelInboundClassification::ScopedApprovalResolution(payload),
+        ),
+        ProductInboundPayload::AuthResolution(payload) => {
+            Some(ChannelInboundClassification::AuthResolution(payload))
+        }
+        ProductInboundPayload::NoOp => Some(ChannelInboundClassification::NoOp),
+        _ => None,
+    })
 }
 
 fn parse_app_mention(

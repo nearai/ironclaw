@@ -34,9 +34,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
+use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
+    ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
     ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
@@ -167,6 +167,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// threaded into the degenerate one-thread group (see
     /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional run trajectory observer threaded into the
+    /// degenerate one-thread group's production capability-port factory.
+    trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     /// E-GATEWAY tool-path analog of `park_gate`: when set, this harness's
     /// `BuiltinHttpTools` capability dispatch parks until released (issue
     /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
@@ -238,6 +241,17 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`.
     pub fn with_hook_factory(mut self, factory: HookDispatcherBuilderFactory) -> Self {
         self.hook_dispatcher_builder_factory = Some(factory);
+        self
+    }
+
+    /// Wire a raw trajectory observer into this harness's underlying group so
+    /// capability input/result callbacks fire through the production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
         self
     }
 
@@ -373,6 +387,15 @@ impl RebornIntegrationHarnessBuilder {
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self
+    }
+
+    /// Same built-in first-party tool runtime as
+    /// [`Self::with_builtin_http_tools`], but backed by the REAL
+    /// `StagedCapabilityIo` so trajectory result callbacks and durable
+    /// result-reference reads use the same IO path production composes.
+    pub fn with_durable_capability_io_builtin_http_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsDurableIo;
         self
     }
 
@@ -591,6 +614,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(factory) = self.hook_dispatcher_builder_factory {
             group_builder = group_builder.hook_dispatcher_builder_factory(factory);
         }
+        if let Some(observer) = self.trajectory_observer {
+            group_builder = group_builder.with_raw_trajectory_observer(observer);
+        }
         if let Some(ttl) = self.runner_lease_ttl {
             group_builder = group_builder.with_runner_lease_ttl_for_test(ttl);
         }
@@ -613,7 +639,7 @@ impl RebornIntegrationHarnessBuilder {
 /// the real decorator chain. See module docs.
 pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
-    pub(crate) workflow: std::sync::Arc<DefaultProductWorkflow>,
+    pub(crate) workflow: std::sync::Arc<DefaultProductSurface>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
@@ -707,6 +733,7 @@ impl RebornIntegrationHarness {
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             park_tool_gate: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
@@ -774,7 +801,7 @@ impl RebornIntegrationHarness {
     /// to complete (C-ATTACH). Lands `bytes` through the harness's real
     /// `InboundAttachmentLander` (production `ProjectScopedAttachmentLander` over
     /// the local-dev workspace filesystem — wired only by `.attachment_tools()`
-    /// groups) via `DefaultProductWorkflow::submit_inbound_with_attachments`, the
+    /// groups) via `DefaultProductSurface::submit_inbound_with_attachments`, the
     /// same production entry point a synchronous host surface (e.g. the
     /// OpenAI-compatible API) uses for inline image bytes. Errors clearly if the
     /// harness has no lander wired.
@@ -893,11 +920,10 @@ impl RebornIntegrationHarness {
         Ok(self.workflow.submit_inbound(envelope).await?)
     }
 
-    /// The REAL per-thread `DefaultProductWorkflow` (durable idempotency
-    /// ledger → conversation binding → turn submission) as the
-    /// `ProductWorkflow` seam — the generic channel inbound sink submits
-    /// through this exact instance.
-    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductWorkflow> {
+    /// The REAL per-thread `DefaultProductSurface` (durable idempotency
+    /// ledger → conversation binding → turn submission). The generic channel
+    /// inbound sink submits through this exact instance.
+    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
         std::sync::Arc::clone(&self.workflow)
     }
 

@@ -129,6 +129,16 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Wire a raw trajectory observer into the group's ONE production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     /// Shorten the group's turn-state store lease TTL (default 90s,
     /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
@@ -151,7 +161,7 @@ impl RebornIntegrationGroupBuilder {
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's
-    /// `DefaultProductWorkflow`, so `submit_inbound(ApprovalResolution/
+    /// `DefaultProductSurface`, so `submit_inbound(ApprovalResolution/
     /// AuthResolution)` dispatches through the SAME arms a real adapter reply
     /// hits, instead of every workflow's default `Rejecting*InteractionService`
     /// stubs. Requires a `HostRuntime` capability backend built via

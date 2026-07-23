@@ -96,7 +96,7 @@ impl ProductProjectionSubscribeInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProductProjectionSubject {
-    /// Adapter/channel style request: ProductWorkflow resolves canonical
+    /// Adapter/channel style request: ProductSurface resolves canonical
     /// actor/scope/thread from verified installation + external refs.
     AdapterExternalRefs {
         adapter_id: ProductAdapterId,
@@ -109,7 +109,7 @@ pub enum ProductProjectionSubject {
 
     /// API/projection style request: caller has already resolved an opaque
     /// product/API id such as OpenAI `resp_*` into canonical Reborn metadata.
-    /// ProductWorkflow remains the facade door, but does not own that mapping.
+    /// ProductSurface remains the facade door, but does not own that mapping.
     CanonicalProjection { actor: TurnActor, scope: TurnScope },
 }
 

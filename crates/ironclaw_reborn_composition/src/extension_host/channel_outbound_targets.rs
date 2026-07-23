@@ -26,14 +26,11 @@ use async_trait::async_trait;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
+use ironclaw_outbound::OutboundError;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
 };
-use ironclaw_product_workflow::{
-    PreferenceTargetCodec, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetSummary, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
-};
+use ironclaw_product_workflow::PreferenceTargetCodec;
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::extension_host::channel_config::ChannelConfigService;
@@ -45,10 +42,11 @@ use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
     handle_declares_field, shared_channel_admission_handles,
 };
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
+    OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
-use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 
 /// The deployment identity every encoded binding ref carries (the same
 /// identity the assembly binds per-extension workflows under).
@@ -96,7 +94,7 @@ impl GenericChannelOutboundTargetProvider {
 
     /// Per-request contexts for every active channel extension with a
     /// registered preference-target codec, in extension-id order.
-    async fn contexts(&self) -> Result<Vec<ChannelTargetContext>, RebornServicesError> {
+    async fn contexts(&self) -> Result<Vec<ChannelTargetContext>, OutboundError> {
         let snapshot = self.deps.watch.current();
         let mut contexts = Vec::new();
         for extension_id in snapshot.extension_ids() {
@@ -114,7 +112,7 @@ impl GenericChannelOutboundTargetProvider {
     async fn context_for_extension(
         &self,
         active: &ActiveExtension,
-    ) -> Result<Option<ChannelTargetContext>, RebornServicesError> {
+    ) -> Result<Option<ChannelTargetContext>, OutboundError> {
         let Some(channel) = active.resolved.channel.as_ref() else {
             return Ok(None);
         };
@@ -191,7 +189,7 @@ impl GenericChannelOutboundTargetProvider {
         &self,
         extension_id: &ExtensionId,
         handle: &str,
-    ) -> Result<Option<String>, RebornServicesError> {
+    ) -> Result<Option<String>, OutboundError> {
         self.deps
             .channel_config
             .non_secret_value(extension_id, handle)
@@ -204,7 +202,7 @@ impl GenericChannelOutboundTargetProvider {
                     %error,
                     "channel config unavailable while resolving outbound targets"
                 );
-                target_backend_error()
+                OutboundError::Backend
             })
     }
 
@@ -240,14 +238,14 @@ impl GenericChannelOutboundTargetProvider {
         let reply_target_binding_ref = context
             .codec
             .encode_shared_conversation_target(self.encode_request(context, &conversation))?;
-        let target_id = RebornOutboundDeliveryTargetId::new(format!(
+        let target_id = OutboundDeliveryTargetId::new(format!(
             "{}:shared-channel:{}:{}",
             context.extension_id,
             context.space_id.as_deref().unwrap_or_default(),
             conversation_id
         ))
         .ok()?;
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             context.extension_id.as_str(),
             format!("{} channel {}", context.display_name, conversation_id),
@@ -274,7 +272,7 @@ impl GenericChannelOutboundTargetProvider {
     fn dm_entry(
         &self,
         context: &ChannelTargetContext,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &OutboundDeliveryTargetScope,
         record: &ChannelDmTargetRecord,
     ) -> Option<OutboundDeliveryTargetEntry> {
         let (space_id, conversation_id) = dm_record_conversation(record)?;
@@ -284,14 +282,14 @@ impl GenericChannelOutboundTargetProvider {
             self.encode_request(context, &conversation),
             &record.external_actor_id,
         )?;
-        let target_id = RebornOutboundDeliveryTargetId::new(format!(
+        let target_id = OutboundDeliveryTargetId::new(format!(
             "{}:personal-dm:{}:{}",
             context.extension_id,
             space_id.as_deref().unwrap_or_default(),
             caller.user_id.as_str()
         ))
         .ok()?;
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             context.extension_id.as_str(),
             format!("{} DM", context.display_name),
@@ -319,8 +317,8 @@ impl GenericChannelOutboundTargetProvider {
     async fn dm_record(
         &self,
         context: &ChannelTargetContext,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Option<ChannelDmTargetRecord>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Option<ChannelDmTargetRecord>, OutboundError> {
         self.deps
             .dm_targets
             .load(&context.extension_id, &caller.user_id)
@@ -332,11 +330,11 @@ impl GenericChannelOutboundTargetProvider {
                     %error,
                     "channel DM-target store unavailable while resolving outbound targets"
                 );
-                target_backend_error()
+                OutboundError::Backend
             })
     }
 
-    fn caller_in_scope(&self, caller: &WebUiAuthenticatedCaller) -> bool {
+    fn caller_in_scope(&self, caller: &OutboundDeliveryTargetScope) -> bool {
         caller.tenant_id == self.deps.identity.tenant_id
     }
 
@@ -344,7 +342,7 @@ impl GenericChannelOutboundTargetProvider {
     fn conversation_routed_to_caller(
         context: &ChannelTargetContext,
         conversation_id: &str,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &OutboundDeliveryTargetScope,
     ) -> bool {
         context
             .subject_routes
@@ -357,8 +355,8 @@ impl GenericChannelOutboundTargetProvider {
 impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         if !self.caller_in_scope(caller) {
             return Ok(Vec::new());
         }
@@ -383,9 +381,9 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
 
     async fn resolve_outbound_delivery_target(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-        target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
         if !self.caller_in_scope(caller) {
             return Ok(None);
         }
@@ -418,9 +416,9 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
 
     async fn resolve_reply_target_binding(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &OutboundDeliveryTargetScope,
         target: &ReplyTargetBindingRef,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
         if !self.caller_in_scope(caller) {
             return Ok(None);
         }
@@ -474,22 +472,13 @@ fn dm_record_conversation(record: &ChannelDmTargetRecord) -> Option<(Option<Stri
     Some((space_id, conversation_id))
 }
 
-fn full_capabilities() -> RebornOutboundDeliveryTargetCapabilities {
-    RebornOutboundDeliveryTargetCapabilities {
+fn full_capabilities() -> DeliveryTargetCapabilities {
+    DeliveryTargetCapabilities {
         final_replies: true,
+        progress: false,
         gate_prompts: true,
         auth_prompts: true,
-    }
-}
-
-fn target_backend_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
+        modalities: Vec::new(),
     }
 }
 

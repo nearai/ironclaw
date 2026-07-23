@@ -1,4 +1,4 @@
-//! `ProductWorkflow::submit_inbound` idempotency against a REAL, filesystem-backed
+//! `DefaultProductSurface::submit_inbound` idempotency against a REAL, filesystem-backed
 //! `FilesystemIdempotencyLedger` (crate-tier idempotency tests use an in-memory fake) —
 //! proves a second read-modify-write cycle short-circuits to `Duplicate`, not a fresh turn/run.
 
@@ -9,7 +9,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
+use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;

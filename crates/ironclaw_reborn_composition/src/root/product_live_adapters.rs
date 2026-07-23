@@ -41,10 +41,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::{
-    RebornServices,
-    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
-};
+use crate::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 #[derive(Debug, Error)]
 pub enum ProductLivePlannedRuntimeAdapterError {
@@ -781,18 +778,12 @@ pub struct ProductLivePlannedRuntimeAdapters {
 }
 
 impl ProductLivePlannedRuntimeAdapters {
-    /// Builds the adapter bundle from `RebornServices` and explicit product-live dependencies.
-    ///
-    /// Returns `MissingHostRuntime` when the service graph has no host runtime facade.
-    pub fn from_services(
-        services: &RebornServices,
+    /// Builds the adapter bundle from a composed host runtime and explicit
+    /// product-live dependencies.
+    pub fn from_host_runtime(
+        host_runtime: Arc<dyn HostRuntime>,
         config: ProductLivePlannedRuntimeAdapterConfig,
     ) -> Result<Self, ProductLivePlannedRuntimeAdapterError> {
-        let host_runtime = services
-            .host_runtime
-            .clone()
-            .ok_or(ProductLivePlannedRuntimeAdapterError::MissingHostRuntime)?;
-
         // Retain the host-private stores on the bundle (cheap Arc clones) so a
         // consumer building the runner from this bundle wires the SAME stores
         // the capability factory persists into (#6299). The factory takes owned

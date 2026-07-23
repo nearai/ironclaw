@@ -2,7 +2,7 @@
 //! Lane 7 end-to-end coverage for the WebChat v2 HTTP surface.
 //!
 //! Unlike [`webui_v2_serve`], which drives the composed router against a
-//! stub `RebornServicesApi`, this test stands up a real local-dev
+//! stub `ProductSurface`, this test stands up a real local-dev
 //! `RebornRuntime`, overrides its LLM gateway with a scripted
 //! tool-calling fake, composes the v2 router through
 //! [`build_webui_services`] + [`webui_v2_app`], and exercises it from
@@ -42,9 +42,8 @@ use ironclaw_loop_host::{
     HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
-    LOCAL_DEV_SECRETS_MASTER_KEY_PATH, OAuthClientConfig, PollSettings, RebornBuildInput,
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    build_webui_services,
+    OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime, build_webui_services,
 };
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -112,7 +111,7 @@ impl WebuiAuthenticator for TwoUserTokens {
 fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
     // Mirrors the policy the in-mod runtime tests use. Avoids the
     // public `local_dev_runtime_policy()` helper because that returns a
-    // `ResolvedRuntimePolicy` shape; `RebornBuildInput::with_runtime_policy`
+    // `ResolvedRuntimePolicy` shape; `RebornHostBindings::with_runtime_policy`
     // takes the `EffectiveRuntimePolicy` shape and the two are not
     // interchangeable in this direction yet.
     EffectiveRuntimePolicy {
@@ -612,8 +611,9 @@ async fn build_harness_at(
     .await
 }
 
-/// Dummy but well-formed Google OAuth backend for harnesses that need
-/// Gmail/GSuite setup+activation to reach the per-account credential gate.
+/// Dummy but well-formed Google OAuth boot fallback for harnesses that seed
+/// Google credential accounts without driving the administrator configuration
+/// surface.
 fn test_google_oauth_backend() -> OAuthClientConfig {
     OAuthClientConfig::new(
         "e2e-google-client-id.apps.googleusercontent.com",
@@ -631,8 +631,9 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     runtime_owner_id: &str,
     authenticated_user_id: &str,
 ) -> Harness {
-    // This shared harness backs WebUI e2e tests that exercise Gmail/GSuite
-    // setup+activation over the real v2 router with a boot-config fallback.
+    // These tests seed Google credential accounts directly rather than driving
+    // the administrator configuration surface, so supply the legacy boot
+    // fallback they need for OAuth operations.
     build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         storage_root,
         root,
@@ -645,8 +646,7 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     .await
 }
 
-/// Harness variant with composition-time Google OAuth fallback configuration
-/// under the caller's control.
+/// Harness variant with optional boot-time Google OAuth fallback material.
 async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     storage_root: PathBuf,
     root: Option<tempfile::TempDir>,
@@ -657,12 +657,14 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     google_oauth_backend: Option<OAuthClientConfig>,
 ) -> Harness {
     let mut build_input =
-        RebornBuildInput::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy);
+        ironclaw_reborn_composition::local_dev_build_input(runtime_owner_id, storage_root)
+            .with_runtime_policy(policy)
+            .with_bundled_first_party_for_test();
     if let Some(google_oauth_backend) = google_oauth_backend {
         build_input = build_input
             .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
     }
-    let input = RebornRuntimeInput::from_services(build_input)
+    let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -681,7 +683,6 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     // scripted tool calls complete instead of parking on the per-tool approval
     // gate (which would otherwise leave the turn without an assistant reply).
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -726,8 +727,10 @@ async fn build_two_user_harness(
 ) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_dev_build_input(USER, storage_root)
+            .with_runtime_policy(policy)
+            .with_bundled_first_party_for_test(),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -743,7 +746,6 @@ async fn build_two_user_harness(
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -1507,12 +1509,7 @@ async fn webui_v2_sse_streams_first_assistant_text_update_before_model_completio
 #[tokio::test]
 async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     let harness = build_harness().await;
-    let product_auth = harness
-        .runtime
-        .services()
-        .product_auth
-        .as_ref()
-        .expect("local-dev runtime wires product auth");
+    let product_auth = harness.runtime.product_auth_for_test();
     product_auth
         .credential_account_service()
         .create_account(NewCredentialAccount {
@@ -1548,8 +1545,13 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         ))
         .await
         .expect("install Gmail oneshot");
-    assert_eq!(install.status(), StatusCode::OK);
+    let install_status = install.status();
     let install_body = read_json(install).await;
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install body: {install_body}"
+    );
     assert_eq!(
         install_body["success"], true,
         "install body: {install_body}"
@@ -1577,12 +1579,14 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         ))
         .await
         .expect("activate Gmail oneshot");
-    assert_eq!(activate.status(), StatusCode::OK);
+    let activate_status = activate.status();
     let activate_body = read_json(activate).await;
     assert_eq!(
-        activate_body["success"], true,
+        activate_status,
+        StatusCode::OK,
         "activation should succeed after setup completion: {activate_body}"
     );
+    assert_eq!(activate_body["success"], true);
     assert_eq!(activate_body["activated"], true);
 }
 
@@ -1860,12 +1864,6 @@ mod operator_llm_config {
     async fn build_operator_harness() -> Harness {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(&storage_root).expect("local-dev storage root");
-        std::fs::write(
-            storage_root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("test secrets master key");
         let home = RebornHome::resolve_from_env_parts(
             Some(root.path().join("reborn-home").into_os_string()),
             None,
@@ -1875,23 +1873,23 @@ mod operator_llm_config {
         let boot = RebornBootConfig::new(home, RebornProfile::LocalDev);
 
         let gateway = Arc::new(ToolCallingGateway::default());
-        let services = RebornBuildInput::local_dev(USER, storage_root)
-            .with_runtime_policy(local_dev_effective_policy())
-            .with_dcr_oauth_callback("http://127.0.0.1:3000")
-            .expect("loopback OAuth callback origin");
-        let input = RebornRuntimeInput::from_services(services)
-            .with_identity(RebornRuntimeIdentity {
-                tenant_id: TENANT.to_string(),
-                agent_id: AGENT.to_string(),
-                source_binding_id: "e2e-source".to_string(),
-                reply_target_binding_id: "e2e-reply".to_string(),
-            })
-            .with_poll_settings(PollSettings {
-                interval: Duration::from_millis(10),
-                max_total: Duration::from_secs(10),
-            })
-            .with_model_gateway_override(gateway)
-            .with_boot_config(boot);
+        let input = RebornRuntimeInput::from_build_input(
+            ironclaw_reborn_composition::local_dev_build_input(USER, storage_root)
+                .with_runtime_policy(local_dev_effective_policy())
+                .with_bundled_first_party_for_test(),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "e2e-source".to_string(),
+            reply_target_binding_id: "e2e-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway)
+        .with_boot_config(boot);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");

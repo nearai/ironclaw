@@ -23,9 +23,9 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_reborn_composition::{
-    LOCAL_DEV_SECRETS_MASTER_KEY_PATH, OAuthClientConfig, PollSettings, RebornBuildInput,
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    build_webui_services,
+    LOCAL_DEV_SECRETS_MASTER_KEY_PATH, OAuthClientConfig, PollSettings, RebornRuntime,
+    RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    local_dev_build_input,
 };
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
@@ -159,13 +159,14 @@ async fn build_harness() -> Harness {
     )
     .expect("valid boot Google OAuth client");
     let token_egress = Arc::new(OAuthTokenEgress::default());
-    let services = RebornBuildInput::local_dev(USER, storage_root)
+    let services = local_dev_build_input(USER, storage_root)
         .with_runtime_policy(local_dev_policy())
+        .with_bundled_first_party_for_test()
         .with_dcr_oauth_callback("http://127.0.0.1:3000")
         .expect("loopback callback origin")
         .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, boot_client)
         .with_network_http_egress_for_test(Arc::clone(&token_egress) as Arc<dyn NetworkHttpEgress>);
-    let input = RebornRuntimeInput::from_services(services)
+    let input = RebornRuntimeInput::from_build_input(services)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),

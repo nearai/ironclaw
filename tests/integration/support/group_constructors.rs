@@ -28,10 +28,18 @@ use super::{
 /// `.with_run_owner_scoped_capability_dispatch()`, not a fixed `user_id`
 /// override) — those remain call-site-specific.
 async fn build_group_capability_with_base(
-    profile: ToolsProfile,
+    mut profile: ToolsProfile,
     base: &GroupBaseData,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let subject_user = base.canonical_subject_user()?;
+    let product_scope = &base.product_harness.scope;
+    let agent_id = product_scope
+        .agent_id
+        .clone()
+        .ok_or("group product scope is missing an agent id")?;
+    profile.options = profile
+        .options
+        .with_local_runtime_identity(product_scope.tenant_id.clone(), agent_id);
     let harness = profile.build().await?;
     Ok(harness.with_user_id(subject_user))
 }
@@ -375,11 +383,31 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
-    pub async fn extension_delivery(self) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime =
-            super::super::harness::profiles::extension::extension_delivery_tools().await?;
+    pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::extension::extension_delivery_tools_profile()?,
+            &base,
+        )
+        .await?;
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build a visibility-probe group. See
@@ -488,11 +516,9 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a skill-activation group. See
-    /// [`RebornIntegrationGroup::skill_activation_tools`]. Seeds a `greet` system
-    /// skill BEFORE `into_group` so the runtime's `skill_context_source` (and the
-    /// `skill_activate` capability's `activate_skills_for_run`) resolve it at
-    /// activation time. A system skill is used so resolution is independent of the
-    /// run's scope owner — the seam only needs the skill to exist.
+    /// [`RebornIntegrationGroup::skill_activation_tools`]. The skill profile
+    /// pre-seeds the system fixtures before runtime construction so the warmed
+    /// system-skill descriptor cache sees them.
     pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
@@ -503,11 +529,6 @@ impl RebornIntegrationGroupBuilder {
             &base.canonical_binding.tenant_id,
         )
         .await?;
-        host_runtime.seed_system_skill_for_test(
-            "greet",
-            "greets the user warmly",
-            "GREET_SKILL_PROMPT_SENTINEL",
-        )?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }

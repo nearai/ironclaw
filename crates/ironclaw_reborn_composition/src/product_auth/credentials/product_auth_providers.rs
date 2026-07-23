@@ -82,40 +82,16 @@ impl AdminClientCredentialSource for ComposedAdminClientCredentialSource {
     }
 }
 
-#[derive(Debug)]
-struct BootOnlyAdminClientCredentialSource;
-
-#[async_trait]
-impl AdminClientCredentialSource for BootOnlyAdminClientCredentialSource {
-    async fn resolve(
-        &self,
-        _handles: &[SecretHandle],
-    ) -> Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError> {
-        Ok(None)
-    }
-}
-
 /// Deferred manifest-admin credential source. The administrator service is
 /// built after the auth engine's durable dependencies, so composition fills
 /// this slot once and the engine resolves a complete revisioned value set at
-/// request time. Paths without the WebUI administrator surface leave it
-/// unfilled and use boot values only.
+/// request time.
 #[derive(Clone, Default)]
 pub(crate) struct AdminConfigurationCredentialSlot {
     inner: Arc<std::sync::OnceLock<Arc<dyn AdminClientCredentialSource>>>,
 }
 
 impl AdminConfigurationCredentialSlot {
-    /// Explicitly scope a composition path to bootstrap credentials. This is
-    /// distinct from an accidentally unfilled deferred slot.
-    pub(crate) fn boot_only() -> Self {
-        let slot = Self::default();
-        let _ = slot
-            .inner
-            .set(Arc::new(BootOnlyAdminClientCredentialSource));
-        slot
-    }
-
     pub(crate) fn fill(
         &self,
         service: Arc<ComposedAdminConfigurationService>,
@@ -273,12 +249,15 @@ pub(crate) fn compose_provider_client(
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
     admin_configuration_credentials: AdminConfigurationCredentialSlot,
+    first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
-        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes()
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
-            })?,
+        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes(
+            first_party_bundles,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+        })?,
     ));
 
     let mut client_credentials = CompositionClientCredentials::default();
@@ -521,26 +500,6 @@ mod tests {
             .resolve("example", &recipe_credentials())
             .await
             .expect("boot pair resolves");
-
-        assert_eq!(resolved.client_id.as_str(), "boot-id");
-        assert_eq!(
-            resolved
-                .client_secret
-                .expect("boot client secret")
-                .expose_secret(),
-            "boot-secret"
-        );
-    }
-
-    #[tokio::test]
-    async fn boot_only_composition_uses_complete_boot_pair() {
-        let mut credentials = boot_credentials();
-        credentials.with_admin_configuration_source(AdminConfigurationCredentialSlot::boot_only());
-
-        let resolved = credentials
-            .resolve("example", &recipe_credentials())
-            .await
-            .expect("boot-only pair resolves");
 
         assert_eq!(resolved.client_id.as_str(), "boot-id");
         assert_eq!(

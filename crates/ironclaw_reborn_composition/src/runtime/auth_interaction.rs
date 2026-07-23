@@ -22,7 +22,7 @@ struct BlockedAuthRun {
 }
 
 pub(super) struct SnapshotAuthInteractionReadModel {
-    /// A trait object (not the concrete `ComposedTurnStateStore`) so a
+    /// A trait object (not a concrete row-store type) so a
     /// caller can substitute a different turn-state store's snapshot view —
     /// see `turn_run_snapshot::TurnRunSnapshotSource` and
     /// `build_webui_auth_interaction_service_with_turn_run_source`.

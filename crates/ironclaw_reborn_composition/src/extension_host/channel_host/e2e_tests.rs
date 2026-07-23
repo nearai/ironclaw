@@ -489,7 +489,10 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 /// closure the binary-side native registration provides.
 fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
     Arc::new(|message| {
-        ironclaw_slack_extension::classify_interaction_resolution(&message.text, message.trigger)
+        ironclaw_slack_extension::classify_channel_interaction_resolution(
+            &message.text,
+            message.trigger,
+        )
     })
 }
 
@@ -577,7 +580,7 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// The P4 generic-ingress transport: a minimal `ExtensionHost` with the REAL
 /// bundled channel manifest active (binding the real `SlackChannelAdapter`),
 /// the generic recipe verifier over the test signing secret, the generic
-/// inbound sink over the harness's `DefaultProductWorkflow`, and the
+/// inbound sink over the harness's `DefaultProductSurface`, and the
 /// canonical generic-ingress route mount the fixtures post to. Every request
 /// exercises the production per-request order: verification recipe →
 /// adapter parse → durable admission → post-admission delivery observer.
@@ -3920,8 +3923,8 @@ use crate::extension_host::channel_outbound_targets::{
 };
 use crate::extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 use crate::outbound::OutboundDeliveryTargetProvider;
-use ironclaw_outbound::TriggeredRunDeliveryStore;
-use ironclaw_product_workflow::{PreferenceTargetCodec as _, WebUiAuthenticatedCaller};
+use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
+use ironclaw_product_workflow::PreferenceTargetCodec as _;
 
 /// The retired Slack setup surface's installation id — DIFFERENT from the
 /// durable extension installation id (`INSTALLATION`) the active snapshot
@@ -3955,12 +3958,10 @@ fn generic_outbound_target_provider(
     })
 }
 
-fn operator_caller() -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn operator_caller() -> OutboundDeliveryTargetScope {
+    OutboundDeliveryTargetScope::new(
         TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
         UserId::new(USER).expect("user"),       // safety: static test user id is valid.
-        Some(AgentId::new(AGENT).expect("agent")), // safety: static test agent id is valid.
-        Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
     )
 }
 
@@ -4060,11 +4061,9 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         assert_eq!(resolved.summary.target_id, entry.summary.target_id);
     }
     // …and fails closed for foreign callers.
-    let foreign_tenant = WebUiAuthenticatedCaller::new(
+    let foreign_tenant = OutboundDeliveryTargetScope::new(
         TenantId::new("tenant:other").expect("tenant"), // safety: static test tenant id is valid.
         UserId::new(USER).expect("user"),               // safety: static test user id is valid.
-        None,
-        None,
     );
     assert!(
         provider
@@ -4074,11 +4073,9 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
             .is_empty(),
         "cross-tenant caller sees no targets"
     );
-    let other_user = WebUiAuthenticatedCaller::new(
+    let other_user = OutboundDeliveryTargetScope::new(
         TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
         UserId::new("user:slack-bob").expect("user"), // safety: static test user id is valid.
-        None,
-        None,
     );
     assert!(
         provider

@@ -862,7 +862,8 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             "GET",
             "/repos/nearai/ironclaw/actions/runs",
         )
-        assert workflow_runs["total_count"] == 0
+        assert workflow_runs["total_count"] == 1
+        assert workflow_runs["workflow_runs"][0]["id"] == 1001
 
         workflows = await github_json(
             client,
@@ -870,7 +871,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             "GET",
             "/repos/nearai/ironclaw/actions/workflows",
         )
-        assert workflows["workflows"] == []
+        assert [workflow["id"] for workflow in workflows["workflows"]] == [101]
 
 
 async def test_emulate_google_keeps_seeded_accounts_isolated(emulate_google_server):
