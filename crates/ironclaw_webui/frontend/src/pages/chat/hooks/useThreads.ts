@@ -7,7 +7,11 @@ import {
 } from "../../../lib/api";
 import { queryClient } from "../../../lib/query-client";
 import { normalizeSidebarTitle } from "../../../lib/thread-title";
-import { removeThreadList, upsertThreadInCache } from "../lib/thread-cache";
+import {
+  appendThreadListPage,
+  removeThreadList,
+  upsertThreadInCache,
+} from "../lib/thread-cache";
 
 export function useThreads() {
   // No polling: the sidebar is kept current by local cache writes after
@@ -17,16 +21,25 @@ export function useThreads() {
   // context that doesn't apply here.
   const query = useQuery({
     queryKey: ["threads"],
-    queryFn: () => listThreads({}),
+    queryFn: ({ signal }) => listThreads({ signal }),
   });
 
   const [activeThreadId, setActiveThreadId] = React.useState(null);
   const [isCreating, setIsCreating] = React.useState(false);
+  const [isLoadingMore, setIsLoadingMore] = React.useState(false);
+  const [loadMoreError, setLoadMoreError] = React.useState(null);
   // In-flight create promises keyed by project scope. A single ref would
   // hand a create for project B the pending promise from project A and
   // mis-route the UI to the wrong project's thread; scope the dedup per
   // project so only true double-submits within one scope collapse.
   const createInFlightRef = React.useRef(new Map());
+  const loadMoreInFlightRef = React.useRef(null);
+  const loadMoreAbortRef = React.useRef(null);
+
+  React.useEffect(() => () => {
+    loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
+  }, []);
 
   const handleCreateThread = React.useCallback(async (projectId) => {
     const scopeKey = projectId || "__global__";
@@ -65,6 +78,41 @@ export function useThreads() {
     [activeThreadId]
   );
 
+  const nextCursor = query.data?.next_cursor || null;
+  const handleLoadMore = React.useCallback(() => {
+    if (!nextCursor) return Promise.resolve();
+    if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
+
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    const requestedCursor = nextCursor;
+    const controller = new AbortController();
+    loadMoreAbortRef.current = controller;
+    const request = listThreads({
+      cursor: requestedCursor,
+      signal: controller.signal,
+    })
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        queryClient.setQueryData(["threads"], (data) =>
+          appendThreadListPage(data, page, requestedCursor)
+        );
+        setLoadMoreError(null);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setLoadMoreError(error);
+      })
+      .finally(() => {
+        if (loadMoreInFlightRef.current === request) {
+          loadMoreInFlightRef.current = null;
+          loadMoreAbortRef.current = null;
+          if (!controller.signal.aborted) setIsLoadingMore(false);
+        }
+      });
+    loadMoreInFlightRef.current = request;
+    return request;
+  }, [nextCursor]);
+
   // Normalize v2 SessionThreadRecord → fork's expected shape:
   // - v2 carries `thread_id`; fork's thread-sidebar reads `thread.id`
   // - v2 has no `state`/`turn_count` fields (those are v1 metadata).
@@ -90,11 +138,15 @@ export function useThreads() {
 
   return {
     threads,
-    nextCursor: query.data?.next_cursor || null,
+    nextCursor,
+    hasMore: Boolean(nextCursor),
     activeThreadId,
     setActiveThreadId,
     isLoading: query.isLoading,
     isCreating,
+    isLoadingMore,
+    loadMoreError,
+    loadMore: handleLoadMore,
     createThread: handleCreateThread,
     deleteThread: handleDeleteThread,
   };
