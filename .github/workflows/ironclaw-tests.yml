@@ -895,3 +895,20 @@ jobs:
             echo "IronClaw QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
             exit 1
           fi
+
+  legacy-tests-check:
+    # Compatibility status for branch-protection rules that have not yet
+    # migrated to the canonical Tests (IronClaw) context.
+    name: Tests (Reborn)
+    runs-on: ubuntu-latest
+    if: always()
+    needs: ironclaw-tests
+    steps:
+      - name: Mirror canonical IronClaw test result
+        env:
+          CANONICAL_RESULT: ${{ needs.ironclaw-tests.result }}
+        run: |
+          if [[ "${CANONICAL_RESULT}" != "success" ]]; then
+            echo "Tests (IronClaw) did not succeed: ${CANONICAL_RESULT}"
+            exit 1
+          fi

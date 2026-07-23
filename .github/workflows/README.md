@@ -48,6 +48,12 @@ roll-up **job names**, never individual matrix jobs):
 | `IronClaw E2E` | `ironclaw-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
+During the internal-name migration, the two IronClaw workflows also report
+`Tests (Reborn)` and `Reborn E2E` as pass-through compatibility contexts. They
+mirror the canonical roll-ups and may be removed only after the repository
+ruleset and any external status consumers have been verified on the canonical
+contexts.
+
 Rules for a roll-up job that is (or may become) required:
 
 1. Trigger on `merge_group` and report on every run (`if: always()`), so the

@@ -43,6 +43,23 @@ railway_runtime_detected() {
     || [ -n "${RAILWAY_SERVICE_ID:-}" ]
 }
 
+select_compatible_data_home() {
+  data_root="${1%/}"
+  canonical_home="$data_root/ironclaw"
+  legacy_home="$data_root/ironclaw-reborn"
+
+  # The renamed image pre-creates the canonical directory. Treat an installed
+  # config, rather than directory existence alone, as evidence that the
+  # canonical home has actually been initialized. An explicit IRONCLAW_HOME
+  # above remains the escape hatch when an operator intentionally wants a
+  # different precedence.
+  if [ -d "$legacy_home" ] && [ ! -f "$canonical_home/config.toml" ]; then
+    printf '%s\n' "$legacy_home"
+  else
+    printf '%s\n' "$canonical_home"
+  fi
+}
+
 railway_volume_mount=""
 if [ -n "${RAILWAY_VOLUME_MOUNT_PATH:-}" ]; then
   railway_volume_mount="${RAILWAY_VOLUME_MOUNT_PATH%/}"
@@ -58,19 +75,11 @@ elif [ -n "$railway_volume_mount" ]; then
     */ironclaw) IRONCLAW_HOME="$railway_volume_mount" ;;
     */ironclaw-reborn) IRONCLAW_HOME="$railway_volume_mount" ;;
     *)
-      if [ -d "$railway_volume_mount/ironclaw-reborn" ] \
-        && [ ! -e "$railway_volume_mount/ironclaw" ]; then
-        IRONCLAW_HOME="$railway_volume_mount/ironclaw-reborn"
-      else
-        IRONCLAW_HOME="$railway_volume_mount/ironclaw"
-      fi
+      IRONCLAW_HOME="$(select_compatible_data_home "$railway_volume_mount")"
       ;;
   esac
-elif [ -d "/data/ironclaw-reborn" ] && [ ! -e "/data/ironclaw" ]; then
-  # Adopt the retired image default when an existing volume contains it.
-  IRONCLAW_HOME="/data/ironclaw-reborn"
 else
-  IRONCLAW_HOME="/data/ironclaw"
+  IRONCLAW_HOME="$(select_compatible_data_home "/data")"
 fi
 export IRONCLAW_HOME
 if [ -n "${IRONCLAW_DEFAULT_CONFIG:-}" ]; then
@@ -91,6 +100,16 @@ else
       ;;
   esac
 fi
+
+# Existing deployment specs may still pass one of the former bundled config
+# paths through IRONCLAW_REBORN_DEFAULT_CONFIG. Keep accepting that exact
+# directory contract while the image also exposes a filesystem symlink for
+# tools that read the path directly.
+case "$default_config" in
+  /opt/ironclaw/reborn/*)
+    default_config="/opt/ironclaw/defaults/${default_config#/opt/ironclaw/reborn/}"
+    ;;
+esac
 config_path="$IRONCLAW_HOME/config.toml"
 
 case "$default_config" in

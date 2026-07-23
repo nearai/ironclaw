@@ -117,6 +117,7 @@ fn install_fake_realpath(bin_dir: &std::path::Path) {
 #[test]
 fn runtime_image_declares_and_prepares_ironclaw_home() {
     let dockerfile = runtime_dockerfile();
+    let entrypoint = read_repo_file("docker/ironclaw/entrypoint.sh");
 
     assert!(
         dockerfile.contains("useradd -m -d /home/ironclaw -u 1000 ironclaw"),
@@ -137,6 +138,18 @@ fn runtime_image_declares_and_prepares_ironclaw_home() {
     assert!(
         dockerfile.contains("chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw /workspace"),
         "runtime image must hand the home, IronClaw state dir, and workspace to the non-root user",
+    );
+    assert!(
+        dockerfile.contains("ln -s defaults /opt/ironclaw/reborn"),
+        "runtime image must retain the legacy bundled-config path while deployments migrate",
+    );
+    assert!(
+        dockerfile.contains("ln -s ironclaw-entrypoint /usr/local/bin/ironclaw-reborn-entrypoint"),
+        "runtime image must retain the legacy entrypoint path while deployment specs migrate",
+    );
+    assert!(
+        entrypoint.contains(r#"IRONCLAW_HOME="$(select_compatible_data_home "/data")""#),
+        "the normal docker path must use the same legacy-volume adoption policy covered by the Railway-path runtime tests",
     );
 }
 
@@ -372,7 +385,12 @@ fn ironclaw_entrypoint_accepts_legacy_deployment_variable_aliases() {
 fn ironclaw_entrypoint_adopts_existing_legacy_railway_home() {
     let fake = setup_fake_entrypoint();
     let volume_root = fake._temp.path().join("volume");
+    let canonical_home = volume_root.join("ironclaw");
     let legacy_home = volume_root.join("ironclaw-reborn");
+    // The renamed image pre-creates the canonical directory. That empty
+    // directory is not evidence of an initialized canonical home and must not
+    // shadow an existing legacy volume.
+    std::fs::create_dir_all(&canonical_home).expect("empty canonical home dir");
     std::fs::create_dir_all(&legacy_home).expect("legacy home dir");
     std::fs::write(
         legacy_home.join("config.toml"),
@@ -402,8 +420,79 @@ fn ironclaw_entrypoint_adopts_existing_legacy_railway_home() {
         "api_version = \"legacy.volume/v1\"\n"
     );
     assert!(
-        !volume_root.join("ironclaw").exists(),
-        "the canonical home must not shadow an existing legacy volume"
+        !canonical_home.join("config.toml").exists(),
+        "an empty canonical directory must not shadow an initialized legacy volume"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn ironclaw_entrypoint_prefers_initialized_canonical_home_over_legacy_home() {
+    let fake = setup_fake_entrypoint();
+    let volume_root = fake._temp.path().join("volume");
+    let canonical_home = volume_root.join("ironclaw");
+    let legacy_home = volume_root.join("ironclaw-reborn");
+    std::fs::create_dir_all(&canonical_home).expect("canonical home dir");
+    std::fs::create_dir_all(&legacy_home).expect("legacy home dir");
+    std::fs::write(
+        canonical_home.join("config.toml"),
+        "api_version = \"canonical.volume/v1\"\n",
+    )
+    .expect("canonical config");
+    std::fs::write(
+        legacy_home.join("config.toml"),
+        "api_version = \"legacy.volume/v1\"\n",
+    )
+    .expect("legacy config");
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/ironclaw/entrypoint.sh"))
+        .args(["serve", "--help"])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .env("RAILWAY_VOLUME_MOUNT_PATH", &volume_root)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(canonical_home.join("config.toml")).expect("canonical config"),
+        "api_version = \"canonical.volume/v1\"\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn ironclaw_entrypoint_maps_legacy_bundled_default_config_path() {
+    let fake = setup_fake_entrypoint_recording_cp();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/ironclaw/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env(
+            "IRONCLAW_REBORN_DEFAULT_CONFIG",
+            "/opt/ironclaw/reborn/config.toml",
+        )
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("copied config"),
+        "/opt/ironclaw/defaults/config.toml\n[storage]\n"
     );
 }
 

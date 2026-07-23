@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Internal-name migration compatibility:** keep initialized legacy Docker
+  volumes visible when the canonical directory is only an empty image default,
+  accept former bundled-config and entrypoint paths, and mirror the former CI
+  check and live-canary artifact contracts during the external migration.
 - **Model recovery:** preserve typed, sanitized context-overflow,
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider

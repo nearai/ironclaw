@@ -17,11 +17,21 @@ changing one requires an explicit compatibility migration and rollback plan.
 - `REBORN_TOOL_DISCLOSURE` and `REBORN_COLLAPSE_REPEATED_FAILURES` remain
   fallback aliases for the corresponding `IRONCLAW_*` variables.
 - Existing `~/.ironclaw/reborn` and `/data/ironclaw-reborn` homes are adopted
-  in place when no canonical IronClaw home exists.
+  in place when no initialized canonical IronClaw home exists. A merely
+  pre-created `/data/ironclaw` directory does not shadow a legacy home with
+  state; an explicit `IRONCLAW_HOME` always wins.
+- Docker images retain `/opt/ironclaw/reborn/config*.toml` and
+  `/usr/local/bin/ironclaw-reborn-entrypoint` as symlinked compatibility
+  paths. The entrypoint also maps old bundled-config values to
+  `/opt/ironclaw/defaults/` before validation.
 - Existing `com.ironclaw.reborn` and `ironclaw-reborn.service` service
   definitions remain manageable by the CLI.
 - The `reborn-live-canary-pr` GitHub environment and old live-QA repository
   variable names remain fallback inputs until those external settings migrate.
+- CI publishes both the canonical and legacy live-canary artifact contracts,
+  and mirrors the canonical roll-up results under `Tests (Reborn)` and
+  `Reborn E2E`. Remove those aliases only after external consumers and
+  branch-protection rules have been verified on the canonical names.
 - The external `nearai/benchmarks` workflow still accepts
   `ironclaw-reborn` as a compatibility framework identifier.
 
@@ -50,6 +60,7 @@ persisted turn or run records and therefore remain readable.
 ## Compatibility rule
 
 New code writes canonical IronClaw configuration and uses canonical routes,
-artifact names, Docker paths, and observability targets. Compatibility aliases
-must converge on the same handlers and policy boundaries; they must not create
-a second behavior path.
+artifact names, Docker paths, and observability targets. Transitional aliases
+may mirror those outputs for existing consumers, but must converge on the same
+handlers, artifacts, results, and policy boundaries; they must not create a
+second behavior path.

@@ -844,6 +844,31 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Package prepared legacy live-QA binary contract
+        env:
+          LEGACY_STAGE: ${{ runner.temp }}/prepared-reborn-webui-v2-binary-stage
+        run: |
+          set -euo pipefail
+          artifact_dir="artifacts/prepared-reborn-webui-v2-binary"
+          rm -rf "${LEGACY_STAGE}" "${artifact_dir}"
+          mkdir -p "${LEGACY_STAGE}" "${artifact_dir}"
+          tar -C "${LEGACY_STAGE}" -xzf artifacts/prepared-ironclaw-webui-v2-binary/ironclaw.tar.gz ironclaw
+          install -m 0755 "${LEGACY_STAGE}/ironclaw" "${LEGACY_STAGE}/ironclaw-reborn"
+          tar -C "${LEGACY_STAGE}" -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
+          (
+            cd "${artifact_dir}"
+            sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
+          )
+          cp artifacts/prepared-ironclaw-webui-v2-binary/manifest.json "${artifact_dir}/manifest.json"
+
+      - name: Upload prepared legacy live-QA binary contract
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}
+          path: artifacts/prepared-reborn-webui-v2-binary/
+          if-no-files-found: error
+          retention-days: 1
+
   ironclaw-webui-v2-live-qa:
     name: IronClaw WebUI v2 Live QA (${{ matrix.shard_name }})
     needs:

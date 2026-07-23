@@ -8293,6 +8293,16 @@ class IronClawWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-ironclaw-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-ironclaw-webui-v2-binary/", prepare_body)
+        self.assertIn(
+            "prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}",
+            prepare_body,
+            "existing downstream live-QA consumers must keep receiving the prepared legacy artifact",
+        )
+        self.assertIn(
+            "path: artifacts/prepared-reborn-webui-v2-binary/",
+            prepare_body,
+        )
+        self.assertIn("ironclaw-reborn.tar.gz", prepare_body)
 
         ironclaw_e2e_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/ironclaw-e2e.yml"
@@ -8303,7 +8313,6 @@ class IronClawWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ironclaw_e2e,
         )
         self.assertIn("--argjson features '[]'", ironclaw_e2e)
-        self.assertNotIn("target/debug/ironclaw-reborn", ironclaw_e2e)
         self.assertIn(
             "ironclaw.tar.gz\" ironclaw",
             ironclaw_e2e,
@@ -8311,6 +8320,37 @@ class IronClawWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn(
             "name: ironclaw-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}",
             ironclaw_e2e,
+        )
+        self.assertIn(
+            "ironclaw-reborn.tar.gz",
+            ironclaw_e2e,
+            "the transition workflow must keep publishing the legacy archive",
+        )
+        self.assertIn(
+            "name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}",
+            ironclaw_e2e,
+            "existing live-canary consumers must keep receiving the legacy artifact name",
+        )
+        self.assertRegex(
+            ironclaw_e2e,
+            r"(?ms)^  legacy-e2e-check:\n.*?^    name: Reborn E2E\n"
+            r".*?^    needs: ironclaw-e2e\n",
+            "the former required-check context must mirror the canonical roll-up",
+        )
+        self.assertIn(
+            'tar -C "${LEGACY_STAGE}" -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn',
+            ironclaw_e2e,
+        )
+
+        ironclaw_tests_path = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/ironclaw-tests.yml"
+        )
+        ironclaw_tests = ironclaw_tests_path.read_text(encoding="utf-8")
+        self.assertRegex(
+            ironclaw_tests,
+            r"(?ms)^  legacy-tests-check:\n.*?^    name: Tests \(Reborn\)\n"
+            r".*?^    needs: ironclaw-tests\n",
+            "the former required-check context must mirror the canonical roll-up",
         )
 
         command_workflow_path = (

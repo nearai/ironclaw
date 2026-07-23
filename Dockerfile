@@ -104,6 +104,8 @@ ENV HOME=/home/ironclaw \
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw /workspace \
+    && ln -s defaults /opt/ironclaw/reborn \
+    && ln -s ironclaw-entrypoint /usr/local/bin/ironclaw-reborn-entrypoint \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw /workspace \
     && chmod +x /usr/local/bin/ironclaw-entrypoint
 
