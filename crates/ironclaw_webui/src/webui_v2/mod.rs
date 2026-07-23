@@ -10,7 +10,7 @@
 //!   extension, and automation reads. They never reach into the dispatcher,
 //!   `HostRuntime`, run-state, DB stores, or any runtime lane.
 //! - Auth and CORS are **not** enforced here. Host composition runs the
-//!   bearer-token middleware that builds a [`WebUiAuthenticatedCaller`] and
+//!   bearer-token middleware that builds a [`ProductSurfaceCaller`] and
 //!   injects it as an `Extension` before traffic reaches these handlers.
 //! - The [`IngressRouteDescriptor`] set returned by [`webui_v2_routes`] is
 //!   the canonical contract the host composes against: mount path, method,
@@ -36,7 +36,7 @@
 //!
 //! [`ProductSurface`]: ironclaw_product::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
-//! [`WebUiAuthenticatedCaller`]: ironclaw_product::WebUiAuthenticatedCaller
+//! [`ProductSurfaceCaller`]: ironclaw_product::ProductSurfaceCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
 mod descriptors;

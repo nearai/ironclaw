@@ -7,9 +7,9 @@ use serde::Deserialize;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleProductPayload, LifecycleProductResponse, ProductSurfaceError,
-    ProductSurfaceValidationCode, RebornExtensionCredentialSetup, RebornExtensionSetupSecret,
-    WebUiSetupExtensionRequest,
+    LifecycleProductPayload, LifecycleProductResponse, ProductSetupExtensionRequest,
+    ProductSurfaceError, ProductSurfaceValidationCode, RebornExtensionCredentialSetup,
+    RebornExtensionSetupSecret,
 };
 
 use super::{
@@ -67,7 +67,7 @@ pub(super) async fn project(
 /// credential-submission path below and the channel-config routing in
 /// `lifecycle_setup`, so the wire shape is decoded exactly once.
 pub(super) fn parse_submit_payload(
-    request: WebUiSetupExtensionRequest,
+    request: ProductSetupExtensionRequest,
 ) -> Result<SetupSubmitPayload, ProductSurfaceError> {
     let payload = request
         .payload
@@ -338,8 +338,7 @@ mod tests {
             test_scope(),
             &extension_id,
             &[manual_requirement()],
-            parse_submit_payload(WebUiSetupExtensionRequest {
-                client_action_id: None,
+            parse_submit_payload(ProductSetupExtensionRequest {
                 action: Some("submit".to_string()),
                 payload: Some(serde_json::json!({ "secrets": {} })),
             })

@@ -45,7 +45,7 @@ use ironclaw_product::{
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
-    CREATE_THREAD_OPERATION, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
     ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
@@ -73,8 +73,11 @@ use ironclaw_product::{
     PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
     PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
     PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInput, ProductCapabilityInvoker, ProductOperationId,
-    ProductSurface, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductAgentBoundCaller, ProductCancelRunRequest, ProductCapabilityInvoker,
+    ProductCreateThreadRequest, ProductListAutomationsRequest, ProductListThreadsRequest,
+    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader,
     ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
     ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse,
@@ -117,10 +120,7 @@ use ironclaw_product::{
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
     SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
@@ -165,7 +165,7 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Notify, oneshot};
 
-fn caller() -> WebUiAuthenticatedCaller {
+fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
 }
 
@@ -179,7 +179,7 @@ async fn wait_until_after(floor: chrono::DateTime<Utc>) {
     }
 }
 
-fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
+fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
     caller_for_user_with_project(user_id, Some("project-alpha"))
 }
 
@@ -187,12 +187,12 @@ fn turn_actor_for_user(user_id: &str) -> TurnActor {
     TurnActor::new(UserId::new(user_id).expect("valid user"))
 }
 
-fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
+fn caller_with_project(project_id: Option<&str>) -> ProductSurfaceCaller {
     caller_for_user_with_project("user-alpha", project_id)
 }
 
-fn caller_without_agent() -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller_without_agent() -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("valid tenant"),
         UserId::new("user-alpha").expect("valid user"),
         None,
@@ -200,11 +200,8 @@ fn caller_without_agent() -> WebUiAuthenticatedCaller {
     )
 }
 
-fn caller_for_user_with_project(
-    user_id: &str,
-    project_id: Option<&str>,
-) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller_for_user_with_project(user_id: &str, project_id: Option<&str>) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("valid tenant"),
         UserId::new(user_id).expect("valid user"),
         Some(AgentId::new("agent-alpha").expect("valid agent")),
@@ -220,7 +217,7 @@ fn automation_run_id() -> TurnRunId {
     TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("valid automation run id")
 }
 
-fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
+fn fake_thread_history(owner: &ProductSurfaceCaller, thread_id: &str) -> ThreadHistory {
     let thread_id = ThreadId::new(thread_id).expect("valid thread id");
     let scope = ThreadScope {
         tenant_id: owner.tenant_id.clone(),
@@ -263,7 +260,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
     }
 }
 
-fn thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
+fn thread_scope_for(caller: &ProductSurfaceCaller) -> ThreadScope {
     ThreadScope {
         tenant_id: caller.tenant_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
@@ -273,10 +270,7 @@ fn thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
     }
 }
 
-fn legacy_webui_source_binding_id_for(
-    caller: &WebUiAuthenticatedCaller,
-    thread_id: &str,
-) -> String {
+fn legacy_webui_source_binding_id_for(caller: &ProductSurfaceCaller, thread_id: &str) -> String {
     format!(
         "{}{}{}{}{}",
         segment("surface", "webui"),
@@ -298,7 +292,7 @@ fn segment(name: &str, value: &str) -> String {
 /// thread-bound facade calls pass the ownership check.
 async fn setup_owned_thread(
     services: &RebornServices,
-    owner: WebUiAuthenticatedCaller,
+    owner: ProductSurfaceCaller,
     thread_id: &str,
 ) {
     create_thread_for(services, owner, thread_id).await;
@@ -1335,7 +1329,7 @@ struct RevocableAutomationFacade {
 }
 
 impl RevocableAutomationFacade {
-    fn new(thread_id: ThreadId, caller: &WebUiAuthenticatedCaller) -> Self {
+    fn new(thread_id: ThreadId, caller: &ProductSurfaceCaller) -> Self {
         let scope = TriggerRunThreadScope {
             agent_id: caller.agent_id.clone(),
             project_id: caller.project_id.clone(),
@@ -1422,13 +1416,13 @@ impl AutomationProductFacade for ErroringAutomationFacade {
 
 #[derive(Default)]
 struct RecordingOutboundPreferencesFacade {
-    get_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    get_calls: Mutex<Vec<ProductSurfaceCaller>>,
     set_calls: Mutex<usize>,
-    list_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    list_calls: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
 impl RecordingOutboundPreferencesFacade {
-    fn get_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
+    fn get_calls(&self) -> Vec<ProductSurfaceCaller> {
         self.get_calls.lock().expect("lock").clone()
     }
 
@@ -1436,12 +1430,12 @@ impl RecordingOutboundPreferencesFacade {
         *self.set_calls.lock().expect("lock")
     }
 
-    fn list_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
+    fn list_calls(&self) -> Vec<ProductSurfaceCaller> {
         self.list_calls.lock().expect("lock").clone()
     }
 }
 
-type OutboundPreferencesInvokeCall = (WebUiAuthenticatedCaller, CapabilityId, serde_json::Value);
+type OutboundPreferencesInvokeCall = (ProductSurfaceCaller, CapabilityId, serde_json::Value);
 
 #[derive(Default, Clone)]
 struct RecordingOutboundPreferencesInvoker {
@@ -1458,7 +1452,7 @@ impl RecordingOutboundPreferencesInvoker {
 impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
     async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         capability: CapabilityId,
         input: serde_json::Value,
         activity_id: ActivityId,
@@ -1475,7 +1469,7 @@ impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
 impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
     async fn get_outbound_preferences(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         self.get_calls.lock().expect("lock").push(caller);
         Ok(RebornOutboundPreferencesResponse {
@@ -1487,7 +1481,7 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
 
     async fn set_outbound_preferences(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let _ = (caller, request);
@@ -1501,7 +1495,7 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
 
     async fn list_outbound_delivery_targets(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         self.list_calls.lock().expect("lock").push(caller);
         Ok(RebornOutboundDeliveryTargetListResponse {
@@ -2229,13 +2223,13 @@ fn scripted_stub_unreachable(method: &str) -> ! {
 
 async fn create_thread_for(
     services: &RebornServices,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     thread_id: &str,
 ) {
     services
         .create_thread(
             caller,
-            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+            serde_json::from_value::<ProductCreateThreadRequest>(json!({
                 "client_action_id": format!("create-{thread_id}"),
                 "requested_thread_id": thread_id
             }))
@@ -2256,7 +2250,7 @@ async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
         .invoke(
             caller(),
             CapabilityId::new("product.test_invoke").expect("valid capability id"),
-            ProductCapabilityInput::json(json!({"request": "test"})),
+            json!({"request": "test"}),
             ActivityId::new(),
         )
         .await;
@@ -2275,7 +2269,7 @@ async fn duplicate_create_thread_replays_generated_thread_for_same_client_action
         Arc::new(FakeTurnCoordinator::default()),
     );
     let request = || {
-        serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+        serde_json::from_value::<ProductCreateThreadRequest>(json!({
             "client_action_id": "create-duplicate"
         }))
         .expect("request")
@@ -2305,7 +2299,7 @@ async fn create_thread_metadata_is_serialized_json() {
     let response = services
         .create_thread(
             caller(),
-            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+            serde_json::from_value::<ProductCreateThreadRequest>(json!({
                 "client_action_id": client_action_id
             }))
             .expect("request"),
@@ -2850,9 +2844,7 @@ async fn project_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(PROJECT_UPDATE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                json!({ "project_id": "project-alpha", "name": "Renamed" }),
-            ),
+            json!({ "project_id": "project-alpha", "name": "Renamed" }),
             ActivityId::new(),
         )
         .await
@@ -2870,7 +2862,7 @@ async fn project_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(PROJECT_DELETE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "project_id": "project-alpha" })),
+            json!({ "project_id": "project-alpha" }),
             ActivityId::new(),
         )
         .await
@@ -2888,14 +2880,12 @@ async fn project_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(PROJECT_MEMBER_ADD_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAddMemberRequest {
-                    project_id: "project-alpha".to_string(),
-                    user_id: "user-beta".to_string(),
-                    role: RebornProjectRole::Viewer,
-                })
-                .expect("project member add input"),
-            ),
+            serde_json::to_value(RebornAddMemberRequest {
+                project_id: "project-alpha".to_string(),
+                user_id: "user-beta".to_string(),
+                role: RebornProjectRole::Viewer,
+            })
+            .expect("project member add input"),
             ActivityId::new(),
         )
         .await
@@ -2913,14 +2903,12 @@ async fn project_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(PROJECT_MEMBER_UPDATE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornUpdateMemberRoleRequest {
-                    project_id: "project-alpha".to_string(),
-                    user_id: "user-beta".to_string(),
-                    role: RebornProjectRole::Editor,
-                })
-                .expect("project member update input"),
-            ),
+            serde_json::to_value(RebornUpdateMemberRoleRequest {
+                project_id: "project-alpha".to_string(),
+                user_id: "user-beta".to_string(),
+                role: RebornProjectRole::Editor,
+            })
+            .expect("project member update input"),
             ActivityId::new(),
         )
         .await
@@ -2938,13 +2926,11 @@ async fn project_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(PROJECT_MEMBER_REMOVE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornRemoveMemberRequest {
-                    project_id: "project-alpha".to_string(),
-                    user_id: "user-beta".to_string(),
-                })
-                .expect("project member remove input"),
-            ),
+            serde_json::to_value(RebornRemoveMemberRequest {
+                project_id: "project-alpha".to_string(),
+                user_id: "user-beta".to_string(),
+            })
+            .expect("project member remove input"),
             ActivityId::new(),
         )
         .await
@@ -3009,12 +2995,10 @@ async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
         .invoke(
             caller(),
             CapabilityId::new(THREAD_DELETE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornDeleteThreadRequest {
-                    thread_id: "thread-session-product-surface".to_string(),
-                })
-                .expect("thread delete input"),
-            ),
+            serde_json::to_value(RebornDeleteThreadRequest {
+                thread_id: "thread-session-product-surface".to_string(),
+            })
+            .expect("thread delete input"),
             ActivityId::new(),
         )
         .await
@@ -3078,7 +3062,7 @@ async fn create_thread_scopes_to_authorized_project() {
     services
         .create_thread(
             caller_with_project(Some("project-alpha")),
-            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+            serde_json::from_value::<ProductCreateThreadRequest>(json!({
                 "client_action_id": "create-scoped",
                 "requested_thread_id": "thread-scoped",
                 "project_id": "project-scoped"
@@ -3112,7 +3096,7 @@ async fn create_thread_rejects_unauthorized_project() {
     let err = services
         .create_thread(
             caller_with_project(Some("project-alpha")),
-            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+            serde_json::from_value::<ProductCreateThreadRequest>(json!({
                 "client_action_id": "create-denied",
                 "requested_thread_id": "thread-denied",
                 "project_id": "project-forbidden"
@@ -3142,7 +3126,7 @@ async fn create_thread_without_proposed_project_keeps_caller_scope() {
     services
         .create_thread(
             caller_with_project(Some("project-alpha")),
-            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+            serde_json::from_value::<ProductCreateThreadRequest>(json!({
                 "client_action_id": "create-default",
                 "requested_thread_id": "thread-default"
             }))
@@ -3166,7 +3150,7 @@ async fn create_thread_without_proposed_project_keeps_caller_scope() {
 fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_typed() {
     let query = THREADS_VIEW
         .query(
-            WebUiListThreadsRequest::default()
+            ProductListThreadsRequest::default()
                 .set_limit(25)
                 .set_needs_approval(true),
             Some("cursor-1".to_string()),
@@ -3192,19 +3176,6 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
 
     assert!(response.threads.is_empty());
     assert_eq!(response.next_cursor.as_deref(), Some("cursor-2"));
-
-    let command = CREATE_THREAD_OPERATION
-        .request(WebUiCreateThreadRequest {
-            client_action_id: Some("action-1".to_string()),
-            requested_thread_id: None,
-            project_id: None,
-        })
-        .expect("create thread command");
-    assert_eq!(
-        command.operation_id,
-        ProductOperationId::CreateThread.as_str()
-    );
-    assert_eq!(command.input["client_action_id"], "action-1");
 
     assert_eq!(
         OUTBOUND_PREFERENCES_SET_CAPABILITY
@@ -3282,7 +3253,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-1",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -3356,7 +3327,7 @@ async fn submit_turn_records_skill_activation_message_before_turn_wake() {
     let submitted = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-skill-activation",
                 "thread_id": "thread-alpha",
                 "content": "/code-review inspect this"
@@ -3421,7 +3392,7 @@ async fn busy_submit_clears_skill_activation_message() {
     let rejected = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-skill-activation-busy",
                 "thread_id": "thread-alpha",
                 "content": "/code-review inspect this"
@@ -3469,7 +3440,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-recorder-fails",
                 "thread_id": "thread-alpha",
                 "content": "/code-review inspect this"
@@ -3576,7 +3547,7 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
     create_thread_for(&services, caller(), "thread-alpha").await;
 
     let request = || {
-        serde_json::from_value::<WebUiSendMessageRequest>(json!({
+        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
             "client_action_id": "send-duplicate",
             "thread_id": "thread-alpha",
             "content": "hello once"
@@ -3612,7 +3583,7 @@ async fn submitted_replay_with_missing_or_invalid_run_id_maps_to_replay_unavaila
         let err = services
             .submit_turn(
                 caller(),
-                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                     "client_action_id": "send-replay-corrupt",
                     "thread_id": "thread-alpha",
                     "content": "hello from webui"
@@ -3639,7 +3610,7 @@ async fn submit_turn_rejects_missing_thread_before_turn_submission() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-missing",
                 "thread_id": "thread-missing",
                 "content": "this thread was never created"
@@ -3666,7 +3637,7 @@ async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-capacity",
                 "thread_id": "thread-alpha",
                 "content": "capacity denied"
@@ -3692,7 +3663,7 @@ async fn submit_turn_rejects_non_owner_before_turn_submission() {
     let err = services
         .submit_turn(
             caller_for_user("user-beta"),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-denied",
                 "thread_id": "thread-alpha",
                 "content": "wrong participant"
@@ -3754,7 +3725,7 @@ async fn same_thread_retry_replays_legacy_submitted_message_after_binding_key_ch
     let replayed = services
         .submit_turn(
             caller,
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-legacy-submitted",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -3813,7 +3784,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
     let response = services
         .submit_turn(
             caller.clone(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-legacy-accepted",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -3852,7 +3823,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-cross-thread",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -3865,7 +3836,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-cross-thread",
                 "thread_id": "thread-beta",
                 "content": "hello twice"
@@ -3910,7 +3881,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let services = Arc::new(services);
 
     let request = || {
-        serde_json::from_value::<WebUiSendMessageRequest>(json!({
+        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
             "client_action_id": "send-concurrent",
             "thread_id": "thread-alpha",
             "content": "hello once"
@@ -4090,7 +4061,7 @@ async fn delete_thread_rejects_thread_with_active_run() {
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-before-delete",
                 "thread_id": "thread-alpha",
                 "content": "keep this run alive"
@@ -4135,7 +4106,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
         submit_services
             .submit_turn(
                 caller(),
-                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                     "client_action_id": "send-racing-delete",
                     "thread_id": "thread-alpha",
                     "content": "submit while delete races"
@@ -4225,7 +4196,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
     services
         .submit_turn(
             caller.clone(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-no-project",
                 "thread_id": "thread-alpha",
                 "content": "hello once"
@@ -4238,7 +4209,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
     let err = services
         .submit_turn(
             caller,
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-no-project",
                 "thread_id": "thread-beta",
                 "content": "hello twice"
@@ -4275,7 +4246,7 @@ async fn duplicate_submit_is_isolated_by_project_scope() {
     let first = services
         .submit_turn(
             caller_with_project(Some("project-alpha")),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-project-scoped",
                 "thread_id": "thread-alpha",
                 "content": "hello alpha"
@@ -4287,7 +4258,7 @@ async fn duplicate_submit_is_isolated_by_project_scope() {
     let second = services
         .submit_turn(
             caller_with_project(Some("project-beta")),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-project-scoped",
                 "thread_id": "thread-beta",
                 "content": "hello beta"
@@ -4312,7 +4283,7 @@ async fn validation_errors_are_stable_and_sanitized() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-1",
                 "thread_id": "thread-alpha"
             }))
@@ -4349,7 +4320,7 @@ async fn turn_admission_rejected_maps_to_busy_taxonomy() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-rate-limited",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -4378,7 +4349,7 @@ async fn turn_unauthorized_maps_to_forbidden() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-forbidden",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -4449,7 +4420,7 @@ async fn turn_error_categories_map_to_facade_taxonomy() {
         let err = services
             .submit_turn(
                 caller(),
-                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                     "client_action_id": format!("send-{name}"),
                     "thread_id": thread_id,
                     "content": "hello from webui"
@@ -4705,7 +4676,7 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
     let response = services
         .cancel_run(
             caller(),
-            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+            serde_json::from_value::<ProductCancelRunRequest>(json!({
                 "client_action_id": "cancel-1",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -4734,7 +4705,7 @@ async fn retry_run_uses_turn_facade_and_stable_response() {
     let response = services
         .retry_run(
             caller(),
-            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+            serde_json::from_value::<ProductRetryRunRequest>(json!({
                 "client_action_id": "retry-1",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string()
@@ -4783,7 +4754,7 @@ async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
     let err = services
         .retry_run(
             caller(),
-            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+            serde_json::from_value::<ProductRetryRunRequest>(json!({
                 "client_action_id": "retry-invalid-run",
                 "thread_id": "thread-alpha",
                 "run_id": "not-a-run-uuid"
@@ -4824,7 +4795,7 @@ async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
     let err = services
         .retry_run(
             caller(),
-            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+            serde_json::from_value::<ProductRetryRunRequest>(json!({
                 "client_action_id": "retry-not-retryable",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string()
@@ -4852,7 +4823,7 @@ async fn retry_run_rejects_cross_user_access() {
     let alice = caller();
     create_thread_for(&services, alice.clone(), "thread-alice").await;
 
-    let bob = WebUiAuthenticatedCaller::new(
+    let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("user-bob").expect("user"),
         alice.agent_id.clone(),
@@ -4862,7 +4833,7 @@ async fn retry_run_rejects_cross_user_access() {
     let err = services
         .retry_run(
             bob,
-            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+            serde_json::from_value::<ProductRetryRunRequest>(json!({
                 "client_action_id": "retry-cross",
                 "thread_id": "thread-alice",
                 "run_id": run_id_string()
@@ -4893,7 +4864,7 @@ async fn approved_gate_resolution_resumes_turn() {
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-1",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -4933,7 +4904,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-missing-actor",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -4965,7 +4936,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-mismatched-actor",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -4996,7 +4967,7 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-auth-fallback",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5028,7 +4999,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-auth-state-routed",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5063,7 +5034,7 @@ async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-auth-stale",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5098,7 +5069,7 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-approval-state-routed",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5136,7 +5107,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-approval-stale",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5172,7 +5143,7 @@ async fn terminal_run_state_rejects_gate_resolution_before_shape_fallback() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-terminal",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5207,7 +5178,7 @@ async fn approval_gate_resolution_uses_approval_interaction_service() {
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "approval-gate-1",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5246,7 +5217,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "approval-gate-deny",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5283,7 +5254,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-credential",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5319,7 +5290,7 @@ async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-credential",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5357,7 +5328,7 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-auth-deny",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5425,7 +5396,7 @@ async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-auth-denial-resumed",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5462,7 +5433,7 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-auth-missing-run",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5500,7 +5471,7 @@ async fn denied_gate_resolution_cancels_run() {
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-2",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5531,7 +5502,7 @@ async fn cancel_run_rejects_cross_user_access() {
     create_thread_for(&services, alice.clone(), "thread-alice").await;
 
     // Bob shares Alice's (tenant, agent, project) scope and guesses her thread.
-    let bob = WebUiAuthenticatedCaller::new(
+    let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("user-bob").expect("user"),
         alice.agent_id.clone(),
@@ -5541,7 +5512,7 @@ async fn cancel_run_rejects_cross_user_access() {
     let err = services
         .cancel_run(
             bob,
-            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+            serde_json::from_value::<ProductCancelRunRequest>(json!({
                 "client_action_id": "cancel-cross",
                 "thread_id": "thread-alice",
                 "run_id": run_id_string(),
@@ -5578,7 +5549,7 @@ async fn cancel_run_remaps_thread_scope_mismatch_to_not_found() {
     let err = services
         .cancel_run(
             caller(),
-            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+            serde_json::from_value::<ProductCancelRunRequest>(json!({
                 "client_action_id": "cancel-scope-mismatch",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5611,7 +5582,7 @@ async fn resolve_gate_rejects_cross_user_access() {
     create_thread_for(&services, alice.clone(), "thread-alice").await;
     coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
 
-    let bob = WebUiAuthenticatedCaller::new(
+    let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("user-bob").expect("user"),
         alice.agent_id.clone(),
@@ -5621,7 +5592,7 @@ async fn resolve_gate_rejects_cross_user_access() {
     let err = services
         .resolve_gate(
             bob,
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-cross",
                 "thread_id": "thread-alice",
                 "run_id": run_id_string(),
@@ -5659,7 +5630,7 @@ async fn stream_events_rejects_cross_user_access() {
     let alice = caller();
     setup_owned_thread(&services, alice.clone(), "thread-alice").await;
 
-    let bob = WebUiAuthenticatedCaller::new(
+    let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("user-bob").expect("user"),
         alice.agent_id.clone(),
@@ -5703,7 +5674,7 @@ async fn create_thread_explicit_id_collision_remaps_to_not_found() {
     let alice = caller();
     setup_owned_thread(&services, alice.clone(), "thread-alice").await;
 
-    let bob = WebUiAuthenticatedCaller::new(
+    let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("user-bob").expect("user"),
         alice.agent_id.clone(),
@@ -5713,7 +5684,7 @@ async fn create_thread_explicit_id_collision_remaps_to_not_found() {
     let err = services
         .create_thread(
             bob,
-            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+            serde_json::from_value::<ProductCreateThreadRequest>(json!({
                 "client_action_id": "create-cross",
                 "requested_thread_id": "thread-alice",
             }))
@@ -5744,7 +5715,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-stale",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5778,7 +5749,7 @@ async fn generic_gate_resolution_with_persistent_flag_is_rejected() {
     let err = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "gate-always",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5816,7 +5787,7 @@ async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction
     let response = services
         .resolve_gate(
             caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "approval-gate-always",
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
@@ -5956,7 +5927,7 @@ async fn list_automation_dispatches_through_product_facade() {
     let listed = query_automations(
         &services,
         caller(),
-        WebUiListAutomationsRequest::default().set_limit(10),
+        ProductListAutomationsRequest::default().set_limit(10),
     )
     .await
     .expect("list automations");
@@ -6085,7 +6056,7 @@ struct ConnectedChannelConnectionFacade {
 impl ChannelConnectionFacade for ConnectedChannelConnectionFacade {
     async fn caller_channel_connections(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
         Ok(self.connections.clone())
     }
@@ -6273,14 +6244,14 @@ struct AccountStatusConnectionFacade {
 impl ChannelConnectionFacade for AccountStatusConnectionFacade {
     async fn caller_channel_connections(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
         Ok(self.connections.clone())
     }
 
     async fn caller_channel_account_states(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, ProductSurfaceError>
     {
         Ok(self.account_states.clone())
@@ -6845,7 +6816,7 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
         .invoke(
             caller(),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "final_reply_target_id": "slack-dm-alpha" })),
+            json!({ "final_reply_target_id": "slack-dm-alpha" }),
             ActivityId::new(),
         )
         .await
@@ -6906,7 +6877,7 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
         .invoke(
             caller_for_user_with_project("user-bravo", None),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "final_reply_target_id": "slack-dm-beta" })),
+            json!({ "final_reply_target_id": "slack-dm-beta" }),
             ActivityId::new(),
         )
         .await
@@ -7038,7 +7009,7 @@ async fn trace_reads_are_available_as_product_views() {
             .expect("clock")
             .as_nanos()
     );
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id.as_str()).expect("user"),
         None,
@@ -7098,7 +7069,7 @@ async fn set_outbound_preferences_can_clear_final_target() {
         .invoke(
             caller(),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({})),
+            json!({}),
             ActivityId::new(),
         )
         .await
@@ -7153,7 +7124,7 @@ async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
         .invoke(
             caller(),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "final_reply_target_id": max_length_target_id })),
+            json!({ "final_reply_target_id": max_length_target_id }),
             ActivityId::new(),
         )
         .await
@@ -7183,7 +7154,7 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = query_automations(
         &services,
         caller_without_agent(),
-        WebUiListAutomationsRequest::default().set_limit(10),
+        ProductListAutomationsRequest::default().set_limit(10),
     )
     .await
     .expect_err("missing agent id should fail closed");
@@ -7205,7 +7176,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     query_automations(
         &services,
         caller(),
-        WebUiListAutomationsRequest::default().set_limit(u32::MAX),
+        ProductListAutomationsRequest::default().set_limit(u32::MAX),
     )
     .await
     .expect("list automations");
@@ -7231,7 +7202,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     query_automations(
         &services,
         caller(),
-        WebUiListAutomationsRequest::default().set_limit(0),
+        ProductListAutomationsRequest::default().set_limit(0),
     )
     .await
     .expect("list automations");
@@ -7253,9 +7224,13 @@ async fn list_automations_uses_default_limit_when_omitted() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    query_automations(&services, caller(), WebUiListAutomationsRequest::default())
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default(),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -7278,7 +7253,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     query_automations(
         &services,
         caller(),
-        WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
+        ProductListAutomationsRequest::default().set_run_limit(u32::MAX),
     )
     .await
     .expect("list automations");
@@ -7304,7 +7279,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     query_automations(
         &services,
         caller(),
-        WebUiListAutomationsRequest::default().set_run_limit(0),
+        ProductListAutomationsRequest::default().set_run_limit(0),
     )
     .await
     .expect("list automations");
@@ -7329,7 +7304,7 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     query_automations(
         &services,
         caller(),
-        WebUiListAutomationsRequest::default().set_include_completed(true),
+        ProductListAutomationsRequest::default().set_include_completed(true),
     )
     .await
     .expect("list automations");
@@ -7351,9 +7326,13 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    query_automations(&services, caller(), WebUiListAutomationsRequest::default())
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default(),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -7613,7 +7592,7 @@ async fn automation_mutations_are_available_as_product_capabilities() {
             .invoke(
                 caller(),
                 CapabilityId::new(capability_id).expect("capability id"),
-                ProductCapabilityInput::json(input),
+                input,
                 ActivityId::new(),
             )
             .await
@@ -7648,17 +7627,17 @@ async fn rename_automation_validates_name_before_product_facade() {
 
     for (request, expected_code) in [
         (
-            WebUiRenameAutomationRequest { name: None },
+            ProductRenameAutomationRequest { name: None },
             ProductSurfaceValidationCode::MissingField,
         ),
         (
-            WebUiRenameAutomationRequest {
+            ProductRenameAutomationRequest {
                 name: Some("  ".to_string()),
             },
             ProductSurfaceValidationCode::Blank,
         ),
         (
-            WebUiRenameAutomationRequest {
+            ProductRenameAutomationRequest {
                 name: Some("x".repeat(257)),
             },
             ProductSurfaceValidationCode::TooLong,
@@ -7796,7 +7775,7 @@ impl RecordingOperatorLogsService {
 impl OperatorLogsService for RecordingOperatorLogsService {
     async fn query_logs(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornLogQueryRequest,
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
         self.requests.lock().expect("lock").push(request);
@@ -7814,7 +7793,7 @@ struct CrateRootLifecycleBackend;
 
 async fn query_logs_view(
     services: &RebornServices,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     mut request: RebornLogQueryRequest,
 ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
     let cursor = request.cursor.take();
@@ -7834,7 +7813,7 @@ async fn query_logs_view(
 
 async fn query_operator_logs_view(
     services: &RebornServices,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     mut request: RebornOperatorLogsQuery,
 ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
     let cursor = request.cursor.take();
@@ -7856,7 +7835,7 @@ async fn query_operator_logs_view(
 impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
     async fn control_service(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornServiceLifecycleRequest,
     ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError> {
         Ok(RebornServiceLifecycleResponse {
@@ -7884,7 +7863,7 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     let boundary_source = format!("{}é", "s".repeat(254));
     let response = query_operator_logs_view(
         &services,
-        caller().with_operator_webui_config(true),
+        caller().with_operator_config(true),
         RebornOperatorLogsQuery {
             limit: Some(u32::MAX),
             cursor: Some(oversized_cursor),
@@ -7938,7 +7917,7 @@ async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
 
     query_operator_logs_view(
         &services,
-        caller().with_operator_webui_config(true),
+        caller().with_operator_config(true),
         RebornOperatorLogsQuery {
             limit: Some(25),
             cursor: Some("after:7".to_string()),
@@ -7978,7 +7957,7 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
 
     let err = query_operator_logs_view(
         &services,
-        caller().with_operator_webui_config(true),
+        caller().with_operator_config(true),
         RebornOperatorLogsQuery {
             limit: None,
             cursor: None,
@@ -8306,7 +8285,7 @@ const TRIGGER_CREATOR_USER_ID: &str = "user-trigger-creator";
 /// Build a `ThreadScope` matching how `record_trigger_prompt` actually stores
 /// trigger-fired threads: same tenant/agent/project as the trigger record, but
 /// `owner_user_id` = the **external creator** (not the WebUI caller).
-fn trigger_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
+fn trigger_thread_scope_for(caller: &ProductSurfaceCaller) -> ThreadScope {
     ThreadScope {
         tenant_id: caller.tenant_id.clone(),
         agent_id: caller.agent_id.clone().expect("agent id"),
@@ -8320,7 +8299,7 @@ fn trigger_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
 
 /// Build the `TriggerRunThreadScope` that `resolve_run_thread_scope` returns
 /// for a trigger whose thread was stored via `trigger_thread_scope_for`.
-fn trigger_run_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> TriggerRunThreadScope {
+fn trigger_run_thread_scope_for(caller: &ProductSurfaceCaller) -> TriggerRunThreadScope {
     TriggerRunThreadScope {
         agent_id: caller.agent_id.clone(),
         project_id: caller.project_id.clone(),
@@ -8931,7 +8910,7 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
 
 fn automation_facade_with_trigger_thread(
     trigger_thread_id: ThreadId,
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
 ) -> Arc<StaticAutomationFacade> {
     Arc::new(
         StaticAutomationFacade::new(vec![RebornAutomationInfo {
@@ -8969,7 +8948,7 @@ fn automation_facade_with_trigger_thread(
 /// `owner_user_id = Some(creator_user_id)`.
 async fn setup_trigger_thread(
     thread_service: &Arc<InMemorySessionThreadService>,
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     thread_id: &str,
 ) -> ThreadId {
     let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
@@ -8990,7 +8969,7 @@ async fn setup_trigger_thread(
 
 async fn setup_ownerless_trigger_thread(
     thread_service: &Arc<InMemorySessionThreadService>,
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     thread_id: &str,
 ) -> ThreadId {
     let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
@@ -9045,7 +9024,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     let response = services
         .resolve_gate(
             caller.clone(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "approval-trigger-1",
                 "thread_id": trigger_thread_id.as_str(),
                 "run_id": run_id_string(),
@@ -9115,7 +9094,7 @@ async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
     let response = services
         .cancel_run(
             caller.clone(),
-            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+            serde_json::from_value::<ProductCancelRunRequest>(json!({
                 "client_action_id": "cancel-trigger-1",
                 "thread_id": trigger_thread_id.as_str(),
                 "run_id": run_id_string(),
@@ -9211,7 +9190,7 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
     let err = services
         .resolve_gate(
             bob,
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+            serde_json::from_value::<ProductResolveGateRequest>(json!({
                 "client_action_id": "approval-trigger-rejected",
                 "thread_id": trigger_thread_id.as_str(),
                 "run_id": run_id_string(),
@@ -9465,9 +9444,13 @@ async fn list_automations_returns_empty_list() {
     )
     .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
 
-    let listed = query_automations(&services, caller(), WebUiListAutomationsRequest::default())
-        .await
-        .expect("list automations");
+    let listed = query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default(),
+    )
+    .await
+    .expect("list automations");
 
     assert!(listed.automations.is_empty());
     // Default facade reports the scheduler as running.
@@ -9487,9 +9470,13 @@ async fn list_automations_surfaces_disabled_scheduler() {
         StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
     ));
 
-    let listed = query_automations(&services, caller(), WebUiListAutomationsRequest::default())
-        .await
-        .expect("list automations");
+    let listed = query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default(),
+    )
+    .await
+    .expect("list automations");
 
     assert!(!listed.scheduler_enabled);
 }
@@ -9501,9 +9488,13 @@ async fn automation_facade_unwired_fails_closed() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let error = query_automations(&services, caller(), WebUiListAutomationsRequest::default())
-        .await
-        .expect_err("unwired automation facade");
+    let error = query_automations(
+        &services,
+        caller(),
+        ProductListAutomationsRequest::default(),
+    )
+    .await
+    .expect_err("unwired automation facade");
 
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);
@@ -9550,8 +9541,7 @@ async fn setup_extension_rejects_blank_required_manual_secret() {
         &services,
         caller(),
         "github",
-        WebUiSetupExtensionRequest {
-            client_action_id: None,
+        ProductSetupExtensionRequest {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9579,8 +9569,7 @@ async fn setup_extension_rejects_unknown_secret_name() {
         &services,
         caller(),
         "github",
-        WebUiSetupExtensionRequest {
-            client_action_id: None,
+        ProductSetupExtensionRequest {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9608,8 +9597,7 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
         &services,
         caller(),
         "google",
-        WebUiSetupExtensionRequest {
-            client_action_id: None,
+        ProductSetupExtensionRequest {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9724,8 +9712,7 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
         &services,
         caller(),
         "github",
-        WebUiSetupExtensionRequest {
-            client_action_id: None,
+        ProductSetupExtensionRequest {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9780,8 +9767,7 @@ async fn setup_extension_rejects_unknown_channel_config_field() {
         &services,
         caller(),
         "github",
-        WebUiSetupExtensionRequest {
-            client_action_id: None,
+        ProductSetupExtensionRequest {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "fields": {
@@ -9829,7 +9815,7 @@ struct SetupSetActiveCall {
 
 struct SetupRecordingLlmConfigService {
     snapshot_calls: Mutex<usize>,
-    snapshot_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    snapshot_callers: Mutex<Vec<ProductSurfaceCaller>>,
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     delete_provider_calls: Mutex<Vec<String>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
@@ -9864,7 +9850,7 @@ impl SetupRecordingLlmConfigService {
         *self.snapshot_calls.lock().expect("lock")
     }
 
-    fn snapshot_callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+    fn snapshot_callers(&self) -> Vec<ProductSurfaceCaller> {
         self.snapshot_callers.lock().expect("lock").clone()
     }
 
@@ -9935,7 +9921,7 @@ impl SetupRecordingLlmConfigService {
 impl LlmConfigService for SetupRecordingLlmConfigService {
     async fn snapshot(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         *self.snapshot_calls.lock().expect("lock") += 1;
         self.snapshot_callers.lock().expect("lock").push(caller);
@@ -9947,7 +9933,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn upsert_provider(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: UpsertLlmProviderRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         if let Some(error) = self.next_upsert_error.lock().expect("lock").take() {
@@ -9970,7 +9956,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn delete_provider(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         provider_id: String,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         self.delete_provider_calls
@@ -9982,7 +9968,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn set_active(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         if let Some(error) = self.next_set_active_error.lock().expect("lock").take() {
@@ -10000,7 +9986,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn test_connection(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError> {
         *self.test_connection_calls.lock().expect("lock") += 1;
@@ -10012,7 +9998,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn list_models(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError> {
         *self.list_models_calls.lock().expect("lock") += 1;
@@ -10025,7 +10011,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn start_nearai_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
         panic!("start_nearai_login is not used by operator setup tests")
@@ -10033,7 +10019,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn complete_nearai_wallet_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
         panic!("complete_nearai_wallet_login is not used by operator setup tests")
@@ -10041,7 +10027,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
     async fn start_codex_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
         panic!("start_codex_login is not used by operator setup tests")
     }
@@ -10049,7 +10035,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
 
 struct RecordingOperatorStatusService {
     response: RebornOperatorStatusResponse,
-    callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    callers: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
 impl RecordingOperatorStatusService {
@@ -10060,7 +10046,7 @@ impl RecordingOperatorStatusService {
         }
     }
 
-    fn callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+    fn callers(&self) -> Vec<ProductSurfaceCaller> {
         self.callers.lock().expect("lock").clone()
     }
 }
@@ -10069,7 +10055,7 @@ impl RecordingOperatorStatusService {
 impl OperatorStatusService for RecordingOperatorStatusService {
     async fn status(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError> {
         self.callers.lock().expect("lock").push(caller);
         Ok(self.response.clone())
@@ -10190,7 +10176,7 @@ struct OperatorConfigAutoApproveInvoker {
 impl ProductCapabilityInvoker for OperatorConfigAutoApproveInvoker {
     async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         capability: CapabilityId,
         input: serde_json::Value,
         activity_id: ActivityId,
@@ -10211,7 +10197,7 @@ impl ProductCapabilityInvoker for OperatorConfigAutoApproveInvoker {
 impl OperatorConfigAutoApproveInvoker {
     async fn invoke_auto_approve(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError> {
@@ -10242,7 +10228,7 @@ impl OperatorConfigAutoApproveInvoker {
 
     async fn invoke_tool_permission(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError> {
@@ -10500,71 +10486,97 @@ fn operator_config_entry_value<'a>(
 
 async fn query_operator_config_list<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> RebornOperatorConfigListResponse {
+    let page = query_product_surface_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+            params: json!({}),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("operator config list view");
+    serde_json::from_value(page.payload).expect("operator config list payload")
+}
+
+async fn query_product_surface_page<S: ProductSurface + ?Sized>(
+    services: &S,
+    caller: ProductSurfaceCaller,
+    query: RebornViewQuery,
+) -> Result<RebornViewPage, ProductSurfaceError> {
     let page = services
         .query(
             caller,
-            RebornViewQuery {
-                view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
+            ironclaw_host_api::ProductSurfaceQueryRequest {
+                view_id: query.view_id,
+                input: query.params,
+                cursor: query.cursor,
+                limit: None,
             },
         )
-        .await
-        .expect("operator config list view");
-    serde_json::from_value(page.payload).expect("operator config list payload")
+        .await?;
+    let payload = page
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(ProductSurfaceError::internal)?;
+    Ok(RebornViewPage {
+        payload,
+        next_cursor: page.next_cursor,
+    })
 }
 
 async fn query_operator_config_key<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     key: &str,
 ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
-    let page = services
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
-                params: json!({ "key": key }),
-                cursor: None,
-            },
-        )
-        .await?;
+    let page = query_product_surface_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
+            params: json!({ "key": key }),
+            cursor: None,
+        },
+    )
+    .await?;
     serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn query_operator_setup<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Result<ironclaw_product::RebornOperatorSetupResponse, ProductSurfaceError> {
-    let page = services
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: OPERATOR_SETUP_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
+    let page = query_product_surface_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: OPERATOR_SETUP_VIEW.id.to_string(),
+            params: json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
     serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn query_automations<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
-    request: WebUiListAutomationsRequest,
+    caller: ProductSurfaceCaller,
+    request: ProductListAutomationsRequest,
 ) -> Result<RebornListAutomationsResponse, ProductSurfaceError> {
-    let page = services
-        .query(caller, AUTOMATIONS_VIEW.query(request, None)?)
+    let page = query_product_surface_page(services, caller, AUTOMATIONS_VIEW.query(request, None)?)
         .await?;
     AUTOMATIONS_VIEW.decode_page(page)
 }
 
 async fn invoke_json_product_capability<S, T>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     capability_id: &str,
     input: T,
 ) -> Result<Resolution, ProductSurfaceError>
@@ -10572,68 +10584,70 @@ where
     S: ProductSurface + ?Sized,
     T: Serialize,
 {
-    services
+    let response = services
         .invoke(
             caller,
-            CapabilityId::new(capability_id).expect("capability id"),
-            ProductCapabilityInput::json(serde_json::to_value(input).expect("capability input")),
-            ActivityId::new(),
+            ironclaw_host_api::ProductSurfaceInvokeRequest {
+                operation_id: CapabilityId::new(capability_id).expect("capability id"),
+                input: serde_json::to_value(input).expect("capability input"),
+                activity_id: ActivityId::new(),
+            },
         )
-        .await
+        .await?;
+    serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn query_threads<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
-    mut request: WebUiListThreadsRequest,
+    caller: ProductSurfaceCaller,
+    mut request: ProductListThreadsRequest,
 ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
     let cursor = request.cursor.take();
-    let page = services
-        .query(caller, THREADS_VIEW.query(request, cursor)?)
-        .await?;
+    let page =
+        query_product_surface_page(services, caller, THREADS_VIEW.query(request, cursor)?).await?;
     THREADS_VIEW.decode_page(page)
 }
 
 async fn query_extensions<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionListResponse, ProductSurfaceError> {
-    let page = services
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: EXTENSIONS_VIEW.id.to_string(),
-                params: json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
+    let page = query_product_surface_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: EXTENSIONS_VIEW.id.to_string(),
+            params: json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
     serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn query_extension_setup<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     package_id: &str,
 ) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
-    let page = services
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: EXTENSION_SETUP_VIEW.id.to_string(),
-                params: json!({ "package_id": package_id }),
-                cursor: None,
-            },
-        )
-        .await?;
+    let page = query_product_surface_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+            params: json!({ "package_id": package_id }),
+            cursor: None,
+        },
+    )
+    .await?;
     serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     package_id: &str,
-    request: WebUiSetupExtensionRequest,
+    request: ProductSetupExtensionRequest,
 ) -> Result<Resolution, ProductSurfaceError> {
     let mut input = serde_json::to_value(request).map_err(ProductSurfaceError::internal_from)?;
     input
@@ -10643,21 +10657,25 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
             "extension_id".to_string(),
             serde_json::Value::String(package_id.to_string()),
         );
-    services
+    let response = services
         .invoke(
             caller,
-            CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(input),
-            ActivityId::new(),
+            ironclaw_host_api::ProductSurfaceInvokeRequest {
+                operation_id: CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
+                    .expect("capability id"),
+                input,
+                activity_id: ActivityId::new(),
+            },
         )
-        .await
+        .await?;
+    serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn submit_extension_setup_and_query<S: ProductSurface + ?Sized>(
     services: &S,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     package_id: &str,
-    request: WebUiSetupExtensionRequest,
+    request: ProductSetupExtensionRequest,
 ) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
     let caller_for_query = caller.clone();
     invoke_extension_setup_submit(services, caller, package_id, request).await?;
@@ -10678,7 +10696,7 @@ async fn extension_import_is_available_as_product_capability() {
         .invoke(
             caller(),
             CapabilityId::new(EXTENSION_IMPORT_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "bundle_base64": STANDARD.encode(&bundle) })),
+            json!({ "bundle_base64": STANDARD.encode(&bundle) }),
             ActivityId::new(),
         )
         .await
@@ -10782,7 +10800,7 @@ struct RecordingSkillsFacade {
 impl SkillsProductFacade for RecordingSkillsFacade {
     async fn list_skills(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornSkillListResponse, ProductSurfaceError> {
         Ok(RebornSkillListResponse {
             skills: vec![skill_info("local-skill")],
@@ -10793,7 +10811,7 @@ impl SkillsProductFacade for RecordingSkillsFacade {
 
     async fn search_skills(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         query: String,
     ) -> Result<RebornSkillSearchResponse, ProductSurfaceError> {
         self.search_queries.lock().expect("lock").push(query);
@@ -10807,7 +10825,7 @@ impl SkillsProductFacade for RecordingSkillsFacade {
 
     async fn read_skill_content(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         name: String,
     ) -> Result<RebornSkillContentResponse, ProductSurfaceError> {
         Ok(RebornSkillContentResponse {
@@ -10882,7 +10900,7 @@ async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
             ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
         ),
     );
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         TenantId::new("tenant-scope").expect("tenant"),
         UserId::new("user-scope").expect("user"),
         Some(AgentId::new("agent-scope").expect("agent")),
@@ -11160,25 +11178,25 @@ async fn operator_config_reads_are_available_as_product_views() {
 #[tokio::test]
 async fn operator_config_is_scoped_by_tenant_and_user() {
     let services = services_with_operator_approval_config();
-    let alice_tenant_a = WebUiAuthenticatedCaller::new(
+    let alice_tenant_a = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("alice").expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     );
-    let bob_tenant_a = WebUiAuthenticatedCaller::new(
+    let bob_tenant_a = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("bob").expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     );
-    let alice_tenant_a_other_project = WebUiAuthenticatedCaller::new(
+    let alice_tenant_a_other_project = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("alice").expect("user"),
         Some(AgentId::new("agent-beta").expect("agent")),
         Some(ProjectId::new("project-beta").expect("project")),
     );
-    let alice_tenant_b = WebUiAuthenticatedCaller::new(
+    let alice_tenant_b = ProductSurfaceCaller::new(
         TenantId::new("tenant-beta").expect("tenant"),
         UserId::new("alice").expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
@@ -11365,7 +11383,7 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
         .with_operator_status_service(status_service.clone());
     let diagnostics_caller =
         caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"))
-            .with_operator_webui_config(true);
+            .with_operator_config(true);
 
     let page = services
         .query(
@@ -11435,7 +11453,7 @@ async fn operator_command_plane_reads_are_available_as_product_views() {
             }),
         ));
 
-    let operator = caller().with_operator_webui_config(true);
+    let operator = caller().with_operator_config(true);
     let diagnostics_page = services
         .query(
             operator.clone(),
@@ -11481,8 +11499,8 @@ async fn llm_config_snapshot_is_available_as_product_view() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
-    let snapshot_caller = caller_for_user_with_project("user-llm", Some("project-llm"))
-        .with_operator_webui_config(true);
+    let snapshot_caller =
+        caller_for_user_with_project("user-llm", Some("project-llm")).with_operator_config(true);
 
     let page = services
         .query(
@@ -11516,7 +11534,7 @@ async fn llm_config_snapshot_is_available_as_product_view() {
 }
 
 #[tokio::test]
-async fn operator_only_product_views_require_operator_webui_config() {
+async fn operator_only_product_views_require_operator_config() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     let services = services_with_setup_llm_config(llm_config.clone());
 
@@ -11536,7 +11554,7 @@ async fn operator_only_product_views_require_operator_webui_config() {
     assert_eq!(err.kind, ProductSurfaceErrorKind::ParticipantDenied);
     assert_eq!(
         llm_config.snapshot_callers(),
-        Vec::<WebUiAuthenticatedCaller>::new()
+        Vec::<ProductSurfaceCaller>::new()
     );
 }
 
@@ -11556,7 +11574,7 @@ async fn operator_diagnostics_reports_setup_service_absence_without_failing_rout
 
     let page = services
         .query(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornViewQuery {
                 view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
                 params: json!({}),
@@ -11581,7 +11599,7 @@ async fn get_operator_setup_returns_snapshot_from_llm_config() {
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let response = query_operator_setup(&services, caller().with_operator_webui_config(true))
+    let response = query_operator_setup(&services, caller().with_operator_config(true))
         .await
         .expect("setup response");
 
@@ -11607,7 +11625,7 @@ async fn get_operator_setup_without_llm_config_returns_service_unavailable() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let err = query_operator_setup(&services, caller().with_operator_webui_config(true))
+    let err = query_operator_setup(&services, caller().with_operator_config(true))
         .await
         .expect_err("setup service is unavailable");
 
@@ -11909,16 +11927,10 @@ async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
         .invoke(
             caller(),
             CapabilityId::new(LLM_PROVIDER_UPSERT_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::llm_provider_upsert(UpsertLlmProviderRequest {
-                id: "ollama".to_string(),
-                client_action_id: None,
-                name: None,
-                adapter: "ollama".to_string(),
-                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
-                default_model: None,
-                api_key: None,
-                set_active: false,
-                model: None,
+            json!({
+                "id": "ollama",
+                "adapter": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1"
             }),
             ActivityId::new(),
         )
@@ -11938,7 +11950,7 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(LLM_PROVIDER_DELETE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "provider_id": "acme" })),
+            json!({ "provider_id": "acme" }),
             ActivityId::new(),
         )
         .await
@@ -11947,7 +11959,7 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(LLM_ACTIVE_SET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({ "provider_id": "openai", "model": "gpt-5-mini" })),
+            json!({ "provider_id": "openai", "model": "gpt-5-mini" }),
             ActivityId::new(),
         )
         .await
@@ -11980,13 +11992,13 @@ async fn operator_setup_run_is_available_as_product_capability() {
         .invoke(
             caller(),
             CapabilityId::new(OPERATOR_SETUP_RUN_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(json!({
+            json!({
                 "provider_id": "openai",
                 "adapter": "open_ai_completions",
                 "base_url": "https://api.example.test/v1",
                 "model": "gpt-5-mini",
                 "api_key": "sk-secret"
-            })),
+            }),
             ActivityId::new(),
         )
         .await
@@ -12720,7 +12732,7 @@ async fn get_run_state_rejects_cross_user_access() {
     let alice = caller();
     setup_owned_thread(&services, alice.clone(), "thread-alice").await;
 
-    let bob = WebUiAuthenticatedCaller::new(
+    let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new("user-bob").expect("user"),
         alice.agent_id.clone(),
@@ -12753,7 +12765,7 @@ async fn get_run_state_rejects_cross_user_access() {
 /// rows to slice against.
 async fn seed_thread_messages(
     threads: &InMemorySessionThreadService,
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     thread_id: &str,
     count: usize,
 ) {
@@ -12975,7 +12987,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let error = query_threads(&services, caller(), WebUiListThreadsRequest::default())
+    let error = query_threads(&services, caller(), ProductListThreadsRequest::default())
         .await
         .expect_err(
             "list_threads must fail closed when the SessionThreadService backend \
@@ -13048,7 +13060,7 @@ async fn list_threads_hides_automation_trigger_threads() {
         .await
         .expect("malformed metadata thread");
 
-    let response = query_threads(&services, caller, WebUiListThreadsRequest::default())
+    let response = query_threads(&services, caller, ProductListThreadsRequest::default())
         .await
         .expect("list threads");
     let thread_ids = response
@@ -13105,7 +13117,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default().set_needs_approval(true),
+        ProductListThreadsRequest::default().set_needs_approval(true),
     )
     .await
     .expect("list approval threads");
@@ -13149,7 +13161,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default().set_needs_approval(true),
+        ProductListThreadsRequest::default().set_needs_approval(true),
     )
     .await
     .expect("list approval threads");
@@ -13192,7 +13204,7 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default().set_needs_approval(true),
+        ProductListThreadsRequest::default().set_needs_approval(true),
     )
     .await
     .expect("list approval threads");
@@ -13238,7 +13250,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default().set_needs_approval(true),
+        ProductListThreadsRequest::default().set_needs_approval(true),
     )
     .await
     .expect("list approval threads");
@@ -13294,7 +13306,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default().set_needs_approval(true),
+        ProductListThreadsRequest::default().set_needs_approval(true),
     )
     .await
     .expect("list approval threads");
@@ -13331,7 +13343,7 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default()
+        ProductListThreadsRequest::default()
             .set_needs_approval(true)
             .set_candidate_thread_id(automation_pending_thread_id.as_str()),
     )
@@ -13387,7 +13399,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
         query_threads(
             &services,
             caller,
-            WebUiListThreadsRequest::default().set_limit(2),
+            ProductListThreadsRequest::default().set_limit(2),
         ),
     )
     .await
@@ -13444,7 +13456,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     let response = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default().set_limit(1),
+        ProductListThreadsRequest::default().set_limit(1),
     )
     .await
     .expect("list threads");
@@ -13529,7 +13541,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let first_page = query_threads(
         &services,
         caller.clone(),
-        WebUiListThreadsRequest::default().set_limit(1),
+        ProductListThreadsRequest::default().set_limit(1),
     )
     .await
     .expect("list first visible page");
@@ -13546,7 +13558,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_page = query_threads(
         &services,
         caller,
-        WebUiListThreadsRequest::default()
+        ProductListThreadsRequest::default()
             .set_limit(1)
             .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
     )
@@ -13583,7 +13595,7 @@ async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-notice-approval",
                 "thread_id": "thread-notice",
                 "content": "hello"
@@ -13625,7 +13637,7 @@ async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-notice-auth",
                 "thread_id": "thread-notice",
                 "content": "hello"
@@ -13667,7 +13679,7 @@ async fn rejected_busy_notice_generic_status_contains_generic_copy() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-notice-generic",
                 "thread_id": "thread-notice",
                 "content": "hello"
@@ -13711,7 +13723,7 @@ async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-replay-rejected-busy",
                 "thread_id": "thread-alpha",
                 "content": "hello from webui"
@@ -13749,7 +13761,7 @@ async fn replayed_rejected_busy_returns_none_run_metadata() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-replay-none-metadata",
                 "thread_id": "thread-alpha",
                 "content": "replay with none metadata"
@@ -13812,7 +13824,7 @@ async fn fresh_rejected_busy_returns_some_run_metadata() {
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-fresh-busy-metadata",
                 "thread_id": "thread-busy-fresh",
                 "content": "hello busy"
@@ -13880,7 +13892,7 @@ async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_b
     let response = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-mark-fail-reconcile",
                 "thread_id": "thread-alpha",
                 "content": "hello mark-fail"
@@ -13958,7 +13970,7 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
     let error = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-deferred-busy-mark-fail-reconcile",
                 "thread_id": "thread-alpha",
                 "content": "hello deferred-busy mark-fail"
@@ -14044,7 +14056,7 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-att",
                 "thread_id": "thread-alpha",
                 "content": "see attached",
@@ -14119,7 +14131,7 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-att",
                 "thread_id": "thread-alpha",
                 "content": "spreadsheet attached",
@@ -14176,7 +14188,7 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
     let err = services
         .submit_turn(
             caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            serde_json::from_value::<ProductSubmitTurnRequest>(json!({
                 "client_action_id": "send-att",
                 "thread_id": "thread-alpha",
                 "content": "see attached",
@@ -14468,14 +14480,12 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(ADMIN_USER_UPDATE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAdminUpdateUserProductRequest {
-                    user_id: target.clone(),
-                    display_name: Some("Beta Renamed".to_string()),
-                    metadata: None,
-                })
-                .expect("admin update input"),
-            ),
+            serde_json::to_value(RebornAdminUpdateUserProductRequest {
+                user_id: target.clone(),
+                display_name: Some("Beta Renamed".to_string()),
+                metadata: None,
+            })
+            .expect("admin update input"),
             ActivityId::new(),
         )
         .await
@@ -14507,14 +14517,12 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(ADMIN_USER_PUT_SECRET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAdminPutSecretProductRequest {
-                    user_id: target.clone(),
-                    handle: "openai_api_key".to_string(),
-                    value: "sk-test".to_string(),
-                })
-                .expect("admin secret put input"),
-            ),
+            serde_json::to_value(RebornAdminPutSecretProductRequest {
+                user_id: target.clone(),
+                handle: "openai_api_key".to_string(),
+                value: "sk-test".to_string(),
+            })
+            .expect("admin secret put input"),
             ActivityId::new(),
         )
         .await
@@ -14528,13 +14536,11 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(ADMIN_USER_DELETE_SECRET_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAdminDeleteSecretProductRequest {
-                    user_id: target.clone(),
-                    handle: "openai_api_key".to_string(),
-                })
-                .expect("admin secret delete input"),
-            ),
+            serde_json::to_value(RebornAdminDeleteSecretProductRequest {
+                user_id: target.clone(),
+                handle: "openai_api_key".to_string(),
+            })
+            .expect("admin secret delete input"),
             ActivityId::new(),
         )
         .await
@@ -14548,13 +14554,11 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(ADMIN_USER_SET_STATUS_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAdminSetStatusProductRequest {
-                    user_id: target.clone(),
-                    status: AdminUserStatus::Suspended,
-                })
-                .expect("admin status input"),
-            ),
+            serde_json::to_value(RebornAdminSetStatusProductRequest {
+                user_id: target.clone(),
+                status: AdminUserStatus::Suspended,
+            })
+            .expect("admin status input"),
             ActivityId::new(),
         )
         .await
@@ -14586,13 +14590,11 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(ADMIN_USER_SET_ROLE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAdminSetRoleProductRequest {
-                    user_id: target.clone(),
-                    role: AdminUserRole::Admin,
-                })
-                .expect("admin role input"),
-            ),
+            serde_json::to_value(RebornAdminSetRoleProductRequest {
+                user_id: target.clone(),
+                role: AdminUserRole::Admin,
+            })
+            .expect("admin role input"),
             ActivityId::new(),
         )
         .await
@@ -14624,12 +14626,10 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .invoke(
             caller(),
             CapabilityId::new(ADMIN_USER_DELETE_CAPABILITY_ID).expect("capability id"),
-            ProductCapabilityInput::json(
-                serde_json::to_value(RebornAdminUserRequest {
-                    user_id: target.clone(),
-                })
-                .expect("admin delete input"),
-            ),
+            serde_json::to_value(RebornAdminUserRequest {
+                user_id: target.clone(),
+            })
+            .expect("admin delete input"),
             ActivityId::new(),
         )
         .await
@@ -14853,7 +14853,7 @@ async fn admin_list_forwards_status_filter_to_the_port() {
 
     let suspended = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery {
                 status: Some(AdminUserStatus::Suspended),
                 ..Default::default()
@@ -14866,7 +14866,7 @@ async fn admin_list_forwards_status_filter_to_the_port() {
 
     let active = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery {
                 status: Some(AdminUserStatus::Active),
                 ..Default::default()
@@ -14879,7 +14879,7 @@ async fn admin_list_forwards_status_filter_to_the_port() {
 
     let all = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery::default(),
         )
         .await
@@ -14900,7 +14900,7 @@ async fn admin_list_bounds_pages_and_threads_the_cursor() {
 
     let page1 = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery {
                 limit: Some(2),
                 ..Default::default()
@@ -14916,7 +14916,7 @@ async fn admin_list_bounds_pages_and_threads_the_cursor() {
 
     let page2 = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery {
                 limit: Some(2),
                 cursor: Some(cursor),
@@ -14938,7 +14938,7 @@ async fn admin_list_rejects_a_malformed_cursor() {
     let services = admin_services(FakeAdminUsers::default());
     let err = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery {
                 cursor: Some("not a valid user id \u{7f}".to_string()),
                 ..Default::default()
@@ -14953,7 +14953,7 @@ async fn admin_list_rejects_a_malformed_cursor() {
 async fn admin_operator_bypasses_role_check() {
     // An env-bearer operator has no user record but is an implicit admin.
     let services = admin_services(FakeAdminUsers::default());
-    let operator = caller().with_operator_webui_config(true);
+    let operator = caller().with_operator_config(true);
     services
         .list_admin_users(operator, RebornAdminUserListQuery::default())
         .await
@@ -15047,7 +15047,7 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
         async move {
             services
                 .set_admin_user_role(
-                    caller().with_operator_webui_config(true),
+                    caller().with_operator_config(true),
                     UserId::new(uid).expect("user"),
                     RebornAdminSetRoleRequest {
                         role: AdminUserRole::Member,
@@ -15075,7 +15075,7 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
 
     let remaining = services
         .list_admin_users(
-            caller().with_operator_webui_config(true),
+            caller().with_operator_config(true),
             RebornAdminUserListQuery::default(),
         )
         .await

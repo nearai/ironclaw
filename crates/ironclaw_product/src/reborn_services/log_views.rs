@@ -1,10 +1,10 @@
 //! Descriptor-backed caller and operator log projections.
 
 use super::{
-    ProductCapabilityInvoker, ProductSurfaceError, ProductSurfaceValidationCode,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorLogsQuery, RebornOperatorSurfaceStatus,
-    RebornServices, RebornViewDescriptor, RebornViewProvider, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceCallerExt, ProductSurfaceError,
+    ProductSurfaceValidationCode, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorLogsQuery,
+    RebornOperatorSurfaceStatus, RebornServices, RebornViewDescriptor, RebornViewProvider,
     bounded_log_query, bounded_operator_logs_query, parse_thread_id_field,
     validate_log_query_modes,
 };
@@ -26,7 +26,7 @@ where
 {
     pub(super) async fn build_logs_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         mut query: RebornLogQueryRequest,
         cursor: Option<String>,
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
@@ -48,7 +48,7 @@ where
 
     pub(super) async fn build_operator_logs_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         mut query: RebornOperatorLogsQuery,
         cursor: Option<String>,
     ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {

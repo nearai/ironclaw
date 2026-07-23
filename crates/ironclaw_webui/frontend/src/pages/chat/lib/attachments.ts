@@ -3,7 +3,7 @@
 // The browser stages files locally (reads them to base64 + a preview data
 // URL), validates them against the server-advertised inline-attachment
 // contract (`session.attachments` — see `useAttachmentConfig`), and hands
-// `useChat.send` the wire shape `WebUiInboundAttachment` expects:
+// `useChat.send` the wire shape `ProductInboundAttachment` expects:
 // `{ mime_type, filename, data_base64 }`. The server-side decode in
 // `product_surface_inbound::decode_attachments` remains the sole authority — these
 // client checks are UX hints that fail fast before a doomed upload.
@@ -208,7 +208,7 @@ export async function stageFiles(files, { limits, existing = [], t }) {
   return { staged, errors };
 }
 
-// Map a staged attachment into the `WebUiInboundAttachment` wire shape the
+// Map a staged attachment into the `ProductInboundAttachment` wire shape the
 // v2 send-message endpoint accepts.
 export function toWireAttachment(att) {
   return {

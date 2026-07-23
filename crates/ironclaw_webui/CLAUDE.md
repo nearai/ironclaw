@@ -72,7 +72,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 Handlers consume only `ironclaw_product::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
-`WebUiAuthenticatedCaller`, carries the matched token's `WebUiV2Capabilities`,
+`ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail
 closed (`500`) if that layer is missing (locked by
 `missing_caller_extension_returns_500`).

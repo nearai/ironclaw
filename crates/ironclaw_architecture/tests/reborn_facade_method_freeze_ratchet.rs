@@ -1,42 +1,32 @@
-//! Anti-slippage ratchet for the product-facade method surface (§5.2 / §5.2.5 /
-//! §10 of `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! Anti-slippage ratchet for the product-surface method contract (§5.2 /
+//! §5.2.5 / §10 of
+//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
 //!
-//! §5.2's target: the product surface is the *turn lifecycle* + two generic
-//! conduits (`invoke` for commands, `query` for reads) that never grow. A feature
-//! adds a **capability descriptor** and/or a **view descriptor**, never a facade
-//! method. §5.2.5 step 1 is "freeze the facade now" — check in the current
-//! `ProductSurface` method set so any *new* method fails CI and the migration
-//! stops the bleeding before it starts.
+//! §5.2's target: product consumers share the neutral
+//! `ironclaw_host_api::ProductSurface` vocabulary (`invoke`, `query`, and
+//! `stream_events`). Feature work adds a **capability descriptor** and/or a
+//! **view descriptor**, never a product-local facade method.
 //!
-//! This test freezes the `ProductSurface` method set after the first view
-//! migration replaced the two dedicated log-query methods with the generic
-//! `query` read conduit. It now also admits `invoke`, the second generic conduit
-//! named by §5.2. Adding that canonical target conduit is convergence toward the
-//! frozen end-state, not a feature-method exception: `invoke` is admitted by
-//! exact name, both conduits are required below, and every other addition stays
-//! banned. The ratchet fails on any subsequent change:
+//! This test freezes that shared host API method set and asserts the
+//! product-local `ironclaw_product::ProductSurface` trait stays retired. The
+//! ratchet fails on any subsequent change:
 //!
-//! - a **new** trait method (not in [`FROZEN_REBORN_SERVICES_METHODS`]) fails —
-//!   the feature belongs in a capability/view descriptor, not a new facade method;
-//! - a **removed** method not trimmed from the allowlist fails — so the list
-//!   shrinks in lock-step as each mutation migrates to a descriptor and reviewers
-//!   watch it get shorter (the §10 monotonic-shrink contract);
+//! - a **new** host `ProductSurface` method fails — the feature belongs in a
+//!   capability/view descriptor, not a new facade method;
+//! - a **removed** host method fails — callers share this exact three-word
+//!   vocabulary unless §5.2 is intentionally revised;
 //! - a **duplicate** method name in the block fails (defensive; a trait cannot
 //!   legally declare two, but the scan is explicit about it).
 //!
-//! Scoped to the *method set*: the extractor reads only the `ProductSurface`
-//! trait block, at trait-declaration depth (a `fn` inside a default-method body is
-//! ignored), with comments and string literals stripped (shared
+//! Scoped to the *method set*: the extractor reads only the host
+//! `ProductSurface` trait block, at trait-declaration depth (a `fn` inside a
+//! default-method body is ignored), with comments and string literals stripped (shared
 //! [`ratchet_support::strip_comments_and_strings`]).
 //!
-//! Definition of done for this axis (§5.2.5 step 5 / §10): the facade *is* the
-//! turn lifecycle (`open_conversation`, `submit_turn`, `events`, `reply`,
-//! `resolve_gate`, `cancel`) + `invoke` + `query` — the allowlist shrinks to that
-//! ~8-method set and every other entry migrates to a matrix-declared capability
-//! descriptor or a view descriptor. The follow-on §10 obligation ("every
-//! capability descriptor declares an origin→gate matrix") lands with the
-//! descriptor registry and is a separate ratchet — this one holds the method
-//! surface from growing while that migration runs.
+//! Definition of done for this axis (§5.2.5 step 5 / §10): product consumers use
+//! `host_api::ProductSurface` (`invoke`, `query`, `stream_events`) plus
+//! descriptors, and the product crate does not reintroduce its own product
+//! surface trait vocabulary.
 
 // This ratchet uses only the shared stripper + workspace-root helper; the
 // type-def scanners in the shared module are unreachable from this binary
@@ -48,32 +38,17 @@ use std::collections::BTreeSet;
 
 use ratchet_support::{strip_comments_and_strings, workspace_root};
 
-/// Path (relative to the workspace root) of the crate that defines the facade
-/// trait — the §-referenced contract owner (`type-placement.md` rule 3).
-const FACADE_SOURCE: &str = "crates/ironclaw_product/src/reborn_services.rs";
-const FACADE_TRAIT: &str = "ProductSurface";
+/// Path (relative to the workspace root) of the crate that defines the shared
+/// product-surface contract.
+const HOST_PRODUCT_SURFACE_SOURCE: &str = "crates/ironclaw_host_api/src/product_surface.rs";
+/// Product implementation source that must not grow another local ProductSurface
+/// trait.
+const PRODUCT_REBORN_SERVICES_SOURCE: &str = "crates/ironclaw_product/src/reborn_services.rs";
 const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
 const RETIRED_PROTO_FACADE_TRAIT: &str = "RebornServicesApi";
 
-/// The frozen inventory of `ProductSurface` methods, as of the §5.2.5 freeze.
-/// Grouped by the product domain each method serves, so a reviewer can see which
-/// cluster is migrating as entries disappear. Remove an entry in the same PR that
-/// deletes its method (because the method became a capability/view descriptor).
-/// The sole post-freeze addition is §5.2's canonical `invoke` target conduit,
-/// already listed below; never add another product operation here.
-const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
-    // --- turn lifecycle (the irreducible core, §5.2.3) ---
-    "create_thread",
-    "submit_turn",
-    "cancel_run",
-    "stream_events",
-    "supports_stream_events_subscription",
-    "subscribe_events",
-    "get_run_state",
-    "invoke",
-    "query",
-    "execute_command",
-];
+/// The frozen inventory of shared `host_api::ProductSurface` methods.
+const EXPECTED_HOST_PRODUCT_SURFACE_METHODS: &[&str] = &["invoke", "query", "stream_events"];
 
 /// Extract the method names declared **directly** in `trait <trait_name>`'s block
 /// — i.e. at trait-declaration depth, so a `fn` nested inside a default-method
@@ -163,17 +138,17 @@ fn extract_trait_methods(source: &str, trait_name: &str) -> Vec<String> {
 }
 
 #[test]
-fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
-    let source_path = workspace_root().join(FACADE_SOURCE);
+fn host_product_surface_method_set_is_frozen() {
+    let source_path = workspace_root().join(HOST_PRODUCT_SURFACE_SOURCE);
     let source = std::fs::read_to_string(&source_path)
-        .unwrap_or_else(|e| panic!("failed to read facade source {source_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to read product surface source {source_path:?}: {e}"));
 
-    let found = extract_trait_methods(&source, FACADE_TRAIT);
+    let found = extract_trait_methods(&source, PRODUCT_SURFACE_TRAIT);
     assert!(
         !found.is_empty(),
-        "no `{FACADE_TRAIT}` methods were extracted from {FACADE_SOURCE}: the trait was renamed, \
-         moved, or the extractor no longer recognizes its block — update this ratchet to keep \
-         tracking the facade surface."
+        "no `{PRODUCT_SURFACE_TRAIT}` methods were extracted from {HOST_PRODUCT_SURFACE_SOURCE}: \
+         the trait was renamed, moved, or the extractor no longer recognizes its block — update \
+         this ratchet to keep tracking the shared product-surface contract."
     );
 
     // Duplicate detection (defensive — a trait cannot legally declare two, but a
@@ -185,52 +160,45 @@ fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
         .collect();
     assert!(
         duplicated.is_empty(),
-        "`{FACADE_TRAIT}` block yielded duplicate method names {duplicated:?} — the extractor or \
-         the trait is malformed."
+        "`{PRODUCT_SURFACE_TRAIT}` block yielded duplicate method names {duplicated:?} — the \
+         extractor or the trait is malformed."
     );
 
-    let frozen: BTreeSet<&str> = FROZEN_REBORN_SERVICES_METHODS.iter().copied().collect();
+    let expected: BTreeSet<&str> = EXPECTED_HOST_PRODUCT_SURFACE_METHODS
+        .iter()
+        .copied()
+        .collect();
     let found_set: BTreeSet<&str> = found.iter().map(String::as_str).collect();
 
-    for conduit in ["invoke", "query"] {
-        assert!(
-            found_set.contains(conduit),
-            "`{FACADE_TRAIT}` must retain §5.2's canonical `{conduit}` conduit; removing or \
-             renaming it reopens per-feature facade growth."
-        );
-    }
-
-    let added: Vec<&str> = found_set.difference(&frozen).copied().collect();
+    let added: Vec<&str> = found_set.difference(&expected).copied().collect();
     assert!(
         added.is_empty(),
-        "New `{FACADE_TRAIT}` methods are banned (arch-simplification §5.2/§5.2.5/§10): the product \
-         surface is turn-lifecycle + `invoke`/`query`; a new product operation is a matrix-declared \
-         capability descriptor or a view descriptor, never a facade method. Offending new methods: \
-         {added:?}."
+        "New `{PRODUCT_SURFACE_TRAIT}` methods are banned (arch-simplification §5.2/§5.2.5/§10): \
+         a new product operation is a matrix-declared capability descriptor or a view descriptor, \
+         never a facade method. Offending new methods: {added:?}."
     );
 
-    let removed: Vec<&str> = frozen.difference(&found_set).copied().collect();
+    let removed: Vec<&str> = expected.difference(&found_set).copied().collect();
     assert!(
         removed.is_empty(),
-        "FROZEN_REBORN_SERVICES_METHODS lists methods that no longer exist on `{FACADE_TRAIT}`: \
-         {removed:?}. A facade method was removed (good — §5.2 migration progress!) — trim it from \
-         the allowlist in the same PR so the ratchet keeps shrinking toward the turn-lifecycle + \
-         `invoke`/`query` end-state (§10)."
+        "Expected shared `{PRODUCT_SURFACE_TRAIT}` methods are missing: {removed:?}. Product \
+         consumers share exactly `invoke`, `query`, and `stream_events` unless §5.2 is revised."
     );
 }
 
 #[test]
-fn reborn_services_api_proto_facade_stays_retired() {
-    let source_path = workspace_root().join(FACADE_SOURCE);
+fn product_local_product_surface_traits_stay_retired() {
+    let source_path = workspace_root().join(PRODUCT_REBORN_SERVICES_SOURCE);
     let source = std::fs::read_to_string(&source_path)
-        .unwrap_or_else(|e| panic!("failed to read facade source {source_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to read product source {source_path:?}: {e}"));
     let stripped = strip_comments_and_strings(&source);
     let product_surface_needle = format!("pub trait {PRODUCT_SURFACE_TRAIT}");
     let retired_needle = format!("trait {RETIRED_PROTO_FACADE_TRAIT}");
 
     assert!(
-        stripped.contains(&product_surface_needle),
-        "`{PRODUCT_SURFACE_TRAIT}` must remain the named §5.2 product boundary."
+        !stripped.contains(&product_surface_needle),
+        "`ironclaw_product::{PRODUCT_SURFACE_TRAIT}` was retired; use \
+         `ironclaw_host_api::{PRODUCT_SURFACE_TRAIT}` and descriptors instead."
     );
     assert!(
         !stripped.contains(&retired_needle),

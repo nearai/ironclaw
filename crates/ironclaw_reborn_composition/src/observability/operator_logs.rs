@@ -5,9 +5,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_product::{
-    OperatorLogsService, ProductSurfaceError, RebornLogEntry, RebornLogLevel,
-    RebornLogQueryRequest, RebornLogQueryResponse, WebUiAuthenticatedCaller,
-    normalize_operator_log_context_value,
+    OperatorLogsService, ProductSurfaceCaller, ProductSurfaceError, RebornLogEntry, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, normalize_operator_log_context_value,
 };
 use ironclaw_safety::{LeakDetector, sensitive_paths::is_sensitive_path_str};
 use tracing::field::{Field, Visit};
@@ -575,7 +574,7 @@ impl From<StoredLogEntry> for RebornLogEntry {
 impl OperatorLogsService for OperatorLogBuffer {
     async fn query_logs(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornLogQueryRequest,
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
         Ok(self.query(request))

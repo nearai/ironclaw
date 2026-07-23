@@ -31,6 +31,7 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
     AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
@@ -50,8 +51,8 @@ use ironclaw_product::{
     DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurface, ProductWorkflowError, RebornFilesystemIdempotencyLedger,
-    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
 use ironclaw_threads::SessionThreadService;
@@ -686,7 +687,7 @@ impl GenericChannelHostAssembly {
                 service
                     as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
             });
-        let surface = Arc::new(workflow) as Arc<dyn ProductSurface>;
+        let surface = Arc::new(workflow) as Arc<dyn ChannelInboundProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,

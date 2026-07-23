@@ -22,14 +22,12 @@ use ironclaw_auth::{
     SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId,
-    UserId,
+    AgentId, InstallationState, InvocationId, ProductSurfaceCaller, ProjectId, ResourceScope,
+    SecretHandle, TenantId, UserId,
 };
 use ironclaw_product::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductOperationRequest,
-    ProductOperationResponse, ProductSurface, ProductSurfaceError, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
-    rejecting_product_surface_error,
+    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceError,
+    RebornExtensionInfo, RebornExtensionListResponse, rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -277,29 +275,39 @@ impl UnusedServices {
 }
 
 #[async_trait]
-impl ProductSurface for UnusedServices {
+impl ironclaw_host_api::ProductSurface for UnusedServices {
+    async fn invoke(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
+    }
+
     async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, ProductSurfaceError> {
-        match query.view_id.as_str() {
-            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornExtensionListResponse {
-                    extensions: self.installed_extensions.clone(),
-                })
-                .expect("extension list payload"),
+        _caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        match request.view_id.as_str() {
+            id if id == EXTENSIONS_VIEW.id => Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                items: vec![
+                    serde_json::to_value(RebornExtensionListResponse {
+                        extensions: self.installed_extensions.clone(),
+                    })
+                    .expect("extension list payload"),
+                ],
                 next_cursor: None,
             }),
             _ => Err(rejecting_product_surface_error()),
         }
     }
 
-    async fn execute_command(
+    async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
         Err(rejecting_product_surface_error())
     }
 }

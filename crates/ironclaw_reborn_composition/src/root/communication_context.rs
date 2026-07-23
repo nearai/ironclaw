@@ -4,7 +4,7 @@ use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
+    ProductSurfaceCaller, RebornOutboundDeliveryTargetStatus,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -94,7 +94,7 @@ async fn fetch_communication_context(
         .explicit_owner_user_id()
         .cloned()
         .unwrap_or_else(|| actor.user_id.clone());
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         scope.tenant_id.clone(),
         owner_user_id,
         scope.agent_id.clone(),
@@ -238,11 +238,11 @@ mod tests {
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-        ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+        RebornSetOutboundPreferencesRequest,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
@@ -286,14 +286,14 @@ mod tests {
             impl OutboundPreferencesProductFacade for $name {
                 async fn get_outbound_preferences(
                     &self,
-                    _caller: WebUiAuthenticatedCaller,
+                    _caller: ProductSurfaceCaller,
                 ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
                     $get
                 }
 
                 async fn set_outbound_preferences(
                     &self,
-                    _caller: WebUiAuthenticatedCaller,
+                    _caller: ProductSurfaceCaller,
                     _request: RebornSetOutboundPreferencesRequest,
                 ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
                     $get
@@ -301,7 +301,7 @@ mod tests {
 
                 async fn list_outbound_delivery_targets(
                     &self,
-                    _caller: WebUiAuthenticatedCaller,
+                    _caller: ProductSurfaceCaller,
                 ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
                     Ok(RebornOutboundDeliveryTargetListResponse {
                         targets: Vec::new(),
@@ -518,7 +518,7 @@ mod tests {
     impl OutboundPreferencesProductFacade for CaptureCallerPreferencesFacade {
         async fn get_outbound_preferences(
             &self,
-            caller: WebUiAuthenticatedCaller,
+            caller: ProductSurfaceCaller,
         ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
             *self.seen_user_id.lock().expect("lock") = Some(caller.user_id.as_str().to_string());
             Ok(RebornOutboundPreferencesResponse::default())
@@ -526,7 +526,7 @@ mod tests {
 
         async fn set_outbound_preferences(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
             _request: RebornSetOutboundPreferencesRequest,
         ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
             Ok(RebornOutboundPreferencesResponse::default())
@@ -534,7 +534,7 @@ mod tests {
 
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
             Ok(RebornOutboundDeliveryTargetListResponse {
                 targets: Vec::new(),
@@ -752,14 +752,14 @@ mod tests {
     impl OutboundPreferencesProductFacade for HangingPreferencesFacade {
         async fn get_outbound_preferences(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
             std::future::pending().await
         }
 
         async fn set_outbound_preferences(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
             _request: RebornSetOutboundPreferencesRequest,
         ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
             Ok(RebornOutboundPreferencesResponse::default())
@@ -767,7 +767,7 @@ mod tests {
 
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
             Ok(RebornOutboundDeliveryTargetListResponse {
                 targets: Vec::new(),
@@ -786,14 +786,14 @@ mod tests {
     impl OutboundPreferencesProductFacade for PanickingPreferencesFacade {
         async fn get_outbound_preferences(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
             panic!("induced panic for JoinError test")
         }
 
         async fn set_outbound_preferences(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
             _request: RebornSetOutboundPreferencesRequest,
         ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
             Ok(RebornOutboundPreferencesResponse::default())
@@ -801,7 +801,7 @@ mod tests {
 
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
             Ok(RebornOutboundDeliveryTargetListResponse {
                 targets: Vec::new(),

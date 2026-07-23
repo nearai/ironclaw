@@ -1,80 +1,71 @@
 //! Host/kernel-facing product surface contract.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, UserId};
+use crate::{
+    ActivityId, AdapterInstallationId, AgentId, CapabilityId, ChannelInboundClassification,
+    NormalizedInboundMessage, ProductAdapterError, ProductAdapterId, ProductInboundAck,
+    ProductInboundEnvelope, ProductSourceChannel, ProjectId, ProtocolAuthEvidence, RedactedString,
+    TenantId, UserId,
+};
 
-/// Host-stable product operation identifiers used with
-/// [`ProductSurfaceInvokeRequest`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductSurfaceOperation {
-    ChannelInboundAdmit,
-    CreateThread,
-    SubmitTurn,
-    CancelRun,
-    ResolveGate,
-    RetryRun,
-    ProjectCreate,
-    ProjectFsRead,
-    FsRead,
-    AttachmentRead,
-    TraceAccountLoginLink,
-    TraceHoldAuthorize,
-    OperatorConfigSetKey,
-    OperatorServiceLifecycle,
-    LlmTestConnection,
-    LlmListModels,
-    LlmNearAiLogin,
-    LlmNearAiWalletLogin,
-    LlmCodexLogin,
-    AdminUserCreate,
-    AdminUserDeleteSecret,
-    AutomationPause,
-    AutomationResume,
-    AutomationRename,
-    AutomationDelete,
+/// One verified, normalized channel message admitted through a product surface.
+///
+/// The channel ingress router verifies the transport request and runs the
+/// adapter's pure normalization first. Product workflow owns conversion into
+/// the durable inbound envelope and commit path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInboundSurfaceRequest {
+    pub adapter_id: ProductAdapterId,
+    pub source_channel: ProductSourceChannel,
+    pub installation_id: AdapterInstallationId,
+    pub evidence: ProtocolAuthEvidence,
+    pub received_at: chrono::DateTime<chrono::Utc>,
+    pub message: NormalizedInboundMessage,
+    pub classification: Option<ChannelInboundClassification>,
 }
 
-impl ProductSurfaceOperation {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ChannelInboundAdmit => "channel.admit_inbound",
-            Self::CreateThread => "webui.create_thread",
-            Self::SubmitTurn => "webui.submit_turn",
-            Self::CancelRun => "webui.cancel_run",
-            Self::ResolveGate => "webui.resolve_gate",
-            Self::RetryRun => "webui.retry_run",
-            Self::ProjectCreate => "project.create",
-            Self::ProjectFsRead => "project.fs.read",
-            Self::FsRead => "fs.read",
-            Self::AttachmentRead => "attachment.read",
-            Self::TraceAccountLoginLink => "trace.account_login_link",
-            Self::TraceHoldAuthorize => "trace.hold_authorize",
-            Self::OperatorConfigSetKey => "operator.config.set_key",
-            Self::OperatorServiceLifecycle => "operator.service.lifecycle",
-            Self::LlmTestConnection => "llm.test_connection",
-            Self::LlmListModels => "llm.list_models",
-            Self::LlmNearAiLogin => "llm.nearai.login",
-            Self::LlmNearAiWalletLogin => "llm.nearai.wallet_login",
-            Self::LlmCodexLogin => "llm.codex.login",
-            Self::AdminUserCreate => "admin.user.create",
-            Self::AdminUserDeleteSecret => "admin.user.delete_secret",
-            Self::AutomationPause => "automation.pause",
-            Self::AutomationResume => "automation.resume",
-            Self::AutomationRename => "automation.rename",
-            Self::AutomationDelete => "automation.delete",
-        }
-    }
+/// Durable channel admission evidence returned by product workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInboundSurfaceAdmission {
+    pub envelope: ProductInboundEnvelope,
+    pub ack: ProductInboundAck,
+}
 
-    pub fn capability_id(self) -> Result<CapabilityId, crate::HostApiError> {
-        CapabilityId::new(self.as_str()).map_err(|_| crate::HostApiError::InvalidId {
-            kind: "product_surface_operation",
-            value: self.as_str().to_string(),
-            reason: "built-in product surface operation id is invalid".to_string(),
+/// Admission rejection after product workflow had enough trusted input to build
+/// the canonical envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInboundSurfaceRejectedAdmission {
+    pub envelope: ProductInboundEnvelope,
+    pub error: ProductAdapterError,
+}
+
+/// Channel admission outcome returned by the host/product channel ingress door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelInboundSurfaceOutcome {
+    Admitted(Box<ChannelInboundSurfaceAdmission>),
+    Invalid(ProductAdapterError),
+    Rejected(Box<ChannelInboundSurfaceRejectedAdmission>),
+}
+
+impl ChannelInboundSurfaceOutcome {
+    pub fn unavailable() -> Self {
+        Self::Invalid(ProductAdapterError::Internal {
+            detail: RedactedString::new("channel product surface admission is not available"),
         })
     }
+}
+
+/// Typed admission door for extension/channel ingress.
+#[async_trait]
+pub trait ChannelInboundProductSurface: Send + Sync {
+    async fn admit_channel_inbound(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+    ) -> ChannelInboundSurfaceOutcome;
 }
 
 /// Authenticated product-surface caller stamped by a trusted terminal boundary.
@@ -82,16 +73,19 @@ impl ProductSurfaceOperation {
 pub struct ProductSurfaceCaller {
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub agent_id: AgentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub operator_config: bool,
 }
 
 impl ProductSurfaceCaller {
     pub fn new(
         tenant_id: TenantId,
         user_id: UserId,
-        agent_id: AgentId,
+        agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
     ) -> Self {
         Self {
@@ -99,8 +93,18 @@ impl ProductSurfaceCaller {
             user_id,
             agent_id,
             project_id,
+            operator_config: false,
         }
     }
+
+    pub fn with_operator_config(mut self, operator_config: bool) -> Self {
+        self.operator_config = operator_config;
+        self
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Generic product mutation request. The operation id names a host-stable
@@ -108,7 +112,6 @@ impl ProductSurfaceCaller {
 /// payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProductSurfaceInvokeRequest {
-    pub caller: ProductSurfaceCaller,
     pub operation_id: CapabilityId,
     pub input: serde_json::Value,
     pub activity_id: ActivityId,
@@ -123,7 +126,6 @@ pub struct ProductSurfaceInvokeResponse {
 /// Generic read-only product view request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProductSurfaceQueryRequest {
-    pub caller: ProductSurfaceCaller,
     pub view_id: String,
     #[serde(default)]
     pub input: serde_json::Value,
@@ -144,7 +146,6 @@ pub struct ProductSurfaceQueryPage {
 /// Generic product event stream request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProductSurfaceStreamRequest {
-    pub caller: ProductSurfaceCaller,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,21 +297,67 @@ fn default_kind_for_code(code: ProductSurfaceErrorCode) -> ProductSurfaceErrorKi
     }
 }
 
-/// Stable product surface exposed by host kernels to product terminals.
+/// Stable product surface exposed by host composition.
 #[async_trait]
 pub trait ProductSurface: Send + Sync {
     async fn invoke(
         &self,
+        caller: ProductSurfaceCaller,
         request: ProductSurfaceInvokeRequest,
     ) -> Result<ProductSurfaceInvokeResponse, ProductSurfaceError>;
 
     async fn query(
         &self,
+        caller: ProductSurfaceCaller,
         request: ProductSurfaceQueryRequest,
     ) -> Result<ProductSurfaceQueryPage, ProductSurfaceError>;
 
     async fn stream_events(
         &self,
+        caller: ProductSurfaceCaller,
         request: ProductSurfaceStreamRequest,
     ) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError>;
+}
+
+/// Product surface bound to one authenticated caller at a trusted edge.
+///
+/// Route/channel consumers pass this handle inward so operation request DTOs do
+/// not carry authority-bearing caller data.
+#[derive(Clone)]
+pub struct BoundProductSurface {
+    surface: Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+}
+
+impl BoundProductSurface {
+    pub fn new(surface: Arc<dyn ProductSurface>, caller: ProductSurfaceCaller) -> Self {
+        Self { surface, caller }
+    }
+
+    pub fn caller(&self) -> &ProductSurfaceCaller {
+        &self.caller
+    }
+
+    pub async fn invoke(
+        &self,
+        request: ProductSurfaceInvokeRequest,
+    ) -> Result<ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        self.surface.invoke(self.caller.clone(), request).await
+    }
+
+    pub async fn query(
+        &self,
+        request: ProductSurfaceQueryRequest,
+    ) -> Result<ProductSurfaceQueryPage, ProductSurfaceError> {
+        self.surface.query(self.caller.clone(), request).await
+    }
+
+    pub async fn stream_events(
+        &self,
+        request: ProductSurfaceStreamRequest,
+    ) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError> {
+        self.surface
+            .stream_events(self.caller.clone(), request)
+            .await
+    }
 }

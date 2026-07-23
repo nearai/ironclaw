@@ -37,10 +37,10 @@ use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
     FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
     OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
@@ -48,11 +48,13 @@ use ironclaw_product::{
     OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
     PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
-    PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductOperationId,
-    ProductOperationRequest, ProductOperationResponse, ProductSurface, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
+    PROJECT_VIEW, PROJECTS_VIEW, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
@@ -64,13 +66,12 @@ use ironclaw_product::{
     RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListMembersResponse, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornGetProjectRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -86,16 +87,14 @@ use ironclaw_product::{
     RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornViewPage, RebornViewQuery, RunArtifactLogs,
     RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, rejecting_product_surface_error,
+    TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
 use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -112,18 +111,158 @@ use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
     webui_v2_router, webui_v2_router_with_options,
 };
+use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use programmable_surface::ProgrammableProductSurface;
 
-fn caller() -> WebUiAuthenticatedCaller {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ProductSurfaceCallId {
+    CreateThread,
+    SubmitTurn,
+    CancelRun,
+    ResolveGate,
+    RetryRun,
+    ProjectCreate,
+    ProjectFsRead,
+    FsRead,
+    AttachmentRead,
+    TraceAccountLoginLink,
+    TraceHoldAuthorize,
+    OperatorConfigSetKey,
+    OperatorServiceLifecycle,
+    LlmTestConnection,
+    LlmListModels,
+    LlmNearAiLogin,
+    LlmNearAiWalletLogin,
+    LlmCodexLogin,
+    AdminUserCreate,
+    AdminUserDeleteSecret,
+    AutomationPause,
+    AutomationResume,
+    AutomationRename,
+    AutomationDelete,
+}
+
+impl ProductSurfaceCallId {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateThread => "thread.create",
+            Self::SubmitTurn => "turn.submit",
+            Self::CancelRun => "run.cancel",
+            Self::ResolveGate => "gate.resolve",
+            Self::RetryRun => "run.retry",
+            Self::ProjectCreate => "project.create",
+            Self::ProjectFsRead => "project.fs.read",
+            Self::FsRead => "fs.read",
+            Self::AttachmentRead => "attachment.read",
+            Self::TraceAccountLoginLink => "trace.account_login_link",
+            Self::TraceHoldAuthorize => "trace.hold_authorize",
+            Self::OperatorConfigSetKey => "operator.config.set_key",
+            Self::OperatorServiceLifecycle => "operator.service.lifecycle",
+            Self::LlmTestConnection => "llm.test_connection",
+            Self::LlmListModels => "llm.list_models",
+            Self::LlmNearAiLogin => "llm.nearai.login",
+            Self::LlmNearAiWalletLogin => "llm.nearai.wallet_login",
+            Self::LlmCodexLogin => "llm.codex.login",
+            Self::AdminUserCreate => "admin.user.create",
+            Self::AdminUserDeleteSecret => "admin.user.delete_secret",
+            Self::AutomationPause => "automation.pause",
+            Self::AutomationResume => "automation.resume",
+            Self::AutomationRename => "automation.rename",
+            Self::AutomationDelete => "automation.delete",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "thread.create" => Some(Self::CreateThread),
+            "turn.submit" => Some(Self::SubmitTurn),
+            "run.cancel" => Some(Self::CancelRun),
+            "gate.resolve" => Some(Self::ResolveGate),
+            "run.retry" => Some(Self::RetryRun),
+            "project.create" => Some(Self::ProjectCreate),
+            "project.fs.read" => Some(Self::ProjectFsRead),
+            "fs.read" => Some(Self::FsRead),
+            "attachment.read" => Some(Self::AttachmentRead),
+            "trace.account_login_link" => Some(Self::TraceAccountLoginLink),
+            "trace.hold_authorize" => Some(Self::TraceHoldAuthorize),
+            "operator.config.set_key" => Some(Self::OperatorConfigSetKey),
+            "operator.service.lifecycle" => Some(Self::OperatorServiceLifecycle),
+            "llm.test_connection" => Some(Self::LlmTestConnection),
+            "llm.list_models" => Some(Self::LlmListModels),
+            "llm.nearai.login" => Some(Self::LlmNearAiLogin),
+            "llm.nearai.wallet_login" => Some(Self::LlmNearAiWalletLogin),
+            "llm.codex.login" => Some(Self::LlmCodexLogin),
+            "admin.user.create" => Some(Self::AdminUserCreate),
+            "admin.user.delete_secret" => Some(Self::AdminUserDeleteSecret),
+            "automation.pause" => Some(Self::AutomationPause),
+            "automation.resume" => Some(Self::AutomationResume),
+            "automation.rename" => Some(Self::AutomationRename),
+            "automation.delete" => Some(Self::AutomationDelete),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RecordedProductSurfaceCallRequest {
+    call_id: String,
+    input: Value,
+}
+
+impl RecordedProductSurfaceCallRequest {
+    fn from_value(call_id: ProductSurfaceCallId, input: Value) -> Self {
+        Self {
+            call_id: call_id.as_str().to_string(),
+            input,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RecordedProductSurfaceCallResponse {
+    Json(Value),
+    ProjectFile(ProjectFsFile),
+    Attachment(RebornAttachmentBytes),
+}
+
+impl RecordedProductSurfaceCallResponse {
+    fn json<T: Serialize>(value: T) -> Result<Self, ProductSurfaceError> {
+        Ok(Self::Json(
+            serde_json::to_value(value).map_err(ProductSurfaceError::internal_from)?,
+        ))
+    }
+
+    fn project_file(file: ProjectFsFile) -> Self {
+        Self::ProjectFile(file)
+    }
+
+    fn attachment(bytes: RebornAttachmentBytes) -> Self {
+        Self::Attachment(bytes)
+    }
+
+    fn into_value(self) -> Result<Value, ProductSurfaceError> {
+        match self {
+            Self::Json(value) => Ok(value),
+            Self::ProjectFile(file) => {
+                serde_json::to_value(file).map_err(ProductSurfaceError::internal_from)
+            }
+            Self::Attachment(bytes) => {
+                serde_json::to_value(bytes).map_err(ProductSurfaceError::internal_from)
+            }
+        }
+    }
+}
+
+fn caller() -> ProductSurfaceCaller {
     caller_for_user("user-alpha")
 }
 
-fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
@@ -138,7 +277,7 @@ fn router_with(services: Arc<dyn ProductSurface>) -> Router {
 fn router_with_caller(
     services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
@@ -298,8 +437,8 @@ fn operator_config_diagnostic_command_plane_response(
 
 #[derive(Default)]
 struct StubServices {
-    create_thread_calls: Mutex<Vec<WebUiCreateThreadRequest>>,
-    submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
+    create_thread_calls: Mutex<Vec<ProductCreateThreadRequest>>,
+    submit_turn_calls: Mutex<Vec<ProductSubmitTurnRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
@@ -308,17 +447,18 @@ struct StubServices {
     next_global_auto_approve_error: Mutex<Option<ProductSurfaceError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
-    operation_calls: Mutex<Vec<ProductOperationRequest>>,
-    next_operation_response: Mutex<Option<Result<ProductOperationResponse, ProductSurfaceError>>>,
+    surface_calls: Mutex<Vec<RecordedProductSurfaceCallRequest>>,
+    next_surface_response:
+        Mutex<Option<Result<RecordedProductSurfaceCallResponse, ProductSurfaceError>>>,
     next_invoke_response: Mutex<Option<Result<Resolution, ProductSurfaceError>>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
-    cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
-    resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
-    retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
-    list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
-    list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    cancel_run_calls: Mutex<Vec<ProductCancelRunRequest>>,
+    resolve_gate_calls: Mutex<Vec<ProductResolveGateRequest>>,
+    retry_run_calls: Mutex<Vec<ProductRetryRunRequest>>,
+    list_threads_calls: Mutex<Vec<ProductListThreadsRequest>>,
+    list_automations_calls: Mutex<Vec<ProductListAutomationsRequest>>,
     /// Captures the authenticated caller's user id for each
     /// `trace_account_traces` call, so the contract test can assert the handler
     /// forwards the caller (the route is caller-scoped).
@@ -351,9 +491,6 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, ProductSurfaceError>>>,
     stream_events_notify: Arc<Notify>,
-    stream_events_subscription_enabled: Mutex<bool>,
-    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
-    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
@@ -380,9 +517,9 @@ impl StubServices {
 
     fn enqueue_operation_response(
         &self,
-        response: Result<ProductOperationResponse, ProductSurfaceError>,
+        response: Result<RecordedProductSurfaceCallResponse, ProductSurfaceError>,
     ) {
-        *self.next_operation_response.lock().expect("lock") = Some(response);
+        *self.next_surface_response.lock().expect("lock") = Some(response);
     }
 
     fn fail_set_operator_config_key(&self, error: ProductSurfaceError) {
@@ -413,23 +550,6 @@ impl StubServices {
             .push_back(response);
     }
 
-    fn enable_stream_events_subscription(
-        &self,
-        events: Vec<Result<ProductOutboundEnvelope, ProductSurfaceError>>,
-    ) {
-        let (sender, receiver) = mpsc::channel(events.len().max(1));
-        for event in events {
-            sender.try_send(event).expect("subscription test queue");
-        }
-        drop(sender);
-        *self
-            .stream_events_subscription_enabled
-            .lock()
-            .expect("lock") = true;
-        *self.next_stream_events_subscription.lock().expect("lock") =
-            Some(RebornStreamEventsSubscription::new(receiver));
-    }
-
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
     /// test wait on the actual facade call rather than guessing at a
     /// timeout — axum's SSE body is lazy, so the handler does not run
@@ -446,7 +566,7 @@ impl StubServices {
 impl StubServices {
     async fn global_auto_approve_enabled(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<bool, ProductSurfaceError> {
         *self.global_auto_approve_calls.lock().expect("lock") += 1;
         if *self.stall_global_auto_approve.lock().expect("lock") {
@@ -465,8 +585,8 @@ impl StubServices {
 
     async fn create_thread(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
+        _caller: ProductSurfaceCaller,
+        request: ProductCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         self.create_thread_calls
             .lock()
@@ -500,8 +620,8 @@ impl StubServices {
 
     async fn submit_turn(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
+        _caller: ProductSurfaceCaller,
+        request: ProductSubmitTurnRequest,
     ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         self.submit_turn_calls
             .lock()
@@ -527,7 +647,7 @@ impl StubServices {
 
     async fn get_timeline(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, ProductSurfaceError> {
         self.get_timeline_calls
@@ -560,22 +680,26 @@ impl StubServices {
 
     async fn invoke(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         capability: CapabilityId,
-        input: ProductCapabilityInput,
+        input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError> {
-        if let ProductCapabilityInput::LlmProviderUpsert(request) = input {
+        if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
+            let provider_id = input
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(ProductSurfaceError::internal)?
+                .to_string();
             self.upsert_llm_provider_calls
                 .lock()
                 .expect("lock")
-                .push((request.id, request.api_key.is_some()));
+                .push((provider_id, input.get("api_key").is_some()));
             if let Some(response) = self.next_invoke_response.lock().expect("lock").take() {
                 return response;
             }
             return Err(service_unavailable_error(false));
         }
-        let input = input.into_json()?;
         if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID
             && let Some(provider_id) = input.get("provider_id").and_then(Value::as_str)
         {
@@ -607,7 +731,7 @@ impl StubServices {
 
     async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, ProductSurfaceError> {
         self.view_queries.lock().expect("lock").push(query.clone());
@@ -707,7 +831,7 @@ impl StubServices {
                 })
             }
             id if id == THREADS_VIEW.id => {
-                let mut request: WebUiListThreadsRequest =
+                let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params).expect("thread list params");
                 request.cursor = query.cursor.or(request.cursor);
                 self.list_threads_calls.lock().expect("lock").push(request);
@@ -780,7 +904,7 @@ impl StubServices {
                 })
             }
             id if id == AUTOMATIONS_VIEW.id => {
-                let request: WebUiListAutomationsRequest =
+                let request: ProductListAutomationsRequest =
                     serde_json::from_value(query.params).expect("automation list params");
                 self.list_automations_calls
                     .lock()
@@ -1122,7 +1246,7 @@ impl StubServices {
 
     async fn read_fs_file(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornFsReadRequest,
     ) -> Result<ProjectFsFile, ProductSurfaceError> {
         Ok(ProjectFsFile {
@@ -1136,7 +1260,7 @@ impl StubServices {
 
     async fn read_attachment(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornAttachmentRequest,
     ) -> Result<RebornAttachmentBytes, ProductSurfaceError> {
         self.read_attachment_calls
@@ -1158,7 +1282,7 @@ impl StubServices {
 
     async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.stream_events_calls
@@ -1173,52 +1297,10 @@ impl StubServices {
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
 
-    fn supports_stream_events_subscription(&self) -> bool {
-        *self
-            .stream_events_subscription_enabled
-            .lock()
-            .expect("lock")
-    }
-
-    async fn subscribe_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
-        self.subscribe_events_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        self.next_stream_events_subscription
-            .lock()
-            .expect("lock")
-            .take()
-            .ok_or_else(|| service_unavailable_error(true))
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
-        // Not exercised by any current handler test — `get_run_state` is on
-        // the facade trait but not wired to a WebChat v2 HTTP route. Fail
-        // loud rather than fabricate a response so a future caller-level
-        // test that forgets to program this path can't quietly pass.
-        Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Internal,
-            kind: ProductSurfaceErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
     async fn cancel_run(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
+        _caller: ProductSurfaceCaller,
+        request: ProductCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         self.cancel_run_calls
             .lock()
@@ -1234,8 +1316,8 @@ impl StubServices {
 
     async fn resolve_gate(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
+        _caller: ProductSurfaceCaller,
+        request: ProductResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         self.resolve_gate_calls
             .lock()
@@ -1252,8 +1334,8 @@ impl StubServices {
 
     async fn retry_run(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiRetryRunRequest,
+        _caller: ProductSurfaceCaller,
+        request: ProductRetryRunRequest,
     ) -> Result<RebornRetryRunResponse, ProductSurfaceError> {
         self.retry_run_calls
             .lock()
@@ -1268,7 +1350,7 @@ impl StubServices {
 
     async fn set_operator_config_key(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         key: String,
         request: RebornOperatorConfigSetRequest,
     ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
@@ -1291,7 +1373,7 @@ impl StubServices {
 
     async fn run_operator_service_lifecycle(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornOperatorServiceLifecycleRequest,
     ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
         self.run_operator_service_lifecycle_calls
@@ -1305,7 +1387,7 @@ impl StubServices {
 
     async fn test_llm_connection(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, ProductSurfaceError> {
         self.test_llm_connection_calls
@@ -1320,7 +1402,7 @@ impl StubServices {
 
     async fn list_llm_models(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, ProductSurfaceError> {
         self.list_llm_models_calls
@@ -1336,7 +1418,7 @@ impl StubServices {
 
     async fn trace_account_login_link(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornAccountLoginLinkResponse, ProductSurfaceError> {
         // Capture the forwarded caller (tenant AND user — this is the trusted
         // identity boundary) so the contract test can verify the caller-scoped
@@ -1356,153 +1438,109 @@ impl StubServices {
             url: Some("https://commons.example/account/login?code=stub".to_string()),
         })
     }
-}
 
-#[async_trait]
-impl ProductSurface for StubServices {
-    async fn invoke(
+    async fn record_product_surface_call(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        capability: CapabilityId,
-        input: ProductCapabilityInput,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        StubServices::invoke(self, caller, capability, input, activity_id).await
-    }
-
-    async fn query(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, ProductSurfaceError> {
-        StubServices::query(self, caller, query).await
-    }
-
-    async fn stream_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-        StubServices::stream_events(self, caller, request).await
-    }
-
-    fn supports_stream_events_subscription(&self) -> bool {
-        StubServices::supports_stream_events_subscription(self)
-    }
-
-    async fn subscribe_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
-        StubServices::subscribe_events(self, caller, request).await
-    }
-
-    async fn get_run_state(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
-        StubServices::get_run_state(self, caller, request).await
-    }
-
-    async fn execute_command(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
-        self.operation_calls
+        caller: ProductSurfaceCaller,
+        request: RecordedProductSurfaceCallRequest,
+    ) -> Result<RecordedProductSurfaceCallResponse, ProductSurfaceError> {
+        self.surface_calls
             .lock()
             .expect("lock")
             .push(request.clone());
-        if let Some(response) = self.next_operation_response.lock().expect("lock").take() {
+        if let Some(response) = self.next_surface_response.lock().expect("lock").take() {
             return response;
         }
-        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
+        let call_id = ProductSurfaceCallId::parse(request.call_id.as_str())
             .ok_or_else(|| service_unavailable_error(false))?;
-        match operation_id {
-            ProductOperationId::ChannelInboundAdmit => Err(service_unavailable_error(false)),
-            ProductOperationId::CreateThread => ProductOperationResponse::json(
+        match call_id {
+            ProductSurfaceCallId::CreateThread => RecordedProductSurfaceCallResponse::json(
                 self.create_thread(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::SubmitTurn => ProductOperationResponse::json(
+            ProductSurfaceCallId::SubmitTurn => RecordedProductSurfaceCallResponse::json(
                 self.submit_turn(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::CancelRun => ProductOperationResponse::json(
+            ProductSurfaceCallId::CancelRun => RecordedProductSurfaceCallResponse::json(
                 self.cancel_run(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::ResolveGate => ProductOperationResponse::json(
+            ProductSurfaceCallId::ResolveGate => RecordedProductSurfaceCallResponse::json(
                 self.resolve_gate(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::RetryRun => ProductOperationResponse::json(
+            ProductSurfaceCallId::RetryRun => RecordedProductSurfaceCallResponse::json(
                 self.retry_run(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::ProjectCreate => {
+            ProductSurfaceCallId::ProjectCreate => {
                 let _: RebornCreateProjectRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornProjectResponse {
+                RecordedProductSurfaceCallResponse::json(RebornProjectResponse {
                     project: sample_project_info("project-created"),
                 })
             }
-            ProductOperationId::ProjectFsRead => {
+            ProductSurfaceCallId::ProjectFsRead => {
                 let request: RebornProjectFsReadRequest =
                     serde_json::from_value(request.input).expect("input");
-                Ok(ProductOperationResponse::project_file(ProjectFsFile {
-                    path: request.path,
-                    filename: Some("report.md".to_string()),
-                    mime_type: "text/markdown".to_string(),
-                    size_bytes: 7,
-                    bytes: b"# notes".to_vec(),
-                }))
+                Ok(RecordedProductSurfaceCallResponse::project_file(
+                    ProjectFsFile {
+                        path: request.path,
+                        filename: Some("report.md".to_string()),
+                        mime_type: "text/markdown".to_string(),
+                        size_bytes: 7,
+                        bytes: b"# notes".to_vec(),
+                    },
+                ))
             }
-            ProductOperationId::FsRead => Ok(ProductOperationResponse::project_file(
+            ProductSurfaceCallId::FsRead => Ok(RecordedProductSurfaceCallResponse::project_file(
                 self.read_fs_file(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             )),
-            ProductOperationId::AttachmentRead => Ok(ProductOperationResponse::attachment(
-                self.read_attachment(
-                    caller,
-                    serde_json::from_value(request.input).expect("input"),
-                )
-                .await?,
-            )),
-            ProductOperationId::TraceAccountLoginLink => {
-                ProductOperationResponse::json(self.trace_account_login_link(caller).await?)
+            ProductSurfaceCallId::AttachmentRead => {
+                Ok(RecordedProductSurfaceCallResponse::attachment(
+                    self.read_attachment(
+                        caller,
+                        serde_json::from_value(request.input).expect("input"),
+                    )
+                    .await?,
+                ))
             }
-            ProductOperationId::TraceHoldAuthorize => {
+            ProductSurfaceCallId::TraceAccountLoginLink => {
+                RecordedProductSurfaceCallResponse::json(
+                    self.trace_account_login_link(caller).await?,
+                )
+            }
+            ProductSurfaceCallId::TraceHoldAuthorize => {
                 let _: RebornTraceHoldAuthorizeProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornTraceHoldAuthorizeResponse {
+                RecordedProductSurfaceCallResponse::json(RebornTraceHoldAuthorizeResponse {
                     authorized: true,
                 })
             }
-            ProductOperationId::OperatorConfigSetKey => {
+            ProductSurfaceCallId::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(
+                RecordedProductSurfaceCallResponse::json(
                     self.set_operator_config_key(
                         caller,
                         request.key,
@@ -1513,62 +1551,66 @@ impl ProductSurface for StubServices {
                     .await?,
                 )
             }
-            ProductOperationId::OperatorServiceLifecycle => ProductOperationResponse::json(
-                self.run_operator_service_lifecycle(
-                    caller,
-                    serde_json::from_value(request.input).expect("input"),
+            ProductSurfaceCallId::OperatorServiceLifecycle => {
+                RecordedProductSurfaceCallResponse::json(
+                    self.run_operator_service_lifecycle(
+                        caller,
+                        serde_json::from_value(request.input).expect("input"),
+                    )
+                    .await?,
                 )
-                .await?,
-            ),
-            ProductOperationId::LlmTestConnection => ProductOperationResponse::json(
+            }
+            ProductSurfaceCallId::LlmTestConnection => RecordedProductSurfaceCallResponse::json(
                 self.test_llm_connection(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::LlmListModels => ProductOperationResponse::json(
+            ProductSurfaceCallId::LlmListModels => RecordedProductSurfaceCallResponse::json(
                 self.list_llm_models(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            ProductOperationId::LlmNearAiLogin => {
+            ProductSurfaceCallId::LlmNearAiLogin => {
                 let _: NearAiLoginRequest = serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(NearAiLoginStart {
+                RecordedProductSurfaceCallResponse::json(NearAiLoginStart {
                     auth_url: "https://near.ai/login".to_string(),
                 })
             }
-            ProductOperationId::LlmNearAiWalletLogin => {
+            ProductSurfaceCallId::LlmNearAiWalletLogin => {
                 let _: NearAiWalletLoginRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(NearAiWalletLoginResult { active: true })
+                RecordedProductSurfaceCallResponse::json(NearAiWalletLoginResult { active: true })
             }
-            ProductOperationId::LlmCodexLogin => ProductOperationResponse::json(CodexLoginStart {
-                user_code: "TEST-CODE".to_string(),
-                verification_uri: "https://openai.com/device".to_string(),
-            }),
-            ProductOperationId::AdminUserCreate => {
+            ProductSurfaceCallId::LlmCodexLogin => {
+                RecordedProductSurfaceCallResponse::json(CodexLoginStart {
+                    user_code: "TEST-CODE".to_string(),
+                    verification_uri: "https://openai.com/device".to_string(),
+                })
+            }
+            ProductSurfaceCallId::AdminUserCreate => {
                 let request: RebornAdminCreateUserRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAdminUserCreatedResponse {
+                RecordedProductSurfaceCallResponse::json(RebornAdminUserCreatedResponse {
                     user: sample_admin_user(request.email.as_deref().unwrap_or("user-admin")),
                     api_token: "token-test".to_string(),
                 })
             }
-            ProductOperationId::AdminUserDeleteSecret => {
+            ProductSurfaceCallId::AdminUserDeleteSecret => {
                 let request: RebornAdminDeleteSecretProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAdminSecretDeletedResponse {
+                RecordedProductSurfaceCallResponse::json(RebornAdminSecretDeletedResponse {
                     handle: request.handle,
                     deleted: true,
                 })
             }
-            ProductOperationId::AutomationPause => {
+            ProductSurfaceCallId::AutomationPause => {
                 let request: RebornAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
                     updated: true,
                     automation: Some(automation_info(
                         request.automation_id.as_str(),
@@ -1577,10 +1619,10 @@ impl ProductSurface for StubServices {
                     )),
                 })
             }
-            ProductOperationId::AutomationResume => {
+            ProductSurfaceCallId::AutomationResume => {
                 let request: RebornAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
                     updated: true,
                     automation: Some(automation_info(
                         request.automation_id.as_str(),
@@ -1589,10 +1631,10 @@ impl ProductSurface for StubServices {
                     )),
                 })
             }
-            ProductOperationId::AutomationRename => {
+            ProductSurfaceCallId::AutomationRename => {
                 let request: RebornRenameAutomationProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
                     updated: true,
                     automation: Some(automation_info(
                         request.automation_id.as_str(),
@@ -1601,15 +1643,101 @@ impl ProductSurface for StubServices {
                     )),
                 })
             }
-            ProductOperationId::AutomationDelete => {
+            ProductSurfaceCallId::AutomationDelete => {
                 let _: RebornAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
-                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
                     updated: true,
                     automation: None,
                 })
             }
         }
+    }
+}
+
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn invoke(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
+            let output = self
+                .record_product_surface_call(
+                    caller,
+                    RecordedProductSurfaceCallRequest::from_value(call_id, request.input),
+                )
+                .await?
+                .into_value()?;
+            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+        }
+
+        let output = StubServices::invoke(
+            self,
+            caller,
+            request.operation_id,
+            request.input,
+            request.activity_id,
+        )
+        .await?;
+        let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+    }
+
+    async fn query(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        let page = StubServices::query(
+            self,
+            caller,
+            RebornViewQuery {
+                view_id: request.view_id,
+                params: request.input,
+                cursor: request.cursor,
+            },
+        )
+        .await?;
+        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+            items: vec![page.payload],
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    async fn stream_events(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let thread_id = request.stream_id.ok_or_else(|| {
+            ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
+        })?;
+        let after_cursor = request
+            .after_cursor
+            .map(ProjectionCursor::new)
+            .transpose()
+            .map_err(ProductSurfaceError::internal_from)?;
+        let response = StubServices::stream_events(
+            self,
+            caller,
+            RebornStreamEventsRequest {
+                thread_id,
+                after_cursor,
+            },
+        )
+        .await?;
+        let events = response
+            .events
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events,
+            next_cursor: None,
+        })
     }
 }
 
@@ -2645,19 +2773,19 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
         "automation-alpha"
     );
 
-    let calls = services.operation_calls.lock().expect("lock").clone();
+    let calls = services.surface_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 2);
     assert_eq!(
-        calls[0].operation_id,
-        ProductOperationId::AutomationPause.as_str()
+        calls[0].call_id,
+        ProductSurfaceCallId::AutomationPause.as_str()
     );
     assert_eq!(
         calls[0].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
     assert_eq!(
-        calls[1].operation_id,
-        ProductOperationId::AutomationResume.as_str()
+        calls[1].call_id,
+        ProductSurfaceCallId::AutomationResume.as_str()
     );
     assert_eq!(
         calls[1].input,
@@ -2688,11 +2816,11 @@ async fn rename_automation_dispatches_path_id_and_body_to_facade() {
     assert_eq!(body["automation"]["automation_id"], "automation-alpha");
     assert_eq!(body["automation"]["name"], "Renamed status");
 
-    let calls = services.operation_calls.lock().expect("lock").clone();
+    let calls = services.surface_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].operation_id,
-        ProductOperationId::AutomationRename.as_str()
+        calls[0].call_id,
+        ProductSurfaceCallId::AutomationRename.as_str()
     );
     assert_eq!(
         calls[0].input,
@@ -2756,11 +2884,11 @@ async fn rename_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
-        let calls = services.operation_calls.lock().expect("lock").clone();
+        let calls = services.surface_calls.lock().expect("lock").clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls[0].operation_id,
-            ProductOperationId::AutomationRename.as_str()
+            calls[0].call_id,
+            ProductSurfaceCallId::AutomationRename.as_str()
         );
     }
 }
@@ -2777,7 +2905,7 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("clock")
             .as_nanos()
     );
-    let unique_caller = WebUiAuthenticatedCaller::new(
+    let unique_caller = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id.as_str()).expect("user"),
         None,
@@ -2837,7 +2965,7 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
             .expect("clock")
             .as_nanos()
     );
-    let unique_caller = WebUiAuthenticatedCaller::new(
+    let unique_caller = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
         UserId::new(user_id.as_str()).expect("user"),
         None,
@@ -2949,11 +3077,11 @@ async fn delete_automation_dispatches_path_id_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["updated"], true);
     assert!(body.get("automation").is_none() || body["automation"].is_null());
-    let calls = services.operation_calls.lock().expect("lock").clone();
+    let calls = services.surface_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].operation_id,
-        ProductOperationId::AutomationDelete.as_str()
+        calls[0].call_id,
+        ProductSurfaceCallId::AutomationDelete.as_str()
     );
     assert_eq!(
         calls[0].input,
@@ -3013,11 +3141,11 @@ async fn delete_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
-        let calls = services.operation_calls.lock().expect("lock").clone();
+        let calls = services.surface_calls.lock().expect("lock").clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls[0].operation_id,
-            ProductOperationId::AutomationDelete.as_str()
+            calls[0].call_id,
+            ProductSurfaceCallId::AutomationDelete.as_str()
         );
     }
 }
@@ -3110,7 +3238,7 @@ async fn list_automations_error_maps_to_http_status() {
 #[tokio::test]
 async fn list_automations_include_completed_true_forwarded_to_facade() {
     // ?include_completed=true must be parsed and forwarded as `true` in the
-    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    // ProductListAutomationsRequest so the facade can widen its exclusion slice.
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -3464,7 +3592,7 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     // rather than a static frontend list that can drift. The `accept` tokens
     // must be exactly the shared format registry's output (drift kill), and
     // the budgets must match what `decode_attachments` enforces.
-    let expected = ironclaw_product::webui_attachment_capabilities();
+    let expected = ironclaw_product::product_attachment_capabilities();
     let accept: Vec<String> = body["attachments"]["accept"]
         .as_array()
         .expect("attachments.accept is an array")
@@ -3943,14 +4071,14 @@ async fn admin_user_secret_mutations_invoke_product_capabilities() {
         })
     );
 
-    let operation_calls = services.operation_calls.lock().expect("lock").clone();
-    assert_eq!(operation_calls.len(), 1);
+    let surface_calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(surface_calls.len(), 1);
     assert_eq!(
-        operation_calls[0].operation_id,
-        ProductOperationId::AdminUserDeleteSecret.as_str()
+        surface_calls[0].call_id,
+        ProductSurfaceCallId::AdminUserDeleteSecret.as_str()
     );
     assert_eq!(
-        operation_calls[0].input,
+        surface_calls[0].input,
         serde_json::json!({
             "user_id": "user-admin",
             "handle": "openai_api_key"
@@ -6299,7 +6427,6 @@ where
 #[tokio::test]
 async fn stream_events_sets_unbuffered_sse_headers() {
     let services = Arc::new(StubServices::default());
-    services.enable_stream_events_subscription(Vec::new());
 
     let router = router_with(services);
     let response = router
@@ -6389,61 +6516,6 @@ async fn stream_events_continues_immediately_after_non_empty_batch() {
         Some(&expected_cursor),
         "follow-up call must still preserve cursor ordering"
     );
-}
-
-#[tokio::test]
-async fn stream_events_uses_subscription_when_facade_supports_it() {
-    let services = Arc::new(StubServices::default());
-    let envelope_a = make_projection_update_envelope("cursor:sub-a");
-    let envelope_b = make_projection_update_envelope("cursor:sub-b");
-    services.enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b)]);
-
-    let router = router_with(services.clone());
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/threads/thread-x/events")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut body = response.into_body();
-    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
-        parse_sse_events(buf).len() >= 3
-    })
-    .await;
-    drop(body);
-
-    let events = parse_sse_events(&bytes);
-    assert!(
-        events.len() >= 3,
-        "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
-        String::from_utf8_lossy(&bytes)
-    );
-    let cursor_a_json =
-        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
-    assert_eq!(events[0].event.as_deref(), Some("keep_alive"));
-    assert_eq!(events[0].data.as_deref(), Some(r#"{"type":"keep_alive"}"#));
-    assert_eq!(events[1].event.as_deref(), Some("projection_update"));
-    assert_eq!(events[1].id.as_deref(), Some(cursor_a_json.as_str()));
-
-    assert_eq!(
-        services.stream_events_calls.lock().expect("lock").len(),
-        0,
-        "subscription-enabled SSE route must not call the polling drain facade"
-    );
-    let subscribe_calls = services
-        .subscribe_events_calls
-        .lock()
-        .expect("lock")
-        .clone();
-    assert_eq!(subscribe_calls.len(), 1);
-    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
-    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being
@@ -6847,90 +6919,6 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         Some(envelope_b.projection_cursor()),
         "second WS poll must advance after_cursor to the last emitted projection cursor",
     );
-}
-
-#[tokio::test]
-async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
-    use futures::StreamExt;
-    use tokio_tungstenite::tungstenite::Message as WsMessage;
-
-    let services = Arc::new(StubServices::default());
-    let envelope_a = make_projection_update_envelope("cursor:ws-sub-a");
-    let envelope_b = make_projection_update_envelope("cursor:ws-sub-b");
-    services
-        .enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b.clone())]);
-
-    let router = router_with(services.clone());
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let serve_handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
-    let (mut ws, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url),
-    )
-    .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
-
-    let mut text_frames: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, ws.next()).await {
-            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
-            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
-            Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(_))) => break,
-            Err(_) => break,
-        }
-    }
-    let _ = ws.close(None).await;
-    serve_handle.abort();
-
-    assert!(
-        text_frames.len() >= 3,
-        "expected readiness + subscription projection frames; got {} text frame(s): {:?}",
-        text_frames.len(),
-        text_frames,
-    );
-
-    let ready_json: Value = serde_json::from_str(&text_frames[0]).expect("ready frame parses");
-    assert_eq!(ready_json, serde_json::json!({ "type": "keep_alive" }));
-
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope a parses");
-    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
-    assert_eq!(
-        envelope_a_json, expected_a,
-        "first projection WS frame must carry the first subscription envelope",
-    );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[2]).expect("envelope b parses");
-    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
-    assert_eq!(
-        envelope_b_json, expected_b,
-        "second WS frame must carry the second subscription envelope",
-    );
-
-    assert_eq!(
-        services.stream_events_calls.lock().expect("lock").len(),
-        0,
-        "subscription-enabled WS route must not call the polling drain facade",
-    );
-    let subscribe_calls = services
-        .subscribe_events_calls
-        .lock()
-        .expect("lock")
-        .clone();
-    assert_eq!(subscribe_calls.len(), 1);
-    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
-    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 #[tokio::test]

@@ -456,7 +456,7 @@ export function queryOperatorLogs({
 
 // --- Messages ---
 
-// `attachments` is an array of `WebUiInboundAttachment`
+// `attachments` is an array of `ProductInboundAttachment`
 // (`{ mime_type, filename, data_base64 }`). Omitted from the body when
 // empty so a text-only send keeps the original wire shape.
 export function sendMessage({

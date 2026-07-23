@@ -27,8 +27,8 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_product::{
-    AUTOMATIONS_VIEW, RebornListAutomationsResponse, RebornViewQuery, WebUiAuthenticatedCaller,
-    WebUiListAutomationsRequest,
+    AUTOMATIONS_VIEW, ProductListAutomationsRequest, ProductSurfaceCaller,
+    RebornListAutomationsResponse,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -112,7 +112,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
         .expect("production runtime builds");
 
     let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-automation-prod-tenant").unwrap(),
         UserId::new("runtime-automation-prod-owner").unwrap(),
         Some(AgentId::new("runtime-automation-prod-agent").unwrap()),
@@ -122,19 +122,27 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // An empty list is fine — the key invariant is that the facade is wired
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
-    let result = bundle
-        .api
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: AUTOMATIONS_VIEW.id.to_string(),
-                params: serde_json::to_value(WebUiListAutomationsRequest::default())
-                    .expect("automation list params"),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("production automation facade must be reachable (not 503)");
+    let result = ironclaw_host_api::ProductSurface::query(
+        bundle.api.as_ref(),
+        caller,
+        ironclaw_host_api::ProductSurfaceQueryRequest {
+            view_id: AUTOMATIONS_VIEW.id.to_string(),
+            input: serde_json::to_value(ProductListAutomationsRequest::default())
+                .expect("automation list params"),
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await
+    .expect("production automation facade must be reachable (not 503)");
+    let result = ironclaw_product::RebornViewPage {
+        payload: result
+            .items
+            .into_iter()
+            .next()
+            .expect("automation list payload"),
+        next_cursor: result.next_cursor,
+    };
     let result: RebornListAutomationsResponse =
         serde_json::from_value(result.payload).expect("automation list response");
     assert_eq!(

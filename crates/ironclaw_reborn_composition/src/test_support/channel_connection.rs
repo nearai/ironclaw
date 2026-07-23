@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
 use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
-use ironclaw_product::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
+use ironclaw_product::{ChannelConnectionFacade, ProductSurfaceCaller};
 
 use crate::extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionFacade,
@@ -244,7 +244,7 @@ impl ChannelConnectionTestBundle {
     ) -> Result<bool, String> {
         let connections = self
             .facade
-            .caller_channel_connections(WebUiAuthenticatedCaller::new(
+            .caller_channel_connections(ProductSurfaceCaller::new(
                 self.tenant_id.clone(),
                 user_id.clone(),
                 Some(self.agent_id.clone()),

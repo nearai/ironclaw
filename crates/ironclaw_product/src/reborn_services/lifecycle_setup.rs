@@ -6,11 +6,11 @@ use ironclaw_host_api::ExtensionId;
 use crate::{
     ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceValidationCode, ProductWorkflowError, RebornChannelConfigField,
-    RebornExtensionCredentialSetup, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornSetupExtensionResponse, RebornViewDescriptor, WebUiAuthenticatedCaller,
-    WebUiSetupExtensionRequest,
+    LifecycleProductSurfaceContext, ProductSetupExtensionRequest, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceValidationCode,
+    ProductWorkflowError, RebornChannelConfigField, RebornExtensionCredentialSetup,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
+    RebornViewDescriptor,
 };
 
 use super::{
@@ -33,7 +33,7 @@ pub(super) async fn setup_extension_view(
     facade: &dyn LifecycleProductFacade,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     channel_config: Option<&dyn ChannelConfigFacade>,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     params: serde_json::Value,
 ) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
     let package_id = views::required_string_view_param(params, "package_id")?;
@@ -45,7 +45,7 @@ pub(super) async fn setup_extension_view(
         channel_config,
         caller,
         package_ref,
-        WebUiSetupExtensionRequest::default(),
+        ProductSetupExtensionRequest::default(),
     )
     .await
 }
@@ -54,7 +54,7 @@ pub(super) async fn submit_extension_setup_capability(
     facade: &dyn LifecycleProductFacade,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     channel_config: Option<&dyn ChannelConfigFacade>,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     input: serde_json::Value,
 ) -> Result<(), ProductSurfaceError> {
     let mut object = match input {
@@ -93,9 +93,9 @@ pub(super) async fn setup_extension(
     facade: &dyn LifecycleProductFacade,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     channel_config: Option<&dyn ChannelConfigFacade>,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     package_ref: LifecyclePackageRef,
-    request: WebUiSetupExtensionRequest,
+    request: ProductSetupExtensionRequest,
 ) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
     let action = setup_action(&request)?;
     let scope = credential_scope(&caller, &package_ref);
@@ -273,7 +273,9 @@ async fn setup_extension_response(
     })
 }
 
-fn setup_action(request: &WebUiSetupExtensionRequest) -> Result<SetupAction, ProductSurfaceError> {
+fn setup_action(
+    request: &ProductSetupExtensionRequest,
+) -> Result<SetupAction, ProductSurfaceError> {
     match request.action.as_deref() {
         None => Ok(SetupAction::View),
         Some("submit") => Ok(SetupAction::Submit),

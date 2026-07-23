@@ -22,9 +22,9 @@ use std::os::unix::process::CommandExt;
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product::{
-    OperatorServiceLifecycleService, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, WebUiAuthenticatedCaller,
+    OperatorServiceLifecycleService, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
 };
 
 const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";
@@ -792,7 +792,7 @@ impl RebornLocalServiceLifecycle {
 
     fn ensure_authorized_operator(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
     ) -> Result<(), ProductSurfaceError> {
         if self.operator_identity.as_ref().is_some_and(|operator| {
             caller.tenant_id == operator.tenant_id && caller.user_id == operator.user_id
@@ -820,7 +820,7 @@ impl Default for RebornLocalServiceLifecycle {
 impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
     async fn control_service(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornServiceLifecycleRequest,
     ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError> {
         self.ensure_authorized_operator(&caller)?;
@@ -1900,8 +1900,8 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         assert!(response.remediation.is_some());
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             ironclaw_host_api::TenantId::new("tenant-test").expect("tenant"),
             ironclaw_host_api::UserId::new("user-test").expect("user"),
             Some(ironclaw_host_api::AgentId::new("agent-test").expect("agent")),

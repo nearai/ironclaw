@@ -10,12 +10,12 @@ use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionFacade, OperatorStatusService, ProductSurface, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    ChannelConnectionFacade, OperatorStatusService, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -365,7 +365,7 @@ impl ReadinessOperatorStatusService {
 impl OperatorStatusService for ReadinessOperatorStatusService {
     async fn status(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError> {
         Ok(status_response_from_readiness(&self.readiness))
     }
@@ -401,7 +401,7 @@ impl LocalSkillsProductFacade {
 impl SkillsProductFacade for LocalSkillsProductFacade {
     async fn list_skills(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornSkillListResponse, ProductSurfaceError> {
         let scope = caller_skill_scope(caller);
         let skills = self
@@ -420,7 +420,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn search_skills(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: String,
     ) -> Result<RebornSkillSearchResponse, ProductSurfaceError> {
         let scope = caller_skill_scope(caller);
@@ -439,7 +439,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn read_skill_content(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         name: String,
     ) -> Result<RebornSkillContentResponse, ProductSurfaceError> {
         let scope = caller_skill_scope(caller);
@@ -455,7 +455,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
     }
 }
 
-fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
+fn caller_skill_scope(caller: ProductSurfaceCaller) -> ResourceScope {
     ResourceScope {
         tenant_id: caller.tenant_id,
         user_id: caller.user_id,

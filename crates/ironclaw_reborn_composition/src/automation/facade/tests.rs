@@ -14,12 +14,12 @@ use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductSurface, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductWorkflowError,
-    RebornAutomationHoldReason, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornListThreadsResponse, RebornServices,
+    ProductListThreadsRequest, ProductSurfaceCaller, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductWorkflowError, RebornAutomationHoldReason,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornListThreadsResponse, RebornServices,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
-    WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,
@@ -154,8 +154,8 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
     }
 }
 
-fn webui_caller(caller: &ProductAgentBoundCaller) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn webui_caller(caller: &ProductAgentBoundCaller) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         caller.tenant_id.clone(),
         caller.user_id.clone(),
         Some(caller.agent_id.clone()),
@@ -757,9 +757,9 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
             webui_caller(&c),
             THREADS_VIEW
                 .query(
-                    WebUiListThreadsRequest {
+                    ProductListThreadsRequest {
                         needs_approval: true,
-                        ..WebUiListThreadsRequest::default()
+                        ..ProductListThreadsRequest::default()
                     },
                     None,
                 )

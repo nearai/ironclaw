@@ -71,7 +71,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
 
 - **Adding a route** requires a handler **and** a matching entry in
   `webui_v2_routes()` — the descriptor contract test fails otherwise. Handlers
-  receive `WebUiAuthenticatedCaller` via `axum::Extension`; a missing extension
+  receive `ProductSurfaceCaller` via `axum::Extension`; a missing extension
   surfaces `500` (locked by a regression test — do not hand-roll a fallback).
 - **All HTTP errors travel through `WebUiV2HttpError`**, never hand-built
   `StatusCode` returns — that keeps the redacted-error vocabulary intact.

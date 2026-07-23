@@ -538,16 +538,12 @@ pub(crate) enum CredentialRefreshWorkerReady {
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub(crate) approval_interaction:
-        Option<Arc<dyn ironclaw_product::ApprovalInteractionService>>,
+    pub(crate) approval_interaction: Option<Arc<dyn ironclaw_product::ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product::AuthInteractionService>>,
     pub(crate) identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub(crate) approval_context:
-        Option<Arc<dyn ironclaw_product::ApprovalPromptContextSource>>,
-    pub(crate) blocked_auth_prompts:
-        Option<Arc<dyn ironclaw_product::BlockedAuthPromptSource>>,
-    pub(crate) auth_flow_cancel:
-        Option<Arc<dyn ironclaw_product::BlockedAuthFlowCanceller>>,
+    pub(crate) approval_context: Option<Arc<dyn ironclaw_product::ApprovalPromptContextSource>>,
+    pub(crate) blocked_auth_prompts: Option<Arc<dyn ironclaw_product::BlockedAuthPromptSource>>,
+    pub(crate) auth_flow_cancel: Option<Arc<dyn ironclaw_product::BlockedAuthFlowCanceller>>,
     pub(crate) run_delivery_settings: ironclaw_product::RunDeliverySettings,
 }
 
@@ -4385,14 +4381,13 @@ async fn build_backend_production(
         channel_pairing_registry = Some(channel_pairing_registry_built);
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
-                let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> =
-                    Arc::new(
-                        crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
-                            generic.host.snapshot_watch(),
-                            transport,
-                        )
-                        .with_deployment_channels(Arc::clone(&deployment_channels)),
-                    );
+                let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
+                    crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
+                        generic.host.snapshot_watch(),
+                        transport,
+                    )
+                    .with_deployment_channels(Arc::clone(&deployment_channels)),
+                );
                 let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
                     Arc::clone(&outbound_stores.outbound_state)
                         as Arc<dyn ironclaw_outbound::OutboundStateStore>,

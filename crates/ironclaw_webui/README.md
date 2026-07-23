@@ -28,7 +28,7 @@ across it:
 
 The native WebChat v2 HTTP routes on top of
 `ironclaw_product::ProductSurface`. Handlers are thin: they read the
-`WebUiAuthenticatedCaller` + `WebUiV2Capabilities` injected as axum extensions,
+`ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
 dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
 
 - `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` — build

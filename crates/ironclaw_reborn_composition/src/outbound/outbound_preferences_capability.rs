@@ -16,9 +16,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade, ProductSurfaceCaller,
     ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
 };
 
 pub(crate) fn extend_builtin_first_party_package(
@@ -101,14 +100,14 @@ impl FirstPartyCapabilityHandler for SetOutboundPreferencesHandler {
 fn authenticated_caller(
     request: &FirstPartyCapabilityRequest,
     started: Instant,
-) -> Result<WebUiAuthenticatedCaller, FirstPartyCapabilityError> {
+) -> Result<ProductSurfaceCaller, FirstPartyCapabilityError> {
     if request.authenticated_actor_user_id.as_ref() != Some(&request.scope.user_id) {
         return Err(dispatch_error(
             RuntimeDispatchErrorKind::PolicyDenied,
             started,
         ));
     }
-    Ok(WebUiAuthenticatedCaller::new(
+    Ok(ProductSurfaceCaller::new(
         request.scope.tenant_id.clone(),
         request.scope.user_id.clone(),
         request.scope.agent_id.clone(),

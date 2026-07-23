@@ -17,8 +17,8 @@ use ironclaw_reborn_traces::contribution::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ProductCapabilityInvoker, ProductSurfaceError, ProductView, RebornServices, RebornViewProvider,
-    WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceCallerExt, ProductSurfaceError,
+    ProductView, RebornServices, RebornViewProvider,
 };
 
 pub const TRACE_CREDITS_VIEW: ProductView<serde_json::Value, RebornTraceCreditsResponse> =
@@ -232,7 +232,7 @@ where
 {
     pub(super) async fn build_trace_credits_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornTraceCreditsResponse, ProductSurfaceError> {
         let actor = caller.actor();
         let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
@@ -244,7 +244,7 @@ where
 
     pub(super) async fn build_trace_account_traces_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornAccountTracesResponse, ProductSurfaceError> {
         let actor = caller.actor();
         account_traces_for_user(&caller.tenant_id, &actor.user_id)

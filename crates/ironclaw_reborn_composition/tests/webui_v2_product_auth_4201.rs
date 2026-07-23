@@ -19,12 +19,10 @@ use ironclaw_auth::{
     NewCredentialAccount,
 };
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
-use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_product::{
-    ProductOperationRequest, ProductOperationResponse, ProductSurface, ProductSurfaceError,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, WebUiAuthenticatedCaller, rejecting_product_surface_error,
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ProjectId, ResourceScope, TenantId, UserId,
 };
+use ironclaw_product::{ProductSurfaceError, rejecting_product_surface_error};
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
@@ -73,27 +71,28 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl ProductSurface for UnusedServices {
-    async fn stream_events(
+impl ironclaw_host_api::ProductSurface for UnusedServices {
+    async fn invoke(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
         Err(rejecting_product_surface_error())
     }
 
-    async fn get_run_state(
+    async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
         Err(rejecting_product_surface_error())
     }
-    async fn execute_command(
+
+    async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
         Err(rejecting_product_surface_error())
     }
 }

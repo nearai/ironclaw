@@ -1366,16 +1366,12 @@ impl RebornRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn delivery_coordinator(
-        &self,
-    ) -> Option<Arc<ironclaw_product::DeliveryCoordinator>> {
+    pub fn delivery_coordinator(&self) -> Option<Arc<ironclaw_product::DeliveryCoordinator>> {
         self.delivery_coordinator.clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_config_facade(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigFacade>> {
+    pub fn channel_config_facade(&self) -> Option<Arc<dyn ironclaw_product::ChannelConfigFacade>> {
         Some(Arc::new(
             crate::extension_host::channel_config::RebornChannelConfigFacade::new(Arc::clone(
                 &self.channel_config,
@@ -1867,9 +1863,7 @@ impl RebornRuntime {
 
     /// First-class projects + membership (ACL) facade over the host-owned scoped
     /// substrate, backing the WebUI project surface.
-    pub(crate) fn reborn_project_service(
-        &self,
-    ) -> Arc<dyn ironclaw_product::ProjectService> {
+    pub(crate) fn reborn_project_service(&self) -> Arc<dyn ironclaw_product::ProjectService> {
         Arc::clone(&self.project_service)
     }
 
@@ -2509,7 +2503,7 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_turns::resolve_cli(
+                product_context: Some(ironclaw_turns::product_context::resolve_cli(
                     scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
                 )),
             })

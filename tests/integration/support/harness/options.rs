@@ -82,8 +82,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
         Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
     /// Binary-parity account-setup declarations (extension-runtime §5.5),
     /// the `RebornHostBindings::with_account_setup_descriptors` seam.
-    pub(crate) account_setup_descriptors:
-        Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     /// Typed handle for the recording network egress when the profile wants
     /// `captured_network_requests` assertions (the dyn seam alone loses the
     /// recorder type).

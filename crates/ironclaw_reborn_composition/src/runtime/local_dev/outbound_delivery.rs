@@ -10,8 +10,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product::{
-    OutboundPreferencesProductFacade, ProductSurfaceError, ProductSurfaceErrorCode,
-    RebornOutboundDeliveryTargetId, WebUiAuthenticatedCaller,
+    OutboundPreferencesProductFacade, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, RebornOutboundDeliveryTargetId,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
@@ -641,8 +641,8 @@ fn invocation_effective_input_ref(
 fn caller_for_run(
     invocation: &SyntheticCapabilityInvocation,
     fallback_user_id: &UserId,
-) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         invocation.run_context.scope.tenant_id.clone(),
         effective_user_id(&invocation.run_context, fallback_user_id),
         invocation.run_context.scope.agent_id.clone(),

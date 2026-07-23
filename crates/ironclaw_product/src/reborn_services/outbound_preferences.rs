@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use super::{
-    OutboundPreferencesProductFacade, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, RebornOutboundDeliveryModality,
+    OutboundPreferencesProductFacade, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
     RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -47,7 +46,7 @@ impl RebornOutboundPreferencesFacade {
 
     async fn response_for_record(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         record: Option<&CommunicationPreferenceRecord>,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let (final_reply_target, final_reply_target_status) =
@@ -85,7 +84,7 @@ impl RebornOutboundPreferencesFacade {
 
     async fn summary_for_reply_target(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         target: &ReplyTargetBindingRef,
     ) -> Result<Option<RebornOutboundDeliveryTargetSummary>, ProductSurfaceError> {
         self.targets
@@ -98,7 +97,7 @@ impl RebornOutboundPreferencesFacade {
 
     async fn resolve_final_reply_target(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<OutboundDeliveryTargetEntry, ProductSurfaceError> {
         let target_id = outbound_target_id_from_reborn(target_id)?;
@@ -109,11 +108,11 @@ impl RebornOutboundPreferencesFacade {
             .ok_or_else(outbound_target_not_found)
     }
 
-    /// Invariant: `WebUiAuthenticatedCaller` must come from the authenticated
+    /// Invariant: `ProductSurfaceCaller` must come from the authenticated
     /// product/session boundary, never from request-body tenant/user fields.
     /// This key and target-provider scope intentionally share the same
     /// verified caller identity.
-    fn key(caller: &WebUiAuthenticatedCaller) -> CommunicationPreferenceKey {
+    fn key(caller: &ProductSurfaceCaller) -> CommunicationPreferenceKey {
         CommunicationPreferenceKey::personal(caller.tenant_id.clone(), caller.user_id.clone())
     }
 }
@@ -122,7 +121,7 @@ impl RebornOutboundPreferencesFacade {
 impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
     async fn get_outbound_preferences(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let record = self
             .preferences
@@ -135,7 +134,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
 
     async fn set_outbound_preferences(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let key = Self::key(&caller);
@@ -183,7 +182,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
 
     async fn list_outbound_delivery_targets(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         let targets = self
             .targets
@@ -206,7 +205,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
     }
 }
 
-fn target_scope(caller: &WebUiAuthenticatedCaller) -> OutboundDeliveryTargetScope {
+fn target_scope(caller: &ProductSurfaceCaller) -> OutboundDeliveryTargetScope {
     OutboundDeliveryTargetScope::new(caller.tenant_id.clone(), caller.user_id.clone())
 }
 
@@ -1442,8 +1441,8 @@ mod tests {
             .expect("seed communication preference");
     }
 
-    fn caller(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(tenant(tenant_id), user(user_id), None, None)
+    fn caller(tenant_id: &str, user_id: &str) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(tenant(tenant_id), user(user_id), None, None)
     }
 
     fn outbound_scope(tenant_id: &str, user_id: &str) -> OutboundDeliveryTargetScope {

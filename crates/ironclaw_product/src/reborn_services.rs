@@ -8,17 +8,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
+    marker::PhantomData,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
     time::Duration,
 };
 
 use crate::{
-    AdapterInstallationId, ChannelInboundClassification, NormalizedInboundMessage,
-    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductSourceChannel, ProductWorkflowRejectionKind, ProjectionCursor, ProjectionStream,
-    ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
+    ProductAdapterError, ProductWorkflowRejectionKind, ProjectionCursor, ProjectionStream,
+    ProjectionSubscriptionRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -48,21 +46,22 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
-    ListPendingApprovalsRequest, ProductSurfaceValidationCode, ProductWorkflowError,
+    ListPendingApprovalsRequest, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductGateResolution, ProductInboundCommand, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductSurfaceCaller,
+    ProductSurfaceCallerExt, ProductSurfaceValidationCode, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    UnsupportedLifecycleProductFacade,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -87,7 +86,7 @@ mod operator_config_views;
 mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod outbound_views;
-mod product_operations;
+mod product_capability_handlers;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -116,6 +115,8 @@ pub use admin_users::{
     RebornAdminUserSecretsListResponse,
 };
 pub use ironclaw_host_api::{
+    ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, ProductSurface,
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 pub use trace_credits::{
@@ -217,14 +218,13 @@ pub use types::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornVendorAuthAccounts,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornVendorAuthAccounts,
 };
 pub use views::{
-    ProductOperation, ProductOperationId, ProductOperationRequest, ProductOperationResponse,
-    ProductOperationTypedInput, ProductView, RebornViewDescriptor, RebornViewPage,
-    RebornViewProvider, RebornViewQuery, UnavailableRebornViewProvider,
+    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+    UnavailableRebornViewProvider,
 };
 
 type SkillActivationRecorder =
@@ -320,87 +320,126 @@ pub const AUTOMATION_RENAME_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_DELETE_CAPABILITY_ID: &str = "builtin.automation_delete";
 pub const AUTOMATION_DELETE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_DELETE_CAPABILITY_ID);
-pub const CREATE_THREAD_OPERATION: ProductOperation<
-    WebUiCreateThreadRequest,
+
+pub const CREATE_THREAD_COMMAND_ID: &str = "thread.create";
+pub const CREATE_THREAD_COMMAND: ProductSurfaceCommandDescriptor<
+    ProductCreateThreadRequest,
     RebornCreateThreadResponse,
-> = ProductOperation::new(ProductOperationId::CreateThread);
-pub const SUBMIT_TURN_OPERATION: ProductOperation<
-    WebUiSendMessageRequest,
+> = ProductSurfaceCommandDescriptor::new(CREATE_THREAD_COMMAND_ID);
+pub const SUBMIT_TURN_COMMAND_ID: &str = "turn.submit";
+pub const SUBMIT_TURN_COMMAND: ProductSurfaceCommandDescriptor<
+    ProductSubmitTurnRequest,
     RebornSubmitTurnResponse,
-> = ProductOperation::new(ProductOperationId::SubmitTurn);
-pub const CANCEL_RUN_OPERATION: ProductOperation<WebUiCancelRunRequest, RebornCancelRunResponse> =
-    ProductOperation::new(ProductOperationId::CancelRun);
-pub const RESOLVE_GATE_OPERATION: ProductOperation<
-    WebUiResolveGateRequest,
+> = ProductSurfaceCommandDescriptor::new(SUBMIT_TURN_COMMAND_ID);
+pub const CANCEL_RUN_COMMAND_ID: &str = "run.cancel";
+pub const CANCEL_RUN_COMMAND: ProductSurfaceCommandDescriptor<
+    ProductCancelRunRequest,
+    RebornCancelRunResponse,
+> = ProductSurfaceCommandDescriptor::new(CANCEL_RUN_COMMAND_ID);
+pub const RESOLVE_GATE_COMMAND_ID: &str = "gate.resolve";
+pub const RESOLVE_GATE_COMMAND: ProductSurfaceCommandDescriptor<
+    ProductResolveGateRequest,
     RebornResolveGateResponse,
-> = ProductOperation::new(ProductOperationId::ResolveGate);
-pub const RETRY_RUN_OPERATION: ProductOperation<WebUiRetryRunRequest, RebornRetryRunResponse> =
-    ProductOperation::new(ProductOperationId::RetryRun);
-pub const PROJECT_CREATE_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(RESOLVE_GATE_COMMAND_ID);
+pub const RETRY_RUN_COMMAND_ID: &str = "run.retry";
+pub const RETRY_RUN_COMMAND: ProductSurfaceCommandDescriptor<
+    ProductRetryRunRequest,
+    RebornRetryRunResponse,
+> = ProductSurfaceCommandDescriptor::new(RETRY_RUN_COMMAND_ID);
+pub const PROJECT_CREATE_COMMAND_ID: &str = "project.create";
+pub const PROJECT_CREATE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornCreateProjectRequest,
     RebornProjectResponse,
-> = ProductOperation::new(ProductOperationId::ProjectCreate);
-pub const PROJECT_FS_READ_OPERATION: ProductOperation<RebornProjectFsReadRequest, ProjectFsFile> =
-    ProductOperation::new(ProductOperationId::ProjectFsRead);
-pub const FS_READ_OPERATION: ProductOperation<RebornFsReadRequest, ProjectFsFile> =
-    ProductOperation::new(ProductOperationId::FsRead);
-pub const ATTACHMENT_READ_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(PROJECT_CREATE_COMMAND_ID);
+pub const PROJECT_FS_READ_COMMAND_ID: &str = "project.fs.read";
+pub const PROJECT_FS_READ_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornProjectFsReadRequest,
+    ProjectFsFile,
+> = ProductSurfaceCommandDescriptor::new(PROJECT_FS_READ_COMMAND_ID);
+pub const FS_READ_COMMAND_ID: &str = "fs.read";
+pub const FS_READ_COMMAND: ProductSurfaceCommandDescriptor<RebornFsReadRequest, ProjectFsFile> =
+    ProductSurfaceCommandDescriptor::new(FS_READ_COMMAND_ID);
+pub const ATTACHMENT_READ_COMMAND_ID: &str = "attachment.read";
+pub const ATTACHMENT_READ_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAttachmentRequest,
     RebornAttachmentBytes,
-> = ProductOperation::new(ProductOperationId::AttachmentRead);
-pub const TRACE_ACCOUNT_LOGIN_LINK_OPERATION: ProductOperation<
-    serde_json::Value,
+> = ProductSurfaceCommandDescriptor::new(ATTACHMENT_READ_COMMAND_ID);
+pub const TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID: &str = "trace.account_login_link";
+pub const TRACE_ACCOUNT_LOGIN_LINK_COMMAND: ProductSurfaceCommandDescriptor<
+    EmptyProductCommandInput,
     RebornAccountLoginLinkResponse,
-> = ProductOperation::new(ProductOperationId::TraceAccountLoginLink);
-pub const TRACE_HOLD_AUTHORIZE_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID);
+pub const TRACE_HOLD_AUTHORIZE_COMMAND_ID: &str = "trace.hold_authorize";
+pub const TRACE_HOLD_AUTHORIZE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse,
-> = ProductOperation::new(ProductOperationId::TraceHoldAuthorize);
-pub const OPERATOR_CONFIG_SET_KEY_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(TRACE_HOLD_AUTHORIZE_COMMAND_ID);
+pub const OPERATOR_CONFIG_SET_KEY_COMMAND_ID: &str = "operator.config.set_key";
+pub const OPERATOR_CONFIG_SET_KEY_COMMAND: ProductSurfaceCommandDescriptor<
     RebornOperatorConfigSetProductRequest,
     RebornOperatorConfigGetResponse,
-> = ProductOperation::new(ProductOperationId::OperatorConfigSetKey);
-pub const OPERATOR_SERVICE_LIFECYCLE_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(OPERATOR_CONFIG_SET_KEY_COMMAND_ID);
+pub const OPERATOR_SERVICE_LIFECYCLE_COMMAND_ID: &str = "operator.service.lifecycle";
+pub const OPERATOR_SERVICE_LIFECYCLE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornOperatorServiceLifecycleRequest,
     RebornOperatorCommandPlaneResponse,
-> = ProductOperation::new(ProductOperationId::OperatorServiceLifecycle);
-pub const LLM_TEST_CONNECTION_OPERATION: ProductOperation<serde_json::Value, LlmProbeResult> =
-    ProductOperation::new(ProductOperationId::LlmTestConnection);
-pub const LLM_LIST_MODELS_OPERATION: ProductOperation<serde_json::Value, LlmModelsResult> =
-    ProductOperation::new(ProductOperationId::LlmListModels);
-pub const LLM_NEARAI_LOGIN_OPERATION: ProductOperation<serde_json::Value, NearAiLoginStart> =
-    ProductOperation::new(ProductOperationId::LlmNearAiLogin);
-pub const LLM_NEARAI_WALLET_LOGIN_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(OPERATOR_SERVICE_LIFECYCLE_COMMAND_ID);
+pub const LLM_TEST_CONNECTION_COMMAND_ID: &str = "llm.test_connection";
+pub const LLM_TEST_CONNECTION_COMMAND: ProductSurfaceCommandDescriptor<
+    serde_json::Value,
+    LlmProbeResult,
+> = ProductSurfaceCommandDescriptor::new(LLM_TEST_CONNECTION_COMMAND_ID);
+pub const LLM_LIST_MODELS_COMMAND_ID: &str = "llm.list_models";
+pub const LLM_LIST_MODELS_COMMAND: ProductSurfaceCommandDescriptor<
+    serde_json::Value,
+    LlmModelsResult,
+> = ProductSurfaceCommandDescriptor::new(LLM_LIST_MODELS_COMMAND_ID);
+pub const LLM_NEARAI_LOGIN_COMMAND_ID: &str = "llm.nearai.login";
+pub const LLM_NEARAI_LOGIN_COMMAND: ProductSurfaceCommandDescriptor<
+    serde_json::Value,
+    NearAiLoginStart,
+> = ProductSurfaceCommandDescriptor::new(LLM_NEARAI_LOGIN_COMMAND_ID);
+pub const LLM_NEARAI_WALLET_LOGIN_COMMAND_ID: &str = "llm.nearai.wallet_login";
+pub const LLM_NEARAI_WALLET_LOGIN_COMMAND: ProductSurfaceCommandDescriptor<
     serde_json::Value,
     NearAiWalletLoginResult,
-> = ProductOperation::new(ProductOperationId::LlmNearAiWalletLogin);
-pub const LLM_CODEX_LOGIN_OPERATION: ProductOperation<serde_json::Value, CodexLoginStart> =
-    ProductOperation::new(ProductOperationId::LlmCodexLogin);
-pub const ADMIN_USER_CREATE_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(LLM_NEARAI_WALLET_LOGIN_COMMAND_ID);
+pub const LLM_CODEX_LOGIN_COMMAND_ID: &str = "llm.codex.login";
+pub const LLM_CODEX_LOGIN_COMMAND: ProductSurfaceCommandDescriptor<
+    EmptyProductCommandInput,
+    CodexLoginStart,
+> = ProductSurfaceCommandDescriptor::new(LLM_CODEX_LOGIN_COMMAND_ID);
+pub const ADMIN_USER_CREATE_COMMAND_ID: &str = "admin.user.create";
+pub const ADMIN_USER_CREATE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAdminCreateUserRequest,
     RebornAdminUserCreatedResponse,
-> = ProductOperation::new(ProductOperationId::AdminUserCreate);
-pub const ADMIN_USER_DELETE_SECRET_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(ADMIN_USER_CREATE_COMMAND_ID);
+pub const ADMIN_USER_DELETE_SECRET_COMMAND_ID: &str = "admin.user.delete_secret";
+pub const ADMIN_USER_DELETE_SECRET_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAdminDeleteSecretProductRequest,
     RebornAdminSecretDeletedResponse,
-> = ProductOperation::new(ProductOperationId::AdminUserDeleteSecret);
-pub const AUTOMATION_PAUSE_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(ADMIN_USER_DELETE_SECRET_COMMAND_ID);
+pub const AUTOMATION_PAUSE_COMMAND_ID: &str = "automation.pause";
+pub const AUTOMATION_PAUSE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
-> = ProductOperation::new(ProductOperationId::AutomationPause);
-pub const AUTOMATION_RESUME_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_PAUSE_COMMAND_ID);
+pub const AUTOMATION_RESUME_COMMAND_ID: &str = "automation.resume";
+pub const AUTOMATION_RESUME_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
-> = ProductOperation::new(ProductOperationId::AutomationResume);
-pub const AUTOMATION_RENAME_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_RESUME_COMMAND_ID);
+pub const AUTOMATION_RENAME_COMMAND_ID: &str = "automation.rename";
+pub const AUTOMATION_RENAME_COMMAND: ProductSurfaceCommandDescriptor<
     RebornRenameAutomationProductRequest,
     RebornAutomationMutationResponse,
-> = ProductOperation::new(ProductOperationId::AutomationRename);
-pub const AUTOMATION_DELETE_OPERATION: ProductOperation<
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_RENAME_COMMAND_ID);
+pub const AUTOMATION_DELETE_COMMAND_ID: &str = "automation.delete";
+pub const AUTOMATION_DELETE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
-> = ProductOperation::new(ProductOperationId::AutomationDelete);
-pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_DELETE_COMMAND_ID);
+pub const THREADS_VIEW: ProductView<ProductListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =
     ProductView::paginated("timeline");
@@ -409,7 +448,7 @@ pub const GLOBAL_AUTO_APPROVE_VIEW: ProductView<
     RebornGlobalAutoApproveResponse,
 > = ProductView::unpaginated("global_auto_approve");
 pub const AUTOMATIONS_VIEW: ProductView<
-    WebUiListAutomationsRequest,
+    ProductListAutomationsRequest,
     RebornListAutomationsResponse,
 > = ProductView::unpaginated("automations");
 pub const PROJECT_FS_LIST_VIEW: ProductView<
@@ -545,7 +584,7 @@ pub struct ChannelAuthAccountState {
 pub trait ChannelConnectionFacade: Send + Sync {
     async fn caller_channel_connections(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError>;
 
     /// The caller's durable auth-account signal per channel extension, keyed by
@@ -560,7 +599,7 @@ pub trait ChannelConnectionFacade: Send + Sync {
     /// caller's account status.
     async fn caller_channel_account_states(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, ProductSurfaceError>
     {
         Ok(std::collections::HashMap::new())
@@ -568,7 +607,7 @@ pub trait ChannelConnectionFacade: Send + Sync {
 
     async fn disconnect_channel_for_caller(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _channel: &str,
     ) -> Result<(), ProductSurfaceError> {
         Err(ProductSurfaceError::service_unavailable(false))
@@ -582,7 +621,7 @@ pub struct StaticChannelConnectionFacade;
 impl ChannelConnectionFacade for StaticChannelConnectionFacade {
     async fn caller_channel_connections(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
         Ok(std::collections::HashMap::new())
     }
@@ -630,7 +669,7 @@ pub trait ChannelConfigFacade: Send + Sync {
 pub trait OperatorStatusService: Send + Sync {
     async fn status(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError>;
 }
 
@@ -649,7 +688,7 @@ impl StaticOperatorStatusService {
 impl OperatorStatusService for StaticOperatorStatusService {
     async fn status(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError> {
         Ok(self.response.clone())
     }
@@ -662,7 +701,7 @@ pub struct UnsupportedOperatorStatusService;
 impl OperatorStatusService for UnsupportedOperatorStatusService {
     async fn status(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError> {
         Err(operator_surface_unavailable())
     }
@@ -672,7 +711,7 @@ impl OperatorStatusService for UnsupportedOperatorStatusService {
 pub trait OperatorLogsService: Send + Sync {
     async fn query_logs(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornLogQueryRequest,
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError>;
 }
@@ -684,7 +723,7 @@ pub struct UnsupportedOperatorLogsService;
 impl OperatorLogsService for UnsupportedOperatorLogsService {
     async fn query_logs(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: RebornLogQueryRequest,
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
         Err(operator_surface_unavailable())
@@ -695,7 +734,7 @@ impl OperatorLogsService for UnsupportedOperatorLogsService {
 pub trait OperatorServiceLifecycleService: Send + Sync {
     async fn control_service(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornServiceLifecycleRequest,
     ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError>;
 }
@@ -707,7 +746,7 @@ pub struct UnsupportedOperatorServiceLifecycleService;
 impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleService {
     async fn control_service(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornServiceLifecycleRequest,
     ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError> {
         Ok(RebornServiceLifecycleResponse {
@@ -726,7 +765,7 @@ impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleServ
 pub trait SkillsProductFacade: Send + Sync {
     async fn list_skills(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornSkillListResponse, ProductSurfaceError> {
         let _ = caller;
         Err(ProductSurfaceError::service_unavailable(false))
@@ -734,7 +773,7 @@ pub trait SkillsProductFacade: Send + Sync {
 
     async fn search_skills(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: String,
     ) -> Result<RebornSkillSearchResponse, ProductSurfaceError> {
         let _ = (caller, query);
@@ -743,7 +782,7 @@ pub trait SkillsProductFacade: Send + Sync {
 
     async fn read_skill_content(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         name: String,
     ) -> Result<RebornSkillContentResponse, ProductSurfaceError> {
         let _ = (caller, name);
@@ -773,7 +812,7 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     /// stable state while mutation and target inventory remain fail-closed.
     async fn get_outbound_preferences(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
 
     /// Persist the caller's scoped outbound delivery preferences.
@@ -784,7 +823,7 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     /// non-retryable service-unavailable response until a real facade is wired.
     async fn set_outbound_preferences(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
 
@@ -797,7 +836,7 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     /// service-unavailable response until a real facade is wired.
     async fn list_outbound_delivery_targets(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError>;
 }
 
@@ -814,14 +853,14 @@ impl UnsupportedOutboundPreferencesProductFacade {
 impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductFacade {
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         Ok(RebornOutboundPreferencesResponse::default())
     }
 
     async fn set_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         Err(outbound_preferences_unavailable())
@@ -829,7 +868,7 @@ impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductF
 
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Err(outbound_preferences_unavailable())
     }
@@ -1110,7 +1149,7 @@ impl GateResolutionRoute {
         status: TurnStatus,
         parked_gate_ref: Option<&GateRef>,
         requested_gate_ref: &GateRef,
-        resolution: &WebUiGateResolution,
+        resolution: &ProductGateResolution,
     ) -> Result<Self, ProductSurfaceError> {
         match status {
             TurnStatus::BlockedApproval => {
@@ -1139,11 +1178,11 @@ impl GateResolutionRoute {
         }
     }
 
-    fn from_gate_shape(gate_ref: &GateRef, resolution: &WebUiGateResolution) -> Self {
+    fn from_gate_shape(gate_ref: &GateRef, resolution: &ProductGateResolution) -> Self {
         match (
             is_approval_gate_ref(gate_ref.as_str()),
             is_auth_gate_ref(gate_ref.as_str()),
-            matches!(resolution, WebUiGateResolution::CredentialProvided { .. }),
+            matches!(resolution, ProductGateResolution::CredentialProvided { .. }),
         ) {
             (true, _, _) => Self::Approval,
             (_, true, _) | (_, _, true) => Self::Auth,
@@ -1309,7 +1348,7 @@ fn setup_response_from_llm_snapshot(
     }
 }
 
-fn caller_resource_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+fn caller_resource_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
     ResourceScope {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
@@ -1351,7 +1390,7 @@ fn product_view_forbidden() -> ProductSurfaceError {
     ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
 }
 
-fn product_view_requires_operator_webui_config(view_id: &str) -> bool {
+fn product_view_requires_operator_config(view_id: &str) -> bool {
     matches!(
         view_id,
         id if id == ADMIN_CONFIGURATION_VIEW.id
@@ -1364,17 +1403,17 @@ fn product_view_requires_operator_webui_config(view_id: &str) -> bool {
 }
 
 fn authorize_product_view(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     view_id: &str,
 ) -> Result<(), ProductSurfaceError> {
-    if product_view_requires_operator_webui_config(view_id) && !caller.operator_webui_config {
+    if product_view_requires_operator_config(view_id) && !caller.operator_config {
         return Err(product_view_forbidden());
     }
     Ok(())
 }
 
 fn operator_config_auto_approve_activity_id(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     enabled: bool,
 ) -> ActivityId {
     let mut seed = Vec::new();
@@ -2081,246 +2120,49 @@ fn operator_diagnostics_surface_status(
     }
 }
 
-/// One verified, normalized channel message admitted through ProductSurface.
-///
-/// The channel ingress router verifies the transport request and runs the
-/// adapter's pure normalization first. ProductSurface owns conversion into the
-/// durable inbound envelope and commit path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChannelInboundSurfaceRequest {
-    pub adapter_id: ProductAdapterId,
-    pub source_channel: ProductSourceChannel,
-    pub installation_id: AdapterInstallationId,
-    pub evidence: ProtocolAuthEvidence,
-    pub received_at: chrono::DateTime<Utc>,
-    pub message: NormalizedInboundMessage,
-    pub classification: Option<ChannelInboundClassification>,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyProductCommandInput {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductSurfaceCommandDescriptor<Input, Output> {
+    pub id: &'static str,
+    _types: PhantomData<fn(Input) -> Output>,
 }
 
-/// Durable channel admission evidence returned by ProductSurface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChannelInboundSurfaceAdmission {
-    pub envelope: ProductInboundEnvelope,
-    pub ack: ProductInboundAck,
-}
+impl<Input, Output> ProductSurfaceCommandDescriptor<Input, Output> {
+    pub const fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            _types: PhantomData,
+        }
+    }
 
-/// Admission rejection after ProductSurface had enough trusted input to build
-/// the canonical envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChannelInboundSurfaceRejectedAdmission {
-    pub envelope: ProductInboundEnvelope,
-    pub error: ProductAdapterError,
-}
-
-/// Channel admission outcome returned by the ProductSurface command conduit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChannelInboundSurfaceOutcome {
-    Admitted(Box<ChannelInboundSurfaceAdmission>),
-    Invalid(ProductAdapterError),
-    Rejected(Box<ChannelInboundSurfaceRejectedAdmission>),
-}
-
-impl ChannelInboundSurfaceOutcome {
-    pub fn unavailable() -> Self {
-        Self::Invalid(ProductAdapterError::Internal {
-            detail: RedactedString::new("channel ProductSurface admission is not available"),
-        })
+    pub fn capability_id(&self) -> Result<CapabilityId, ProductSurfaceError> {
+        CapabilityId::new(self.id).map_err(ProductSurfaceError::internal_from)
     }
 }
 
-#[async_trait]
-pub trait ProductSurface: Send + Sync {
-    async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    async fn submit_turn(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    async fn cancel_run(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    /// Invoke one descriptor-declared product capability through the generic
-    /// mutation conduit targeted by architecture simplification §5.2.
-    ///
-    /// `caller` is trusted ingress input. `capability` and `input` are
-    /// designators only; a wired implementation must resolve and authorize
-    /// them rather than treating either as authority. `activity_id` is the
-    /// stable idempotency identity for this mutation and must be preserved
-    /// across retries.
-    /// The unwired default fails closed without performing any side effect.
-    async fn invoke(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        capability: CapabilityId,
-        input: ProductCapabilityInput,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        let _ = (caller, capability, input, activity_id);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    /// Query one descriptor-declared, read-only product view. This is the
-    /// generic read conduit; new views register an id rather than growing this
-    /// facade with per-feature methods.
-    async fn query(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, ProductSurfaceError> {
-        let _ = (caller, query);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    async fn stream_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    fn supports_stream_events_subscription(&self) -> bool {
-        false
-    }
-
-    async fn subscribe_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
-        Err(ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::Unavailable,
-            ProductSurfaceErrorKind::ReplayUnavailable,
-            503,
-            true,
-        ))
-    }
-
-    async fn get_run_state(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-
-    async fn execute_command(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
-        let _ = (caller, request);
-        Err(ProductSurfaceError::service_unavailable(false))
-    }
-}
-
-impl<Params, Output> ProductOperation<Params, Output>
+impl<Input, Output> ProductSurfaceCommandDescriptor<Input, Output>
 where
-    Params: Serialize,
+    Input: Serialize,
     Output: DeserializeOwned,
 {
-    pub async fn execute_on<S>(
+    pub async fn invoke_on(
         &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
-        input: Params,
-    ) -> Result<Output, ProductSurfaceError>
-    where
-        S: ProductSurface + ?Sized,
-    {
-        surface
-            .execute_command(caller, self.request(input)?)
-            .await?
-            .into_json()
-    }
-}
-
-impl<Params> ProductOperation<Params, ProjectFsFile>
-where
-    Params: Serialize,
-{
-    pub async fn execute_file_on<S>(
-        &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
-        input: Params,
-    ) -> Result<ProjectFsFile, ProductSurfaceError>
-    where
-        S: ProductSurface + ?Sized,
-    {
-        surface
-            .execute_command(caller, self.request(input)?)
-            .await?
-            .into_project_file()
-    }
-}
-
-impl<Params> ProductOperation<Params, RebornAttachmentBytes>
-where
-    Params: Serialize,
-{
-    pub async fn execute_attachment_on<S>(
-        &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
-        input: Params,
-    ) -> Result<RebornAttachmentBytes, ProductSurfaceError>
-    where
-        S: ProductSurface + ?Sized,
-    {
-        surface
-            .execute_command(caller, self.request(input)?)
-            .await?
-            .into_attachment()
-    }
-}
-
-/// Input carried by the generic ProductSurface operation conduit.
-///
-/// Most capabilities are ordinary JSON payloads. Secret-bearing ProductSurface
-/// requests use typed variants so they do not cross the WebUI/product boundary
-/// as raw, debug-printable JSON values.
-pub enum ProductCapabilityInput {
-    Json(serde_json::Value),
-    LlmProviderUpsert(UpsertLlmProviderRequest),
-}
-
-impl ProductCapabilityInput {
-    pub fn json(input: serde_json::Value) -> Self {
-        Self::Json(input)
-    }
-
-    pub fn llm_provider_upsert(request: UpsertLlmProviderRequest) -> Self {
-        Self::LlmProviderUpsert(request)
-    }
-
-    pub fn into_json(self) -> Result<serde_json::Value, ProductSurfaceError> {
-        match self {
-            Self::Json(input) => Ok(input),
-            Self::LlmProviderUpsert(_) => Err(ProductSurfaceError::internal_from(
-                "secret-bearing product capability input cannot be delegated as JSON",
-            )),
-        }
+        surface: &ironclaw_host_api::BoundProductSurface,
+        input: Input,
+        activity_id: ActivityId,
+    ) -> Result<Output, ProductSurfaceError> {
+        let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
+        let response = surface
+            .invoke(ironclaw_host_api::ProductSurfaceInvokeRequest {
+                operation_id: self.capability_id()?,
+                input,
+                activity_id,
+            })
+            .await?;
+        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
 }
 
@@ -2328,7 +2170,7 @@ impl ProductCapabilityInput {
 ///
 /// Capability declarations stay as one stable id plus origin/policy metadata
 /// elsewhere. Product-workflow-owned ids are backed by the
-/// [`product_operations`] registry; runtime-backed ids delegate to the wired
+/// [`product_capability_handlers`] registry; runtime-backed ids delegate to the wired
 /// first-party capability invoker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProductCapabilityDescriptor {
@@ -2348,26 +2190,24 @@ impl ProductCapabilityDescriptor {
         CapabilityId::new(self.id).map_err(ProductSurfaceError::internal_from)
     }
 
-    pub async fn invoke_on<T, S>(
+    pub async fn invoke_on<T>(
         &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
+        surface: &ironclaw_host_api::BoundProductSurface,
         input: T,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>
     where
         T: Serialize,
-        S: ProductSurface + ?Sized,
     {
         let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-        surface
-            .invoke(
-                caller,
-                self.capability_id()?,
-                ProductCapabilityInput::json(input),
+        let response = surface
+            .invoke(ironclaw_host_api::ProductSurfaceInvokeRequest {
+                operation_id: self.capability_id()?,
+                input,
                 activity_id,
-            )
-            .await
+            })
+            .await?;
+        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
 }
 
@@ -2414,7 +2254,7 @@ pub trait InboundAttachmentReader: Send + Sync {
 pub trait ProductCapabilityInvoker: Send + Sync {
     async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         capability: CapabilityId,
         input: serde_json::Value,
         activity_id: ActivityId,
@@ -2430,7 +2270,7 @@ pub struct UnavailableProductCapabilityInvoker;
 impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
     async fn invoke(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _capability: CapabilityId,
         _input: serde_json::Value,
         _activity_id: ActivityId,
@@ -2710,7 +2550,7 @@ where
 
     async fn invoke_json_capability<T>(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         capability: ProductCapabilityDescriptor,
         input: T,
         activity_id: ActivityId,
@@ -2747,7 +2587,7 @@ where
 
     async fn invoke_operator_setup_run(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         input: serde_json::Value,
     ) -> Result<(), ProductSurfaceError> {
         let request: RebornOperatorSetupRequest =
@@ -2763,7 +2603,7 @@ where
 
     async fn apply_operator_setup_request(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornOperatorSetupRequest,
     ) -> Result<(), ProductSurfaceError> {
         if self.llm_config.is_none() {
@@ -2829,8 +2669,8 @@ where
 
     async fn build_automations_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, ProductSurfaceError> {
         let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(ProductSurfaceError::from_status(
@@ -2861,8 +2701,8 @@ where
 
     async fn build_threads_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
         // Reuse the same scope-construction shape the other v2 facade
         // methods use: fail-closed when the caller has no agent
@@ -3011,9 +2851,9 @@ where
     /// explicitly forbidden").
     async fn authorize_admin(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
     ) -> Result<(), ProductSurfaceError> {
-        if caller.operator_webui_config {
+        if caller.operator_config {
             return Ok(());
         }
         let record = self
@@ -3117,159 +2957,12 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
-    async fn execute_product_surface_operation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
-        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(|| ProductSurfaceError::service_unavailable(false))?;
-        match operation_id {
-            ProductOperationId::ChannelInboundAdmit => {
-                Ok(ProductOperationResponse::channel_inbound(
-                    ChannelInboundSurfaceOutcome::unavailable(),
-                ))
-            }
-            ProductOperationId::CreateThread => ProductOperationResponse::json(
-                self.create_thread(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::SubmitTurn => ProductOperationResponse::json(
-                self.submit_turn(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::CancelRun => ProductOperationResponse::json(
-                self.cancel_run(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::ResolveGate => ProductOperationResponse::json(
-                self.resolve_gate(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::RetryRun => ProductOperationResponse::json(
-                self.retry_run(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::ProjectCreate => ProductOperationResponse::json(
-                self.create_project(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::ProjectFsRead => Ok(ProductOperationResponse::project_file(
-                self.read_project_file(caller, product_command_input(request.input)?)
-                    .await?,
-            )),
-            ProductOperationId::FsRead => Ok(ProductOperationResponse::project_file(
-                self.read_fs_file(caller, product_command_input(request.input)?)
-                    .await?,
-            )),
-            ProductOperationId::AttachmentRead => Ok(ProductOperationResponse::attachment(
-                self.read_attachment(caller, product_command_input(request.input)?)
-                    .await?,
-            )),
-            ProductOperationId::TraceAccountLoginLink => {
-                views::parse_empty_view_params(request.input)?;
-                ProductOperationResponse::json(self.trace_account_login_link(caller).await?)
-            }
-            ProductOperationId::TraceHoldAuthorize => {
-                let request: RebornTraceHoldAuthorizeProductRequest =
-                    product_command_input(request.input)?;
-                ProductOperationResponse::json(
-                    self.authorize_trace_hold(caller, request.submission_id)
-                        .await?,
-                )
-            }
-            ProductOperationId::OperatorConfigSetKey => {
-                let request: RebornOperatorConfigSetProductRequest =
-                    product_command_input(request.input)?;
-                ProductOperationResponse::json(
-                    self.set_operator_config_key(
-                        caller,
-                        request.key,
-                        RebornOperatorConfigSetRequest {
-                            value: request.value,
-                        },
-                    )
-                    .await?,
-                )
-            }
-            ProductOperationId::OperatorServiceLifecycle => ProductOperationResponse::json(
-                self.run_operator_service_lifecycle(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::LlmTestConnection => ProductOperationResponse::json(
-                self.test_llm_connection(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::LlmListModels => ProductOperationResponse::json(
-                self.list_llm_models(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::LlmNearAiLogin => ProductOperationResponse::json(
-                self.start_nearai_login(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::LlmNearAiWalletLogin => ProductOperationResponse::json(
-                self.complete_nearai_wallet_login(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::LlmCodexLogin => {
-                views::parse_empty_view_params(request.input)?;
-                ProductOperationResponse::json(self.start_codex_login(caller).await?)
-            }
-            ProductOperationId::AdminUserCreate => ProductOperationResponse::json(
-                self.create_admin_user(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            ProductOperationId::AdminUserDeleteSecret => {
-                let request: RebornAdminDeleteSecretProductRequest =
-                    product_command_input(request.input)?;
-                let handle = product_secret_handle(request.handle)?;
-                ProductOperationResponse::json(
-                    self.delete_admin_user_secret(caller, request.user_id, handle)
-                        .await?,
-                )
-            }
-            ProductOperationId::AutomationPause => {
-                let request: RebornAutomationRequest = product_command_input(request.input)?;
-                ProductOperationResponse::json(
-                    self.pause_automation(caller, request.automation_id).await?,
-                )
-            }
-            ProductOperationId::AutomationResume => {
-                let request: RebornAutomationRequest = product_command_input(request.input)?;
-                ProductOperationResponse::json(
-                    self.resume_automation(caller, request.automation_id)
-                        .await?,
-                )
-            }
-            ProductOperationId::AutomationRename => {
-                let request: RebornRenameAutomationProductRequest =
-                    product_command_input(request.input)?;
-                ProductOperationResponse::json(
-                    self.rename_automation(
-                        caller,
-                        request.automation_id,
-                        WebUiRenameAutomationRequest { name: request.name },
-                    )
-                    .await?,
-                )
-            }
-            ProductOperationId::AutomationDelete => {
-                let request: RebornAutomationRequest = product_command_input(request.input)?;
-                ProductOperationResponse::json(
-                    self.delete_automation(caller, request.automation_id)
-                        .await?,
-                )
-            }
-        }
-    }
-
     /// Mint a one-time Trace Commons browser login link for the authenticated
     /// caller. The returned URL is a one-time account-access credential and must
     /// never be logged or exposed on a model-visible surface.
     async fn trace_account_login_link(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornAccountLoginLinkResponse, ProductSurfaceError> {
         let actor = caller.actor();
         trace_credits::account_login_link_for_user(&caller.tenant_id, &actor.user_id)
@@ -3280,7 +2973,7 @@ where
     /// Authorize the caller's held manual-review trace for submission.
     async fn authorize_trace_hold(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         submission_id: String,
     ) -> Result<RebornTraceHoldAuthorizeResponse, ProductSurfaceError> {
         let actor = caller.actor();
@@ -3302,14 +2995,16 @@ where
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn invoke(
+    pub async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         capability: CapabilityId,
-        input: ProductCapabilityInput,
+        input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError> {
-        if let Some(operation) = product_operations::ProductOperationHandler::parse(&capability) {
+        if let Some(operation) =
+            product_capability_handlers::ProductCapabilityHandler::parse(&capability)
+        {
             let summary = operation.success_summary();
             let invoker = self.product_capability_invoker.clone();
             return invoker
@@ -3322,13 +3017,13 @@ where
                 .await;
         }
         self.product_capability_invoker
-            .invoke(caller, capability, input.into_json()?, activity_id)
+            .invoke(caller, capability, input, activity_id)
             .await
     }
 
     pub async fn list_admin_users(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: RebornAdminUserListQuery,
     ) -> Result<RebornAdminUserListResponse, ProductSurfaceError> {
         self.authorize_admin(&caller).await?;
@@ -3365,7 +3060,7 @@ where
 
     pub async fn get_admin_user(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
     ) -> Result<RebornAdminUserResponse, ProductSurfaceError> {
         self.authorize_admin(&caller).await?;
@@ -3377,7 +3072,7 @@ where
 
     pub async fn create_admin_user(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornAdminCreateUserRequest,
     ) -> Result<RebornAdminUserCreatedResponse, ProductSurfaceError> {
         self.authorize_admin(&caller).await?;
@@ -3403,7 +3098,7 @@ where
 
     pub async fn update_admin_user(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
         request: RebornAdminUpdateUserRequest,
     ) -> Result<RebornAdminUserResponse, ProductSurfaceError> {
@@ -3426,7 +3121,7 @@ where
 
     pub async fn set_admin_user_status(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
         request: RebornAdminSetStatusRequest,
     ) -> Result<RebornAdminUserResponse, ProductSurfaceError> {
@@ -3451,7 +3146,7 @@ where
 
     pub async fn set_admin_user_role(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
         request: RebornAdminSetRoleRequest,
     ) -> Result<RebornAdminUserResponse, ProductSurfaceError> {
@@ -3475,7 +3170,7 @@ where
 
     pub async fn delete_admin_user(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
     ) -> Result<RebornAdminUserDeletedResponse, ProductSurfaceError> {
         self.authorize_admin(&caller).await?;
@@ -3500,7 +3195,7 @@ where
 
     pub async fn list_admin_user_secrets(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
     ) -> Result<RebornAdminUserSecretsListResponse, ProductSurfaceError> {
         self.authorize_admin(&caller).await?;
@@ -3516,7 +3211,7 @@ where
 
     pub async fn put_admin_user_secret(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
         handle: SecretHandle,
         request: RebornAdminPutSecretRequest,
@@ -3539,7 +3234,7 @@ where
 
     pub async fn delete_admin_user_secret(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         user_id: UserId,
         handle: SecretHandle,
     ) -> Result<RebornAdminSecretDeletedResponse, ProductSurfaceError> {
@@ -3561,7 +3256,7 @@ where
 
     pub async fn global_auto_approve_enabled(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<bool, ProductSurfaceError> {
         let Some(config) = &self.operator_approval_config else {
             return Ok(false);
@@ -3585,7 +3280,7 @@ where
 
     pub async fn run_operator_setup(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornOperatorSetupRequest,
     ) -> Result<RebornOperatorSetupResponse, ProductSurfaceError> {
         self.apply_operator_setup_request(caller.clone(), request)
@@ -3595,7 +3290,7 @@ where
 
     pub async fn set_operator_config_key(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         key: String,
         request: RebornOperatorConfigSetRequest,
     ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
@@ -3650,8 +3345,8 @@ where
     /// for thread ids they did not create.
     pub async fn create_thread(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         // A browser may propose a project for the new thread; authorize the
         // caller's access to it (never trust the body alone) and adopt it as the
@@ -3661,7 +3356,7 @@ where
             .authorize_create_thread_project(caller, request.project_id.clone())
             .await?;
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::CreateThread {
+        let ProductInboundCommand::CreateThread {
             caller,
             client_action_id,
             requested_thread_id,
@@ -3700,14 +3395,14 @@ where
 
     pub async fn submit_turn(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductSubmitTurnRequest,
     ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         // Decode + budget inline attachment bytes before the request is
         // consumed into the (bytes-free, serializable) command.
         let attachments = request.decode_attachments()?;
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::SendMessage {
+        let ProductInboundCommand::SendMessage {
             scope,
             actor,
             client_action_id,
@@ -3939,7 +3634,7 @@ where
 
     pub async fn delete_thread(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornDeleteThreadRequest,
     ) -> Result<RebornDeleteThreadResponse, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
@@ -3960,7 +3655,7 @@ where
 
     pub async fn get_timeline(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
@@ -3982,9 +3677,9 @@ where
         })
     }
 
-    async fn query(
+    pub async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, ProductSurfaceError> {
         authorize_product_view(&caller, &query.view_id)?;
@@ -4020,8 +3715,9 @@ where
                 views::view_page(response)
             }
             id if id == THREADS_VIEW.id => {
-                let mut request: WebUiListThreadsRequest = serde_json::from_value(query.params)
-                    .map_err(ProductSurfaceError::internal_from)?;
+                let mut request: ProductListThreadsRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
                 request.cursor = query.cursor.or(request.cursor);
                 let response = self.build_threads_view(caller, request).await?;
                 let next_cursor = response.next_cursor.clone();
@@ -4224,7 +3920,7 @@ where
 
     async fn list_project_dir(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornProjectFsListRequest,
     ) -> Result<RebornProjectFsListResponse, ProductSurfaceError> {
         let reader = self.require_project_filesystem()?;
@@ -4243,7 +3939,7 @@ where
 
     async fn stat_project_path(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornProjectFsStatRequest,
     ) -> Result<RebornProjectFsStatResponse, ProductSurfaceError> {
         let reader = self.require_project_filesystem()?;
@@ -4261,7 +3957,7 @@ where
 
     pub async fn read_project_file(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornProjectFsReadRequest,
     ) -> Result<ProjectFsFile, ProductSurfaceError> {
         let reader = self.require_project_filesystem()?;
@@ -4278,7 +3974,7 @@ where
 
     async fn list_fs_mounts(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornFsMountsResponse, ProductSurfaceError> {
         // No wired browser is not an error: the UI renders an empty viewer.
         let mounts = self
@@ -4300,7 +3996,7 @@ where
 
     pub async fn browse_fs_dir(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornFsListRequest,
     ) -> Result<RebornFsListResponse, ProductSurfaceError> {
         let browser = self.require_filesystem_browser(request.mount)?;
@@ -4322,7 +4018,7 @@ where
 
     async fn stat_fs_path(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornFsStatRequest,
     ) -> Result<RebornFsStatResponse, ProductSurfaceError> {
         let browser = self.require_filesystem_browser(request.mount)?;
@@ -4339,7 +4035,7 @@ where
 
     pub async fn read_fs_file(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornFsReadRequest,
     ) -> Result<ProjectFsFile, ProductSurfaceError> {
         let browser = self.require_filesystem_browser(request.mount)?;
@@ -4355,7 +4051,7 @@ where
 
     async fn list_projects(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornListProjectsRequest,
     ) -> Result<RebornListProjectsResponse, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4367,7 +4063,7 @@ where
 
     pub async fn create_project(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornCreateProjectRequest,
     ) -> Result<RebornProjectResponse, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4379,7 +4075,7 @@ where
 
     async fn get_project(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornGetProjectRequest,
     ) -> Result<RebornProjectResponse, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4391,7 +4087,7 @@ where
 
     async fn update_project(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornUpdateProjectRequest,
     ) -> Result<RebornProjectResponse, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4403,7 +4099,7 @@ where
 
     async fn delete_project(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornDeleteProjectRequest,
     ) -> Result<(), ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4415,7 +4111,7 @@ where
 
     async fn list_project_members(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornListMembersRequest,
     ) -> Result<RebornListMembersResponse, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4427,7 +4123,7 @@ where
 
     async fn add_project_member(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornAddMemberRequest,
     ) -> Result<RebornProjectMemberInfo, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4439,7 +4135,7 @@ where
 
     async fn update_project_member_role(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornUpdateMemberRoleRequest,
     ) -> Result<RebornProjectMemberInfo, ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4451,7 +4147,7 @@ where
 
     async fn remove_project_member(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornRemoveMemberRequest,
     ) -> Result<(), ProductSurfaceError> {
         let service = self.require_project_service()?;
@@ -4463,7 +4159,7 @@ where
 
     pub async fn read_attachment(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornAttachmentRequest,
     ) -> Result<RebornAttachmentBytes, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
@@ -4535,9 +4231,9 @@ where
         })
     }
 
-    async fn stream_events(
+    pub async fn stream_events(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
@@ -4585,97 +4281,14 @@ where
         Ok(RebornStreamEventsResponse { events })
     }
 
-    fn supports_stream_events_subscription(&self) -> bool {
-        self.event_stream
-            .as_ref()
-            .is_some_and(|stream| stream.supports_subscription())
-    }
-
-    async fn subscribe_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
-        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-        let actor = caller.actor();
-        let access = self
-            .resolve_thread_access_for_caller(
-                caller.clone(),
-                caller.turn_scope(thread_id.clone()),
-                &actor,
-            )
-            .await?;
-        let Some(event_stream) = &self.event_stream else {
-            return Err(ProductSurfaceError::from_status_kind(
-                ProductSurfaceErrorCode::Unavailable,
-                ProductSurfaceErrorKind::ReplayUnavailable,
-                503,
-                false,
-            ));
-        };
-        let mut subscription = event_stream
-            .subscribe(ProjectionSubscriptionRequest {
-                actor: access.run_actor,
-                scope: access.scope,
-                after_cursor: request.after_cursor,
-            })
-            .await
-            .map_err(map_projection_error)?;
-
-        let service = self.clone();
-        let caller_for_revalidation = caller.clone();
-        let actor_for_revalidation = actor;
-        let (sender, receiver) = mpsc::channel(128);
-        tokio::spawn(async move {
-            loop {
-                let next = tokio::select! {
-                    _ = sender.closed() => return,
-                    next = subscription.next() => next,
-                };
-                let Some(next) = next else {
-                    return;
-                };
-                let envelope = match next {
-                    Ok(envelope) => envelope,
-                    Err(error) => {
-                        let _ = sender.send(Err(map_projection_error(error))).await;
-                        return;
-                    }
-                };
-                if sender.is_closed() {
-                    return;
-                }
-                let revalidate = service
-                    .resolve_thread_access_for_caller(
-                        caller_for_revalidation.clone(),
-                        caller_for_revalidation.turn_scope(thread_id.clone()),
-                        &actor_for_revalidation,
-                    )
-                    .await;
-                if let Err(error) = revalidate {
-                    let _ = sender.send(Err(error)).await;
-                    return;
-                }
-                if sender.is_closed() {
-                    return;
-                }
-                if sender.send(Ok(envelope)).await.is_err() {
-                    return;
-                }
-            }
-        });
-
-        Ok(RebornStreamEventsSubscription::new(receiver))
-    }
-
     pub async fn cancel_run(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::CancelRun { mut request } = command else {
+        let ProductInboundCommand::CancelRun { mut request } = command else {
             return Err(ProductSurfaceError::internal_invariant());
         };
         // Ownership probe with automation-trigger fallback. If the thread is a
@@ -4701,12 +4314,12 @@ where
 
     pub async fn resolve_gate(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::ResolveGate {
+        let ProductInboundCommand::ResolveGate {
             scope,
             actor,
             run_id,
@@ -4773,12 +4386,12 @@ where
 
     pub async fn retry_run(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiRetryRunRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductRetryRunRequest,
     ) -> Result<RebornRetryRunResponse, ProductSurfaceError> {
         let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::RetryRun {
+        let ProductInboundCommand::RetryRun {
             scope,
             actor,
             run_id,
@@ -4819,9 +4432,9 @@ where
         Ok(response.into())
     }
 
-    async fn get_run_state(
+    pub async fn get_run_state(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
@@ -4859,7 +4472,7 @@ where
 
     async fn pause_automation(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
@@ -4876,7 +4489,7 @@ where
 
     async fn resume_automation(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
@@ -4893,9 +4506,9 @@ where
 
     async fn rename_automation(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         automation_id: String,
-        request: WebUiRenameAutomationRequest,
+        request: ProductRenameAutomationRequest,
     ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(ProductSurfaceError::from_status(
@@ -4912,7 +4525,7 @@ where
 
     async fn delete_automation(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
@@ -4929,7 +4542,7 @@ where
 
     pub async fn run_operator_service_lifecycle(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornOperatorServiceLifecycleRequest,
     ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
         let request = RebornServiceLifecycleRequest {
@@ -4970,7 +4583,7 @@ where
 
     pub async fn test_llm_connection(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, ProductSurfaceError> {
         let service = self
@@ -4986,7 +4599,7 @@ where
 
     pub async fn list_llm_models(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, ProductSurfaceError> {
         let service = self
@@ -5002,7 +4615,7 @@ where
 
     pub async fn start_nearai_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, ProductSurfaceError> {
         let service = self
@@ -5017,7 +4630,7 @@ where
 
     pub async fn start_codex_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, ProductSurfaceError> {
         let service = self
             .llm_config
@@ -5031,7 +4644,7 @@ where
 
     pub async fn complete_nearai_wallet_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, ProductSurfaceError> {
         let service = self
@@ -5046,92 +4659,6 @@ where
 }
 
 #[async_trait]
-impl<I, V> ProductSurface for RebornServices<I, V>
-where
-    I: ProductCapabilityInvoker + Clone + 'static,
-    V: RebornViewProvider + Clone + 'static,
-{
-    async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
-        RebornServices::create_thread(self, caller, request).await
-    }
-
-    async fn submit_turn(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
-        RebornServices::submit_turn(self, caller, request).await
-    }
-
-    async fn cancel_run(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
-        RebornServices::cancel_run(self, caller, request).await
-    }
-
-    async fn invoke(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        capability: CapabilityId,
-        input: ProductCapabilityInput,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        RebornServices::invoke(self, caller, capability, input, activity_id).await
-    }
-
-    async fn query(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, ProductSurfaceError> {
-        RebornServices::query(self, caller, query).await
-    }
-
-    async fn stream_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-        RebornServices::stream_events(self, caller, request).await
-    }
-
-    fn supports_stream_events_subscription(&self) -> bool {
-        RebornServices::supports_stream_events_subscription(self)
-    }
-
-    async fn subscribe_events(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
-        RebornServices::subscribe_events(self, caller, request).await
-    }
-
-    async fn get_run_state(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
-        RebornServices::get_run_state(self, caller, request).await
-    }
-
-    async fn execute_command(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
-        self.execute_product_surface_operation(caller, request)
-            .await
-    }
-}
-
-#[async_trait]
 impl<I, V> ironclaw_host_api::ProductSurface for RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
@@ -5139,17 +4666,23 @@ where
 {
     async fn invoke(
         &self,
+        caller: ProductSurfaceCaller,
         request: ironclaw_host_api::ProductSurfaceInvokeRequest,
     ) -> Result<
         ironclaw_host_api::ProductSurfaceInvokeResponse,
         ironclaw_host_api::ProductSurfaceError,
     > {
-        let caller = product_surface_caller(request.caller);
+        if let Some(command) =
+            product_capability_handlers::ProductCommandHandler::parse(&request.operation_id)
+        {
+            let output = command.invoke(self, caller, request.input).await?;
+            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+        }
         let output = RebornServices::invoke(
             self,
             caller,
             request.operation_id,
-            ProductCapabilityInput::json(request.input),
+            request.input,
             request.activity_id,
         )
         .await?;
@@ -5162,12 +4695,13 @@ where
 
     async fn query(
         &self,
+        caller: ProductSurfaceCaller,
         request: ironclaw_host_api::ProductSurfaceQueryRequest,
     ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
     {
         let page = RebornServices::query(
             self,
-            product_surface_caller(request.caller),
+            caller,
             RebornViewQuery {
                 view_id: request.view_id,
                 params: request.input,
@@ -5183,6 +4717,7 @@ where
 
     async fn stream_events(
         &self,
+        caller: ProductSurfaceCaller,
         request: ironclaw_host_api::ProductSurfaceStreamRequest,
     ) -> Result<
         ironclaw_host_api::ProductSurfaceStreamResponse,
@@ -5207,7 +4742,7 @@ where
         };
         let response = RebornServices::stream_events(
             self,
-            product_surface_caller(request.caller),
+            caller,
             RebornStreamEventsRequest {
                 thread_id,
                 after_cursor,
@@ -5230,17 +4765,6 @@ where
     }
 }
 
-fn product_surface_caller(
-    caller: ironclaw_host_api::ProductSurfaceCaller,
-) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
-        caller.tenant_id,
-        caller.user_id,
-        Some(caller.agent_id),
-        caller.project_id,
-    )
-}
-
 impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker,
@@ -5249,8 +4773,8 @@ where
     async fn list_visible_threads_for_scope(
         &self,
         scope: ThreadScope,
-        request: WebUiListThreadsRequest,
-        caller: WebUiAuthenticatedCaller,
+        request: ProductListThreadsRequest,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
         let visible_limit = clamp_thread_list_limit(request.limit);
         let needs_approval = request.needs_approval;
@@ -5333,7 +4857,7 @@ where
 
     async fn list_automation_threads_needing_approval(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         visible_limit: usize,
         candidate_thread_id: Option<String>,
     ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
@@ -5433,7 +4957,7 @@ where
 
     async fn automation_run_thread_record(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         bound_caller: &ProductAgentBoundCaller,
         thread_id: ThreadId,
         automation_title: Option<AutomationNotificationTitle>,
@@ -5457,7 +4981,7 @@ where
 
     async fn automation_run_thread_record_for_scope(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         bound_caller: &ProductAgentBoundCaller,
         thread_id: ThreadId,
         trigger_scope: TriggerRunThreadScope,
@@ -5901,7 +5425,7 @@ where
     /// that need the full transcript call `try_automation_trigger_timeline_fallback`.
     async fn check_automation_trigger_access(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         scope: &TurnScope,
         original_not_found_error: ProductSurfaceError,
     ) -> Result<ResolvedThreadAccess, ProductSurfaceError> {
@@ -5970,7 +5494,7 @@ where
     /// caller's session scope, which would be wrong for a trigger thread.
     async fn resolve_thread_history_for_caller(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         scope: &TurnScope,
     ) -> Result<(ThreadScope, ThreadHistory), ProductSurfaceError> {
         let thread_scope =
@@ -5999,7 +5523,7 @@ where
 
     async fn try_automation_trigger_timeline_fallback(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         scope: &TurnScope,
         original_not_found_error: ProductSurfaceError,
     ) -> Result<(ThreadScope, ThreadHistory), ProductSurfaceError> {
@@ -6040,7 +5564,7 @@ where
     /// acting on the thread after their access is revoked.
     async fn resolve_thread_access_for_caller(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         scope: TurnScope,
         actor: &TurnActor,
     ) -> Result<ResolvedThreadAccess, ProductSurfaceError> {
@@ -6122,9 +5646,9 @@ where
     /// scope is returned unchanged.
     async fn authorize_create_thread_project(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         requested_project_id: Option<String>,
-    ) -> Result<WebUiAuthenticatedCaller, ProductSurfaceError> {
+    ) -> Result<ProductSurfaceCaller, ProductSurfaceError> {
         let Some(raw) = requested_project_id else {
             return Ok(caller);
         };
@@ -6142,9 +5666,9 @@ where
     /// only after the access probe succeeds.
     async fn authorize_project_caller(
         &self,
-        mut caller: WebUiAuthenticatedCaller,
+        mut caller: ProductSurfaceCaller,
         project_id: ProjectId,
-    ) -> Result<WebUiAuthenticatedCaller, ProductSurfaceError> {
+    ) -> Result<ProductSurfaceCaller, ProductSurfaceError> {
         self.get_project(
             caller.clone(),
             RebornGetProjectRequest {
@@ -6160,7 +5684,7 @@ where
     /// An omitted selector preserves the caller's existing project scope.
     async fn authorize_browse_scope(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         project_id: Option<ProjectId>,
     ) -> Result<ResourceScope, ProductSurfaceError> {
         let caller = match project_id {
@@ -6177,7 +5701,7 @@ where
     /// project files by guessing a thread id.
     async fn authorize_project_fs_access(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         thread_id: String,
     ) -> Result<ThreadScope, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", thread_id)?;
@@ -6219,18 +5743,18 @@ where
         run_id: TurnRunId,
         gate_ref: GateRef,
         client_action_id: IdempotencyKey,
-        resolution: WebUiGateResolution,
+        resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         let decision = match resolution {
-            WebUiGateResolution::Approved { always } => {
+            ProductGateResolution::Approved { always } => {
                 if always {
                     ApprovalInteractionDecision::AlwaysAllow
                 } else {
                     ApprovalInteractionDecision::ApproveOnce
                 }
             }
-            WebUiGateResolution::Declined => ApprovalInteractionDecision::Deny,
-            WebUiGateResolution::CredentialProvided { .. } => {
+            ProductGateResolution::Declined => ApprovalInteractionDecision::Deny,
+            ProductGateResolution::CredentialProvided { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
         };
@@ -6260,7 +5784,7 @@ where
         actor: &TurnActor,
         run_id: TurnRunId,
         gate_ref: &GateRef,
-        resolution: &WebUiGateResolution,
+        resolution: &ProductGateResolution,
     ) -> Result<GateResolutionRoute, ProductSurfaceError> {
         let state = match self
             .turn_coordinator
@@ -6298,17 +5822,17 @@ where
         run_id: TurnRunId,
         gate_ref: GateRef,
         client_action_id: IdempotencyKey,
-        resolution: WebUiGateResolution,
+        resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         let decision = match resolution {
-            WebUiGateResolution::CredentialProvided { credential_ref } => {
+            ProductGateResolution::CredentialProvided { credential_ref } => {
                 AuthInteractionDecision::CredentialProvided {
                     credential_ref: parse_credential_account_id(&credential_ref)
                         .map_err(map_auth_interaction_error)?,
                 }
             }
-            WebUiGateResolution::Declined => AuthInteractionDecision::Deny,
-            WebUiGateResolution::Approved { .. } => {
+            ProductGateResolution::Declined => AuthInteractionDecision::Deny,
+            ProductGateResolution::Approved { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
         };
@@ -6341,10 +5865,10 @@ where
         run_id: TurnRunId,
         gate_ref: GateRef,
         client_action_id: IdempotencyKey,
-        resolution: WebUiGateResolution,
+        resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         match resolution {
-            WebUiGateResolution::Approved { always } => {
+            ProductGateResolution::Approved { always } => {
                 reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
                     .await?;
                 // Generic fallback has only one-shot `resume_turn`; persistent
@@ -6376,10 +5900,10 @@ where
                     .map_err(map_turn_error)?;
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
             }
-            WebUiGateResolution::CredentialProvided { .. } => {
+            ProductGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
             }
-            WebUiGateResolution::Declined => {
+            ProductGateResolution::Declined => {
                 assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,
@@ -6430,7 +5954,7 @@ fn map_ownership_probe_error(error: SessionThreadError) -> ProductSurfaceError {
 /// from the request body. A fresh `invocation_id` is minted per call; the
 /// scoped filesystem namespaces storage by tenant/user/agent/project, so this
 /// addresses the same mount the agent's own tools wrote through.
-fn caller_browse_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+fn caller_browse_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
     ResourceScope {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
@@ -6462,7 +5986,7 @@ fn map_project_fs_error(error: ProjectFsError) -> ProductSurfaceError {
     }
 }
 
-fn project_caller(caller: &WebUiAuthenticatedCaller) -> ProjectCaller {
+fn project_caller(caller: &ProductSurfaceCaller) -> ProjectCaller {
     ProjectCaller {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
@@ -6832,7 +6356,7 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
 }
 
 fn parse_automation_name(
-    request: WebUiRenameAutomationRequest,
+    request: ProductRenameAutomationRequest,
 ) -> Result<AutomationName, ProductSurfaceError> {
     let Some(raw_name) = request.name else {
         return Err(ProductSurfaceError::validation(
@@ -7329,7 +6853,7 @@ fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
 }
 
 fn product_agent_bound_caller_from_webui(
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Option<ProductAgentBoundCaller> {
     let agent_id = caller.agent_id?;
     Some(ProductAgentBoundCaller::new(
@@ -7341,7 +6865,7 @@ fn product_agent_bound_caller_from_webui(
 }
 
 fn generated_thread_id(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     client_action_id: &ironclaw_turns::IdempotencyKey,
 ) -> ThreadId {
     let seed = format!(

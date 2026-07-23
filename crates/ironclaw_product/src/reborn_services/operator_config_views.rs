@@ -4,14 +4,13 @@ use futures::future::try_join_all;
 use serde::Deserialize;
 
 use super::{
-    AUTO_APPROVE_CONFIG_KEY, ProductCapabilityInvoker, ProductSurfaceError,
+    AUTO_APPROVE_CONFIG_KEY, ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceError,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse, RebornServices,
-    RebornViewDescriptor, RebornViewProvider, TOOL_CONFIG_PREFIX, WebUiAuthenticatedCaller,
-    auto_approve_config_entry, caller_resource_scope, find_operator_tool,
-    operator_config_not_wired_response, operator_config_unknown_key_error,
-    operator_config_validation_diagnostics, operator_tool_permission_context, tool_config_entry,
-    tool_config_entry_with_context,
+    RebornViewDescriptor, RebornViewProvider, TOOL_CONFIG_PREFIX, auto_approve_config_entry,
+    caller_resource_scope, find_operator_tool, operator_config_not_wired_response,
+    operator_config_unknown_key_error, operator_config_validation_diagnostics,
+    operator_tool_permission_context, tool_config_entry, tool_config_entry_with_context,
 };
 
 pub const OPERATOR_CONFIG_LIST_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -42,7 +41,7 @@ where
 {
     pub(super) async fn build_operator_config_list_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorConfigListResponse, ProductSurfaceError> {
         let Some(config) = &self.operator_approval_config else {
             return Ok(operator_config_not_wired_response());
@@ -76,7 +75,7 @@ where
 
     pub(super) async fn build_operator_config_key_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         params: serde_json::Value,
     ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
         let OperatorConfigKeyViewParams { key } =

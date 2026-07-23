@@ -17,8 +17,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    RebornSkillActionResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
-    WebUiAuthenticatedCaller,
+    ProductSurfaceCaller, RebornSkillActionResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
 };
 
 pub(crate) fn extend_builtin_first_party_package(
@@ -105,14 +104,14 @@ impl FirstPartyCapabilityHandler for SetSkillAutoActivateLearnedHandler {
 fn authenticated_caller(
     request: &FirstPartyCapabilityRequest,
     started: Instant,
-) -> Result<WebUiAuthenticatedCaller, FirstPartyCapabilityError> {
+) -> Result<ProductSurfaceCaller, FirstPartyCapabilityError> {
     if request.authenticated_actor_user_id.as_ref() != Some(&request.scope.user_id) {
         return Err(dispatch_error(
             RuntimeDispatchErrorKind::PolicyDenied,
             started,
         ));
     }
-    Ok(WebUiAuthenticatedCaller::new(
+    Ok(ProductSurfaceCaller::new(
         request.scope.tenant_id.clone(),
         request.scope.user_id.clone(),
         request.scope.agent_id.clone(),

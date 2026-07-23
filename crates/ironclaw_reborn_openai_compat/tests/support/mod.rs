@@ -7,15 +7,16 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::ThreadId;
 use ironclaw_product::{
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCaller, ProductSurfaceCallerExt,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND,
+};
+use ironclaw_product::{
     ExternalEventId, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
     ProductTriggerReason, ProjectionReadRequest, UserMessagePayload,
-};
-use ironclaw_product::{
-    ProductSurface, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiSendMessageRequest,
 };
 use ironclaw_reborn_openai_compat::{FilesystemOpenAiCompatRefStore, OPENAI_COMPAT_ADAPTER_ID};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -35,7 +36,7 @@ struct FakeProductSurfaceState {
     programmed: HashMap<String, ProductInboundAck>,
     fixed_outcome: Option<ProductInboundAck>,
     submitted: Vec<RecordedProductSurfaceSubmit>,
-    cancelled: Vec<WebUiCancelRunRequest>,
+    cancelled: Vec<ProductCancelRunRequest>,
     read_inputs: Vec<ProjectionReadRequest>,
     stream_events: Vec<RebornStreamEventsRequest>,
     fail_with: Option<ProductSurfaceError>,
@@ -43,7 +44,7 @@ struct FakeProductSurfaceState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RecordedProductSurfaceSubmit {
-    request: WebUiSendMessageRequest,
+    request: ProductSubmitTurnRequest,
 }
 
 impl RecordedProductSurfaceSubmit {
@@ -163,7 +164,7 @@ impl FakeProductSurface {
             .len()
     }
 
-    pub(crate) fn cancel_requests(&self) -> Vec<WebUiCancelRunRequest> {
+    pub(crate) fn cancel_requests(&self) -> Vec<ProductCancelRunRequest> {
         self.state
             .lock()
             .expect("surface state lock")
@@ -194,12 +195,11 @@ impl Default for FakeProductSurface {
     }
 }
 
-#[async_trait]
-impl ProductSurface for FakeProductSurface {
+impl FakeProductSurface {
     async fn create_thread(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
@@ -222,8 +222,8 @@ impl ProductSurface for FakeProductSurface {
 
     async fn submit_turn(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductSubmitTurnRequest,
     ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
@@ -269,8 +269,8 @@ impl ProductSurface for FakeProductSurface {
 
     async fn cancel_run(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
+        caller: ProductSurfaceCaller,
+        request: ProductCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
@@ -302,7 +302,7 @@ impl ProductSurface for FakeProductSurface {
 
     async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.state
@@ -311,6 +311,75 @@ impl ProductSurface for FakeProductSurface {
             .stream_events
             .push(request);
         Ok(RebornStreamEventsResponse { events: Vec::new() })
+    }
+}
+
+#[async_trait]
+impl ProductSurface for FakeProductSurface {
+    async fn invoke(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        let output = if request.operation_id.as_str() == CREATE_THREAD_COMMAND.id {
+            let input = serde_json::from_value::<ProductCreateThreadRequest>(request.input)
+                .map_err(ProductSurfaceError::internal_from)?;
+            serde_json::to_value(self.create_thread(caller, input).await?)
+                .map_err(ProductSurfaceError::internal_from)?
+        } else if request.operation_id.as_str() == SUBMIT_TURN_COMMAND.id {
+            let input = serde_json::from_value::<ProductSubmitTurnRequest>(request.input)
+                .map_err(ProductSurfaceError::internal_from)?;
+            serde_json::to_value(self.submit_turn(caller, input).await?)
+                .map_err(ProductSurfaceError::internal_from)?
+        } else if request.operation_id.as_str() == CANCEL_RUN_COMMAND.id {
+            let input = serde_json::from_value::<ProductCancelRunRequest>(request.input)
+                .map_err(ProductSurfaceError::internal_from)?;
+            serde_json::to_value(self.cancel_run(caller, input).await?)
+                .map_err(ProductSurfaceError::internal_from)?
+        } else {
+            return Err(invalid_request());
+        };
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+    }
+
+    async fn query(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        Err(invalid_request())
+    }
+
+    async fn stream_events(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let thread_id = request.stream_id.ok_or_else(invalid_request)?;
+        let after_cursor = request
+            .after_cursor
+            .map(ironclaw_product::ProjectionCursor::new)
+            .transpose()
+            .map_err(|_| invalid_request())?;
+        let response = self
+            .stream_events(
+                caller,
+                RebornStreamEventsRequest {
+                    thread_id,
+                    after_cursor,
+                },
+            )
+            .await?;
+        let events = response
+            .events
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events,
+            next_cursor: None,
+        })
     }
 }
 
@@ -381,7 +450,7 @@ fn reborn_submit_from_ack(
     }
 }
 
-fn thread_record(caller: &WebUiAuthenticatedCaller, thread_id: ThreadId) -> SessionThreadRecord {
+fn thread_record(caller: &ProductSurfaceCaller, thread_id: ThreadId) -> SessionThreadRecord {
     SessionThreadRecord {
         scope: ThreadScope {
             tenant_id: caller.tenant_id.clone(),

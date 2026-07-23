@@ -52,12 +52,9 @@ use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
-use crate::product_surface_inbound::WebUiAuthenticatedCaller;
 use crate::reborn_services::{
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, ProductOperationId,
-    ProductOperationRequest, ProductOperationResponse, ProductOperationTypedInput, ProductSurface,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
 
 /// Host-side [`ProductSurface`] implementation that dispatches inbound
@@ -195,40 +192,7 @@ impl DefaultProductSurface {
 }
 
 #[async_trait]
-impl ProductSurface for DefaultProductSurface {
-    async fn execute_command(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
-        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(channel_surface_unavailable)?;
-        if operation_id != ProductOperationId::ChannelInboundAdmit {
-            return Err(channel_surface_unavailable());
-        }
-        let Some(ProductOperationTypedInput::ChannelInbound(request)) = request.typed_input else {
-            return Ok(ProductOperationResponse::channel_inbound(
-                ChannelInboundSurfaceOutcome::unavailable(),
-            ));
-        };
-        Ok(ProductOperationResponse::channel_inbound(
-            self.admit_channel_inbound(*request).await,
-        ))
-    }
-}
-
-fn channel_surface_unavailable() -> ProductSurfaceError {
-    ProductSurfaceError {
-        code: ProductSurfaceErrorCode::Unavailable,
-        kind: ProductSurfaceErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }
-}
-
-impl DefaultProductSurface {
+impl ChannelInboundProductSurface for DefaultProductSurface {
     async fn admit_channel_inbound(
         &self,
         request: ChannelInboundSurfaceRequest,
@@ -287,7 +251,9 @@ impl DefaultProductSurface {
             )),
         }
     }
+}
 
+impl DefaultProductSurface {
     /// Shared submit path for both the bytes-free [`Self::submit_inbound`]
     /// door and the inline-attachment [`Self::submit_inbound_with_attachments`] door.
     /// `attachments` carry decoded inline bytes (never serialized into the envelope)

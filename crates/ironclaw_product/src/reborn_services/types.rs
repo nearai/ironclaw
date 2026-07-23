@@ -13,7 +13,6 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
-use tokio::sync::mpsc;
 
 use crate::{
     ChannelConnectionRequirement, LifecycleInstallScope, LifecyclePackageRef,
@@ -379,8 +378,8 @@ pub struct RebornAttachmentRequest {
 }
 
 /// Raw bytes of one landed attachment plus the metadata a browser needs to
-/// render or download it. Returned by [`super::ATTACHMENT_READ_OPERATION`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// render or download it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAttachmentBytes {
     pub mime_type: String,
     pub filename: Option<String>,
@@ -397,24 +396,6 @@ pub struct RebornStreamEventsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornStreamEventsResponse {
     pub events: Vec<ProductOutboundEnvelope>,
-}
-
-pub struct RebornStreamEventsSubscription {
-    receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::ProductSurfaceError>>,
-}
-
-impl RebornStreamEventsSubscription {
-    pub fn new(
-        receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::ProductSurfaceError>>,
-    ) -> Self {
-        Self { receiver }
-    }
-
-    pub async fn next(
-        &mut self,
-    ) -> Option<Result<ProductOutboundEnvelope, super::ProductSurfaceError>> {
-        self.receiver.recv().await
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,7 +461,7 @@ pub enum RebornResolveGateResponse {
 /// Browser body for the WebUI run-state read.
 ///
 /// Pure read — no idempotency key. Caller authority is supplied separately by
-/// `WebUiAuthenticatedCaller` and combined with `thread_id` to produce the
+/// `ProductSurfaceCaller` and combined with `thread_id` to produce the
 /// canonical [`ironclaw_turns::TurnScope`] inside the facade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornGetRunStateRequest {

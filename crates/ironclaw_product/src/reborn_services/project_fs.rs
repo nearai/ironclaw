@@ -61,9 +61,9 @@ pub struct ProjectFsStat {
 
 /// Materialized file bytes plus the metadata a download response needs.
 ///
-/// Not `Serialize`: the bytes are streamed as the HTTP body, never embedded in
-/// a JSON envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Product-surface commands carry this through the host JSON envelope before
+/// WebUI streams the bytes as the HTTP body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectFsFile {
     pub path: String,
     pub filename: Option<String>,

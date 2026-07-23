@@ -465,6 +465,8 @@ pub fn mark_bearer_token_verified_for_tenant(
 
 #[cfg(test)]
 mod tests {
+    use crate::RedactedString;
+
     use super::*;
 
     #[test]

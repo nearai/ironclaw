@@ -10,7 +10,7 @@ use super::*;
 
 pub(super) async fn oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<OAuthStartRequest>,
 ) -> Result<Json<OAuthStartResponse>, ProductAuthRouteFailure> {
     let now = Utc::now();
@@ -87,7 +87,7 @@ pub(super) async fn oauth_start_handler(
 /// verifiers, authorization codes, or opaque state.
 pub(super) async fn oauth_flow_status_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Path(flow_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
 ) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
@@ -110,7 +110,7 @@ pub(super) async fn oauth_flow_status_handler(
 /// empty meaning the full ceiling).
 pub(super) async fn extension_oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Path(package_id): Path<String>,
     Json(request): Json<ExtensionOAuthStartRequest>,
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {

@@ -6,8 +6,7 @@
 
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::{
-    AgentId, ProductSurfaceError, ProductSurfaceValidationCode, ProjectId, TenantId, ThreadId,
-    UserId,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ThreadId,
 };
 use ironclaw_turns::{
     CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnRunId,
@@ -33,11 +32,11 @@ const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 /// Carries the `accept` tokens generated from the shared
 /// [`ironclaw_common`] format registry (so the file picker can never drift
 /// from the server's allowed MIME set) plus the same budgets
-/// [`WebUiSendMessageRequest::decode_attachments`] enforces. The browser
+/// [`ProductSubmitTurnRequest::decode_attachments`] enforces. The browser
 /// uses this only for pre-submit hints; the server-side decode remains the
 /// sole authority on what is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebUiAttachmentCapabilities {
+pub struct ProductAttachmentCapabilities {
     /// HTML file-input `accept` tokens from the shared registry: exact MIME
     /// types plus extensions, e.g. `["image/png", ".png", "application/pdf",
     /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
@@ -54,8 +53,8 @@ pub struct WebUiAttachmentCapabilities {
 /// The inline-attachment contract advertised to browsers. Generated from the
 /// shared format registry and the budgets `decode_attachments` enforces, so
 /// the picker and the server stay in lockstep by construction.
-pub fn webui_attachment_capabilities() -> WebUiAttachmentCapabilities {
-    WebUiAttachmentCapabilities {
+pub fn product_attachment_capabilities() -> ProductAttachmentCapabilities {
+    ProductAttachmentCapabilities {
         accept: ironclaw_common::accept_tokens(),
         max_count: MAX_INLINE_ATTACHMENTS,
         max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
@@ -63,52 +62,21 @@ pub fn webui_attachment_capabilities() -> WebUiAttachmentCapabilities {
     }
 }
 
-/// Authenticated WebUI caller after route auth has already completed.
+/// Product-surface caller helpers for turn-specific workflow code.
 ///
-/// This is authority-bearing input supplied by the host/router layer, not by
-/// the browser body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WebUiAuthenticatedCaller {
-    pub tenant_id: TenantId,
-    pub user_id: UserId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<AgentId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ProjectId>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub operator_webui_config: bool,
+/// `ironclaw_host_api` intentionally does not depend on `ironclaw_turns`, so
+/// product owns the conversion from shared caller vocabulary to turn vocabulary.
+pub trait ProductSurfaceCallerExt {
+    fn actor(&self) -> TurnActor;
+    fn turn_scope(&self, thread_id: ThreadId) -> TurnScope;
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-impl WebUiAuthenticatedCaller {
-    pub fn new(
-        tenant_id: TenantId,
-        user_id: UserId,
-        agent_id: Option<AgentId>,
-        project_id: Option<ProjectId>,
-    ) -> Self {
-        Self {
-            tenant_id,
-            user_id,
-            agent_id,
-            project_id,
-            operator_webui_config: false,
-        }
-    }
-
-    pub fn with_operator_webui_config(mut self, operator_webui_config: bool) -> Self {
-        self.operator_webui_config = operator_webui_config;
-        self
-    }
-
-    pub fn actor(&self) -> TurnActor {
+impl ProductSurfaceCallerExt for ProductSurfaceCaller {
+    fn actor(&self) -> TurnActor {
         TurnActor::new(self.user_id.clone())
     }
 
-    pub fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
+    fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
         TurnScope::new_with_owner(
             self.tenant_id.clone(),
             self.agent_id.clone(),
@@ -121,7 +89,7 @@ impl WebUiAuthenticatedCaller {
 
 /// Browser body for WebUI create-thread mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiCreateThreadRequest {
+pub struct ProductCreateThreadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,7 +108,7 @@ pub struct WebUiCreateThreadRequest {
 /// upload bytes enter the workflow — they are decoded, budgeted, and landed in
 /// storage, never carried on the (serializable) inbound command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiInboundAttachment {
+pub struct ProductInboundAttachment {
     pub mime_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
@@ -149,7 +117,7 @@ pub struct WebUiInboundAttachment {
 
 /// Browser body for WebUI send-message mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiSendMessageRequest {
+pub struct ProductSubmitTurnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,7 +125,7 @@ pub struct WebUiSendMessageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<WebUiInboundAttachment>,
+    pub attachments: Vec<ProductInboundAttachment>,
     /// Caller-selected model for this turn. A hint routed to when the operator
     /// has it configured, otherwise the run falls back to the deployment's
     /// active model. The `"default"` alias and empty values are treated as "no
@@ -166,7 +134,7 @@ pub struct WebUiSendMessageRequest {
     pub model: Option<String>,
 }
 
-impl WebUiSendMessageRequest {
+impl ProductSubmitTurnRequest {
     /// Validate and decode the inline attachments into bytes-bearing
     /// [`InboundAttachment`]s ready for landing.
     ///
@@ -248,7 +216,7 @@ impl WebUiSendMessageRequest {
 
 /// Browser body for WebUI cancel-run mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiCancelRunRequest {
+pub struct ProductCancelRunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,7 +229,7 @@ pub struct WebUiCancelRunRequest {
 
 /// Browser body for WebUI failed-run retry mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiRetryRunRequest {
+pub struct ProductRetryRunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,7 +240,7 @@ pub struct WebUiRetryRunRequest {
 
 /// Browser query for WebUI list-threads read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiListThreadsRequest {
+pub struct ProductListThreadsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,7 +251,7 @@ pub struct WebUiListThreadsRequest {
     pub needs_approval: bool,
 }
 
-impl WebUiListThreadsRequest {
+impl ProductListThreadsRequest {
     pub fn set_limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
@@ -307,7 +275,7 @@ impl WebUiListThreadsRequest {
 
 /// Browser query for WebUI automation listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiListAutomationsRequest {
+pub struct ProductListAutomationsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,7 +287,7 @@ pub struct WebUiListAutomationsRequest {
     pub include_completed: bool,
 }
 
-impl WebUiListAutomationsRequest {
+impl ProductListAutomationsRequest {
     pub fn set_limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
@@ -338,7 +306,7 @@ impl WebUiListAutomationsRequest {
 
 /// Browser body for WebUI automation rename mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiRenameAutomationRequest {
+pub struct ProductRenameAutomationRequest {
     /// Optional at the DTO boundary so `{}` returns the stable field-level
     /// `missing_field` validation error instead of a generic JSON rejection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,7 +326,7 @@ pub struct WebUiRenameAutomationRequest {
 /// path and lifted into a lifecycle package ref by the handler before
 /// it crosses the facade boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiSetupExtensionRequest {
+pub struct ProductSetupExtensionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -369,7 +337,7 @@ pub struct WebUiSetupExtensionRequest {
 
 /// Browser body for WebUI gate-resolution mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct WebUiResolveGateRequest {
+pub struct ProductResolveGateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,7 +356,7 @@ pub struct WebUiResolveGateRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WebUiCancelReason {
+pub enum ProductCancelReason {
     UserRequested,
     Superseded,
     Timeout,
@@ -396,21 +364,21 @@ pub enum WebUiCancelReason {
     Policy,
 }
 
-impl From<WebUiCancelReason> for SanitizedCancelReason {
-    fn from(value: WebUiCancelReason) -> Self {
+impl From<ProductCancelReason> for SanitizedCancelReason {
+    fn from(value: ProductCancelReason) -> Self {
         match value {
-            WebUiCancelReason::UserRequested => Self::UserRequested,
-            WebUiCancelReason::Superseded => Self::Superseded,
-            WebUiCancelReason::Timeout => Self::Timeout,
-            WebUiCancelReason::OperatorRequested => Self::OperatorRequested,
-            WebUiCancelReason::Policy => Self::Policy,
+            ProductCancelReason::UserRequested => Self::UserRequested,
+            ProductCancelReason::Superseded => Self::Superseded,
+            ProductCancelReason::Timeout => Self::Timeout,
+            ProductCancelReason::OperatorRequested => Self::OperatorRequested,
+            ProductCancelReason::Policy => Self::Policy,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "resolution", rename_all = "snake_case")]
-pub enum WebUiGateResolution {
+pub enum ProductGateResolution {
     Approved {
         #[serde(default)]
         always: bool,
@@ -425,9 +393,9 @@ pub enum WebUiGateResolution {
 /// Canonical route-independent WebUI command produced after validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
-pub enum WebUiInboundCommand {
+pub enum ProductInboundCommand {
     CreateThread {
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         client_action_id: IdempotencyKey,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         requested_thread_id: Option<ThreadId>,
@@ -450,7 +418,7 @@ pub enum WebUiInboundCommand {
         run_id: TurnRunId,
         gate_ref: GateRef,
         client_action_id: IdempotencyKey,
-        resolution: WebUiGateResolution,
+        resolution: ProductGateResolution,
     },
     RetryRun {
         scope: TurnScope,
@@ -460,18 +428,18 @@ pub enum WebUiInboundCommand {
     },
 }
 
-impl WebUiCreateThreadRequest {
+impl ProductCreateThreadRequest {
     pub fn into_command(
         self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<WebUiInboundCommand, ProductSurfaceError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductInboundCommand, ProductSurfaceError> {
         let client_action_id = parse_client_action_id(self.client_action_id)?;
         let requested_thread_id = self
             .requested_thread_id
             .map(|value| parse_thread_id_value("requested_thread_id", value))
             .transpose()?;
 
-        Ok(WebUiInboundCommand::CreateThread {
+        Ok(ProductInboundCommand::CreateThread {
             caller,
             client_action_id,
             requested_thread_id,
@@ -479,11 +447,11 @@ impl WebUiCreateThreadRequest {
     }
 }
 
-impl WebUiSendMessageRequest {
+impl ProductSubmitTurnRequest {
     pub fn into_command(
         self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<WebUiInboundCommand, ProductSurfaceError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductInboundCommand, ProductSurfaceError> {
         let client_action_id = parse_client_action_id(self.client_action_id)?;
         let thread_id = parse_thread_id(self.thread_id)?;
         let content = required_text(
@@ -493,7 +461,7 @@ impl WebUiSendMessageRequest {
             TextMode::MessageContent,
         )?;
 
-        Ok(WebUiInboundCommand::SendMessage {
+        Ok(ProductInboundCommand::SendMessage {
             scope: caller.turn_scope(thread_id),
             actor: caller.actor(),
             client_action_id,
@@ -506,17 +474,17 @@ impl WebUiSendMessageRequest {
     }
 }
 
-impl WebUiCancelRunRequest {
+impl ProductCancelRunRequest {
     pub fn into_command(
         self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<WebUiInboundCommand, ProductSurfaceError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductInboundCommand, ProductSurfaceError> {
         let client_action_id = parse_client_action_id(self.client_action_id)?;
         let thread_id = parse_thread_id(self.thread_id)?;
         let run_id = parse_run_id(self.run_id)?;
         let reason = parse_cancel_reason(self.reason)?;
 
-        Ok(WebUiInboundCommand::CancelRun {
+        Ok(ProductInboundCommand::CancelRun {
             request: CancelRunRequest {
                 scope: caller.turn_scope(thread_id),
                 actor: caller.actor(),
@@ -528,16 +496,16 @@ impl WebUiCancelRunRequest {
     }
 }
 
-impl WebUiRetryRunRequest {
+impl ProductRetryRunRequest {
     pub fn into_command(
         self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<WebUiInboundCommand, ProductSurfaceError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductInboundCommand, ProductSurfaceError> {
         let client_action_id = parse_client_action_id(self.client_action_id)?;
         let thread_id = parse_thread_id(self.thread_id)?;
         let run_id = parse_run_id(self.run_id)?;
 
-        Ok(WebUiInboundCommand::RetryRun {
+        Ok(ProductInboundCommand::RetryRun {
             scope: caller.turn_scope(thread_id),
             actor: caller.actor(),
             run_id,
@@ -546,18 +514,18 @@ impl WebUiRetryRunRequest {
     }
 }
 
-impl WebUiResolveGateRequest {
+impl ProductResolveGateRequest {
     pub fn into_command(
         self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<WebUiInboundCommand, ProductSurfaceError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductInboundCommand, ProductSurfaceError> {
         let client_action_id = parse_client_action_id(self.client_action_id)?;
         let thread_id = parse_thread_id(self.thread_id)?;
         let run_id = parse_run_id(self.run_id)?;
         let gate_ref = parse_gate_ref(self.gate_ref)?;
         let resolution = parse_gate_resolution(self.resolution, self.always, self.credential_ref)?;
 
-        Ok(WebUiInboundCommand::ResolveGate {
+        Ok(ProductInboundCommand::ResolveGate {
             scope: caller.turn_scope(thread_id),
             actor: caller.actor(),
             run_id,
@@ -636,14 +604,14 @@ fn parse_gate_resolution(
     resolution: Option<String>,
     always: Option<bool>,
     credential_ref: Option<String>,
-) -> Result<WebUiGateResolution, ProductSurfaceError> {
+) -> Result<ProductGateResolution, ProductSurfaceError> {
     let resolution = required_text("resolution", resolution, 64, TextMode::Token)?;
     match resolution.as_str() {
-        "approved" => Ok(WebUiGateResolution::Approved {
+        "approved" => Ok(ProductGateResolution::Approved {
             always: always.unwrap_or(false),
         }),
-        "declined" => Ok(WebUiGateResolution::Declined),
-        "credential_provided" => Ok(WebUiGateResolution::CredentialProvided {
+        "declined" => Ok(ProductGateResolution::Declined),
+        "credential_provided" => Ok(ProductGateResolution::CredentialProvided {
             credential_ref: required_text(
                 "credential_ref",
                 credential_ref,

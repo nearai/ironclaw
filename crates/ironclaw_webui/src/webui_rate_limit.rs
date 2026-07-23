@@ -44,7 +44,7 @@ use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
-use ironclaw_product::WebUiAuthenticatedCaller;
+use ironclaw_product::ProductSurfaceCaller;
 use lru::LruCache;
 
 use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
@@ -231,7 +231,7 @@ fn request_counter_key(
 
     let bucket_key = match scope {
         RateLimitScope::PerCaller => {
-            let Some(caller) = request.extensions().get::<WebUiAuthenticatedCaller>() else {
+            let Some(caller) = request.extensions().get::<ProductSurfaceCaller>() else {
                 tracing::debug!(
                     target = "ironclaw::reborn::webui_rate_limit",
                     route_id = %route.route_id,
@@ -288,7 +288,7 @@ fn match_route(routes: &[RouteLimit], method: &Method, path: &str) -> Option<usi
         .map(|(idx, _)| idx)
 }
 
-fn caller_key(caller: &WebUiAuthenticatedCaller) -> String {
+fn caller_key(caller: &ProductSurfaceCaller) -> String {
     // \x1F (unit separator) is rejected by `TenantId` / `UserId` newtypes
     // at construction time, so it can never appear inside a valid id —
     // safe to use as the join delimiter for a flat key.
@@ -312,7 +312,7 @@ fn now_epoch_secs() -> u64 {
 
 /// Axum middleware that enforces the per-route rate limits resolved by
 /// [`build_rate_limit_state`]. Authenticated routes run this after the
-/// bearer-auth middleware so the [`WebUiAuthenticatedCaller`] extension
+/// bearer-auth middleware so the [`ProductSurfaceCaller`] extension
 /// is available; public callback routes use route/global buckets that do
 /// not require a caller extension. Returns 429 when the bucket has
 /// exhausted the route's window; otherwise passes through.
@@ -400,8 +400,8 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{TenantId, UserId};
 
-    fn caller(tenant: &str, user: &str) -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn caller(tenant: &str, user: &str) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new(tenant).expect("tenant"),
             UserId::new(user).expect("user"),
             None,
@@ -442,7 +442,7 @@ mod tests {
         }
     }
 
-    fn consume(state: &RateLimitState, caller: &WebUiAuthenticatedCaller) -> bool {
+    fn consume(state: &RateLimitState, caller: &ProductSurfaceCaller) -> bool {
         let key = CounterKey {
             route_idx: 0,
             bucket_key: caller_key(caller),

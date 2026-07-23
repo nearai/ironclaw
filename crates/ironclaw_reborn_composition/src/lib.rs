@@ -138,10 +138,10 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
+pub use ironclaw_product::PreferenceTargetCodec;
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
 pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product::PreferenceTargetCodec;
 pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,

@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider};
 use crate::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, WebUiAuthenticatedCaller,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode,
 };
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -58,41 +58,41 @@ pub trait LlmConfigService: Send + Sync {
     /// Current merged catalog + active selection, keys masked.
     async fn snapshot(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Add or update a custom provider (and optionally its key / active state).
     async fn upsert_provider(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: UpsertLlmProviderRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Remove a custom provider and any stored key for it.
     async fn delete_provider(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         provider_id: String,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Select the active provider + model.
     async fn set_active(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Probe a provider's credentials/endpoint without persisting anything.
     async fn test_connection(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError>;
 
     /// List the models a provider exposes, without persisting anything.
     async fn list_models(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError>;
 
@@ -103,7 +103,7 @@ pub trait LlmConfigService: Send + Sync {
     /// caller polls the snapshot until NEAR AI is active.
     async fn start_nearai_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError>;
 
@@ -115,7 +115,7 @@ pub trait LlmConfigService: Send + Sync {
     /// no server-built auth URL.
     async fn complete_nearai_wallet_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError>;
 
@@ -126,7 +126,7 @@ pub trait LlmConfigService: Send + Sync {
     /// caller polls the snapshot until Codex is active.
     async fn start_codex_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError>;
 }
 
@@ -356,7 +356,7 @@ where
 {
     pub(super) async fn invoke_llm_provider_upsert(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: UpsertLlmProviderRequest,
     ) -> Result<(), ProductSurfaceError> {
         let service = self
@@ -373,7 +373,7 @@ where
 
     pub(super) async fn invoke_llm_provider_delete(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         input: serde_json::Value,
     ) -> Result<(), ProductSurfaceError> {
         let service = self
@@ -395,7 +395,7 @@ where
 
     pub(super) async fn invoke_llm_active_set(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         input: serde_json::Value,
     ) -> Result<(), ProductSurfaceError> {
         let service = self
@@ -413,7 +413,7 @@ where
 
     pub(super) async fn build_llm_config_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, ProductSurfaceError> {
         let service = self
             .llm_config

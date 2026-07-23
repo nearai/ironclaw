@@ -1,10 +1,10 @@
 //! Descriptor-backed operator command-plane read projections.
 
 use super::{
-    OperatorSetupHostState, ProductCapabilityInvoker, ProductSurfaceError, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorSetupResponse, RebornOperatorSurfaceStatus,
-    RebornServices, RebornViewDescriptor, RebornViewProvider, WebUiAuthenticatedCaller, llm_config,
-    operator_config_surface_not_wired_diagnostic, operator_diagnostics_surface_status,
+    OperatorSetupHostState, ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceError,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorSetupResponse,
+    RebornOperatorSurfaceStatus, RebornServices, RebornViewDescriptor, RebornViewProvider,
+    llm_config, operator_config_surface_not_wired_diagnostic, operator_diagnostics_surface_status,
     operator_doctor_setup_unavailable_diagnostic, operator_doctor_status_diagnostic,
     operator_doctor_status_response, operator_doctor_status_unavailable_diagnostic,
     setup_response_from_llm_snapshot,
@@ -32,7 +32,7 @@ where
 {
     pub(super) async fn build_operator_setup_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorSetupResponse, ProductSurfaceError> {
         let Some(llm_config) = &self.llm_config else {
             return Err(llm_config::llm_config_unavailable());
@@ -50,7 +50,7 @@ where
 
     pub(super) async fn build_operator_diagnostics_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
         let mut diagnostics = Vec::new();
         let mut operator_status = None;
@@ -119,7 +119,7 @@ where
 
     pub(super) async fn build_operator_status_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
         let status = self.operator_status.status(caller).await?;
         Ok(RebornOperatorCommandPlaneResponse {

@@ -28,8 +28,8 @@ use ironclaw_product::{
     ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductSurfaceError,
-    ProductWorkflowError, RebornChannelConnectStrategy, WebUiAuthenticatedCaller,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductSurfaceCaller,
+    ProductSurfaceError, ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -1775,7 +1775,7 @@ impl RebornLocalExtensionManagementPort {
                 };
                 channel_connection
                     .disconnect_channel_for_caller(
-                        WebUiAuthenticatedCaller::new(
+                        ProductSurfaceCaller::new(
                             removal_scope.tenant_id.clone(),
                             actor_user_id.clone(),
                             removal_scope.agent_id.clone(),
@@ -4283,7 +4283,7 @@ supports_threads = true
     /// the next `n` disconnects to fail so retry convergence can be pinned.
     #[derive(Default)]
     struct RecordingChannelConnectionFacade {
-        disconnects: StdMutex<Vec<(WebUiAuthenticatedCaller, String)>>,
+        disconnects: StdMutex<Vec<(ProductSurfaceCaller, String)>>,
         failures_remaining: AtomicUsize,
     }
 
@@ -4292,7 +4292,7 @@ supports_threads = true
             self.failures_remaining.store(count, Ordering::SeqCst);
         }
 
-        fn disconnects(&self) -> Vec<(WebUiAuthenticatedCaller, String)> {
+        fn disconnects(&self) -> Vec<(ProductSurfaceCaller, String)> {
             self.disconnects.lock().expect("disconnect lock").clone()
         }
     }
@@ -4301,14 +4301,14 @@ supports_threads = true
     impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
         async fn caller_channel_connections(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
             Ok(std::collections::HashMap::new())
         }
 
         async fn disconnect_channel_for_caller(
             &self,
-            caller: WebUiAuthenticatedCaller,
+            caller: ProductSurfaceCaller,
             channel: &str,
         ) -> Result<(), ProductSurfaceError> {
             self.disconnects

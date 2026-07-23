@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use super::{
-    OutboundPreferencesProductFacade, ProductSurfaceError, RebornOperatorToolInfo,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
+    OutboundPreferencesProductFacade, ProductSurfaceCaller, ProductSurfaceError,
+    RebornOperatorToolInfo, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornSetOutboundPreferencesRequest,
 };
 use ironclaw_host_api::{EffectKind, ExtensionId, HostApiError, PermissionMode};
 use thiserror::Error;
@@ -72,7 +72,7 @@ impl OutboundDeliveryCapabilityInputError {
 
 pub async fn list_outbound_delivery_targets_for_model(
     facade: &dyn OutboundPreferencesProductFacade,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     input: OutboundDeliveryTargetsListInput,
 ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
     let mut response = facade.list_outbound_delivery_targets(caller).await?;
@@ -90,7 +90,7 @@ pub async fn list_outbound_delivery_targets_for_model(
 
 pub async fn set_outbound_delivery_target_for_model(
     facade: &dyn OutboundPreferencesProductFacade,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     input: OutboundDeliveryTargetSetInput,
 ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
     facade

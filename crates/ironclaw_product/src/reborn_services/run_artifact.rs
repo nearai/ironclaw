@@ -17,11 +17,11 @@ use ironclaw_threads::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, ProductSurfaceError,
-    ProductSurfaceErrorCode, RebornGetRunStateRequest, RebornGetRunStateResponse, RebornLogEntry,
-    RebornLogQueryRequest, RebornServices, RebornViewDescriptor, RebornViewProvider,
-    WebUiAuthenticatedCaller, bounded_log_query, map_thread_error, parse_run_id_field,
-    parse_thread_id_field,
+    OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, ProductSurfaceCaller,
+    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornLogEntry, RebornLogQueryRequest,
+    RebornServices, RebornViewDescriptor, RebornViewProvider, bounded_log_query, map_thread_error,
+    parse_run_id_field, parse_thread_id_field,
 };
 
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
@@ -95,7 +95,7 @@ where
 {
     pub(super) async fn build_run_artifact(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornRunArtifactRequest,
     ) -> Result<RebornRunArtifact, ProductSurfaceError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
@@ -178,7 +178,7 @@ where
 
     async fn artifact_logs(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         thread_id: String,
         run_id: String,
         redactor: &DeterministicTraceRedactor,

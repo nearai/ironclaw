@@ -12,11 +12,11 @@ use crate::{
     ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductSurfaceError, ProductSurfaceValidationCode, ProductView,
-    RebornAccountBindingSource, RebornAuthAccount, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornVendorAuthAccounts,
-    WebUiAuthenticatedCaller,
+    LifecycleProductSurfaceContext, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceValidationCode, ProductView, RebornAccountBindingSource, RebornAuthAccount,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
+    RebornVendorAuthAccounts,
 };
 
 use super::{
@@ -40,7 +40,7 @@ pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionListResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller.clone());
     let lifecycle = execute_lifecycle(
@@ -80,7 +80,7 @@ pub(super) async fn list_extensions(
 
 pub(super) async fn list_extension_registry(
     facade: &dyn LifecycleProductFacade,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionRegistryResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller);
     let (installed_result, registry_result) = tokio::join!(
@@ -120,7 +120,7 @@ pub(super) async fn list_extension_registry(
 
 pub(super) async fn import_extension_capability(
     facade: &dyn LifecycleProductFacade,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     input: serde_json::Value,
 ) -> Result<(), ProductSurfaceError> {
     let bundle_base64 = match input {
@@ -159,7 +159,7 @@ async fn execute_lifecycle(
         .map_err(map_lifecycle_error)
 }
 
-fn lifecycle_surface_context(caller: WebUiAuthenticatedCaller) -> LifecycleProductContext {
+fn lifecycle_surface_context(caller: ProductSurfaceCaller) -> LifecycleProductContext {
     LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
         tenant_id: caller.tenant_id,
         user_id: caller.user_id,
@@ -180,7 +180,7 @@ fn lifecycle_installed_extensions(
 async fn lifecycle_extension_infos(
     installed: Vec<LifecycleInstalledExtensionSummary>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     connections: HashMap<String, bool>,
     account_states: HashMap<String, ChannelAuthAccountState>,
     activation_errors: HashMap<String, String>,
@@ -237,7 +237,7 @@ fn registry_entry(
 
 async fn credential_readiness_for_extension(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     installed: &LifecycleInstalledExtensionSummary,
 ) -> Result<ExtensionCredentialReadiness, ProductSurfaceError> {
     let extension_id = ExtensionId::new(installed.summary.package_ref.id.as_str())
@@ -472,9 +472,9 @@ mod tests {
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductWorkflowError, RebornExtensionOnboardingState,
-        WebUiAuthenticatedCaller,
+        LifecycleSearchExtensionSummary, ProductSurfaceCaller, ProductSurfaceError,
+        ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductWorkflowError,
+        RebornExtensionOnboardingState,
     };
 
     #[derive(Default)]
@@ -497,7 +497,7 @@ mod tests {
     impl ChannelConnectionFacade for TestConnections {
         async fn caller_channel_connections(
             &self,
-            _caller: WebUiAuthenticatedCaller,
+            _caller: ProductSurfaceCaller,
         ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
             Ok(self.connections.clone())
         }
@@ -1067,8 +1067,8 @@ mod tests {
         }
     }
 
-    fn caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("valid tenant"),
             UserId::new("user-alpha").expect("valid user"),
             Some(AgentId::new("agent-alpha").expect("valid agent")),

@@ -3,16 +3,17 @@
 use base64::Engine;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product::{
-    ProductSurfaceError, ProductSurfaceValidationCode, WebUiAuthenticatedCaller, WebUiCancelReason,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundAttachment,
-    WebUiInboundCommand, WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    ProductCancelReason, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductGateResolution, ProductInboundAttachment, ProductInboundCommand,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 use ironclaw_turns::SanitizedCancelReason;
 use serde_json::json;
 use uuid::Uuid;
 
-fn caller() -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller() -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("valid tenant"),
         UserId::new("user-alpha").expect("valid user"),
         Some(AgentId::new("agent-alpha").expect("valid agent")),
@@ -35,7 +36,7 @@ fn assert_validation_error(
 
 #[test]
 fn create_thread_maps_authenticated_caller_to_canonical_command() {
-    let request: WebUiCreateThreadRequest = serde_json::from_value(json!({
+    let request: ProductCreateThreadRequest = serde_json::from_value(json!({
         "client_action_id": "create-1",
         "requested_thread_id": "thread-alpha"
     }))
@@ -43,7 +44,7 @@ fn create_thread_maps_authenticated_caller_to_canonical_command() {
 
     let command = request.into_command(caller()).expect("valid command");
 
-    let WebUiInboundCommand::CreateThread {
+    let ProductInboundCommand::CreateThread {
         caller,
         client_action_id,
         requested_thread_id,
@@ -61,7 +62,7 @@ fn create_thread_maps_authenticated_caller_to_canonical_command() {
 
 #[test]
 fn send_message_maps_body_to_turn_scope_actor_and_content() {
-    let request: WebUiSendMessageRequest = serde_json::from_value(json!({
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
         "client_action_id": "send-1",
         "thread_id": "thread-alpha",
         "content": "hello\nworld"
@@ -70,7 +71,7 @@ fn send_message_maps_body_to_turn_scope_actor_and_content() {
 
     let command = request.into_command(caller()).expect("valid command");
 
-    let WebUiInboundCommand::SendMessage {
+    let ProductInboundCommand::SendMessage {
         scope,
         actor,
         client_action_id,
@@ -94,14 +95,14 @@ fn send_message_maps_body_to_turn_scope_actor_and_content() {
 #[test]
 fn send_message_carries_requested_model_and_drops_default_alias() {
     // A concrete model is carried through as a requested-model hint.
-    let request = WebUiSendMessageRequest {
+    let request = ProductSubmitTurnRequest {
         client_action_id: Some("send-model".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hi".to_string()),
         attachments: Vec::new(),
         model: Some("gpt-4o".to_string()),
     };
-    let WebUiInboundCommand::SendMessage {
+    let ProductInboundCommand::SendMessage {
         requested_model, ..
     } = request.into_command(caller()).expect("valid command")
     else {
@@ -112,14 +113,14 @@ fn send_message_carries_requested_model_and_drops_default_alias() {
     // The "default" alias (and empty) are dropped to `None` so a default-model
     // request falls back to the deployment's active model.
     for alias in ["default", "DEFAULT", "  ", ""] {
-        let request = WebUiSendMessageRequest {
+        let request = ProductSubmitTurnRequest {
             client_action_id: Some("send-default".to_string()),
             thread_id: Some("thread-alpha".to_string()),
             content: Some("hi".to_string()),
             attachments: Vec::new(),
             model: Some(alias.to_string()),
         };
-        let WebUiInboundCommand::SendMessage {
+        let ProductInboundCommand::SendMessage {
             requested_model, ..
         } = request.into_command(caller()).expect("valid command")
         else {
@@ -131,7 +132,7 @@ fn send_message_carries_requested_model_and_drops_default_alias() {
 
 #[test]
 fn cancel_run_maps_to_canonical_cancel_request() {
-    let request: WebUiCancelRunRequest = serde_json::from_value(json!({
+    let request: ProductCancelRunRequest = serde_json::from_value(json!({
         "client_action_id": "cancel-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
@@ -141,7 +142,7 @@ fn cancel_run_maps_to_canonical_cancel_request() {
 
     let command = request.into_command(caller()).expect("valid command");
 
-    let WebUiInboundCommand::CancelRun { request } = command else {
+    let ProductInboundCommand::CancelRun { request } = command else {
         panic!("expected cancel-run command");
     };
     assert_eq!(request.scope.thread_id.as_str(), "thread-alpha");
@@ -152,7 +153,7 @@ fn cancel_run_maps_to_canonical_cancel_request() {
 
 #[test]
 fn retry_run_maps_to_canonical_retry_command() {
-    let request: WebUiRetryRunRequest = serde_json::from_value(json!({
+    let request: ProductRetryRunRequest = serde_json::from_value(json!({
         "client_action_id": "retry-1",
         "thread_id": "thread-alpha",
         "run_id": run_id()
@@ -161,7 +162,7 @@ fn retry_run_maps_to_canonical_retry_command() {
 
     let command = request.into_command(caller()).expect("valid command");
 
-    let WebUiInboundCommand::RetryRun {
+    let ProductInboundCommand::RetryRun {
         scope,
         actor,
         run_id: parsed_run_id,
@@ -181,7 +182,7 @@ fn retry_run_maps_to_canonical_retry_command() {
 
 #[test]
 fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
-    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
@@ -193,7 +194,7 @@ fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
 
     let command = request.into_command(caller()).expect("valid command");
 
-    let WebUiInboundCommand::ResolveGate {
+    let ProductInboundCommand::ResolveGate {
         scope,
         actor,
         run_id: parsed_run_id,
@@ -214,7 +215,7 @@ fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
     assert_eq!(client_action_id.as_str(), "gate-1");
     assert_eq!(
         resolution,
-        WebUiGateResolution::CredentialProvided {
+        ProductGateResolution::CredentialProvided {
             credential_ref: "credential-alpha".to_string()
         }
     );
@@ -222,7 +223,7 @@ fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
 
 #[test]
 fn missing_content_returns_stable_validation_error() {
-    let request: WebUiSendMessageRequest = serde_json::from_value(json!({
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
         "client_action_id": "send-1",
         "thread_id": "thread-alpha"
     }))
@@ -246,7 +247,7 @@ fn missing_content_returns_stable_validation_error() {
 
 #[test]
 fn blank_client_action_id_returns_stable_validation_error() {
-    let request: WebUiSendMessageRequest = serde_json::from_value(json!({
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
         "client_action_id": "   ",
         "thread_id": "thread-alpha",
         "content": "hello"
@@ -264,7 +265,7 @@ fn blank_client_action_id_returns_stable_validation_error() {
 
 #[test]
 fn invalid_thread_id_returns_stable_validation_error() {
-    let request: WebUiSendMessageRequest = serde_json::from_value(json!({
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
         "client_action_id": "send-1",
         "thread_id": "../other-thread",
         "content": "hello"
@@ -280,7 +281,7 @@ fn invalid_thread_id_returns_stable_validation_error() {
 
 #[test]
 fn missing_run_id_returns_stable_validation_error_for_cancel() {
-    let request: WebUiCancelRunRequest = serde_json::from_value(json!({
+    let request: ProductCancelRunRequest = serde_json::from_value(json!({
         "client_action_id": "cancel-1",
         "thread_id": "thread-alpha"
     }))
@@ -293,7 +294,7 @@ fn missing_run_id_returns_stable_validation_error_for_cancel() {
 
 #[test]
 fn invalid_run_id_returns_stable_validation_error_for_gate_resolution() {
-    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": "not-a-uuid",
@@ -309,7 +310,7 @@ fn invalid_run_id_returns_stable_validation_error_for_gate_resolution() {
 
 #[test]
 fn missing_gate_ref_returns_stable_validation_error() {
-    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
@@ -326,7 +327,7 @@ fn missing_gate_ref_returns_stable_validation_error() {
 
 #[test]
 fn blank_credential_ref_returns_stable_validation_error() {
-    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
@@ -345,7 +346,7 @@ fn blank_credential_ref_returns_stable_validation_error() {
 
 #[test]
 fn command_serializes_with_stable_command_tag() {
-    let request = WebUiSendMessageRequest {
+    let request = ProductSubmitTurnRequest {
         client_action_id: Some("send-1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hello".to_string()),
@@ -363,7 +364,7 @@ fn command_serializes_with_stable_command_tag() {
 
 #[test]
 fn token_fields_reject_control_characters() {
-    let request = WebUiSendMessageRequest {
+    let request = ProductSubmitTurnRequest {
         client_action_id: Some("send\n1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hello".to_string()),
@@ -382,7 +383,7 @@ fn token_fields_reject_control_characters() {
 
 #[test]
 fn invalid_cancel_reason_returns_stable_validation_error() {
-    let request = WebUiCancelRunRequest {
+    let request = ProductCancelRunRequest {
         client_action_id: Some("cancel-1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         run_id: Some(run_id()),
@@ -396,7 +397,7 @@ fn invalid_cancel_reason_returns_stable_validation_error() {
 
 #[test]
 fn invalid_gate_resolution_returns_stable_validation_error() {
-    let request = WebUiResolveGateRequest {
+    let request = ProductResolveGateRequest {
         client_action_id: Some("gate-1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         run_id: Some(run_id()),
@@ -419,14 +420,14 @@ fn invalid_gate_resolution_returns_stable_validation_error() {
 
 #[test]
 fn cancel_reason_defaults_to_user_requested() {
-    let request = WebUiCancelRunRequest {
+    let request = ProductCancelRunRequest {
         client_action_id: Some("cancel-1".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         run_id: Some(run_id()),
         reason: None,
     };
 
-    let WebUiInboundCommand::CancelRun { request } = request
+    let ProductInboundCommand::CancelRun { request } = request
         .into_command(caller())
         .expect("valid cancel command")
     else {
@@ -439,7 +440,7 @@ fn cancel_reason_defaults_to_user_requested() {
 #[test]
 fn cancel_reason_serializes_as_snake_case() {
     assert_eq!(
-        serde_json::to_value(WebUiCancelReason::Policy).expect("reason json"),
+        serde_json::to_value(ProductCancelReason::Policy).expect("reason json"),
         json!("policy")
     );
 }
@@ -448,8 +449,8 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn send_with_attachments(attachments: Vec<WebUiInboundAttachment>) -> WebUiSendMessageRequest {
-    WebUiSendMessageRequest {
+fn send_with_attachments(attachments: Vec<ProductInboundAttachment>) -> ProductSubmitTurnRequest {
+    ProductSubmitTurnRequest {
         client_action_id: Some("send-att".to_string()),
         thread_id: Some("thread-alpha".to_string()),
         content: Some("see attached".to_string()),
@@ -461,12 +462,12 @@ fn send_with_attachments(attachments: Vec<WebUiInboundAttachment>) -> WebUiSendM
 #[test]
 fn decode_attachments_decodes_metadata_kind_and_bytes() {
     let request = send_with_attachments(vec![
-        WebUiInboundAttachment {
+        ProductInboundAttachment {
             mime_type: "application/pdf".to_string(),
             filename: Some("report.pdf".to_string()),
             data_base64: b64(b"%PDF-1.7 body"),
         },
-        WebUiInboundAttachment {
+        ProductInboundAttachment {
             // Uppercase + charset params normalize; kind derives from registry.
             mime_type: "IMAGE/PNG; charset=binary".to_string(),
             filename: None,
@@ -491,7 +492,7 @@ fn decode_attachments_decodes_metadata_kind_and_bytes() {
 
 #[test]
 fn decode_attachments_rejects_unsupported_mime() {
-    let request = send_with_attachments(vec![WebUiInboundAttachment {
+    let request = send_with_attachments(vec![ProductInboundAttachment {
         mime_type: "image/svg+xml".to_string(),
         filename: None,
         data_base64: b64(b"<svg/>"),
@@ -508,7 +509,7 @@ fn decode_attachments_rejects_unsupported_mime() {
 
 #[test]
 fn decode_attachments_rejects_malformed_base64() {
-    let request = send_with_attachments(vec![WebUiInboundAttachment {
+    let request = send_with_attachments(vec![ProductInboundAttachment {
         mime_type: "application/pdf".to_string(),
         filename: None,
         data_base64: "not valid base64!!!".to_string(),
@@ -523,7 +524,7 @@ fn decode_attachments_rejects_malformed_base64() {
 
 #[test]
 fn decode_attachments_rejects_per_file_oversize() {
-    let request = send_with_attachments(vec![WebUiInboundAttachment {
+    let request = send_with_attachments(vec![ProductInboundAttachment {
         mime_type: "application/pdf".to_string(),
         filename: None,
         data_base64: b64(&vec![0u8; 10 * 1024 * 1024 + 1]),
@@ -536,7 +537,7 @@ fn decode_attachments_rejects_per_file_oversize() {
 fn decode_attachments_rejects_total_oversize() {
     let three_mib = vec![0u8; 3 * 1024 * 1024];
     let request = send_with_attachments(vec![
-        WebUiInboundAttachment {
+        ProductInboundAttachment {
             mime_type: "application/pdf".to_string(),
             filename: None,
             data_base64: b64(&three_mib),
@@ -550,7 +551,7 @@ fn decode_attachments_rejects_total_oversize() {
 #[test]
 fn decode_attachments_rejects_too_many() {
     let request = send_with_attachments(vec![
-        WebUiInboundAttachment {
+        ProductInboundAttachment {
             mime_type: "text/plain".to_string(),
             filename: None,
             data_base64: b64(b"x"),
@@ -579,7 +580,7 @@ fn decode_attachments_empty_is_ok() {
 /// been the only producer and it now sends "declined".
 #[test]
 fn declined_is_the_only_decline_wire_string() {
-    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
@@ -588,13 +589,13 @@ fn declined_is_the_only_decline_wire_string() {
     }))
     .expect("declined request json");
     let command = request.into_command(caller()).expect("valid command");
-    let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
+    let ProductInboundCommand::ResolveGate { resolution, .. } = command else {
         panic!("expected resolve-gate command");
     };
-    assert_eq!(resolution, WebUiGateResolution::Declined);
+    assert_eq!(resolution, ProductGateResolution::Declined);
 
     for retired in ["denied", "cancelled"] {
-        let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        let request: ProductResolveGateRequest = serde_json::from_value(json!({
             "client_action_id": "gate-1",
             "thread_id": "thread-alpha",
             "run_id": run_id(),

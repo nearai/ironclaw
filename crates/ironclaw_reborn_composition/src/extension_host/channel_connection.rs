@@ -27,7 +27,7 @@ use ironclaw_auth::{
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
 use ironclaw_product::{
-    ChannelAuthAccountState, ChannelConnectionFacade, ProductSurfaceError, WebUiAuthenticatedCaller,
+    ChannelAuthAccountState, ChannelConnectionFacade, ProductSurfaceCaller, ProductSurfaceError,
 };
 
 use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
@@ -82,7 +82,7 @@ pub(crate) trait ChannelAccountStatusReader: Send + Sync {
     /// when the caller holds no account for that vendor.
     async fn account_status_for_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider: &str,
     ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError>;
 }
@@ -91,7 +91,7 @@ pub(crate) trait ChannelAccountStatusReader: Send + Sync {
 impl ChannelAccountStatusReader for crate::RebornProductAuthServices {
     async fn account_status_for_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider: &str,
     ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError> {
         let provider_id = AuthProviderId::new(provider)
@@ -133,7 +133,7 @@ impl ChannelAccountStatusReader for crate::RebornProductAuthServices {
 pub(crate) trait ChannelDisconnectCleanup: Send + Sync {
     async fn cleanup_disconnected_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         scope: &ChannelConnectionScope,
     ) -> Result<(), String>;
 }
@@ -267,7 +267,7 @@ impl GenericChannelConnectionFacade {
     async fn caller_connected(
         &self,
         entry: &ChannelConnectionEntry,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         scope: &ChannelConnectionScope,
     ) -> Result<bool, ProductSurfaceError> {
         let prefix = scope.provider_user_id_prefix();
@@ -291,7 +291,7 @@ impl GenericChannelConnectionFacade {
     async fn revoke_personal_credentials(
         &self,
         entry: &ChannelConnectionEntry,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
     ) -> Result<(), ProductSurfaceError> {
         let Some(cleanup) = &self.credential_cleanup else {
             return Ok(());
@@ -311,7 +311,7 @@ impl GenericChannelConnectionFacade {
     async fn delete_identity_bindings(
         &self,
         entry: &ChannelConnectionEntry,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider_user_id_prefix: Option<&str>,
     ) -> Result<(), ProductSurfaceError> {
         for provider in &entry.providers {
@@ -340,7 +340,7 @@ struct ChannelDmTargetDisconnectCleanup {
 impl ChannelDisconnectCleanup for ChannelDmTargetDisconnectCleanup {
     async fn cleanup_disconnected_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         _scope: &ChannelConnectionScope,
     ) -> Result<(), String> {
         self.store
@@ -354,7 +354,7 @@ impl ChannelDisconnectCleanup for ChannelDmTargetDisconnectCleanup {
 impl ChannelConnectionFacade for GenericChannelConnectionFacade {
     async fn caller_channel_connections(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<HashMap<String, bool>, ProductSurfaceError> {
         let entries = self.connection_entries().await?;
         let mut connections = HashMap::with_capacity(entries.len());
@@ -384,7 +384,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
 
     async fn caller_channel_account_states(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<HashMap<String, ChannelAuthAccountState>, ProductSurfaceError> {
         let Some(reader) = &self.account_status_reader else {
             return Ok(HashMap::new());
@@ -422,7 +422,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
 
     async fn disconnect_channel_for_caller(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         channel: &str,
     ) -> Result<(), ProductSurfaceError> {
         if caller.tenant_id != self.tenant_id {
@@ -484,7 +484,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
 // vendor account. Shared by the scoped and no-scope disconnect arms so the
 // revoke request cannot drift between them.
 fn personal_credential_cleanup_request(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     extension_id: &str,
     provider: &str,
 ) -> Result<SecretCleanupRequest, ProductSurfaceError> {
@@ -534,8 +534,8 @@ mod tests {
         TenantId::new("tenant:test").expect("tenant")
     }
 
-    fn caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             tenant(),
             UserId::new("user:alice").expect("user"),
             None::<AgentId>,
@@ -788,7 +788,7 @@ mod tests {
             None,
             Some(credential_cleanup.clone()),
         );
-        let foreign_caller = WebUiAuthenticatedCaller::new(
+        let foreign_caller = ProductSurfaceCaller::new(
             TenantId::new("tenant:other").expect("tenant"),
             UserId::new("user:alice").expect("user"),
             None::<AgentId>,
@@ -860,7 +860,7 @@ mod tests {
             "the reader was consulted for the caller + vendor",
         );
 
-        let foreign = WebUiAuthenticatedCaller::new(
+        let foreign = ProductSurfaceCaller::new(
             TenantId::new("tenant:other").expect("tenant"),
             UserId::new("user:alice").expect("user"),
             None::<AgentId>,
@@ -898,7 +898,7 @@ mod tests {
     impl ChannelAccountStatusReader for RecordingAccountStatusReader {
         async fn account_status_for_caller(
             &self,
-            caller: &WebUiAuthenticatedCaller,
+            caller: &ProductSurfaceCaller,
             provider: &str,
         ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError> {
             self.calls
@@ -1222,7 +1222,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
     impl ChannelDisconnectCleanup for RecordingDisconnectCleanup {
         async fn cleanup_disconnected_caller(
             &self,
-            caller: &WebUiAuthenticatedCaller,
+            caller: &ProductSurfaceCaller,
             scope: &ChannelConnectionScope,
         ) -> Result<(), String> {
             self.calls.lock().expect("lock").push((
@@ -1239,7 +1239,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
     impl ChannelDisconnectCleanup for FailingDisconnectCleanup {
         async fn cleanup_disconnected_caller(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
+            _caller: &ProductSurfaceCaller,
             _scope: &ChannelConnectionScope,
         ) -> Result<(), String> {
             Err("vendor cleanup unavailable".to_string())

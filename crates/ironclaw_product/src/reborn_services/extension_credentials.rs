@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecyclePackageRef, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    WebUiAuthenticatedCaller,
+    LifecyclePackageRef, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind,
 };
 
 use super::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
@@ -27,7 +27,7 @@ enum RequirementCredentialReadiness {
 }
 
 pub(super) fn credential_scope(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     package_ref: &LifecyclePackageRef,
 ) -> AuthProductScope {
     let seed = format!(

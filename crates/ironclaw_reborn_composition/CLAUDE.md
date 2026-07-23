@@ -124,7 +124,7 @@ Inbound order (outer → inner → handler):
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
    the browser's `EventSource` cannot set headers. Mutations and
    timeline reads stay bearer-only. On success the middleware inserts
-   a `WebUiAuthenticatedCaller` extension built from
+   a `ProductSurfaceCaller` extension built from
    `config.tenant_id` plus the authentication result's `UserId`, and a
    request-scoped `WebUiV2Capabilities` extension from the same
    authentication result.
@@ -162,7 +162,7 @@ Reborn-native product-auth surface:
 
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
-  `WebUiAuthenticatedCaller` inserted by host composition, hashes raw
+  `ProductSurfaceCaller` inserted by host composition, hashes raw
   state/PKCE once, rejects caller-supplied expiry beyond the route TTL,
   and creates an `AuthFlowRecord` through `AuthFlowManager::create_flow`.
   The response authorization URL is composed after flow creation so it can
@@ -181,7 +181,7 @@ Reborn-native product-auth surface:
   transport-peer-IP public callback rate limit.
 - `POST /api/reborn/product-auth/manual-token/submit` is inside the
   same bearer-auth layer as OAuth start. It derives `AuthProductScope`
-  from `WebUiAuthenticatedCaller`, validates the provider/account/token
+  from `ProductSurfaceCaller`, validates the provider/account/token
   fields, creates a short-lived manual-token interaction with a
   `TurnGateResume` continuation, submits the raw token only to
   `RebornProductAuthServices`, and returns the resulting
@@ -360,7 +360,7 @@ rows are inventoried here, not implemented in the current PR.
 - **Connection limit (SSE)** — bounded by `ironclaw_webui`'s own
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
   lifetime). No WS surface to bound.
-- **Caller construction** — `WebUiAuthenticatedCaller` is built from
+- **Caller construction** — `ProductSurfaceCaller` is built from
   `config.tenant_id` (trusted host installation) plus the
   authenticator's verified `UserId`. The browser body cannot influence
   either field; matches the rule in

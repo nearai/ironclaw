@@ -205,7 +205,7 @@ async fn malformed_request_body_returns_sanitized_client_error() {
         "src/",
         "panicked",
         "::",
-        "WebUiCreateThreadRequest",
+        "ProductCreateThreadRequest",
         "client_action_id",
         ENV_TOKEN,
     ] {

@@ -9,10 +9,10 @@ use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product::{
-    ADMIN_CONFIGURATION_VIEW, ProductSurfaceError, ProductSurfaceErrorCode,
+    ADMIN_CONFIGURATION_VIEW, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse, RebornViewDescriptor,
-    RebornViewPage, RebornViewProvider, WebUiAuthenticatedCaller,
+    RebornViewPage, RebornViewProvider,
 };
 use ironclaw_secrets::SecretStore;
 
@@ -56,11 +56,11 @@ impl RebornViewProvider for AdminConfigurationViewProvider {
 
     async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         params: serde_json::Value,
         cursor: Option<String>,
     ) -> Result<RebornViewPage, ProductSurfaceError> {
-        if !caller.operator_webui_config {
+        if !caller.operator_config {
             return Err(forbidden());
         }
         if params != serde_json::json!({}) || cursor.is_some() {
@@ -136,7 +136,7 @@ fn render_group(
     }
 }
 
-pub(crate) fn caller_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+pub(crate) fn caller_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
     ResourceScope {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),

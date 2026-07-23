@@ -18,23 +18,19 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
-    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, InstallationState, NetworkMethod, Outcome, OutcomeRefs, ProjectId,
+    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId, TerminateHint,
+    ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, ProductCapabilityInput, ProductOperationId, ProductOperationRequest,
-    ProductOperationResponse, ProductSurface, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewPage,
-    RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest,
+    LifecyclePackageRef, ProductCreateThreadRequest, ProductListThreadsRequest,
+    ProductResolveGateRequest, ProductSubmitTurnRequest, ProductSurfaceCaller,
+    ProductSurfaceCallerExt, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornListThreadsResponse, RebornSetupExtensionResponse, RebornSubmitTurnResponse,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewQuery,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -186,7 +182,7 @@ fn successful_resolution(activity_id: ActivityId) -> Resolution {
     })
 }
 
-fn trace_credits_response(caller: &WebUiAuthenticatedCaller) -> RebornTraceCreditsResponse {
+fn trace_credits_response(caller: &ProductSurfaceCaller) -> RebornTraceCreditsResponse {
     let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
         caller.tenant_id.as_str(),
         caller.user_id.as_str(),
@@ -565,46 +561,73 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ProductSurface for GatewayOpenAiSurface {
-        async fn create_thread(
+    impl ironclaw_host_api::ProductSurface for GatewayOpenAiSurface {
+        async fn invoke(
             &self,
-            caller: WebUiAuthenticatedCaller,
-            request: WebUiCreateThreadRequest,
-        ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
-            let thread_id = ThreadId::new(
-                request
-                    .requested_thread_id
-                    .or(request.client_action_id)
-                    .unwrap_or_else(|| THREAD.to_string()),
-            )
-            .map_err(ProductSurfaceError::internal_from)?;
-            Ok(RebornCreateThreadResponse {
-                thread: test_thread_record(caller, thread_id),
-            })
+            caller: ProductSurfaceCaller,
+            request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+            let output = match request.operation_id.as_str() {
+                "thread.create" => {
+                    let input: ProductCreateThreadRequest =
+                        serde_json::from_value(request.input)
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    let thread_id = ThreadId::new(
+                        input
+                            .requested_thread_id
+                            .or(input.client_action_id)
+                            .unwrap_or_else(|| THREAD.to_string()),
+                    )
+                    .map_err(ProductSurfaceError::internal_from)?;
+                    serde_json::to_value(RebornCreateThreadResponse {
+                        thread: test_thread_record(caller, thread_id),
+                    })
+                    .map_err(ProductSurfaceError::internal_from)?
+                }
+                "turn.submit" => {
+                    let input: ProductSubmitTurnRequest = serde_json::from_value(request.input)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                    *self
+                        .submit_count
+                        .lock()
+                        .expect("submit count lock should not be poisoned") += 1;
+                    let thread_id =
+                        ThreadId::new(input.thread_id.unwrap_or_else(|| THREAD.to_string()))
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    serde_json::to_value(RebornSubmitTurnResponse::Submitted {
+                        thread_id,
+                        accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
+                            .map_err(ProductSurfaceError::internal_from)?,
+                        turn_id: "turn-openai-chat".to_string(),
+                        run_id: TurnRunId::new(),
+                        status: TurnStatus::Queued,
+                        resolved_run_profile_id: RunProfileId::default_profile()
+                            .as_str()
+                            .to_string(),
+                        resolved_run_profile_version: 1,
+                        event_cursor: EventCursor::default(),
+                    })
+                    .map_err(ProductSurfaceError::internal_from)?
+                }
+                _ => return Err(ProductSurfaceError::service_unavailable(false)),
+            };
+            Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
         }
 
-        async fn submit_turn(
+        async fn query(
             &self,
-            _caller: WebUiAuthenticatedCaller,
-            request: WebUiSendMessageRequest,
-        ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
-            *self
-                .submit_count
-                .lock()
-                .expect("submit count lock should not be poisoned") += 1;
-            let thread_id = ThreadId::new(request.thread_id.unwrap_or_else(|| THREAD.to_string()))
-                .map_err(ProductSurfaceError::internal_from)?;
-            Ok(RebornSubmitTurnResponse::Submitted {
-                thread_id,
-                accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
-                    .map_err(ProductSurfaceError::internal_from)?,
-                turn_id: "turn-openai-chat".to_string(),
-                run_id: TurnRunId::new(),
-                status: TurnStatus::Queued,
-                resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
-                resolved_run_profile_version: 1,
-                event_cursor: EventCursor::default(),
-            })
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
+        }
+
+        async fn stream_events(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
         }
     }
 
@@ -619,108 +642,132 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ProductSurface for AdmissionProductSurface {
-        async fn create_thread(
+    impl ironclaw_host_api::ProductSurface for AdmissionProductSurface {
+        async fn invoke(
             &self,
-            caller: WebUiAuthenticatedCaller,
-            request: WebUiCreateThreadRequest,
-        ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
-            let thread_id = ThreadId::new(
-                request
-                    .requested_thread_id
-                    .or(request.client_action_id)
-                    .unwrap_or_else(|| THREAD.to_string()),
-            )
-            .map_err(ProductSurfaceError::internal_from)?;
-            Ok(RebornCreateThreadResponse {
-                thread: test_thread_record(caller, thread_id),
-            })
+            caller: ProductSurfaceCaller,
+            request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+            let output = match request.operation_id.as_str() {
+                "thread.create" => {
+                    let input: ProductCreateThreadRequest =
+                        serde_json::from_value(request.input)
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    let thread_id = ThreadId::new(
+                        input
+                            .requested_thread_id
+                            .or(input.client_action_id)
+                            .unwrap_or_else(|| THREAD.to_string()),
+                    )
+                    .map_err(ProductSurfaceError::internal_from)?;
+                    serde_json::to_value(RebornCreateThreadResponse {
+                        thread: test_thread_record(caller.clone(), thread_id),
+                    })
+                    .map_err(ProductSurfaceError::internal_from)?
+                }
+                "turn.submit" => {
+                    let input: ProductSubmitTurnRequest = serde_json::from_value(request.input)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                    let thread_id =
+                        ThreadId::new(input.thread_id.clone().ok_or_else(invalid_request_error)?)
+                            .map_err(ProductSurfaceError::internal_from)?;
+                    let scope = caller.turn_scope(thread_id.clone());
+                    let run_id = self
+                        .coordinator
+                        .prepare_turn(scope.clone())
+                        .await
+                        .map_err(map_turn_error)?;
+                    let accepted_message_ref = AcceptedMessageRef::new(format!(
+                        "msg:{}",
+                        input.client_action_id.as_deref().unwrap_or("openai-chat")
+                    ))
+                    .map_err(ProductSurfaceError::internal_from)?;
+                    let response = self
+                        .coordinator
+                        .submit_turn(SubmitTurnRequest {
+                            scope,
+                            actor: caller.actor(),
+                            accepted_message_ref: accepted_message_ref.clone(),
+                            source_binding_ref: SourceBindingRef::new("source:openai-chat")
+                                .map_err(ProductSurfaceError::internal_from)?,
+                            reply_target_binding_ref: ReplyTargetBindingRef::new(
+                                "reply:openai-chat",
+                            )
+                            .map_err(ProductSurfaceError::internal_from)?,
+                            requested_run_profile: None,
+                            requested_model: input.model,
+                            idempotency_key: IdempotencyKey::new(
+                                input
+                                    .client_action_id
+                                    .unwrap_or_else(|| "openai-chat".to_string()),
+                            )
+                            .map_err(ProductSurfaceError::internal_from)?,
+                            received_at: chrono::Utc::now(),
+                            requested_run_id: Some(run_id),
+                            parent_run_id: None,
+                            subagent_depth: 0,
+                            spawn_tree_root_run_id: None,
+                            product_context: None,
+                        })
+                        .await;
+                    let result = match response {
+                        Ok(ironclaw_turns::SubmitTurnResponse::Accepted {
+                            turn_id,
+                            run_id,
+                            status,
+                            resolved_run_profile_id,
+                            resolved_run_profile_version,
+                            event_cursor,
+                            accepted_message_ref,
+                            ..
+                        }) => RebornSubmitTurnResponse::Submitted {
+                            thread_id,
+                            accepted_message_ref,
+                            turn_id: turn_id.to_string(),
+                            run_id,
+                            status,
+                            resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
+                            resolved_run_profile_version: resolved_run_profile_version.as_u64(),
+                            event_cursor,
+                        },
+                        Err(TurnError::ThreadBusy(busy)) => {
+                            RebornSubmitTurnResponse::RejectedBusy {
+                                thread_id,
+                                accepted_message_ref,
+                                active_run_id: Some(busy.active_run_id),
+                                status: Some(busy.status),
+                                event_cursor: Some(busy.event_cursor),
+                                notice: "busy".to_string(),
+                            }
+                        }
+                        Err(error) => return Err(map_turn_error(error)),
+                    };
+                    serde_json::to_value(result).map_err(ProductSurfaceError::internal_from)?
+                }
+                _ => return Err(ProductSurfaceError::service_unavailable(false)),
+            };
+            Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
         }
 
-        async fn submit_turn(
+        async fn query(
             &self,
-            caller: WebUiAuthenticatedCaller,
-            request: WebUiSendMessageRequest,
-        ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
-            let thread_id = ThreadId::new(
-                request
-                    .thread_id
-                    .clone()
-                    .ok_or_else(invalid_request_error)?,
-            )
-            .map_err(ProductSurfaceError::internal_from)?;
-            let scope = caller.turn_scope(thread_id.clone());
-            let run_id = self
-                .coordinator
-                .prepare_turn(scope.clone())
-                .await
-                .map_err(map_turn_error)?;
-            let accepted_message_ref = AcceptedMessageRef::new(format!(
-                "msg:{}",
-                request.client_action_id.as_deref().unwrap_or("openai-chat")
-            ))
-            .map_err(ProductSurfaceError::internal_from)?;
-            let response = self
-                .coordinator
-                .submit_turn(SubmitTurnRequest {
-                    scope,
-                    actor: caller.actor(),
-                    accepted_message_ref: accepted_message_ref.clone(),
-                    source_binding_ref: SourceBindingRef::new("source:openai-chat")
-                        .map_err(ProductSurfaceError::internal_from)?,
-                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply:openai-chat")
-                        .map_err(ProductSurfaceError::internal_from)?,
-                    requested_run_profile: None,
-                    requested_model: request.model,
-                    idempotency_key: IdempotencyKey::new(
-                        request
-                            .client_action_id
-                            .unwrap_or_else(|| "openai-chat".to_string()),
-                    )
-                    .map_err(ProductSurfaceError::internal_from)?,
-                    received_at: chrono::Utc::now(),
-                    requested_run_id: Some(run_id),
-                    parent_run_id: None,
-                    subagent_depth: 0,
-                    spawn_tree_root_run_id: None,
-                    product_context: None,
-                })
-                .await;
-            match response {
-                Ok(ironclaw_turns::SubmitTurnResponse::Accepted {
-                    turn_id,
-                    run_id,
-                    status,
-                    resolved_run_profile_id,
-                    resolved_run_profile_version,
-                    event_cursor,
-                    accepted_message_ref,
-                    ..
-                }) => Ok(RebornSubmitTurnResponse::Submitted {
-                    thread_id,
-                    accepted_message_ref,
-                    turn_id: turn_id.to_string(),
-                    run_id,
-                    status,
-                    resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
-                    resolved_run_profile_version: resolved_run_profile_version.as_u64(),
-                    event_cursor,
-                }),
-                Err(TurnError::ThreadBusy(busy)) => Ok(RebornSubmitTurnResponse::RejectedBusy {
-                    thread_id,
-                    accepted_message_ref,
-                    active_run_id: Some(busy.active_run_id),
-                    status: Some(busy.status),
-                    event_cursor: Some(busy.event_cursor),
-                    notice: "busy".to_string(),
-                }),
-                Err(error) => Err(map_turn_error(error)),
-            }
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
+        }
+
+        async fn stream_events(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+            Err(ProductSurfaceError::service_unavailable(false))
         }
     }
 
     fn test_thread_record(
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         thread_id: ThreadId,
     ) -> SessionThreadRecord {
         SessionThreadRecord {
@@ -899,8 +946,8 @@ mod openai_compat_mount_tests {
 
 #[derive(Default)]
 struct StubServices {
-    create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
-    stream_events_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    create_thread_calls: Mutex<Vec<ProductSurfaceCaller>>,
+    stream_events_calls: Mutex<Vec<ProductSurfaceCaller>>,
     // Records the `gate_ref` value the facade observed on each
     // `resolve_gate` call. Used by the JS-client contract tests to
     // assert axum's path extractor actually percent-decodes the gate
@@ -911,183 +958,164 @@ struct StubServices {
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
 
-impl StubServices {
-    async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
-        self.create_thread_calls.lock().expect("lock").push(caller);
-        Ok(RebornCreateThreadResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new("thread.fake").expect("thread"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new(USER).expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: USER.to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-                created_at: None,
-                updated_at: None,
-            },
-        })
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
-        Ok(RebornSubmitTurnResponse::Submitted {
-            thread_id: ThreadId::new(request.thread_id.clone().unwrap_or_default())
-                .expect("thread id"),
-            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg.fake").expect("ref"),
-            turn_id: "turn.fake".to_string(),
-            run_id: TurnRunId::new(),
-            status: TurnStatus::Queued,
-            resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
-            resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
-            event_cursor: EventCursor(1),
-        })
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
-        Ok(RebornCancelRunResponse {
-            run_id: TurnRunId::new(),
-            status: TurnStatus::Cancelled,
-            event_cursor: EventCursor(2),
-            already_terminal: false,
-        })
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, ProductSurfaceError> {
-        Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Internal,
-            kind: ProductSurfaceErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
-        self.resolve_gate_refs
-            .lock()
-            .expect("lock")
-            .push(request.gate_ref.clone());
-        Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Internal,
-            kind: ProductSurfaceErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-}
-
 #[async_trait]
-impl ProductSurface for StubServices {
+impl ironclaw_host_api::ProductSurface for StubServices {
     async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        capability: CapabilityId,
-        input: ProductCapabilityInput,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
-            let _request: RebornDeleteThreadRequest = serde_json::from_value(input.into_json()?)
-                .map_err(ProductSurfaceError::internal_from)?;
-            let _ = caller;
-            return Ok(successful_resolution(activity_id));
-        }
-        if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
-            let _ = (caller, input);
-            return Ok(successful_resolution(activity_id));
-        }
-        Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Internal,
-            kind: ProductSurfaceErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        let output = match request.operation_id.as_str() {
+            "thread.create" => {
+                self.create_thread_calls.lock().expect("lock").push(caller);
+                serde_json::to_value(RebornCreateThreadResponse {
+                    thread: SessionThreadRecord {
+                        thread_id: ThreadId::new("thread.fake").expect("thread"),
+                        scope: ThreadScope {
+                            tenant_id: TenantId::new(TENANT).expect("tenant"),
+                            agent_id: AgentId::new("agent.fake").expect("agent"),
+                            project_id: Some(ProjectId::new("project.fake").expect("project")),
+                            owner_user_id: Some(UserId::new(USER).expect("user")),
+                            mission_id: None,
+                        },
+                        created_by_actor_id: USER.to_string(),
+                        title: None,
+                        metadata_json: None,
+                        goal: None,
+                        created_at: None,
+                        updated_at: None,
+                    },
+                })
+                .map_err(ProductSurfaceError::internal_from)?
+            }
+            "turn.submit" => {
+                let input: ProductSubmitTurnRequest = serde_json::from_value(request.input)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                serde_json::to_value(RebornSubmitTurnResponse::Submitted {
+                    thread_id: ThreadId::new(input.thread_id.clone().unwrap_or_default())
+                        .expect("thread id"),
+                    accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg.fake")
+                        .expect("ref"),
+                    turn_id: "turn.fake".to_string(),
+                    run_id: TurnRunId::new(),
+                    status: TurnStatus::Queued,
+                    resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
+                    resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
+                    event_cursor: EventCursor(1),
+                })
+                .map_err(ProductSurfaceError::internal_from)?
+            }
+            "run.cancel" => serde_json::to_value(RebornCancelRunResponse {
+                run_id: TurnRunId::new(),
+                status: TurnStatus::Cancelled,
+                event_cursor: EventCursor(2),
+                already_terminal: false,
+            })
+            .map_err(ProductSurfaceError::internal_from)?,
+            "run.retry" => {
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+            "gate.resolve" => {
+                let input: ProductResolveGateRequest = serde_json::from_value(request.input)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                self.resolve_gate_refs
+                    .lock()
+                    .expect("lock")
+                    .push(input.gate_ref.clone());
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+            THREAD_DELETE_CAPABILITY_ID => {
+                let _input: RebornDeleteThreadRequest = serde_json::from_value(request.input)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                serde_json::to_value(successful_resolution(request.activity_id))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
+            EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => {
+                serde_json::to_value(successful_resolution(request.activity_id))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
+            _ => {
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+        };
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, ProductSurfaceError> {
-        match query.view_id.as_str() {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        let query = RebornViewQuery {
+            view_id: request.view_id,
+            params: request.input,
+            cursor: request.cursor,
+        };
+        let payload = match query.view_id.as_str() {
             id if id == THREADS_VIEW.id => {
-                let mut request: WebUiListThreadsRequest = serde_json::from_value(query.params)
-                    .map_err(ProductSurfaceError::internal_from)?;
-                request.cursor = query.cursor.or(request.cursor);
-                let _ = request;
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornListThreadsResponse {
-                        threads: Vec::new(),
-                        next_cursor: None,
-                    })
-                    .map_err(ProductSurfaceError::internal_from)?,
+                let mut list_request: ProductListThreadsRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                list_request.cursor = query.cursor.or(list_request.cursor);
+                let _ = list_request;
+                serde_json::to_value(RebornListThreadsResponse {
+                    threads: Vec::new(),
                     next_cursor: None,
                 })
+                .map_err(ProductSurfaceError::internal_from)?
             }
-            id if id == TRACE_CREDITS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(trace_credits_response(&caller))
-                    .map_err(ProductSurfaceError::internal_from)?,
-                next_cursor: None,
-            }),
+            id if id == TRACE_CREDITS_VIEW.id => {
+                serde_json::to_value(trace_credits_response(&caller))
+                    .map_err(ProductSurfaceError::internal_from)?
+            }
             id if id == TIMELINE_VIEW.id => {
                 let thread_id = query.params["thread_id"]
                     .as_str()
                     .ok_or_else(|| ProductSurfaceError::internal_from("missing thread_id"))?
                     .to_string();
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(RebornTimelineResponse {
-                        thread: SessionThreadRecord {
-                            thread_id: ThreadId::new(thread_id).expect("thread id"),
-                            scope: ThreadScope {
-                                tenant_id: TenantId::new(TENANT).expect("tenant"),
-                                agent_id: AgentId::new("agent.fake").expect("agent"),
-                                project_id: Some(ProjectId::new("project.fake").expect("project")),
-                                owner_user_id: Some(UserId::new(USER).expect("user")),
-                                mission_id: None,
-                            },
-                            created_by_actor_id: USER.to_string(),
-                            title: None,
-                            metadata_json: None,
-                            goal: None,
-                            created_at: None,
-                            updated_at: None,
+                serde_json::to_value(RebornTimelineResponse {
+                    thread: SessionThreadRecord {
+                        thread_id: ThreadId::new(thread_id).expect("thread id"),
+                        scope: ThreadScope {
+                            tenant_id: TenantId::new(TENANT).expect("tenant"),
+                            agent_id: AgentId::new("agent.fake").expect("agent"),
+                            project_id: Some(ProjectId::new("project.fake").expect("project")),
+                            owner_user_id: Some(UserId::new(USER).expect("user")),
+                            mission_id: None,
                         },
-                        messages: Vec::new(),
-                        summary_artifacts: Vec::new(),
-                        next_cursor: None,
-                    })
-                    .map_err(ProductSurfaceError::internal_from)?,
+                        created_by_actor_id: USER.to_string(),
+                        title: None,
+                        metadata_json: None,
+                        goal: None,
+                        created_at: None,
+                        updated_at: None,
+                    },
+                    messages: Vec::new(),
+                    summary_artifacts: Vec::new(),
                     next_cursor: None,
                 })
+                .map_err(ProductSurfaceError::internal_from)?
             }
             id if id == EXTENSION_SETUP_VIEW.id => {
                 let package_id = query.params["package_id"]
@@ -1096,97 +1124,37 @@ impl ProductSurface for StubServices {
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
                         .map_err(ProductSurfaceError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(extension_setup_response(package_ref))
-                        .map_err(ProductSurfaceError::internal_from)?,
-                    next_cursor: None,
-                })
+                serde_json::to_value(extension_setup_response(package_ref))
+                    .map_err(ProductSurfaceError::internal_from)?
             }
-            _ => Err(ProductSurfaceError {
-                code: ProductSurfaceErrorCode::Internal,
-                kind: ProductSurfaceErrorKind::Internal,
-                status_code: 500,
-                retryable: false,
-                field: None,
-                validation_code: None,
-            }),
-        }
+            _ => {
+                return Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Internal,
+                    kind: ProductSurfaceErrorKind::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                });
+            }
+        };
+        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+            items: vec![payload],
+            next_cursor: None,
+        })
     }
 
     async fn stream_events(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let _ = request;
         self.stream_events_calls.lock().expect("lock").push(caller);
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
-        Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Internal,
-            kind: ProductSurfaceErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events: Vec::new(),
+            next_cursor: None,
         })
-    }
-
-    async fn execute_command(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
-        let command_id = ProductOperationId::parse(request.operation_id.as_str()).ok_or(
-            ProductSurfaceError {
-                code: ProductSurfaceErrorCode::Internal,
-                kind: ProductSurfaceErrorKind::Internal,
-                status_code: 500,
-                retryable: false,
-                field: None,
-                validation_code: None,
-            },
-        )?;
-        match command_id {
-            ProductOperationId::CreateThread => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(ProductSurfaceError::internal_from)?;
-                ProductOperationResponse::json(self.create_thread(caller, request).await?)
-            }
-            ProductOperationId::SubmitTurn => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(ProductSurfaceError::internal_from)?;
-                ProductOperationResponse::json(self.submit_turn(caller, request).await?)
-            }
-            ProductOperationId::CancelRun => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(ProductSurfaceError::internal_from)?;
-                ProductOperationResponse::json(self.cancel_run(caller, request).await?)
-            }
-            ProductOperationId::RetryRun => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(ProductSurfaceError::internal_from)?;
-                ProductOperationResponse::json(self.retry_run(caller, request).await?)
-            }
-            ProductOperationId::ResolveGate => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(ProductSurfaceError::internal_from)?;
-                ProductOperationResponse::json(self.resolve_gate(caller, request).await?)
-            }
-            _ => Err(ProductSurfaceError {
-                code: ProductSurfaceErrorCode::Internal,
-                kind: ProductSurfaceErrorKind::Internal,
-                status_code: 500,
-                retryable: false,
-                field: None,
-                validation_code: None,
-            }),
-        }
     }
 }
 

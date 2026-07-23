@@ -1,9 +1,9 @@
 //! Descriptor-backed outbound delivery read projections.
 
 use super::{
-    ProductCapabilityInvoker, ProductSurfaceError, ProductView,
+    ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceError, ProductView,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse, RebornServices,
-    RebornViewProvider, WebUiAuthenticatedCaller,
+    RebornViewProvider,
 };
 
 pub const OUTBOUND_PREFERENCES_VIEW: ProductView<
@@ -23,7 +23,7 @@ where
 {
     pub(super) async fn build_outbound_preferences_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         self.outbound_preferences_facade
             .get_outbound_preferences(caller)
@@ -32,7 +32,7 @@ where
 
     pub(super) async fn build_outbound_delivery_targets_view(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         self.outbound_preferences_facade
             .list_outbound_delivery_targets(caller)

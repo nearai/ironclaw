@@ -35,20 +35,32 @@ use crate::{
 use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{ActivityId, ThreadId};
+use ironclaw_product::{
+    BoundProductSurface, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest,
+    ProductCreateThreadRequest, ProductSubmitTurnRequest, ProductSurface, ProductSurfaceCallerExt,
+    SUBMIT_TURN_COMMAND,
+};
 use ironclaw_product::{
     ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
     ProjectionSubscriptionRequest, UserMessagePayload,
 };
-use ironclaw_product::{
-    ProductSurface, WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiSendMessageRequest,
-};
+use uuid::Uuid;
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSES_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSES_CONTEXT_BYTES: usize = 10 * 1024;
 const MAX_RESPONSES_INPUT_ITEMS: usize = 1_000;
+
+fn openai_product_activity_id(surface: &str, operation_id: &str, public_id: &str) -> ActivityId {
+    let mut seed = Vec::new();
+    for segment in ["openai-compat", surface, operation_id, public_id] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    ActivityId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed))
+}
 #[derive(Clone)]
 pub struct OpenAiResponsesWorkflow {
     product_surface: Arc<dyn ProductSurface>,
@@ -523,15 +535,24 @@ impl OpenAiResponsesWorkflow {
         let run_ref = response_turn_run_ref(&mapping)?;
         let thread_id = projection_thread_id(&mapping)?
             .ok_or_else(|| OpenAiCompatHttpError::conflict(Some("response_id".to_string())))?;
-        self.product_surface
-            .cancel_run(
-                caller.product_surface_caller(),
-                WebUiCancelRunRequest {
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
+        CANCEL_RUN_COMMAND
+            .invoke_on(
+                &surface,
+                ProductCancelRunRequest {
                     client_action_id: Some(format!("{}:cancel", response_id.as_str())),
                     thread_id: Some(thread_id.as_str().to_string()),
                     run_id: Some(run_ref.as_str().to_string()),
                     reason: Some("cancelled by OpenAI-compatible Responses API".to_string()),
                 },
+                openai_product_activity_id(
+                    "responses",
+                    CANCEL_RUN_COMMAND.id,
+                    response_id.as_str(),
+                ),
             )
             .await?;
 
@@ -573,11 +594,20 @@ impl OpenAiResponsesWorkflow {
             .response_thread_id_from_previous_or_public(public_id, previous_mapping)
             .map_err(|_| OpenAiCompatHttpError::internal())?;
         self.ensure_response_thread(caller, &thread_id).await?;
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
         let ack = product_ack_from_reborn_submit(
-            self.product_surface
-                .submit_turn(
-                    caller.product_surface_caller(),
+            SUBMIT_TURN_COMMAND
+                .invoke_on(
+                    &surface,
                     response_surface_submit_request(public_id, &thread_id, user_message_payload),
+                    openai_product_activity_id(
+                        "responses",
+                        SUBMIT_TURN_COMMAND.id,
+                        public_id.as_str(),
+                    ),
                 )
                 .await?,
         );
@@ -735,14 +765,23 @@ impl OpenAiResponsesWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         thread_id: &ThreadId,
     ) -> Result<(), OpenAiCompatHttpError> {
-        self.product_surface
-            .create_thread(
-                caller.product_surface_caller(),
-                WebUiCreateThreadRequest {
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
+        CREATE_THREAD_COMMAND
+            .invoke_on(
+                &surface,
+                ProductCreateThreadRequest {
                     client_action_id: Some(thread_id.as_str().to_string()),
                     requested_thread_id: Some(thread_id.as_str().to_string()),
                     project_id: None,
                 },
+                openai_product_activity_id(
+                    "responses",
+                    CREATE_THREAD_COMMAND.id,
+                    thread_id.as_str(),
+                ),
             )
             .await?;
         Ok(())
@@ -994,8 +1033,8 @@ fn response_surface_submit_request(
     public_id: &OpenAiResponseId,
     thread_id: &ThreadId,
     user_message_payload: UserMessagePayload,
-) -> WebUiSendMessageRequest {
-    WebUiSendMessageRequest {
+) -> ProductSubmitTurnRequest {
+    ProductSubmitTurnRequest {
         client_action_id: Some(public_id.as_str().to_string()),
         thread_id: Some(thread_id.as_str().to_string()),
         content: Some(user_message_payload.text),
