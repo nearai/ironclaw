@@ -64,8 +64,9 @@ use crate::runtime_input::RebornRuntimeIdentity;
 use crate::storage_catalog::validate_reborn_runtime_storage;
 use crate::support::fs::RebornProjectService;
 use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornHostBindings, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
+    RebornAuthContinuationDispatcher, RebornBuildError, RebornCompositionProfile,
+    RebornFacadeReadiness, RebornHostBindings, RebornProductAuthServices, RebornReadiness,
+    RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
@@ -92,7 +93,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::{
-    EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
+    DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_api::{
@@ -196,6 +197,28 @@ fn default_host_http_egress() -> Result<
             reason: error.to_string(),
         }
     })
+}
+
+/// Test-support pass-through so a `#[cfg]`-gated injected
+/// `Arc<dyn NetworkHttpEgress>` (there is no blanket `NetworkHttpEgress` impl on
+/// `Arc<dyn …>`) satisfies the generic `try_with_host_http_egress_with_body_store`
+/// bound. Consumes `RebornHostBindings::network_http_egress_for_test`, letting a
+/// unit/integration test drive hosted-MCP discovery and any host HTTP egress
+/// over a fake transport instead of the real network. Restores the consumer
+/// dropped in commit 975bcd2ce ("Unify reborn runtime assembly"), which
+/// collapsed the two build paths and left the injected egress unread.
+#[cfg(any(test, feature = "test-support"))]
+struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
+    async fn execute(
+        &self,
+        request: ironclaw_network::NetworkHttpRequest,
+    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
+        self.0.execute(request).await
+    }
 }
 
 type ComposedResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
@@ -715,6 +738,15 @@ struct ProductAuthServicesCompositionInput {
     credential_account_visibility_policy: Option<
         Arc<dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy>,
     >,
+    /// Durable auth-flow record projection wired for the builder's OWN durable
+    /// product-auth service (filesystem-backed local-dev / production-shaped
+    /// path). `None` when a caller supplied its own product-auth bundle — that
+    /// path intentionally leaves the WebUI auth interaction surface unavailable
+    /// (see `runtime/tests/auth_interaction.rs`
+    /// `..._are_unavailable_without_flow_record_source`). Restores wiring dropped
+    /// in commit 975bcd2ce ("Unify reborn runtime assembly"), which collapsed the
+    /// old two-branch builder and lost the local-dev `.with_flow_record_source`.
+    flow_record_source: Option<Arc<dyn ironclaw_auth::AuthFlowRecordSource>>,
 }
 
 fn compose_product_auth_services(
@@ -729,6 +761,7 @@ fn compose_product_auth_services(
         secret_store,
         nearai_mcp_host_managed_scope,
         credential_account_visibility_policy,
+        flow_record_source,
     } = input;
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
@@ -752,6 +785,9 @@ fn compose_product_auth_services(
     }
     if let Some(scope) = nearai_mcp_host_managed_scope {
         services = services.with_host_managed_nearai_credential_scope(scope)?;
+    }
+    if let Some(source) = flow_record_source {
+        services = services.with_flow_record_source(source);
     }
     Ok(Arc::new(services))
 }
@@ -2340,6 +2376,8 @@ async fn build_production_shaped(
         channel_extension_bindings,
         first_party_registrars,
         credential_account_visibility_policy,
+        #[cfg(any(test, feature = "test-support"))]
+        network_http_egress_for_test,
         ..
     } = input;
     // The declarative DATA now lives on the deployment (Phase A). Clone the
@@ -2415,6 +2453,8 @@ async fn build_production_shaped(
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
+                #[cfg(any(test, feature = "test-support"))]
+                network_http_egress_for_test: network_http_egress_for_test.clone(),
             };
             build_local_storage_production_shaped(
                 context,
@@ -2470,6 +2510,8 @@ async fn build_production_shaped(
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
+                #[cfg(any(test, feature = "test-support"))]
+                network_http_egress_for_test: network_http_egress_for_test.clone(),
             };
             build_local_storage_production_shaped(
                 context,
@@ -2536,6 +2578,8 @@ async fn build_production_shaped(
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
+                #[cfg(any(test, feature = "test-support"))]
+                network_http_egress_for_test: network_http_egress_for_test.clone(),
             };
             build_libsql_production(
                 context,
@@ -2591,6 +2635,8 @@ async fn build_production_shaped(
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
+                #[cfg(any(test, feature = "test-support"))]
+                network_http_egress_for_test: network_http_egress_for_test.clone(),
             };
             build_postgres_production(
                 context,
@@ -2806,6 +2852,11 @@ struct RebornProductionBuildContext {
     workspace_filesystems: Option<WorkspaceFilesystems>,
     local_dev_storage_root: Option<PathBuf>,
     default_system_prompt_path: Option<PathBuf>,
+    /// Test-support host HTTP egress override (see `TestNetworkHttpEgress`).
+    /// Carried from `RebornHostBindings::network_http_egress_for_test` so the
+    /// unified production-shaped build honors an injected fake transport.
+    #[cfg(any(test, feature = "test-support"))]
+    network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
 }
 
 fn production_wiring(
@@ -3354,8 +3405,27 @@ async fn build_backend_production(
         workspace_filesystems,
         local_dev_storage_root,
         default_system_prompt_path,
+        #[cfg(any(test, feature = "test-support"))]
+        network_http_egress_for_test,
     } = context;
-    let uses_local_host_runtime = local_process_port.is_some();
+    // Select the non-validating local-testing host runtime for a local-dev
+    // deployment. The pre-`975bcd2ce` dedicated local-dev builder always used
+    // `host_runtime_for_local_testing()`; the unified path keyed only on a wired
+    // local host process port (`local_process_port.is_some()`), which is `None`
+    // whenever the local-dev deployment uses a non-`LocalHost` process backend
+    // (e.g. an injected `TenantSandbox` port — the multi-user-safe default). That
+    // wrongly routed such local-dev builds through `host_runtime_for_production`,
+    // whose `validate_production_wiring` rejects the `LocalSingleUser` deployment
+    // mode. Key the choice on the deployment mode too: a `LocalSingleUser` policy
+    // is exactly the shape production validation would reject, so it must use the
+    // local-testing runtime regardless of process backend. (Production
+    // deployments never resolve to `LocalSingleUser` — see
+    // `.claude/rules/safety-and-sandbox.md`.)
+    let deployment_is_local_single_user = matches!(
+        production_wiring.runtime_policy.deployment,
+        DeploymentMode::LocalSingleUser
+    );
+    let uses_local_host_runtime = local_process_port.is_some() || deployment_is_local_single_user;
     // The reserved host-bundled id set consulted during filesystem catalog
     // load and by the upload-import path, sourced from the injected bundles.
     let first_party_reserved_ids = first_party_reserved_extension_ids(&first_party_bundles);
@@ -3594,12 +3664,30 @@ async fn build_backend_production(
     .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores(event_stores)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
+    let host_http_egress_body_store = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&stores.filesystem),
+        runtime_workspace_mounts.clone(),
+    ));
+    // Honor an injected test egress (hosted-MCP discovery / DM provisioning over
+    // a fake transport) when present; otherwise the real policy egress. Restores
+    // the consumer dropped in commit 975bcd2ce — without it every local-dev test
+    // reaches the real network. `TestNetworkHttpEgress` adapts the injected
+    // `Arc<dyn NetworkHttpEgress>` to the generic method bound.
+    #[cfg(any(test, feature = "test-support"))]
+    let services = match network_http_egress_for_test {
+        Some(test_egress) => services.try_with_host_http_egress_with_body_store(
+            TestNetworkHttpEgress(test_egress),
+            host_http_egress_body_store,
+        )?,
+        None => services.try_with_host_http_egress_with_body_store(
+            default_host_http_egress()?,
+            host_http_egress_body_store,
+        )?,
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
     let services = services.try_with_host_http_egress_with_body_store(
         default_host_http_egress()?,
-        Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&stores.filesystem),
-            runtime_workspace_mounts.clone(),
-        )),
+        host_http_egress_body_store,
     )?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
@@ -3638,9 +3726,15 @@ async fn build_backend_production(
     let credential_refresh_candidate_source: Option<
         Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;
+    // The durable auth-flow record projection this builder wires for its own
+    // durable service (`None` arm). Left `None` for a caller-supplied bundle so
+    // that path's WebUI auth interaction surface stays explicitly unavailable
+    // (restores wiring dropped in commit 975bcd2ce).
+    let product_auth_flow_record_source: Option<Arc<dyn ironclaw_auth::AuthFlowRecordSource>>;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
             credential_refresh_candidate_source = None;
+            product_auth_flow_record_source = None;
             ports
         }
         None => {
@@ -3651,6 +3745,8 @@ async fn build_backend_production(
             ));
             credential_refresh_candidate_source =
                 Some(Arc::clone(&durable) as Arc<dyn ironclaw_auth::KeepaliveCandidateSource>);
+            product_auth_flow_record_source =
+                Some(Arc::clone(&durable) as Arc<dyn ironclaw_auth::AuthFlowRecordSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -3689,6 +3785,7 @@ async fn build_backend_production(
                 AuthSurface::Api,
             )),
             credential_account_visibility_policy,
+            flow_record_source: product_auth_flow_record_source,
         })?;
     // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
@@ -3945,8 +4042,7 @@ async fn build_backend_production(
         reason: format!("admin configuration handler is invalid: {error}"),
     })?;
     let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        Arc::clone(&auto_approve_settings)
-            as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>;
+        Arc::clone(&auto_approve_settings) as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>;
     insert_operator_config_handler(&mut first_party_registry, operator_auto_approve_settings)
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("operator configuration handler is invalid: {error}"),
