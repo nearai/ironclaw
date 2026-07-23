@@ -17,7 +17,7 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CLI_SESSION_CAPABILITY_ID, CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices,
     RebornSandboxConfig, RebornScopedSandboxCommandTransport, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, builtin_first_party_handlers, builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -201,7 +201,7 @@ async fn invoke(
     input: Value,
 ) -> Value {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_for_scope(scope, CLI_SESSION_CAPABILITY_ID),
             CapabilityId::new(CLI_SESSION_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
