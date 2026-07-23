@@ -36,8 +36,8 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    RebornServices, build_reborn_services, capability_allowlist,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornRuntime,
+    RebornRuntimeInput, build_runtime, capability_allowlist,
 };
 use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -181,7 +181,7 @@ pub struct HostRuntimeCapabilityConfig {
 }
 
 async fn enable_host_runtime_auto_approve_for_harness_user(
-    services: &RebornServices,
+    services: &RebornRuntime,
     binding: &ResolvedBinding,
 ) {
     let auto_approve = services
@@ -260,9 +260,11 @@ impl ProductLiveAgentLoopHarness {
             .as_ref()
             .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
         let host_runtime_services = if let Some(root) = &host_runtime_root {
-            let services = build_reborn_services(RebornBuildInput::local_dev(
-                "planned-harness-host-runtime",
-                root.path().join("local-dev"),
+            let services = build_runtime(RebornRuntimeInput::from_build_input(
+                ironclaw_reborn_composition::local_dev_build_input(
+                    "planned-harness-host-runtime",
+                    root.path().join("local-dev"),
+                ),
             ))
             .await
             .expect("host runtime harness services");
@@ -719,7 +721,7 @@ impl ScriptedHostRuntimeToolCall {
 }
 
 struct ProductLiveHostRuntimeCapabilityFactory {
-    services: Arc<RebornServices>,
+    services: Arc<RebornRuntime>,
     io: Arc<ProductLiveCapabilityIo>,
     staged_inputs: Arc<Mutex<HashMap<TurnRunId, CapabilityInputRef>>>,
     invocations: Arc<Mutex<Vec<LoopRequest>>>,
@@ -769,8 +771,10 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
             ExtensionId::new("builtin").expect("valid builtin provider id"),
             EffectiveTrustClass::user_trusted(),
         );
-        let adapters = ProductLivePlannedRuntimeAdapters::from_services(
-            &self.services,
+        let adapters = ProductLivePlannedRuntimeAdapters::from_host_runtime(
+            self.services
+                .host_runtime_for_test()
+                .expect("host runtime harness services"),
             ProductLivePlannedRuntimeAdapterConfig {
                 capability_authority_resolver: Arc::new(StaticProductLiveAuthorityResolver {
                     config: visible_capability_request,

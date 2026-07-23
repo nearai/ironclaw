@@ -144,6 +144,7 @@ impl BridgedChannelEgressCredentials {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn register(&self, bridge: Arc<dyn ChannelEgressCredentialsPort>) {
         self.bridges
             .write()
@@ -184,12 +185,14 @@ impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
 /// by integration proofs standing in for `[channel.config]` secret storage
 /// until the configure surface lands (P6/H). Test-support only.
 #[cfg(feature = "test-support")]
+#[allow(dead_code)]
 pub(crate) struct StaticChannelEgressCredentials {
     entries: Vec<(String, String, SecretMaterial)>,
 }
 
 #[cfg(feature = "test-support")]
 impl StaticChannelEgressCredentials {
+    #[allow(dead_code)]
     pub(crate) fn new(entries: Vec<(String, String, SecretMaterial)>) -> Self {
         Self { entries }
     }

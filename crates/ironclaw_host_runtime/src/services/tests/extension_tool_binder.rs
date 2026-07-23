@@ -34,6 +34,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                 description: "binder fixture capability".to_string(),
                 effects: vec![EffectKind::DispatchCapability],
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 default_permission: PermissionMode::Allow,
                 visibility: ironclaw_extensions::CapabilityVisibility::Model,
                 input_schema_ref: ironclaw_host_api::CapabilityProfileSchemaRef::new(

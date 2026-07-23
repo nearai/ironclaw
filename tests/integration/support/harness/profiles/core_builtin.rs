@@ -188,6 +188,13 @@ pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCap
     core_builtin_tools(CoreBuiltinOptions::default()).await
 }
 
+pub(crate) async fn core_builtin_tools_with_durable_capability_io()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;
+    harness.durable_capability_io_requested = true;
+    Ok(harness)
+}
+
 /// Harness-port-seam Change 4: the SAME `core_builtin_tools_default` backend,
 /// with an additional confirmed `/host` mount grant layered onto the
 /// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`

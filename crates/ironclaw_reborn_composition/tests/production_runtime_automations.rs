@@ -31,10 +31,12 @@ use ironclaw_product_workflow::{
     WebUiListAutomationsRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
-    builtin_first_party_trust_policy,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 
 // ─── minimal sandbox transport stub ──────────────────────────────────────────
 
@@ -73,8 +75,8 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "runtime-automation-prod-owner",
             db,
@@ -82,9 +84,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,

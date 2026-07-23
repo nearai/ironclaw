@@ -173,12 +173,15 @@ pub(crate) fn compose_provider_client(
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
     channel_config_credentials: ChannelConfigCredentialSlot,
+    first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
-        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes()
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
-            })?,
+        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes(
+            first_party_bundles,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+        })?,
     ));
 
     let mut client_credentials = CompositionClientCredentials::default();
