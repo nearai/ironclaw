@@ -449,9 +449,8 @@ mod tests {
             false,
         )
         .expect("off source loads");
-        let on =
-            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true, false)
-                .expect("on source loads");
+        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true, false)
+            .expect("on source loads");
         let context = test_run_context().await;
 
         async fn resolve_content(
@@ -504,9 +503,8 @@ mod tests {
             false,
         )
         .expect("off source loads");
-        let on =
-            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, true)
-                .expect("on source loads");
+        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, true)
+            .expect("on source loads");
         let context = test_run_context().await;
 
         async fn resolve_content(
