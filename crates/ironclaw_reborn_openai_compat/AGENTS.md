@@ -12,8 +12,8 @@
 - Chat Completions and Responses API DTOs used by the migration slices.
 - A sanitized OpenAI-compatible error envelope.
 - Feature-gated axum route fragments for host composition to mount.
-- ProductWorkflow-backed Chat Completions and Responses route adapters when
-  host composition injects workflow state.
+- ProductSurface-backed Chat Completions and Responses route adapters when
+  host composition injects product state.
 - OpenAI-compatible SSE translation for projection-backed streaming slices.
 
 ## Do Not Move In Here

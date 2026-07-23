@@ -4237,7 +4237,7 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
 /// listener.
 /// - Uses onboard's OWN provisioned token file (not a hand-seeded one) to
 ///   drive the login → ticket → exchange flow, then goes one step further
-///   and uses the exchanged bearer to call the real `RebornServicesApi`,
+///   and uses the exchanged bearer to call the real `ProductSurface`,
 ///   proving the session is mintable AND usable.
 #[test]
 fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
@@ -4363,7 +4363,7 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
     );
 
     // 3. The exchanged bearer must authorize a real request against the
-    //    production RebornServicesApi, not just be well-formed — catches a
+    //    production ProductSurface, not just be well-formed — catches a
     //    bearer the auth middleware rejects.
     let api_request = format!(
         "GET /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",

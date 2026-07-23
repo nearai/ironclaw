@@ -493,6 +493,7 @@ mod tests {
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
                 EffectKind::UseSecret,
+                EffectKind::ModifyApproval,
                 EffectKind::ExternalWrite,
             ]
         );
@@ -521,6 +522,31 @@ mod tests {
                 .iter()
                 .any(|capability| { capability.as_str() == "builtin.admin_configuration_replace" }),
             "the API-only operator save gesture must not open a second approval gate"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.operator_config_set_auto_approve"
+                }),
+            "the API-only operator auto-approve toggle must not open a second approval gate"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.operator_config_set_tool_permission"
+                }),
+            "the API-only operator tool-permission save must not open a second approval gate"
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.outbound_preferences_set"),
+            "the API-only outbound preferences save gesture must not open a second approval gate"
         );
         assert!(
             !policy

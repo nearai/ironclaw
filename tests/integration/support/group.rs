@@ -66,7 +66,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn_composition::build_default_budget_accountant;
@@ -663,7 +663,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// Test-only override for the canonical loop's default iteration limit.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// When `true`, wire the REAL approval/auth interaction services into
-    /// every thread's `DefaultProductWorkflow` (see
+    /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
@@ -1337,7 +1337,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
-        let mut workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let mut workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         // Real gate-dispatch seam: wire the harness's own local-dev interaction
         // services, but over the GROUP's shared `turn_store` (not the harness's

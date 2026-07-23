@@ -8,6 +8,7 @@
 mod communication_preferences;
 mod delivered_gate_routes;
 mod delivery_resolution;
+mod delivery_targets;
 mod error;
 mod filesystem_store;
 mod ids;
@@ -36,6 +37,13 @@ pub use delivery_resolution::{
     DeliveryTargetCapabilities, RequestedOutboundContext, RequestedOutboundKind,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
     SystemEventReasonCode, TriggerCommunicationContext, TriggerSourceKind,
+};
+pub use delivery_targets::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetChannel,
+    OutboundDeliveryTargetDescription, OutboundDeliveryTargetDisplayName,
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
+    OutboundDeliveryTargetRegistry, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 pub use error::OutboundError;
 pub use filesystem_store::FilesystemOutboundStateStore;

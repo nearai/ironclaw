@@ -20,11 +20,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveryDefaultScope,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
+    OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 use ironclaw_product_workflow::{
-    PreferenceTargetCodec, RebornOutboundDeliveryTargetId, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest, WebUiAuthenticatedCaller, triggered_run_delivery_settings,
+    PreferenceTargetCodec, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    triggered_run_delivery_settings,
 };
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
@@ -112,14 +113,10 @@ impl GenericTriggeredRunDeliveryHook {
         let Some(target) = fire.delivery_target.as_ref() else {
             return Ok(None);
         };
-        let target_id = RebornOutboundDeliveryTargetId::new(target.as_str())
+        let target_id = OutboundDeliveryTargetId::new(target.as_str())
             .map_err(|error| format!("invalid per-trigger delivery target id: {error}"))?;
-        let caller = WebUiAuthenticatedCaller::new(
-            scope.tenant_id.clone(),
-            fire.creator_user_id.clone(),
-            fire.agent_id.clone(),
-            fire.project_id.clone(),
-        );
+        let caller =
+            OutboundDeliveryTargetScope::new(scope.tenant_id.clone(), fire.creator_user_id.clone());
         let entry = self
             .delivery_targets
             .resolve_outbound_delivery_target(&caller, &target_id)

@@ -2,7 +2,7 @@
 //! Lane 7 end-to-end coverage for the WebChat v2 HTTP surface.
 //!
 //! Unlike [`webui_v2_serve`], which drives the composed router against a
-//! stub `RebornServicesApi`, this test stands up a real local-dev
+//! stub `ProductSurface`, this test stands up a real local-dev
 //! `RebornRuntime`, overrides its LLM gateway with a scripted
 //! tool-calling fake, composes the v2 router through
 //! [`build_webui_services`] + [`webui_v2_app`], and exercises it from
@@ -1610,12 +1610,14 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         ))
         .await
         .expect("activate Gmail oneshot");
-    assert_eq!(activate.status(), StatusCode::OK);
+    let activate_status = activate.status();
     let activate_body = read_json(activate).await;
     assert_eq!(
-        activate_body["success"], true,
+        activate_status,
+        StatusCode::OK,
         "activation should succeed after setup completion: {activate_body}"
     );
+    assert_eq!(activate_body["success"], true);
     assert_eq!(activate_body["activated"], true);
 }
 
@@ -1660,13 +1662,14 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
         ))
         .await
         .expect("activate Gmail oneshot");
+    let activate_status = activate.status();
+    let activate_body = read_json(activate).await;
     assert_eq!(
-        activate.status(),
+        activate_status,
         StatusCode::BAD_REQUEST,
         "activation must fail closed before any per-account credential gate when the \
-         operator never configured this instance's Google OAuth backend at all"
+         operator never configured this instance's Google OAuth backend at all: {activate_body}"
     );
-    let activate_body = read_json(activate).await;
     assert_eq!(activate_body["error"], "invalid_request");
     assert_eq!(activate_body["kind"], "validation");
     assert_eq!(activate_body["retryable"], false);

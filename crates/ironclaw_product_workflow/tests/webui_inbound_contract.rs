@@ -505,7 +505,7 @@ fn decode_attachments_rejects_per_file_oversize() {
     let request = send_with_attachments(vec![WebUiInboundAttachment {
         mime_type: "application/pdf".to_string(),
         filename: None,
-        data_base64: b64(&vec![0u8; 5 * 1024 * 1024 + 1]),
+        data_base64: b64(&vec![0u8; 10 * 1024 * 1024 + 1]),
     }]);
     let err = request.decode_attachments().expect_err("over per-file cap");
     assert_eq!(err.field, "attachments");

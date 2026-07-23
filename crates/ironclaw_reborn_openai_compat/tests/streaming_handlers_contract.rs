@@ -10,12 +10,12 @@ use http::Request;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, ExternalConversationRef, FakeProductWorkflow,
-    FinalReplyView, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
-    ProductProjectionState, ProductProjectionSubscribeInput, ProductWorkflow, ProjectionCursor,
+    AdapterInstallationId, AuthRequirement, ExternalConversationRef, FinalReplyView,
+    ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProjectionCursor,
     ProjectionSubscriptionRequest, ProtocolAuthEvidence,
 };
+use ironclaw_product_workflow::ProductSurface;
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
@@ -27,7 +27,7 @@ use ironclaw_reborn_openai_compat::{
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::json;
-use support::in_memory_openai_compat_ref_store;
+use support::{FakeProductSurface, in_memory_openai_compat_ref_store};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -461,7 +461,7 @@ async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_chat(vec![run_status_envelope("first-done", "completed")]);
     streamer.push_chat(vec![run_status_envelope("replay-done", "completed")]);
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     workflow.program_projection_resolution(sample_projection_subscription_request());
     let router = router_with_workflow(streamer.clone(), workflow.clone());
     let body = json!({
@@ -502,7 +502,7 @@ async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
 #[tokio::test]
 async fn chat_stream_idempotency_retries_pending_mapping_after_busy() {
     let streamer = Arc::new(QueuedStreamer::new());
-    let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(deferred_busy_ack()));
     let router = router_with_workflow(streamer, workflow.clone());
     let body = json!({
         "model": "gpt-reborn",
@@ -532,7 +532,7 @@ async fn chat_stream_idempotency_retries_pending_mapping_after_busy() {
 #[tokio::test]
 async fn chat_stream_rejected_busy_ack_returns_429() {
     let streamer = Arc::new(QueuedStreamer::new());
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_busy_ack()));
     let router = router_with_workflow(streamer, workflow.clone());
     let body = json!({
         "model": "gpt-reborn",
@@ -631,45 +631,6 @@ impl OpenAiCompatProjectionStreamer for QueuedStreamer {
     }
 }
 
-struct FixedAckWorkflow {
-    ack: ProductInboundAck,
-    seen_envelopes: Mutex<Vec<ProductInboundEnvelope>>,
-}
-
-impl FixedAckWorkflow {
-    fn new(ack: ProductInboundAck) -> Self {
-        Self {
-            ack,
-            seen_envelopes: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn seen_count(&self) -> usize {
-        self.seen_envelopes.lock().expect("workflow lock").len()
-    }
-}
-
-#[async_trait]
-impl ProductWorkflow for FixedAckWorkflow {
-    async fn submit_inbound(
-        &self,
-        envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ironclaw_product_adapters::ProductAdapterError> {
-        self.seen_envelopes
-            .lock()
-            .expect("workflow lock")
-            .push(envelope);
-        Ok(self.ack.clone())
-    }
-
-    async fn subscribe_projection(
-        &self,
-        _request: ProductProjectionSubscribeInput,
-    ) -> Result<ProjectionSubscriptionRequest, ironclaw_product_adapters::ProductAdapterError> {
-        Ok(sample_projection_subscription_request())
-    }
-}
-
 struct StaticChatReader;
 
 #[async_trait]
@@ -717,7 +678,7 @@ fn router_with_wait_timeout(streamer: Arc<QueuedStreamer>, wait_timeout: Duratio
 
 fn router_with_workflow(
     streamer: Arc<QueuedStreamer>,
-    workflow: Arc<dyn ProductWorkflow>,
+    workflow: Arc<dyn ProductSurface>,
 ) -> axum::Router {
     router_with_options(Some(streamer), workflow, Duration::from_secs(30))
 }
@@ -728,7 +689,7 @@ fn router_without_streamer() -> axum::Router {
 
 fn router_with_options(
     streamer: Option<Arc<QueuedStreamer>>,
-    workflow: Arc<dyn ProductWorkflow>,
+    workflow: Arc<dyn ProductSurface>,
     wait_timeout: Duration,
 ) -> axum::Router {
     let ref_store = in_memory_openai_compat_ref_store();
@@ -752,8 +713,8 @@ fn router_with_options(
     )
 }
 
-fn fake_workflow() -> Arc<FakeProductWorkflow> {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+fn fake_workflow() -> Arc<FakeProductSurface> {
+    let workflow = Arc::new(FakeProductSurface::new());
     workflow.program_projection_resolution(sample_projection_subscription_request());
     workflow
 }

@@ -11,7 +11,7 @@
 
 - **Single resolver for turn-origin/surface/owner classification at ingress.**
   Every inbound submission path (product workflow, web UI, Reborn local dev) must
-  call one of the two resolvers here rather than constructing `ProductTurnContext`
+  call one of the resolvers here rather than constructing `ProductTurnContext`
   inline.
 - `resolve_inbound(classification: InboundClassification, adapter, surface_type, owner)` —
   the single intended mint point for a `ScheduledTrigger` origin.
@@ -31,7 +31,9 @@
   consequence of entering through that seam, not of any caller choosing the enum
   variant.
 - `resolve_web_ui(owner)` — always yields `TurnOriginKind::WebUi` with no adapter
-  or surface; used by the WebUI gateway.
+  or surface and source channel `webui`; used by the WebUI gateway.
+- `resolve_cli(owner)` — uses the same first-party chat origin with no adapter
+  or surface and source channel `cli`; used by Reborn local runtime chat.
 - `InboundClassification` — three-variant ingress enum (`TrustedTrigger`,
   `TrustedOther`, `Untrusted`). Replaces the former `TrustLevel + is_trigger_adapter`
   two-argument contract.

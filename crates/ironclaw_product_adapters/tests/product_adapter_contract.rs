@@ -6,20 +6,17 @@ use std::process::Command;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeliveryStatus,
     EgressCredentialHandle, EgressMethod, EgressPath, EgressRequest, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, FakeOutboundDeliverySink, FakeProductWorkflow,
-    FakeProjectionStream, FakeProtocolHttpEgress, InboundCommandPayload, OutboundDeliverySink,
-    ParsedProductInbound, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
-    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
-    ProductProjectionReadInput, ProductProjectionState, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductSurfaceKind,
-    ProductTriggerReason, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
-    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
-    ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug, RedactedString,
-    TrustedInboundContext, UserMessagePayload,
+    ExternalConversationRef, FakeOutboundDeliverySink, FakeProjectionStream,
+    FakeProtocolHttpEgress, InboundCommandPayload, OutboundDeliverySink,
+    ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId, ProductAttachmentDescriptor,
+    ProductAttachmentKind, ProductCapabilityFlag, ProductControlActionPayload,
+    ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductSurfaceKind, ProductTriggerReason,
+    ProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
+    ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug,
+    RedactedString,
 };
-use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
 const FORBIDDEN_DEPENDENCIES: &[&str] = &[
     "ironclaw_dispatcher",
@@ -138,41 +135,6 @@ fn installation_id() -> AdapterInstallationId {
     AdapterInstallationId::new("install_alpha").expect("valid")
 }
 
-fn auth_context() -> TrustedInboundContext {
-    let evidence = ProtocolAuthEvidence::test_verified(
-        AuthRequirement::SharedSecretHeader {
-            header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
-        },
-        "telegram_install_alpha",
-    );
-    TrustedInboundContext::from_verified_evidence(
-        adapter_id(),
-        installation_id(),
-        chrono::Utc::now(),
-        &evidence,
-    )
-    .expect("verified")
-}
-
-fn sample_parsed(event_id: &str) -> ParsedProductInbound {
-    ParsedProductInbound::new(
-        ExternalEventId::new(event_id).expect("valid"),
-        ExternalActorRef::new("telegram_user", "777", Option::<String>::None).expect("valid"),
-        ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-100"))
-            .expect("valid"),
-        ProductInboundPayload::UserMessage(
-            UserMessagePayload::new("hello", vec![], ProductTriggerReason::DirectChat)
-                .expect("valid"),
-        ),
-    )
-    .expect("parsed")
-}
-
-fn sample_envelope(event_id: &str) -> ProductInboundEnvelope {
-    ProductInboundEnvelope::from_trusted_parse(auth_context(), sample_parsed(event_id))
-        .expect("envelope")
-}
-
 fn sample_target() -> ProductOutboundTarget {
     ProductOutboundTarget::new(
         ReplyTargetBindingRef::new("reply:fake-1").expect("valid"),
@@ -239,141 +201,11 @@ fn verified_auth_evidence_can_carry_tenant_scope_for_host_minted_claims() {
     assert!(serde_json::from_value::<ProtocolAuthEvidence>(json).is_err());
 }
 
-#[tokio::test]
-async fn workflow_default_behavior_accepts_inbound_and_records_envelope() {
-    let workflow = FakeProductWorkflow::new();
-    let ack = workflow
-        .submit_inbound(sample_envelope("update:1"))
-        .await
-        .expect("accept");
-    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
-    assert_eq!(workflow.accepted_count(), 1);
-}
-
-#[tokio::test]
-async fn workflow_dedupes_duplicate_external_event_id_per_source_binding() {
-    let workflow = FakeProductWorkflow::new();
-    let first = sample_envelope("update:42");
-    let second = sample_envelope("update:42");
-    let first_ack = workflow.submit_inbound(first).await.expect("first");
-    assert!(matches!(first_ack, ProductInboundAck::Accepted { .. }));
-    let second_ack = workflow.submit_inbound(second).await.expect("duplicate");
-    assert!(matches!(second_ack, ProductInboundAck::Duplicate { .. }));
-    assert_eq!(workflow.accepted_count(), 1);
-}
-
-#[tokio::test]
-async fn workflow_returns_programmed_outcomes() {
-    let workflow = FakeProductWorkflow::new();
-    workflow.program_outcome(
-        ExternalEventId::new("update:busy").expect("valid"),
-        ProductInboundAck::DeferredBusy {
-            accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid"),
-            active_run_id: TurnRunId::new(),
-        },
-    );
-    workflow.program_outcome(
-        ExternalEventId::new("update:reject").expect("valid"),
-        ProductInboundAck::Rejected(ProductRejection::retryable(
-            ProductRejectionKind::PolicyDenied,
-            "rate limit",
-        )),
-    );
-
-    let busy_ack = workflow
-        .submit_inbound(sample_envelope("update:busy"))
-        .await
-        .expect("busy");
-    assert!(matches!(busy_ack, ProductInboundAck::DeferredBusy { .. }));
-
-    let reject_ack = workflow
-        .submit_inbound(sample_envelope("update:reject"))
-        .await
-        .expect("reject");
-    assert!(matches!(reject_ack, ProductInboundAck::Rejected(_)));
-}
-
 #[test]
 fn control_action_cancel_run_validates_run_id() {
     assert!(ProductControlActionPayload::cancel_run("").is_err());
     assert!(ProductControlActionPayload::cancel_run("not-a-run-id").is_err());
     assert!(ProductControlActionPayload::cancel_run(&TurnRunId::new().to_string()).is_ok());
-}
-
-#[tokio::test]
-async fn workflow_fake_records_submit_read_and_subscribe_doors_separately() {
-    let workflow = FakeProductWorkflow::new();
-    let actor = TurnActor::new(ironclaw_host_api::UserId::new("user:alice").expect("valid"));
-    let scope = TurnScope::new(
-        ironclaw_host_api::TenantId::new("tenant:alpha").expect("valid"),
-        None,
-        None,
-        ironclaw_host_api::ThreadId::new("thread:alpha").expect("valid"),
-    );
-    let read_cursor = ProjectionCursor::new("cursor:read").expect("valid");
-    let subscribe_cursor = ProjectionCursor::new("cursor:subscribe").expect("valid");
-    let read_request = ProjectionReadRequest {
-        actor: actor.clone(),
-        scope: scope.clone(),
-        after_cursor: Some(read_cursor.clone()),
-        limit: Some(10),
-    };
-    let subscribe_request = ProjectionSubscriptionRequest {
-        actor: actor.clone(),
-        scope: scope.clone(),
-        after_cursor: Some(subscribe_cursor.clone()),
-    };
-    workflow.program_projection_read_resolution(read_request.clone());
-    workflow.program_projection_resolution(subscribe_request.clone());
-
-    let read_input = ProductProjectionReadInput::new(
-        ProductProjectionSubject::canonical(actor.clone(), scope.clone()),
-        None,
-        Some(read_cursor),
-        Some(10),
-    );
-    let subscribe_input = ProductProjectionSubscribeInput::new(
-        ProductProjectionSubject::canonical(actor, scope),
-        None,
-        Some(subscribe_cursor),
-    );
-
-    let read = workflow
-        .read_projection(read_input.clone())
-        .await
-        .expect("read");
-    let subscription = workflow
-        .subscribe_projection(subscribe_input.clone())
-        .await
-        .expect("subscribe");
-
-    assert_eq!(read, read_request);
-    assert_eq!(subscription, subscribe_request);
-    assert_eq!(workflow.read_inputs(), vec![read_input]);
-    assert_eq!(workflow.subscribe_inputs(), vec![subscribe_input]);
-    assert_eq!(workflow.accepted_count(), 0);
-
-    let submit = workflow
-        .submit_inbound(sample_envelope("update:projection-doors"))
-        .await
-        .expect("submit");
-    assert!(matches!(submit, ProductInboundAck::Accepted { .. }));
-    assert_eq!(workflow.accepted_count(), 1);
-    assert_eq!(workflow.read_inputs().len(), 1);
-    assert_eq!(workflow.subscribe_inputs().len(), 1);
-}
-
-#[tokio::test]
-async fn workflow_propagates_transient_failure() {
-    let workflow = FakeProductWorkflow::new();
-    workflow.force_failure(ProductAdapterError::WorkflowTransient {
-        reason: RedactedString::new("store unavailable"),
-    });
-    let err = workflow
-        .submit_inbound(sample_envelope("update:1"))
-        .await
-        .expect_err("transient failure");
-    assert!(err.is_retryable());
 }
 
 #[tokio::test]

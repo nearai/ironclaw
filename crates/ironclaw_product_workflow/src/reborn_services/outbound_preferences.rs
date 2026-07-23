@@ -1,17 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use chrono::Utc;
-use futures::future::try_join_all;
-use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_outbound::{
-    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    OutboundError, WriteCommunicationPreferenceRequest,
-};
-use ironclaw_product_workflow::{
+use super::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
@@ -19,299 +8,17 @@ use ironclaw_product_workflow::{
     RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_outbound::{
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
+    WriteCommunicationPreferenceRequest,
+};
 use ironclaw_turns::ReplyTargetBindingRef;
 
-/// The `(tenant, user)` an outbound delivery-target entry belongs to.
-///
-/// Providers stamp this with the identity of the resource they resolved — the
-/// route's subject user, the DM target's provisioned user — so the aggregating
-/// registry can drop any entry that does not belong to the querying caller.
-/// Populating it from the resolved resource (not merely echoing the caller) is
-/// what makes registry scoping a genuine defense-in-depth layer: a provider
-/// that fails to filter by caller yields an owner that no longer matches the
-/// caller, so the registry drops the leaked entry regardless.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutboundDeliveryTargetOwner {
-    pub(crate) tenant_id: TenantId,
-    pub(crate) user_id: UserId,
-}
-
-impl OutboundDeliveryTargetOwner {
-    pub(crate) fn new(tenant_id: TenantId, user_id: UserId) -> Self {
-        Self { tenant_id, user_id }
-    }
-
-    /// The owner scope for the authenticated caller. Only static test fixtures
-    /// that intentionally answer whichever caller asks claim ownership this way
-    /// (real providers derive the owner from the resolved resource), so this is
-    /// a test-only constructor.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_caller(caller: &WebUiAuthenticatedCaller) -> Self {
-        Self {
-            tenant_id: caller.tenant_id.clone(),
-            user_id: caller.user_id.clone(),
-        }
-    }
-
-    /// Whether this owner is the querying caller's `(tenant, user)`.
-    pub(crate) fn matches_caller(&self, caller: &WebUiAuthenticatedCaller) -> bool {
-        self.tenant_id == caller.tenant_id && self.user_id == caller.user_id
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutboundDeliveryTargetEntry {
-    pub(crate) summary: RebornOutboundDeliveryTargetSummary,
-    pub(crate) capabilities: RebornOutboundDeliveryTargetCapabilities,
-    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
-    /// The `(tenant, user)` this entry belongs to. The aggregating registry
-    /// drops any fanned-out entry whose owner does not match the querying
-    /// caller, so cross-caller isolation is structural rather than a
-    /// per-provider convention.
-    pub(crate) owner: OutboundDeliveryTargetOwner,
-}
-
-#[async_trait]
-pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
-
-    async fn resolve_outbound_delivery_target(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(self
-            .list_outbound_delivery_targets(caller)
-            .await?
-            .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies
-                    && entry.summary.target_id.as_str() == target_id.as_str()
-            }))
-    }
-
-    async fn resolve_reply_target_binding(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target: &ReplyTargetBindingRef,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(self
-            .list_outbound_delivery_targets(caller)
-            .await?
-            .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies
-                    && entry.reply_target_binding_ref.as_str() == target.as_str()
-            }))
-    }
-}
-
-/// Caller-ownership predicate the aggregating registry applies to every
-/// fanned-out entry.
-///
-/// The registry is a single process-global instance shared across every
-/// caller/tenant, so it must not trust each provider to have scoped its own
-/// results. Dropping entries whose `owner` is not the querying caller makes
-/// cross-caller isolation structural: a provider that fails to filter (or
-/// scopes by tenant but not user) cannot leak another caller's delivery
-/// target past this predicate. Provider-side filtering stays intact as the
-/// first layer of defense in depth.
-fn entry_owned_by_caller(
-    entry: &OutboundDeliveryTargetEntry,
-    caller: &WebUiAuthenticatedCaller,
-) -> bool {
-    entry.owner.matches_caller(caller)
-}
-
-pub(crate) struct OutboundDeliveryTargetRegistry {
-    providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
-}
-
-impl std::fmt::Debug for OutboundDeliveryTargetRegistry {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OutboundDeliveryTargetRegistry")
-            .field("providers", &self.providers.len())
-            .finish()
-    }
-}
-
-impl OutboundDeliveryTargetRegistry {
-    pub(crate) fn new(providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>) -> Self {
-        Self { providers }
-    }
-}
-
-pub(crate) struct MutableOutboundDeliveryTargetRegistry {
-    providers: RwLock<BTreeMap<String, Arc<dyn OutboundDeliveryTargetProvider>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutboundDeliveryTargetRegistrationOutcome {
-    Registered,
-    Replaced,
-}
-
-impl std::fmt::Debug for MutableOutboundDeliveryTargetRegistry {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let provider_count = match self.providers.read() {
-            Ok(providers) => providers.len(),
-            Err(error) => {
-                tracing::debug!(
-                    target = "ironclaw::reborn::outbound_preferences",
-                    error = ?error,
-                    "outbound target registry read lock failed during debug formatting"
-                );
-                0
-            }
-        };
-        formatter
-            .debug_struct("MutableOutboundDeliveryTargetRegistry")
-            .field("providers", &provider_count)
-            .finish()
-    }
-}
-
-impl Default for MutableOutboundDeliveryTargetRegistry {
-    fn default() -> Self {
-        Self {
-            providers: RwLock::new(BTreeMap::new()),
-        }
-    }
-}
-
-impl MutableOutboundDeliveryTargetRegistry {
-    pub(crate) fn register_provider(
-        &self,
-        provider_key: impl Into<String>,
-        provider: Arc<dyn OutboundDeliveryTargetProvider>,
-    ) -> Result<OutboundDeliveryTargetRegistrationOutcome, RebornServicesError> {
-        let mut providers = self.providers.write().map_err(|error| {
-            tracing::debug!(
-                target = "ironclaw::reborn::outbound_preferences",
-                error = ?error,
-                "outbound target registry write lock failed"
-            );
-            outbound_target_registry_error()
-        })?;
-        let outcome = match providers.insert(provider_key.into(), provider) {
-            Some(_) => OutboundDeliveryTargetRegistrationOutcome::Replaced,
-            None => OutboundDeliveryTargetRegistrationOutcome::Registered,
-        };
-        Ok(outcome)
-    }
-
-    fn providers(
-        &self,
-    ) -> Result<Vec<Arc<dyn OutboundDeliveryTargetProvider>>, RebornServicesError> {
-        self.providers
-            .read()
-            .map(|providers| providers.values().cloned().collect())
-            .map_err(|error| {
-                tracing::debug!(
-                    target = "ironclaw::reborn::outbound_preferences",
-                    error = ?error,
-                    "outbound target registry read lock failed"
-                );
-                outbound_target_registry_error()
-            })
-    }
-}
-
-#[async_trait]
-impl OutboundDeliveryTargetProvider for MutableOutboundDeliveryTargetRegistry {
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        OutboundDeliveryTargetRegistry::new(self.providers()?)
-            .list_outbound_delivery_targets(caller)
-            .await
-    }
-
-    async fn resolve_outbound_delivery_target(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        OutboundDeliveryTargetRegistry::new(self.providers()?)
-            .resolve_outbound_delivery_target(caller, target_id)
-            .await
-    }
-
-    async fn resolve_reply_target_binding(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target: &ReplyTargetBindingRef,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        OutboundDeliveryTargetRegistry::new(self.providers()?)
-            .resolve_reply_target_binding(caller, target)
-            .await
-    }
-}
-
-#[async_trait]
-impl OutboundDeliveryTargetProvider for OutboundDeliveryTargetRegistry {
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        let target_groups = try_join_all(
-            self.providers
-                .iter()
-                .map(|provider| provider.list_outbound_delivery_targets(caller)),
-        )
-        .await?;
-        Ok(target_groups
-            .into_iter()
-            .flatten()
-            .filter(|entry| entry_owned_by_caller(entry, caller))
-            .collect())
-    }
-
-    async fn resolve_outbound_delivery_target(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        // Providers are expected to stay few, so resolve them in parallel to avoid
-        // provider-order latency when the first match lives in a later provider.
-        let target_groups = try_join_all(
-            self.providers
-                .iter()
-                .map(|provider| provider.resolve_outbound_delivery_target(caller, target_id)),
-        )
-        .await?;
-        Ok(target_groups
-            .into_iter()
-            .flatten()
-            .find(|entry| entry_owned_by_caller(entry, caller) && entry.capabilities.final_replies))
-    }
-
-    async fn resolve_reply_target_binding(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target: &ReplyTargetBindingRef,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        // Providers are expected to stay few, so resolve them in parallel to avoid
-        // provider-order latency when the first match lives in a later provider.
-        let target_groups = try_join_all(
-            self.providers
-                .iter()
-                .map(|provider| provider.resolve_reply_target_binding(caller, target)),
-        )
-        .await?;
-        Ok(target_groups
-            .into_iter()
-            .flatten()
-            .find(|entry| entry_owned_by_caller(entry, caller) && entry.capabilities.final_replies))
-    }
-}
-
-pub(crate) struct RebornOutboundPreferencesFacade {
+pub struct RebornOutboundPreferencesFacade {
     preferences: Arc<dyn CommunicationPreferenceRepository>,
     targets: Arc<dyn OutboundDeliveryTargetProvider>,
 }
@@ -327,7 +34,7 @@ impl std::fmt::Debug for RebornOutboundPreferencesFacade {
 }
 
 impl RebornOutboundPreferencesFacade {
-    pub(crate) fn new(
+    pub fn new(
         preferences: Arc<dyn CommunicationPreferenceRepository>,
         targets: Arc<dyn OutboundDeliveryTargetProvider>,
     ) -> Self {
@@ -359,18 +66,20 @@ impl RebornOutboundPreferencesFacade {
 
     fn response_for_resolved_final_reply_target(
         resolved_final_reply_target: Option<&OutboundDeliveryTargetEntry>,
-    ) -> RebornOutboundPreferencesResponse {
-        let final_reply_target = resolved_final_reply_target.map(|entry| entry.summary.clone());
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        let final_reply_target = resolved_final_reply_target
+            .map(|entry| reborn_summary_from_outbound(&entry.summary))
+            .transpose()?;
         let final_reply_target_status = if final_reply_target.is_some() {
             RebornOutboundDeliveryTargetStatus::Available
         } else {
             RebornOutboundDeliveryTargetStatus::NoneConfigured
         };
-        RebornOutboundPreferencesResponse {
+        Ok(RebornOutboundPreferencesResponse {
             final_reply_target,
             final_reply_target_status,
             default_modality: RebornOutboundDeliveryModality::Text,
-        }
+        })
     }
 
     async fn summary_for_reply_target(
@@ -378,11 +87,12 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         target: &ReplyTargetBindingRef,
     ) -> Result<Option<RebornOutboundDeliveryTargetSummary>, RebornServicesError> {
-        Ok(self
-            .targets
-            .resolve_reply_target_binding(caller, target)
-            .await?
-            .map(|entry| entry.summary))
+        self.targets
+            .resolve_reply_target_binding(&target_scope(caller), target)
+            .await
+            .map_err(map_outbound_repository_error)?
+            .map(|entry| reborn_summary_from_outbound(&entry.summary))
+            .transpose()
     }
 
     async fn resolve_final_reply_target(
@@ -390,9 +100,11 @@ impl RebornOutboundPreferencesFacade {
         caller: &WebUiAuthenticatedCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<OutboundDeliveryTargetEntry, RebornServicesError> {
+        let target_id = outbound_target_id_from_reborn(target_id)?;
         self.targets
-            .resolve_outbound_delivery_target(caller, target_id)
-            .await?
+            .resolve_outbound_delivery_target(&target_scope(caller), &target_id)
+            .await
+            .map_err(map_outbound_repository_error)?
             .ok_or_else(outbound_target_not_found)
     }
 
@@ -465,9 +177,7 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             })
             .await
             .map_err(map_outbound_repository_error)?;
-        Ok(Self::response_for_resolved_final_reply_target(
-            resolved_final_reply_target.as_ref(),
-        ))
+        Self::response_for_resolved_final_reply_target(resolved_final_reply_target.as_ref())
     }
 
     async fn list_outbound_delivery_targets(
@@ -476,19 +186,77 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
         let targets = self
             .targets
-            .list_outbound_delivery_targets(&caller)
-            .await?
+            .list_outbound_delivery_targets(&target_scope(&caller))
+            .await
+            .map_err(map_outbound_repository_error)?
             .into_iter()
             .filter(|entry| entry.capabilities.final_replies)
-            .map(|entry| RebornOutboundDeliveryTargetOption {
-                target: entry.summary,
-                capabilities: entry.capabilities,
+            .map(|entry| {
+                Ok(RebornOutboundDeliveryTargetOption {
+                    target: reborn_summary_from_outbound(&entry.summary)?,
+                    capabilities: reborn_capabilities_from_outbound(&entry.capabilities),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, RebornServicesError>>()?;
         Ok(RebornOutboundDeliveryTargetListResponse {
             targets,
             next_cursor: None,
         })
+    }
+}
+
+fn target_scope(caller: &WebUiAuthenticatedCaller) -> OutboundDeliveryTargetScope {
+    OutboundDeliveryTargetScope::new(caller.tenant_id.clone(), caller.user_id.clone())
+}
+
+fn outbound_target_id_from_reborn(
+    target_id: &RebornOutboundDeliveryTargetId,
+) -> Result<OutboundDeliveryTargetId, RebornServicesError> {
+    OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|_| RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("final_reply_target_id".to_string()),
+        validation_code: None,
+    })
+}
+
+fn reborn_summary_from_outbound(
+    summary: &OutboundDeliveryTargetSummary,
+) -> Result<RebornOutboundDeliveryTargetSummary, RebornServicesError> {
+    let target_id = RebornOutboundDeliveryTargetId::new(summary.target_id.as_str())
+        .map_err(|_| outbound_target_projection_error())?;
+    RebornOutboundDeliveryTargetSummary::new(
+        target_id,
+        summary.channel.as_str(),
+        summary.display_name.as_str(),
+        summary
+            .description
+            .as_ref()
+            .map(|description| description.as_str().to_string()),
+    )
+    .map_err(|_| outbound_target_projection_error())
+}
+
+fn reborn_capabilities_from_outbound(
+    capabilities: &ironclaw_outbound::DeliveryTargetCapabilities,
+) -> RebornOutboundDeliveryTargetCapabilities {
+    RebornOutboundDeliveryTargetCapabilities {
+        final_replies: capabilities.final_replies,
+        gate_prompts: capabilities.gate_prompts,
+        auth_prompts: capabilities.auth_prompts,
+    }
+}
+
+fn outbound_target_projection_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
     }
 }
 
@@ -499,17 +267,6 @@ fn outbound_target_not_found() -> RebornServicesError {
         status_code: 404,
         retryable: false,
         field: Some("final_reply_target_id".to_string()),
-        validation_code: None,
-    }
-}
-
-fn outbound_target_registry_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
-        status_code: 500,
-        retryable: false,
-        field: None,
         validation_code: None,
     }
 }
@@ -561,7 +318,9 @@ mod tests {
     use ironclaw_host_api::{TenantId, UserId};
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
-        DeliveryDefaultScope, VersionedCommunicationPreferenceRecord,
+        DeliveryDefaultScope, DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
+        OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry,
+        VersionedCommunicationPreferenceRecord,
     };
 
     use super::*;
@@ -586,8 +345,8 @@ mod tests {
     impl OutboundDeliveryTargetProvider for FakeTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(self
                 .by_user
                 .lock()
@@ -604,9 +363,9 @@ mod tests {
     impl OutboundDeliveryTargetProvider for FailingTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-            Err(service_unavailable_error())
+            _caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
+            Err(OutboundError::Backend)
         }
     }
 
@@ -618,16 +377,16 @@ mod tests {
     impl OutboundDeliveryTargetProvider for ResolvingOnlyTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            _caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(Vec::new())
         }
 
         async fn resolve_outbound_delivery_target(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-            target_id: &RebornOutboundDeliveryTargetId,
-        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            _caller: &OutboundDeliveryTargetScope,
+            target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(
                 (self.entry.summary.target_id.as_str() == target_id.as_str())
                     .then(|| self.entry.clone()),
@@ -636,9 +395,9 @@ mod tests {
 
         async fn resolve_reply_target_binding(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
+            _caller: &OutboundDeliveryTargetScope,
             target: &ReplyTargetBindingRef,
-        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(
                 (self.entry.reply_target_binding_ref.as_str() == target.as_str())
                     .then(|| self.entry.clone()),
@@ -652,25 +411,25 @@ mod tests {
     impl OutboundDeliveryTargetProvider for ResolveFailingTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            _caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(Vec::new())
         }
 
         async fn resolve_outbound_delivery_target(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-            _target_id: &RebornOutboundDeliveryTargetId,
-        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-            Err(service_unavailable_error())
+            _caller: &OutboundDeliveryTargetScope,
+            _target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Err(OutboundError::Backend)
         }
 
         async fn resolve_reply_target_binding(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
+            _caller: &OutboundDeliveryTargetScope,
             _target: &ReplyTargetBindingRef,
-        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-            Err(service_unavailable_error())
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
+            Err(OutboundError::Backend)
         }
     }
 
@@ -680,36 +439,25 @@ mod tests {
     impl OutboundDeliveryTargetProvider for NullResolvingTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            _caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(Vec::new())
         }
 
         async fn resolve_outbound_delivery_target(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-            _target_id: &RebornOutboundDeliveryTargetId,
-        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            _caller: &OutboundDeliveryTargetScope,
+            _target_id: &OutboundDeliveryTargetId,
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(None)
         }
 
         async fn resolve_reply_target_binding(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
+            _caller: &OutboundDeliveryTargetScope,
             _target: &ReplyTargetBindingRef,
-        ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(None)
-        }
-    }
-
-    fn service_unavailable_error() -> RebornServicesError {
-        RebornServicesError {
-            code: RebornServicesErrorCode::Unavailable,
-            kind: RebornServicesErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: true,
-            field: None,
-            validation_code: None,
         }
     }
 
@@ -1385,8 +1133,8 @@ mod tests {
 
         let resolved_target = registry
             .resolve_outbound_delivery_target(
-                &caller("tenant-alpha", "user-alpha"),
-                &target_id("slack-alpha"),
+                &outbound_scope("tenant-alpha", "user-alpha"),
+                &outbound_target_id("slack-alpha"),
             )
             .await
             .expect("resolve target");
@@ -1399,7 +1147,7 @@ mod tests {
 
         let resolved_reply_target = registry
             .resolve_reply_target_binding(
-                &caller("tenant-alpha", "user-alpha"),
+                &outbound_scope("tenant-alpha", "user-alpha"),
                 &reply_ref("reply:slack-alpha"),
             )
             .await
@@ -1424,8 +1172,8 @@ mod tests {
     impl OutboundDeliveryTargetProvider for MisbehavingUnscopedProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            _caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             Ok(vec![self.foreign.clone(), self.owned.clone()])
         }
         // resolve_* deliberately use the trait defaults (list-then-find), which
@@ -1473,7 +1221,7 @@ mod tests {
                 owned: owned.clone(),
             })]);
 
-        let caller = caller("tenant-alpha", "user-alpha");
+        let caller = outbound_scope("tenant-alpha", "user-alpha");
         let registries: [&dyn OutboundDeliveryTargetProvider; 2] = [&mutable, &immutable];
         for registry in registries {
             // list: only the caller-owned entry survives; the B-owned entry is
@@ -1495,7 +1243,7 @@ mod tests {
             // does not, even though the provider would return it.
             assert_eq!(
                 registry
-                    .resolve_outbound_delivery_target(&caller, &target_id("slack-owned"))
+                    .resolve_outbound_delivery_target(&caller, &outbound_target_id("slack-owned"))
                     .await
                     .expect("resolve owned")
                     .map(|entry| entry.summary.target_id.as_str().to_string()),
@@ -1503,7 +1251,10 @@ mod tests {
             );
             assert!(
                 registry
-                    .resolve_outbound_delivery_target(&caller, &target_id("slack-foreign"))
+                    .resolve_outbound_delivery_target(
+                        &caller,
+                        &outbound_target_id("slack-foreign"),
+                    )
                     .await
                     .expect("resolve foreign")
                     .is_none(),
@@ -1535,11 +1286,11 @@ mod tests {
         let registry = OutboundDeliveryTargetRegistry::new(vec![Arc::new(FailingTargetProvider)]);
 
         let error = registry
-            .list_outbound_delivery_targets(&caller("tenant-alpha", "user-alpha"))
+            .list_outbound_delivery_targets(&outbound_scope("tenant-alpha", "user-alpha"))
             .await
             .expect_err("provider failure");
 
-        assert_unavailable_backend_error(error);
+        assert!(matches!(error, OutboundError::Backend));
     }
 
     #[tokio::test]
@@ -1636,17 +1387,19 @@ mod tests {
         final_replies: bool,
     ) -> OutboundDeliveryTargetEntry {
         OutboundDeliveryTargetEntry {
-            summary: RebornOutboundDeliveryTargetSummary::new(
-                target_id(target_id_value),
+            summary: OutboundDeliveryTargetSummary::new(
+                outbound_target_id(target_id_value),
                 channel,
                 display_name,
                 Some(display_name.to_string()),
             )
             .expect("valid target summary"),
-            capabilities: RebornOutboundDeliveryTargetCapabilities {
+            capabilities: DeliveryTargetCapabilities {
                 final_replies,
+                progress: false,
                 gate_prompts: true,
                 auth_prompts: true,
+                modalities: Vec::new(),
             },
             reply_target_binding_ref: reply_ref(reply_target),
             // Existing registry-path tests query as tenant-alpha/user-alpha, so
@@ -1692,6 +1445,10 @@ mod tests {
         WebUiAuthenticatedCaller::new(tenant(tenant_id), user(user_id), None, None)
     }
 
+    fn outbound_scope(tenant_id: &str, user_id: &str) -> OutboundDeliveryTargetScope {
+        OutboundDeliveryTargetScope::new(tenant(tenant_id), user(user_id))
+    }
+
     fn tenant(value: &str) -> TenantId {
         TenantId::new(value).expect("valid tenant")
     }
@@ -1706,5 +1463,9 @@ mod tests {
 
     fn target_id(value: &str) -> RebornOutboundDeliveryTargetId {
         RebornOutboundDeliveryTargetId::new(value).expect("valid target id")
+    }
+
+    fn outbound_target_id(value: &str) -> OutboundDeliveryTargetId {
+        OutboundDeliveryTargetId::new(value).expect("valid target id")
     }
 }

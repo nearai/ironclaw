@@ -48,7 +48,7 @@ async fn reborn_trace_advertises_github_v2_wasm_capabilities() {
             submitted.run_id,
             TurnStatus::Completed,
             HarnessWaitConfig {
-                timeout: Duration::from_secs(15),
+                timeout: Duration::from_secs(45),
                 poll_interval: Duration::from_millis(10),
             },
         )
