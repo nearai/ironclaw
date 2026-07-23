@@ -22,15 +22,27 @@
 #   MODEL         model id           (default: provider catalog default)
 #   REBORN_HOST   listen host        (default: 127.0.0.1)
 #   REBORN_PORT   listen port        (default: 3000)
-#   IRONCLAW_REBORN_HOME             (default: $HOME/.ironclaw-reborn-demo)
-#   IRONCLAW_REBORN_WEBUI_USER_ID    (default: home's [identity].default_owner)
-#   IRONCLAW_REBORN_WEBUI_TOKEN      (default: generated and printed)
+#   IRONCLAW_HOME             (default: $HOME/.ironclaw-reborn-demo)
+#   IRONCLAW_WEBUI_USER_ID    (default: home's [identity].default_owner)
+#   IRONCLAW_WEBUI_TOKEN      (default: generated and printed)
 #
 # REBORN_HOST/REBORN_PORT are deliberately prefixed: a bare HOST would collide
 # with zsh's auto-set $HOST (the machine hostname), which could bind serve to a
 # non-loopback interface and expose the bearer token over plain HTTP.
 
 set -euo pipefail
+
+# Keep existing local launch commands working while making the neutral names
+# authoritative. An explicitly set `IRONCLAW_*` value always wins.
+if [[ -z ${IRONCLAW_HOME+x} && -n ${IRONCLAW_REBORN_HOME:-} ]]; then
+  export IRONCLAW_HOME="$IRONCLAW_REBORN_HOME"
+fi
+if [[ -z ${IRONCLAW_WEBUI_USER_ID+x} && -n ${IRONCLAW_REBORN_WEBUI_USER_ID:-} ]]; then
+  export IRONCLAW_WEBUI_USER_ID="$IRONCLAW_REBORN_WEBUI_USER_ID"
+fi
+if [[ -z ${IRONCLAW_WEBUI_TOKEN+x} && -n ${IRONCLAW_REBORN_WEBUI_TOKEN:-} ]]; then
+  export IRONCLAW_WEBUI_TOKEN="$IRONCLAW_REBORN_WEBUI_TOKEN"
+fi
 
 PROVIDER="${PROVIDER:-nearai}"
 MODEL="${MODEL:-}"
@@ -70,7 +82,7 @@ echo "==> Building WebUI v2 frontend assets"
   pnpm build
 )
 
-export IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME:-$HOME/.ironclaw-reborn-demo}"
+export IRONCLAW_HOME="${IRONCLAW_HOME:-$HOME/.ironclaw-reborn-demo}"
 
 # Reject a home inside the repo, which would trip the workspace/skill-root
 # overlap validation in serve. Canonicalize both paths first (resolving `..`
@@ -78,9 +90,9 @@ export IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME:-$HOME/.ironclaw-reborn-demo
 # Resolve via the parent dir so we don't have to create the home to normalize
 # it; if the parent doesn't exist yet, skip this friendly check and let serve's
 # own validation handle it.
-case "$IRONCLAW_REBORN_HOME" in
-  /*) home_abs="$IRONCLAW_REBORN_HOME" ;;
-  *)  home_abs="$PWD/$IRONCLAW_REBORN_HOME" ;;
+case "$IRONCLAW_HOME" in
+  /*) home_abs="$IRONCLAW_HOME" ;;
+  *)  home_abs="$PWD/$IRONCLAW_HOME" ;;
 esac
 home_parent="$(cd "$(dirname "$home_abs")" 2>/dev/null && pwd -P || true)"
 repo_canonical="$(cd "$REPO_ROOT" && pwd -P)"
@@ -88,7 +100,7 @@ if [ -n "$home_parent" ]; then
   home_canonical="$home_parent/$(basename "$home_abs")"
   case "$home_canonical/" in
     "$repo_canonical"/*)
-      echo "error: IRONCLAW_REBORN_HOME ($home_canonical) is inside the repo ($repo_canonical)." >&2
+      echo "error: IRONCLAW_HOME ($home_canonical) is inside the repo ($repo_canonical)." >&2
       echo "       serve uses the cwd as the workspace root and rejects overlap." >&2
       echo "       Point it somewhere else, e.g. \$HOME/.ironclaw-reborn-demo." >&2
       exit 1
@@ -97,8 +109,8 @@ if [ -n "$home_parent" ]; then
 fi
 
 # Generate a WebUI bearer token if the caller didn't supply one.
-if [ -z "${IRONCLAW_REBORN_WEBUI_TOKEN:-}" ]; then
-  export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
+if [ -z "${IRONCLAW_WEBUI_TOKEN:-}" ]; then
+  export IRONCLAW_WEBUI_TOKEN="$(openssl rand -hex 32)"
 fi
 
 CARGO=(cargo run -q -p ironclaw --bin ironclaw --)
@@ -113,14 +125,14 @@ echo "==> Configuring model route: provider=$PROVIDER ${MODEL:+model=$MODEL}"
 
 # Match the WebUI user to the home's identity owner so serve's owner check
 # passes (set-provider has now written/seeded config.toml). A caller-supplied
-# IRONCLAW_REBORN_WEBUI_USER_ID wins; otherwise read [identity].default_owner
+# IRONCLAW_WEBUI_USER_ID wins; otherwise read [identity].default_owner
 # from the config, falling back to reborn-cli (config init's default).
-config_file="$IRONCLAW_REBORN_HOME/config.toml"
+config_file="$IRONCLAW_HOME/config.toml"
 config_owner=""
 if [ -f "$config_file" ]; then
   config_owner="$(sed -n 's/^[[:space:]]*default_owner[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -1)"
 fi
-export IRONCLAW_REBORN_WEBUI_USER_ID="${IRONCLAW_REBORN_WEBUI_USER_ID:-${config_owner:-reborn-cli}}"
+export IRONCLAW_WEBUI_USER_ID="${IRONCLAW_WEBUI_USER_ID:-${config_owner:-reborn-cli}}"
 
 # Discover the credential env var for this provider and warn if it is unset.
 key_env="$("${CARGO[@]}" models status 2>/dev/null \
@@ -133,9 +145,9 @@ fi
 cat <<EOF
 
 ==> Starting WebChat v2 on http://$REBORN_HOST:$REBORN_PORT/
-    login token : $IRONCLAW_REBORN_WEBUI_TOKEN
-    login user  : $IRONCLAW_REBORN_WEBUI_USER_ID
-    reborn home : $IRONCLAW_REBORN_HOME
+    login token : $IRONCLAW_WEBUI_TOKEN
+    login user  : $IRONCLAW_WEBUI_USER_ID
+    reborn home : $IRONCLAW_HOME
 
 EOF
 

@@ -33,7 +33,7 @@ const DCR_CLIENT_NAME: &str = "Ironclaw";
 
 /// The static vendor-callback base path (`{base}/{vendor}/callback` — the
 /// serve layer mounts the matching `{provider}` route).
-pub(crate) const PRODUCT_AUTH_OAUTH_ROUTE_BASE: &str = "/api/reborn/product-auth/oauth";
+pub(crate) const PRODUCT_AUTH_OAUTH_ROUTE_BASE: &str = "/api/product-auth/oauth";
 
 #[derive(Clone)]
 pub(crate) struct OAuthProviderComposition {

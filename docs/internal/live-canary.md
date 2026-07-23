@@ -107,8 +107,8 @@ operator bearer token. Required repository variables:
 
 Required secrets:
 
-- `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
-- `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
+- `IRONCLAW_SLACK_SIGNING_SECRET`
+- `IRONCLAW_SLACK_BOT_TOKEN`
 
 Required for `qa_3a_slack_connect`, `qa_5a_slack_connect`, and
 `qa_8a_slack_connect`, which assert both sides of the personal OAuth path:

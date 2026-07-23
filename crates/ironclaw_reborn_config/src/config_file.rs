@@ -1,6 +1,6 @@
 //! Boot-time TOML config for the standalone Reborn binary.
 //!
-//! Operator-facing file at `$IRONCLAW_REBORN_HOME/config.toml`. Read once
+//! Operator-facing file at `$IRONCLAW_HOME/config.toml`. Read once
 //! at process start by `ironclaw-reborn run`. Provides the *selection*
 //! layer of the three-layer config model:
 //!
@@ -186,7 +186,7 @@ pub struct RunnerSection {
     /// permit count; values above `tokio::sync::Semaphore::MAX_PERMITS` are
     /// rejected as a config error (they would otherwise panic semaphore
     /// construction). Overridable at runtime by
-    /// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT`.
+    /// `IRONCLAW_RUNNER_WORKER_COUNT`.
     pub worker_count: Option<usize>,
     /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
     pub max_concurrent_runs_per_user: Option<u32>,
@@ -295,12 +295,12 @@ pub struct WebuiSection {
     pub listen_port: Option<u16>,
     /// Name of the environment variable holding the host-installation
     /// bearer token (used by the env-bearer authenticator). Default
-    /// `IRONCLAW_REBORN_WEBUI_TOKEN`. The token VALUE never appears in
+    /// `IRONCLAW_WEBUI_TOKEN`. The token VALUE never appears in
     /// this config file — `secrets_guard` rejects inline secrets.
     pub env_token_var: Option<String>,
     /// Name of the environment variable holding the `UserId` that an
     /// env-bearer-authenticated caller maps to. Default
-    /// `IRONCLAW_REBORN_WEBUI_USER_ID`. Stringly typed; composition
+    /// `IRONCLAW_WEBUI_USER_ID`. Stringly typed; composition
     /// resolves to a real `UserId` and rejects malformed values.
     pub env_user_id_var: Option<String>,
     /// CORS allow-origin list (e.g.

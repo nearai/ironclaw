@@ -71,7 +71,7 @@ export function fetchOauthFlowStatus(flowId, invocationId) {
     ? `?invocation_id=${encodeURIComponent(invocationId)}`
     : "";
   return apiFetch(
-    `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/reconcile${query}`,
+    `/api/product-auth/oauth/flow/${encodeURIComponent(flowId)}/reconcile${query}`,
     { method: "POST" },
   ).catch(() => null);
 }

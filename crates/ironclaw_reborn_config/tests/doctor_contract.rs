@@ -14,7 +14,7 @@ fn doctor_report_is_side_effect_free_and_states_v1_is_not_used() {
     let report = RebornDoctorReport::from_config(config);
 
     assert_eq!(report.profile(), RebornProfile::MigrationDryRun);
-    assert_eq!(report.home_source_label(), "IRONCLAW_REBORN_HOME");
+    assert_eq!(report.home_source_label(), "IRONCLAW_HOME");
     assert_eq!(report.v1_state(), "not-used");
     assert!(!report.home_path().exists());
 }

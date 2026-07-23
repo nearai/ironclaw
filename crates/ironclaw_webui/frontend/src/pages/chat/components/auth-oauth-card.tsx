@@ -6,7 +6,7 @@
  *
  * Opens `gate.authorizationUrl` in a new browser tab via a user-gesture
  * click. The OAuth callback is handled server-side
- * (`/api/reborn/product-auth/oauth/callback/{flow_id}`), which resumes the
+ * (`/api/product-auth/oauth/callback/{flow_id}`), which resumes the
  * paused run. The callback page emits a same-origin completion signal so the
  * WebUI can clear this gate immediately, then projection_update confirms the
  * resumed run state.

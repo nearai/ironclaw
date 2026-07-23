@@ -11,7 +11,7 @@
 //!
 //! The Reborn stack does **not** use this module. Its hosted, multi-tenant model
 //! receives OAuth callbacks on durable gateway HTTP routes
-//! (`/api/reborn/product-auth/oauth/callback/{flow_id}`, see
+//! (`/api/product-auth/oauth/callback/{flow_id}`, see
 //! `ironclaw_reborn_composition::product_auth_serve`) with persisted flow state,
 //! which is fundamentally incompatible with a single-flow, in-process,
 //! fixed-port loopback listener. The sole consumer is the root `ironclaw` v1

@@ -134,7 +134,7 @@ mod tests {
         assert!(!auth_card.contains("err?.message"));
 
         let api = source_text("lib/api.ts");
-        assert!(api.contains("/api/reborn/product-auth/manual-token/submit"));
+        assert!(api.contains("/api/product-auth/manual-token/submit"));
         assert!(api.contains("signal,"));
         assert!(api.contains("account_label: accountLabel"));
         assert!(api.contains("gate_ref: gateRef"));

@@ -111,7 +111,7 @@ PROVIDER=openai scripts/run-reborn-webui.sh
 ```
 
 It prints the login token and the `http://127.0.0.1:3000/` URL. Override
-`PROVIDER`, `MODEL`, `REBORN_HOST`, `REBORN_PORT`, or `IRONCLAW_REBORN_HOME` via
+`PROVIDER`, `MODEL`, `REBORN_HOST`, `REBORN_PORT`, or `IRONCLAW_HOME` via
 the environment. The manual steps below are equivalent.
 
 ### Quick start
@@ -120,7 +120,7 @@ the environment. The manual steps below are equivalent.
 # 1. For serve/run/repl the Reborn home must live OUTSIDE your current working
 #    directory: these commands use the cwd as the local-dev workspace root and
 #    reject overlap with it (see gotchas). Other commands have no such rule.
-export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
+export IRONCLAW_HOME="$HOME/.ironclaw-reborn-demo"
 
 # 2. Configure a model route. NEAR AI shown here; swap the provider id and key
 #    env var for any row in the table below. set-provider records the credential
@@ -134,15 +134,15 @@ export NEARAI_API_KEY="your-key-here"
 #    the literal "reborn-cli". The variable NAMES below are the defaults;
 #    override them via [webui].env_token_var and [webui].env_user_id_var in
 #    config.toml if you prefer different names.
-export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token you log in with
-export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # optional; must match [identity].default_owner if set
+export IRONCLAW_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token you log in with
+export IRONCLAW_WEBUI_USER_ID="reborn-cli"             # optional; must match [identity].default_owner if set
 
 # 4. Launch.
 cargo run -q -p ironclaw --bin ironclaw -- serve
 ```
 
 Then open **`http://127.0.0.1:3000/`** and log in with the
-`IRONCLAW_REBORN_WEBUI_TOKEN` value.
+`IRONCLAW_WEBUI_TOKEN` value.
 
 `--host` / `--port` override the defaults (`127.0.0.1` / `3000`), or set
 `[webui].listen_host` / `[webui].listen_port` in `config.toml`. `--port 0`
@@ -196,16 +196,16 @@ single-line `Error:` and exits.
 
 | Error message contains | Cause | Fix |
 | --- | --- | --- |
-| `must be set to the WebChat v2 bearer token` | `IRONCLAW_REBORN_WEBUI_TOKEN` unset | Export the token env var (step 3). |
-| `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
-| `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
+| `must be set to the WebChat v2 bearer token` | `IRONCLAW_WEBUI_TOKEN` unset | Export the token env var (step 3). |
+| `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
+| `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_HOME` at a path outside your repo/cwd. |
 
 The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
 **current working directory** as the local-dev workspace root, and boot is
 rejected if that root overlaps any default storage root Reborn manages —
 `/skills` (`<reborn-home>/local-dev/skills`), `/tenant-shared/skills`,
 `/system/skills`, or `/system/extensions`. If the home is nested inside the cwd
-(e.g. `IRONCLAW_REBORN_HOME="$PWD/.reborn-home"`), those roots fall under the
+(e.g. `IRONCLAW_HOME="$PWD/.reborn-home"`), those roots fall under the
 workspace root and boot is rejected. Keep the home outside the directory you
 launch from — the default `~/.ironclaw/reborn` already satisfies this.
 
@@ -221,7 +221,7 @@ The browser UI talks to the `/api/webchat/v2` routes. You can drive the same
 loop with `curl` to confirm the model route works without opening a browser:
 
 ```bash
-TOKEN="$IRONCLAW_REBORN_WEBUI_TOKEN"
+TOKEN="$IRONCLAW_WEBUI_TOKEN"
 BASE=http://127.0.0.1:3000/api/webchat/v2
 AUTH="Authorization: Bearer $TOKEN"
 
@@ -375,7 +375,7 @@ Error: `logs` is not implemented yet
 ### `onboard`
 
 First-run bootstrap for the standalone Reborn home. It resolves
-`IRONCLAW_REBORN_HOME` (or the default `~/.ironclaw/reborn`), creates the home
+`IRONCLAW_HOME` (or the default `~/.ironclaw/reborn`), creates the home
 directory, writes missing `config.toml` and `providers.json` using the same
 atomic writer as `config init`, preserves operator-edited files unless
 `--force` is passed, writes a `.onboard-completed.json` marker, and prints the
@@ -425,7 +425,7 @@ and `base_url`.
 and credential kind.
 
 `models set-provider <provider> [--model <model>]` writes `[llm.default]` into
-`$IRONCLAW_REBORN_HOME/config.toml` with the provider id and, for API-key
+`$IRONCLAW_HOME/config.toml` with the provider id and, for API-key
 providers, its catalog credential env-var name (keyless providers like `ollama`
 get no `api_key_env`). `<provider>` is a provider id or alias (`openai`,
 `anthropic`, `nearai`, `ollama`, …); `--model` is optional and defaults to the
@@ -464,7 +464,7 @@ Supported profiles:
 - `production`
 - `migration-dry-run`
 
-Select a profile with `IRONCLAW_REBORN_PROFILE=<profile>`.
+Select a profile with `IRONCLAW_PROFILE=<profile>`.
 
 ### `run`
 
@@ -481,13 +481,13 @@ Use `--dry-run` for the side-effect-free readiness snapshot:
 cargo run -q -p ironclaw --bin ironclaw -- run --dry-run
 ```
 
-When `$IRONCLAW_REBORN_HOME/config.toml` is missing, the first stateful
+When `$IRONCLAW_HOME/config.toml` is missing, the first stateful
 runtime start through `run`, `repl`, or `serve` seeds a sparse
 `config.toml` containing `api_version` and the safe `local-dev` boot profile.
 It intentionally does not seed `[llm.default]`, so env-only model selection
 continues to work. `run --dry-run`, diagnostics, and read-only commands remain
 side-effect-free. One-off environment selections such as
-`IRONCLAW_REBORN_PROFILE=local-dev-yolo` are not persisted into the seeded
+`IRONCLAW_PROFILE=local-dev-yolo` are not persisted into the seeded
 file.
 
 Expected fields include:
@@ -503,18 +503,18 @@ Expected fields include:
 - `local_runtime_shell_readiness: ready`
 - `planned_default_profile: available`
 
-For `IRONCLAW_REBORN_PROFILE=local-dev-yolo`, `run`, `repl`, and `serve` require `--confirm-host-access` before the runtime receives trusted-laptop host access. Confirmed access mounts the host home through `/host`; Unix-style raw home aliases are also accepted when they can be represented as scoped mount aliases.
+For `IRONCLAW_PROFILE=local-dev-yolo`, `run`, `repl`, and `serve` require `--confirm-host-access` before the runtime receives trusted-laptop host access. Confirmed access mounts the host home through `/host`; Unix-style raw home aliases are also accepted when they can be represented as scoped mount aliases.
 
 When `serve --confirm-host-access` grants trusted-laptop access, `serve` refuses non-loopback listeners such as `0.0.0.0`. Bind to `127.0.0.1` or `::1`, or use a less privileged profile for non-loopback test listeners.
 
-For `IRONCLAW_REBORN_PROFILE=production`, `run` requires production storage
+For `IRONCLAW_PROFILE=production`, `run` requires production storage
 and an explicit runtime policy:
 
 ```toml
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 # Optional; defaults to 2. Keep below the PostgreSQL server or managed
 # session-pool cap after reserving capacity for restarts and operator sessions.
 pool_max_size = 2
@@ -524,10 +524,10 @@ deployment_mode = "hosted_multi_tenant"
 default_profile = "secure_default"
 ```
 
-Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
-`IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
+Set `IRONCLAW_POSTGRES_URL` in the process environment, and set
+`IRONCLAW_SECRET_MASTER_KEY` to independent cryptographic key material.
 Remote managed PostgreSQL URLs must use TLS, for example `sslmode=require`.
-Set `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` to override the configured pool
+Set `IRONCLAW_POSTGRES_POOL_MAX_SIZE` to override the configured pool
 size when a managed provider enforces a smaller session-pool cap.
 The first production launch slice supports runtime policies that do not require
 a tenant-sandbox process binding.
@@ -545,7 +545,7 @@ cargo run -q -p ironclaw --bin ironclaw -- repl
 ### `serve`
 
 Starts the WebChat v2 HTTP listener (browser UI). Requires
-`IRONCLAW_REBORN_WEBUI_TOKEN`; `IRONCLAW_REBORN_WEBUI_USER_ID` is optional and
+`IRONCLAW_WEBUI_TOKEN`; `IRONCLAW_WEBUI_USER_ID` is optional and
 falls back to `[identity].default_owner`, then `"reborn-cli"`.
 See [Running with the WebUI (`serve`)](#running-with-the-webui-serve) for the
 full walkthrough, auth setup, common startup errors, and an API smoke test.
@@ -592,14 +592,21 @@ Reborn must not use the current v1 IronClaw state root by default.
 
 Home resolution precedence:
 
-1. `IRONCLAW_REBORN_HOME`
-2. `~/.ironclaw/reborn`
+1. `IRONCLAW_HOME`
+2. legacy `IRONCLAW_REBORN_HOME`
+3. an existing `~/.ironclaw/reborn`, adopted in place without copying data
+4. `~/.ironclaw` for a new installation
 
-The resolver rejects unsafe or misleading homes, including empty paths, relative paths, filesystem root, parent-directory components, and known v1 state-root aliases such as `$HOME/.ironclaw` or `IRONCLAW_BASE_DIR`.
+The resolver rejects unsafe homes, including empty paths, relative paths,
+filesystem root, and parent-directory components. Legacy overrides retain the
+old v1-state collision guard. See
+[`docs/reborn/default-contracts.md`](reborn/default-contracts.md) for
+compatibility and rollback details.
 
 ## Profiles
 
-Use `IRONCLAW_REBORN_PROFILE` to select the boot profile.
+Use `IRONCLAW_PROFILE` to select the boot profile.
+`IRONCLAW_PROFILE` remains a lower-precedence compatibility alias.
 
 Supported values:
 
@@ -613,8 +620,8 @@ Supported values:
 Example:
 
 ```bash
-IRONCLAW_REBORN_HOME="$PWD/.reborn-home" \
-IRONCLAW_REBORN_PROFILE=production \
+IRONCLAW_HOME="$PWD/.ironclaw-home" \
+IRONCLAW_PROFILE=production \
 cargo run -q -p ironclaw --bin ironclaw -- doctor
 ```
 
@@ -634,13 +641,13 @@ cargo run -q -p ironclaw --bin ironclaw -- --help
 # with "is not implemented yet", not to succeed.
 cargo run -q -p ironclaw --bin ironclaw -- channels list; echo "exit: $?"
 cargo run -q -p ironclaw --bin ironclaw -- completion --shell zsh >"$(mktemp -d)/ironclaw.zsh"
-IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
+IRONCLAW_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw --bin ironclaw -- config path
 cargo run -q -p ironclaw --bin ironclaw -- hooks list; echo "exit: $?"
 cargo run -q -p ironclaw --bin ironclaw -- logs; echo "exit: $?"
 cargo run -q -p ironclaw --bin ironclaw -- models status
 cargo run -q -p ironclaw --bin ironclaw -- profile list
-IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
+IRONCLAW_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw --bin ironclaw -- run
 cargo run -q -p ironclaw --bin ironclaw -- skills list
 ```

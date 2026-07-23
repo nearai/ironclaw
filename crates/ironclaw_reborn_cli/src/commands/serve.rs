@@ -29,8 +29,8 @@ use crate::runtime::RuntimeInputOptions;
 pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
 // pub(crate): reused by onboard/status for `env_token_is_active` (webui_token.rs).
-pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
-const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_WEBUI_TOKEN";
+const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_WEBUI_USER_ID";
 /// Lifetime of the one-time API bearer minted when an admin creates a user. A
 /// year: this is a long-lived programmatic credential, not a browser session.
 const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
@@ -430,7 +430,7 @@ impl ServeCommand {
                 .context("failed to assemble IronClaw runtime for `serve`")?;
 
             // Tenant-shared tool credentials from the environment (#5459):
-            // `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs, parsed by
+            // `IRONCLAW_DEV_SECRET__<handle>=<value>` pairs, parsed by
             // `dev_secret_seeds_from_env` (see its doc for the contract), are
             // written into the tenant-shared admin-managed scope so a keyed
             // tool (network + `use_secret`) resolves its `InjectSecretOnce`
@@ -452,7 +452,7 @@ impl ServeCommand {
                 tracing::warn!(
                     target: "ironclaw::reborn::cli",
                     secret_handle = %handle_name,
-                    "seeded IRONCLAW_REBORN_DEV_SECRET__ tool credential at the tenant-shared scope"
+                    "seeded IRONCLAW_DEV_SECRET__ tool credential at the tenant-shared scope"
                 );
             }
 
@@ -517,7 +517,7 @@ impl ServeCommand {
             //   /auth/session/exchange` unconditionally; mounting it while
             //   SSO is on would double-register that path and panic at
             //   router-merge time (no shared-ticket-store knob exists).
-            // - env-sourced tokens (e.g. Railway-style `IRONCLAW_REBORN_WEBUI_TOKEN`)
+            // - env-sourced tokens (e.g. Railway-style `IRONCLAW_WEBUI_TOKEN`)
             //   must not appear in this route's query string, which flows
             //   through edge/proxy access logs.
             let cli_login_mount = if sso_enabled
@@ -755,12 +755,12 @@ fn webui_notion_dcr_callback_origin(
     canonical_host: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
-        .context("invalid hosted WebUI OAuth base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+        .context("invalid hosted WebUI OAuth base URL from IRONCLAW_WEBUI_BASE_URL")?;
     crate::commands::serve_sso::validate_webui_public_base_url(
         public_base_url.as_deref(),
         listen_addr,
     )
-    .context("invalid hosted WebUI OAuth base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    .context("invalid hosted WebUI OAuth base URL from IRONCLAW_WEBUI_BASE_URL")?;
     Ok(webui_oauth_callback_origin(
         listen_addr,
         public_base_url.as_deref(),
@@ -995,11 +995,11 @@ fn print_serve_banner(
     eprintln!();
 }
 
-/// Parse `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs from an
+/// Parse `IRONCLAW_DEV_SECRET__<handle>=<value>` pairs from an
 /// environment snapshot into the `(scope, handle, value)` seeds `serve` writes
 /// through `RebornRuntime::seed_local_dev_secret` (#5459 tenant-shared tool
 /// credentials). The contract, pinned by the unit tests below:
-/// - only names carrying the exact `IRONCLAW_REBORN_DEV_SECRET__` prefix
+/// - only names carrying the exact `IRONCLAW_DEV_SECRET__` prefix
 ///   participate; every other env var is ignored;
 /// - empty values are skipped (an exported-but-blank var is not a secret);
 /// - the suffix IS the [`SecretHandle`] and must be handle-legal (lowercase
@@ -1017,7 +1017,7 @@ fn dev_secret_seeds_from_env(
     default_agent_id: &AgentId,
     default_project_id: Option<&ProjectId>,
 ) -> anyhow::Result<Vec<(ResourceScope, SecretHandle, String)>> {
-    const DEV_SECRET_PREFIX: &str = "IRONCLAW_REBORN_DEV_SECRET__";
+    const DEV_SECRET_PREFIX: &str = "IRONCLAW_DEV_SECRET__";
     let mut seeds = Vec::new();
     for (name, value) in vars {
         let Some(handle_raw) = name.strip_prefix(DEV_SECRET_PREFIX) else {
@@ -1049,12 +1049,12 @@ fn dev_secret_seeds_from_env(
 mod tests {
     use super::*;
 
-    const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+    const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_WEBUI_BASE_URL";
 
     #[test]
     fn present_unicode_env_var_treats_unset_as_none() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_ABSENT_VAR";
+        const VAR: &str = "IRONCLAW_CLI_TEST_ABSENT_VAR";
         // SAFETY: serialized by `lock_runtime_env`; no other thread touches
         // this test-local var name.
         unsafe { std::env::remove_var(VAR) };
@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn present_unicode_env_var_returns_a_present_value() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_PRESENT_VAR";
+        const VAR: &str = "IRONCLAW_CLI_TEST_PRESENT_VAR";
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var(VAR, "a-token-value") };
         let result = present_unicode_env_var(VAR);
@@ -1090,7 +1090,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt as _;
 
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_NON_UNICODE_VAR";
+        const VAR: &str = "IRONCLAW_CLI_TEST_NON_UNICODE_VAR";
         let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var(VAR, &invalid_utf8) };
@@ -1124,7 +1124,7 @@ mod tests {
         )
     }
 
-    /// #5499 review finding #5: the `IRONCLAW_REBORN_DEV_SECRET__` serve
+    /// #5499 review finding #5: the `IRONCLAW_DEV_SECRET__` serve
     /// bridge itself was untested — a typo'd prefix, a mis-parsed handle, a
     /// non-skipped empty value, or seeding at the caller's own scope instead
     /// of the tenant-shared one would all reach production unseen. The env
@@ -1134,18 +1134,18 @@ mod tests {
         let (tenant, user, agent) = dev_secret_identity();
         let vars = vec![
             (
-                "IRONCLAW_REBORN_DEV_SECRET__market_data_api_key".to_string(),
+                "IRONCLAW_DEV_SECRET__market_data_api_key".to_string(),
                 "shared-key".to_string(),
             ),
             // Exported-but-blank must be skipped, not seeded as "".
             (
-                "IRONCLAW_REBORN_DEV_SECRET__blank_value".to_string(),
+                "IRONCLAW_DEV_SECRET__blank_value".to_string(),
                 String::new(),
             ),
             // Non-secret env noise must be ignored, including near-misses
-            // that share a shorter IRONCLAW_REBORN_ prefix.
+            // that share a shorter IRONCLAW_ prefix.
             (
-                "IRONCLAW_REBORN_WEBUI_BASE_URL".to_string(),
+                "IRONCLAW_WEBUI_BASE_URL".to_string(),
                 "http://localhost:8080".to_string(),
             ),
             ("PATH".to_string(), "/usr/bin".to_string()),
@@ -1183,7 +1183,7 @@ mod tests {
     fn dev_secret_invalid_handle_is_a_startup_error() {
         let (tenant, user, agent) = dev_secret_identity();
         let vars = vec![(
-            "IRONCLAW_REBORN_DEV_SECRET__MARKET_DATA_API_KEY".to_string(),
+            "IRONCLAW_DEV_SECRET__MARKET_DATA_API_KEY".to_string(),
             "shared-key".to_string(),
         )];
 
@@ -1218,7 +1218,7 @@ mod tests {
         );
     }
 
-    const WEBUI_USER_ID_TEST_ENV: &str = "IRONCLAW_REBORN_SERVE_TEST_USER_ID_RAW";
+    const WEBUI_USER_ID_TEST_ENV: &str = "IRONCLAW_SERVE_TEST_USER_ID_RAW";
 
     #[test]
     fn webui_user_id_raw_prefers_a_set_nonempty_env_var() {

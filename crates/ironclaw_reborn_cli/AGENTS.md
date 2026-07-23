@@ -13,7 +13,9 @@ This crate owns the standalone `ironclaw` command surface. Keep it small, explic
 
 - Commands that need Reborn boot config must receive `RebornCliContext` from dispatch instead of reading env directly. Pure commands that do not need boot config (for example, shell completion generation) must not force Reborn home resolution.
 - Keep commands side-effect free unless the command name and issue explicitly require mutation.
-- Use `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`; do not write current v1 state.
+- Use `IRONCLAW_HOME` / `~/.ironclaw` for new state. Preserve
+  `IRONCLAW_REBORN_HOME` and an existing `~/.ironclaw/reborn` as
+  compatibility fallbacks; never move or merge user state implicitly.
 - no v1 runtime imports: do not depend on root `ironclaw_legacy`, `src/agent`, channels, worker, DB, setup, service, sandbox, or `ironclaw_engine`.
 - Do not add workspace dependencies beyond `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, and `ironclaw_webui` (host-owned WebUI serve lifecycle) without an architecture test update and explicit PR rationale. Provider registry/auth/model UX should enter through the Reborn composition provider-admin facade, not a separate CLI-only path.
 

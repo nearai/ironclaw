@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Product identity:** present the shipping CLI, WebUI, health responses, and
   built-in capability descriptions as IronClaw without the former “Reborn”
   qualifier.
+- **Default contracts:** prefer neutral `IRONCLAW_*` configuration,
+  `~/.ironclaw` state, `/api/product-auth/*` routes, and neutral OS service
+  identities while preserving legacy environment, state, route, and installed
+  service compatibility.
 
 ### Fixed
 

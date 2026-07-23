@@ -2,7 +2,7 @@
 //!
 //! This is the concrete implementation behind
 //! `POST /api/webchat/v2/operator/service`. It intentionally accepts only the
-//! fixed `ironclaw-reborn` unit/label and fixed command argv shapes; browser
+//! fixed `ironclaw` unit/label and fixed command argv shapes; browser
 //! input can select an action, not a command line.
 // arch-exempt: large_file, copy-only product identity updates with no lifecycle behavior change, plan #6550
 
@@ -28,10 +28,10 @@ use ironclaw_product_workflow::{
     RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
 };
 
-const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";
-const SYSTEMD_UNIT: &str = "ironclaw-reborn.service";
-const WEBUI_TOKEN_ENV: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
-const WEBUI_USER_ID_ENV: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+const LAUNCHD_LABEL: &str = "com.ironclaw";
+const SYSTEMD_UNIT: &str = "ironclaw.service";
+const WEBUI_TOKEN_ENV: &str = "IRONCLAW_WEBUI_TOKEN";
+const WEBUI_USER_ID_ENV: &str = "IRONCLAW_WEBUI_USER_ID";
 const SERVICE_COMMAND_OUTPUT_LIMIT_BYTES: usize = 16 * 1024;
 const SERVICE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1197,8 +1197,8 @@ mod tests {
         #[cfg(unix)]
         assert_service_file_owner_only(&unit_path);
         assert!(unit.contains("ExecStart=\"/usr/local/bin/ironclaw-reborn\" serve"));
-        assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_TOKEN=test-webui-token\""));
-        assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_USER_ID=user-test\""));
+        assert!(unit.contains("Environment=\"IRONCLAW_WEBUI_TOKEN=test-webui-token\""));
+        assert!(unit.contains("Environment=\"IRONCLAW_WEBUI_USER_ID=user-test\""));
         assert_eq!(
             runner.calls(),
             vec![
@@ -1360,7 +1360,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         assert_eq!(response.state, RebornServiceLifecycleState::Installed);
         let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
         let unit = std::fs::read_to_string(unit_path).expect("unit file");
-        assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_TOKEN=test$webui%%token\""));
+        assert!(unit.contains("Environment=\"IRONCLAW_WEBUI_TOKEN=test$webui%%token\""));
         assert!(!unit.contains("test$$webui"));
     }
 
@@ -1639,9 +1639,9 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let plist = std::fs::read_to_string(&plist_path).expect("plist file");
         #[cfg(unix)]
         assert_service_file_owner_only(&plist_path);
-        assert!(plist.contains("<key>IRONCLAW_REBORN_WEBUI_TOKEN</key>"));
+        assert!(plist.contains("<key>IRONCLAW_WEBUI_TOKEN</key>"));
         assert!(plist.contains("<string>test-webui-token</string>"));
-        assert!(plist.contains("<key>IRONCLAW_REBORN_WEBUI_USER_ID</key>"));
+        assert!(plist.contains("<key>IRONCLAW_WEBUI_USER_ID</key>"));
         assert!(plist.contains("<string>user-test</string>"));
     }
 

@@ -676,7 +676,7 @@ export function submitManualToken({
   gateRef,
   signal,
 } = {}) {
-  return apiFetch("/api/reborn/product-auth/manual-token/submit", {
+  return apiFetch("/api/product-auth/manual-token/submit", {
     method: "POST",
     signal,
     body: JSON.stringify({

@@ -2,7 +2,9 @@ use std::{ffi::OsString, str::FromStr};
 
 use crate::RebornConfigError;
 
-/// Environment variable that selects the standalone Reborn boot profile.
+/// Default environment variable that selects the IronClaw boot profile.
+pub const IRONCLAW_PROFILE_ENV: &str = "IRONCLAW_PROFILE";
+/// Legacy environment variable retained for compatibility.
 pub const REBORN_PROFILE_ENV: &str = "IRONCLAW_REBORN_PROFILE";
 
 /// Coarse boot profile for the standalone Reborn binary.
@@ -45,11 +47,28 @@ impl RebornProfile {
     }
 
     pub fn from_env_value(value: Option<OsString>) -> Result<Self, RebornConfigError> {
+        Self::from_env_value_named(value, IRONCLAW_PROFILE_ENV)
+    }
+
+    pub fn from_env_values(
+        value: Option<OsString>,
+        legacy_value: Option<OsString>,
+    ) -> Result<Self, RebornConfigError> {
+        match value {
+            Some(value) => Self::from_env_value_named(Some(value), IRONCLAW_PROFILE_ENV),
+            None => Self::from_env_value_named(legacy_value, REBORN_PROFILE_ENV),
+        }
+    }
+
+    fn from_env_value_named(
+        value: Option<OsString>,
+        name: &'static str,
+    ) -> Result<Self, RebornConfigError> {
         let Some(value) = value else {
             return Ok(Self::default());
         };
         let value = value.to_string_lossy();
-        Self::from_str(value.as_ref())
+        Self::parse_named(value.as_ref(), name)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -102,6 +121,12 @@ impl FromStr for RebornProfile {
     type Err = RebornConfigError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_named(value, IRONCLAW_PROFILE_ENV)
+    }
+}
+
+impl RebornProfile {
+    fn parse_named(value: &str, name: &'static str) -> Result<Self, RebornConfigError> {
         match value {
             "local-dev" => Ok(Self::LocalDev),
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
@@ -110,7 +135,7 @@ impl FromStr for RebornProfile {
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             other => Err(RebornConfigError::InvalidProfile {
-                name: REBORN_PROFILE_ENV,
+                name,
                 value: other.to_string(),
             }),
         }

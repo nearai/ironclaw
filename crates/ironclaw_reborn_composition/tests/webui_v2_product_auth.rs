@@ -559,7 +559,7 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/reborn/product-auth/oauth/start")
+                .uri("/api/product-auth/oauth/start")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
@@ -579,7 +579,7 @@ async fn get_oauth_flow_status(
             Request::builder()
                 .method(Method::GET)
                 .uri(format!(
-                    "/api/reborn/product-auth/oauth/flow/{flow_id}/status{query}"
+                    "/api/product-auth/oauth/flow/{flow_id}/status{query}"
                 ))
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .body(Body::empty())
@@ -661,7 +661,7 @@ async fn post_manual_token_submit(
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/reborn/product-auth/manual-token/submit")
+                .uri("/api/product-auth/manual-token/submit")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))

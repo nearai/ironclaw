@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn webui_token_rotate_writes_a_new_token_file() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
-        let _env = crate::runtime::test_env::EnvGuard::clear("IRONCLAW_REBORN_WEBUI_TOKEN");
+        let _env = crate::runtime::test_env::EnvGuard::clear("IRONCLAW_WEBUI_TOKEN");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("mkdir");
@@ -938,7 +938,7 @@ mod tests {
 
     /// Thermo MUST (rotate env-guard): rotating the token FILE while the
     /// configured env var override (`[webui].env_token_var`, default
-    /// `IRONCLAW_REBORN_WEBUI_TOKEN`) is set and non-empty would silently
+    /// `IRONCLAW_WEBUI_TOKEN`) is set and non-empty would silently
     /// do nothing at runtime — `serve` reads the env var first (see
     /// `webui_token::resolve_webui_token`'s precedence) and never notices
     /// the rotated file. Rotation must refuse instead of silently no-op'ing.
@@ -952,8 +952,7 @@ mod tests {
     #[test]
     fn webui_token_rotate_refuses_when_env_override_is_set() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
-        let _original_env =
-            crate::runtime::test_env::EnvGuard::clear("IRONCLAW_REBORN_WEBUI_TOKEN");
+        let _original_env = crate::runtime::test_env::EnvGuard::clear("IRONCLAW_WEBUI_TOKEN");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("mkdir");
@@ -963,7 +962,7 @@ mod tests {
 
         let result = {
             let _env = crate::runtime::test_env::EnvGuard::set(
-                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                "IRONCLAW_WEBUI_TOKEN",
                 "operator-set-env-token-value",
             );
             execute_webui_token(&context, None, true)
@@ -971,7 +970,7 @@ mod tests {
 
         let err = result.expect_err("rotate must refuse while the env var overrides the token");
         assert!(
-            err.to_string().contains("IRONCLAW_REBORN_WEBUI_TOKEN"),
+            err.to_string().contains("IRONCLAW_WEBUI_TOKEN"),
             "error must name the overriding env var: {err}"
         );
         let after = std::fs::read_to_string(&token_path).expect("read token file again");
@@ -982,7 +981,7 @@ mod tests {
 
         // Edge: empty string == unset — rotate must be ALLOWED.
         let result = {
-            let _env = crate::runtime::test_env::EnvGuard::set("IRONCLAW_REBORN_WEBUI_TOKEN", "");
+            let _env = crate::runtime::test_env::EnvGuard::set("IRONCLAW_WEBUI_TOKEN", "");
             execute_webui_token(&context, None, true)
         };
         result.expect("empty env var must count as unset; rotate must be allowed");
@@ -994,14 +993,13 @@ mod tests {
 
         // Edge: whitespace-only value is non-empty — rotate must be REFUSED.
         let result = {
-            let _env =
-                crate::runtime::test_env::EnvGuard::set("IRONCLAW_REBORN_WEBUI_TOKEN", "   ");
+            let _env = crate::runtime::test_env::EnvGuard::set("IRONCLAW_WEBUI_TOKEN", "   ");
             execute_webui_token(&context, None, true)
         };
         let err =
             result.expect_err("whitespace-only env var must still count as set; rotate refused");
         assert!(
-            err.to_string().contains("IRONCLAW_REBORN_WEBUI_TOKEN"),
+            err.to_string().contains("IRONCLAW_WEBUI_TOKEN"),
             "error must name the overriding env var: {err}"
         );
         let after_whitespace = std::fs::read_to_string(&token_path).expect("read token file again");
@@ -1017,13 +1015,12 @@ mod tests {
         use std::os::unix::ffi::OsStringExt as _;
 
         let _lock = crate::runtime::test_env::lock_runtime_env();
-        let _original_env =
-            crate::runtime::test_env::EnvGuard::clear("IRONCLAW_REBORN_WEBUI_TOKEN");
+        let _original_env = crate::runtime::test_env::EnvGuard::clear("IRONCLAW_WEBUI_TOKEN");
         // SAFETY: serialized by the canonical env lock and restored by the
         // guard above. The point of this regression is the non-UTF-8 value.
         unsafe {
             std::env::set_var(
-                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                "IRONCLAW_WEBUI_TOKEN",
                 std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
             );
         }
@@ -1031,6 +1028,6 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let err = execute_webui_token(&context, None, true)
             .expect_err("any non-empty OS env value must block file rotation");
-        assert!(err.to_string().contains("IRONCLAW_REBORN_WEBUI_TOKEN"));
+        assert!(err.to_string().contains("IRONCLAW_WEBUI_TOKEN"));
     }
 }

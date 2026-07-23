@@ -29,16 +29,16 @@ regex_activation_enabled = true
 
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 pool_max_size = 2
 # Remote Postgres defaults to TLS. For trusted private-network deployments
 # where the provider cannot complete TLS, set both DATABASE_SSLMODE=disable
-# and IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT=true.
+# and IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT=true.
 
 [webui]
-env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
-env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+env_token_var = "IRONCLAW_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_WEBUI_USER_ID"
 
 [llm.default]
 provider_id = "nearai"

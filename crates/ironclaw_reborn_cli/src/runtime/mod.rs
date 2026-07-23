@@ -15,7 +15,8 @@ use ironclaw_reborn_composition::{
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
-    REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
+    IRONCLAW_PROFILE_ENV, REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile,
+    seed_default_config_file_if_missing,
 };
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
@@ -43,14 +44,14 @@ pub(crate) fn init_tracing() {
     // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
     // terminal — the repo's logging invariant.
     let stderr_filter = reborn_env_filter(
-        "IRONCLAW_REBORN_LOG",
+        "IRONCLAW_LOG",
         "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
     // Operator Logs buffer: a *separate* per-layer filter capturing run
     // diagnostics at `debug` for the Logs panel, without those events also
     // going to stderr — keeps terminal safety and Logs-panel visibility decoupled.
     let operator_filter = reborn_env_filter(
-        "IRONCLAW_REBORN_OPERATOR_LOG",
+        "IRONCLAW_OPERATOR_LOG",
         "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
     );
     let _ = tracing_subscriber::registry()
@@ -875,10 +876,10 @@ struct GoogleOAuthEnvInputs {
 impl GoogleOAuthEnvInputs {
     fn read(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
         Self {
-            reborn_client_id: lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_ID"),
-            reborn_redirect_uri: lookup("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI"),
-            reborn_client_secret: lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET"),
-            reborn_hosted_domain_hint: lookup("IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT"),
+            reborn_client_id: lookup("IRONCLAW_GOOGLE_CLIENT_ID"),
+            reborn_redirect_uri: lookup("IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI"),
+            reborn_client_secret: lookup("IRONCLAW_GOOGLE_CLIENT_SECRET"),
+            reborn_hosted_domain_hint: lookup("IRONCLAW_GOOGLE_HOSTED_DOMAIN_HINT"),
             legacy_client_id: lookup("GOOGLE_CLIENT_ID"),
             legacy_client_secret: lookup("GOOGLE_CLIENT_SECRET"),
             legacy_redirect_uri: lookup("GOOGLE_OAUTH_REDIRECT_URI"),
@@ -972,7 +973,7 @@ fn resolve_google_oauth_config_state_from_inputs(
                 target = "ironclaw::reborn::cli::google_oauth",
                 missing = "redirect_uri",
                 "Google OAuth partially configured (client_id set, redirect_uri missing); \
-                 disabling until IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or \
+                 disabling until IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI or \
                  `config set google.redirect_uri` is set"
             );
             return Ok(GoogleOAuthResolution::Disabled(
@@ -984,7 +985,7 @@ fn resolve_google_oauth_config_state_from_inputs(
                 target = "ironclaw::reborn::cli::google_oauth",
                 missing = "client_id",
                 "Google OAuth partially configured (redirect_uri set, client_id missing); \
-                 disabling until IRONCLAW_REBORN_GOOGLE_CLIENT_ID or \
+                 disabling until IRONCLAW_GOOGLE_CLIENT_ID or \
                  `config set google.client_id` is set"
             );
             return Ok(GoogleOAuthResolution::Disabled(
@@ -1149,7 +1150,9 @@ pub(crate) fn effective_profile(
 ) -> anyhow::Result<RebornProfile> {
     // Env wins over file. `RebornBootConfig` already parsed/validated env,
     // so if the variable is present we keep that value.
-    if std::env::var_os(REBORN_PROFILE_ENV).is_some() {
+    if std::env::var_os(IRONCLAW_PROFILE_ENV).is_some()
+        || std::env::var_os(REBORN_PROFILE_ENV).is_some()
+    {
         return Ok(config.profile());
     }
 
@@ -1301,7 +1304,7 @@ fn ensure_worker_count_within_ceiling(
     Ok(())
 }
 
-/// Apply an `IRONCLAW_REBORN_RUNNER_*` env override for a concurrency cap onto
+/// Apply an `IRONCLAW_RUNNER_*` env override for a concurrency cap onto
 /// `slot`. Absent → unchanged; `0` → unlimited (`None`); positive → that cap.
 /// Strict-presence semantics: a set-but-blank / non-numeric value is fatal.
 fn apply_cap_env_override(
@@ -1314,7 +1317,7 @@ fn apply_cap_env_override(
     Ok(())
 }
 
-/// Apply the `IRONCLAW_REBORN_RUNNER_WORKER_COUNT` env override onto `slot`.
+/// Apply the `IRONCLAW_RUNNER_WORKER_COUNT` env override onto `slot`.
 /// Absent → unchanged; `0` → unlimited (`None`); positive → that count.
 /// Strict-presence semantics: a set-but-blank / non-numeric value is fatal.
 ///
@@ -1376,20 +1379,17 @@ fn runner_settings(
     // even when no `[runner]` config section exists). Strict-presence
     // semantics; `0` means "unlimited" for every concurrency knob — for
     // `worker_count` that removes the global scheduler throttle entirely.
-    apply_worker_count_env_override(
-        "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
-        &mut settings.worker_count,
-    )?;
+    apply_worker_count_env_override("IRONCLAW_RUNNER_WORKER_COUNT", &mut settings.worker_count)?;
     apply_cap_env_override(
-        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
+        "IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
         &mut settings.max_concurrent_runs_per_user,
     )?;
     apply_cap_env_override(
-        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS",
+        "IRONCLAW_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS",
         &mut settings.max_concurrent_trigger_runs,
     )?;
     apply_cap_env_override(
-        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
+        "IRONCLAW_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
         &mut settings.max_concurrent_conversation_runs,
     )?;
 
@@ -1437,10 +1437,8 @@ mod tests {
 
     fn lock_runtime_env() -> RuntimeEnvGuard {
         let lock = super::test_env::lock_runtime_env();
-        let resource_governor_singleton = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
-            "true",
-        );
+        let resource_governor_singleton =
+            EnvGuard::set("IRONCLAW_POSTGRES_RESOURCE_GOVERNOR_SINGLETON", "true");
         RuntimeEnvGuard {
             _resource_governor_singleton: resource_governor_singleton,
             _lock: lock,
@@ -1458,7 +1456,7 @@ mod tests {
     #[test]
     fn runner_settings_absent_runner_gives_defaults() {
         // Hold the env lock + clear runner env so a sibling env-override test
-        // cannot bleed `IRONCLAW_REBORN_RUNNER_*` into this config/default case.
+        // cannot bleed `IRONCLAW_RUNNER_*` into this config/default case.
         let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let settings = runner_settings(None).expect("should succeed");
@@ -1563,7 +1561,7 @@ mod tests {
         let settings = runner_settings(Some(&cfg)).expect("ceiling value must be accepted");
         assert_eq!(settings.worker_count.map(|v| v.get()), Some(max));
 
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", &max.to_string());
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", &max.to_string());
         let settings = runner_settings(None).expect("ceiling value must be accepted");
         assert_eq!(settings.worker_count.map(|v| v.get()), Some(max));
     }
@@ -1608,10 +1606,10 @@ mod tests {
     /// behavior. Returns the guards; keep them alive for the test body.
     fn clear_runner_env() -> [EnvGuard; 4] {
         [
-            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
-            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
-            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS"),
-            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS"),
+            EnvGuard::clear("IRONCLAW_RUNNER_WORKER_COUNT"),
+            EnvGuard::clear("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
+            EnvGuard::clear("IRONCLAW_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS"),
+            EnvGuard::clear("IRONCLAW_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS"),
         ]
     }
 
@@ -1619,7 +1617,7 @@ mod tests {
     fn runner_env_worker_count_zero_means_unlimited() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "0");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "0");
         let settings = runner_settings(None).expect("should succeed");
         assert!(settings.worker_count.is_none());
     }
@@ -1630,7 +1628,7 @@ mod tests {
         // worker_count set in the config file.
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "4");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "4");
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert_eq!(settings.worker_count.map(|v| v.get()), Some(4));
@@ -1644,7 +1642,7 @@ mod tests {
         // lower-precedence config value failing startup first.
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "512");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "512");
         let toml = format!(
             "[runner]\nworker_count = {}\n",
             tokio::sync::Semaphore::MAX_PERMITS + 1
@@ -1659,7 +1657,7 @@ mod tests {
     fn runner_env_large_worker_count_passes_through_unclamped() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "512");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "512");
         let settings = runner_settings(None).expect("should succeed");
         assert_eq!(settings.worker_count.map(|v| v.get()), Some(512));
     }
@@ -1669,7 +1667,7 @@ mod tests {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set(
-            "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
+            "IRONCLAW_RUNNER_WORKER_COUNT",
             &(tokio::sync::Semaphore::MAX_PERMITS + 1).to_string(),
         );
         let err = runner_settings(None).expect_err("oversized worker_count must be rejected");
@@ -1683,8 +1681,8 @@ mod tests {
     fn runner_env_caps_zero_means_unlimited() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "0");
-        let _t = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS", "0");
+        let _u = EnvGuard::set("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "0");
+        let _t = EnvGuard::set("IRONCLAW_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS", "0");
         let settings = runner_settings(None).expect("should succeed");
         assert!(settings.max_concurrent_runs_per_user.is_none());
         assert!(settings.max_concurrent_trigger_runs.is_none());
@@ -1694,7 +1692,7 @@ mod tests {
     fn runner_env_cap_overrides_config_file() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "9");
+        let _u = EnvGuard::set("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "9");
         let cfg = parse_runner_section("[runner]\nmax_concurrent_runs_per_user = 3\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert_eq!(
@@ -1709,11 +1707,10 @@ mod tests {
         // not a silent fall-through to the default.
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "   ");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "   ");
         let err = runner_settings(None).expect_err("blank env value must be rejected");
         assert!(
-            err.to_string()
-                .contains("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
+            err.to_string().contains("IRONCLAW_RUNNER_WORKER_COUNT"),
             "error should name the offending var: {err}"
         );
     }
@@ -1722,11 +1719,10 @@ mod tests {
     fn runner_env_non_numeric_value_is_fatal() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "lots");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "lots");
         let err = runner_settings(None).expect_err("non-numeric env value must be rejected");
         assert!(
-            err.to_string()
-                .contains("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
+            err.to_string().contains("IRONCLAW_RUNNER_WORKER_COUNT"),
             "error should name the offending var: {err}"
         );
     }
@@ -1738,7 +1734,7 @@ mod tests {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let oversized = "z".repeat(100);
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", &oversized);
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", &oversized);
         let err = runner_settings(None)
             .expect_err("oversized non-numeric env value must be rejected")
             .to_string();
@@ -1757,7 +1753,7 @@ mod tests {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "0");
+        let _w = EnvGuard::set("IRONCLAW_RUNNER_WORKER_COUNT", "0");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -1847,11 +1843,11 @@ api_key_env = "NEARAI_API_KEY"
         // a set-but-blank slot must be rejected rather than silently ignored.
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "   ");
+        let _u = EnvGuard::set("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "   ");
         let err = runner_settings(None).expect_err("blank env cap value must be rejected");
         assert!(
             err.to_string()
-                .contains("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
+                .contains("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
             "error should name the offending var: {err}"
         );
     }
@@ -1860,14 +1856,11 @@ api_key_env = "NEARAI_API_KEY"
     fn runner_env_cap_non_numeric_value_is_fatal() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _u = EnvGuard::set(
-            "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
-            "many",
-        );
+        let _u = EnvGuard::set("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "many");
         let err = runner_settings(None).expect_err("non-numeric env cap value must be rejected");
         assert!(
             err.to_string()
-                .contains("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
+                .contains("IRONCLAW_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
             "error should name the offending var: {err}"
         );
     }
@@ -1879,10 +1872,7 @@ api_key_env = "NEARAI_API_KEY"
         // silently-ignored knob cannot escape detection.
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
-        let _c = EnvGuard::set(
-            "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
-            "2",
-        );
+        let _c = EnvGuard::set("IRONCLAW_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS", "2");
         let settings = runner_settings(None).expect("should succeed");
         assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
@@ -2003,7 +1993,7 @@ api_key_env = "NEARAI_API_KEY"
     fn clear_reborn_postgres_tls_env() -> (EnvGuard, EnvGuard) {
         (
             EnvGuard::clear("DATABASE_SSLMODE"),
-            EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT"),
+            EnvGuard::clear("IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT"),
         )
     }
 
@@ -2251,8 +2241,8 @@ default_profile = "secure_default"
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2270,8 +2260,8 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     fn build_runtime_input_production_requires_storage_section() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
-        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+        let _postgres_url = EnvGuard::clear("IRONCLAW_POSTGRES_URL");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_SECRET_MASTER_KEY");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2298,8 +2288,8 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     fn build_runtime_input_production_requires_postgres_url_env_value() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
-        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+        let _postgres_url = EnvGuard::clear("IRONCLAW_POSTGRES_URL");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_SECRET_MASTER_KEY");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2309,8 +2299,8 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2331,7 +2321,7 @@ default_profile = "secure_default"
             .expect("missing Postgres URL env must fail closed");
 
         assert!(
-            err.to_string().contains("IRONCLAW_REBORN_POSTGRES_URL"),
+            err.to_string().contains("IRONCLAW_POSTGRES_URL"),
             "error must mention missing env var name, got: {err:#}"
         );
     }
@@ -2340,14 +2330,14 @@ default_profile = "secure_default"
     fn build_runtime_input_production_storage_section_missing_backend_field() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
-        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+        let _postgres_url = EnvGuard::clear("IRONCLAW_POSTGRES_URL");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_SECRET_MASTER_KEY");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2365,20 +2355,18 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key = EnvGuard::set(
-            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-            "test-secret-master-key",
-        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-secret-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2397,20 +2385,18 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key = EnvGuard::set(
-            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-            "test-secret-master-key",
-        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-secret-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "not_a_deployment"
@@ -2433,20 +2419,18 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key = EnvGuard::set(
-            "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-            "test-secret-master-key",
-        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-secret-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2473,8 +2457,8 @@ default_profile = "not_a_profile"
             r#"
 [storage]
 backend = "libsql"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2491,16 +2475,15 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     fn build_runtime_input_production_rejects_whitespace_only_postgres_url() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "   ");
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _postgres_url = EnvGuard::set("IRONCLAW_POSTGRES_URL", "   ");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2519,19 +2502,18 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
-        let pool_max_size = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+        let secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
+        let pool_max_size = EnvGuard::set("IRONCLAW_POSTGRES_POOL_MAX_SIZE", "1");
         let (_temp, config) = boot_config_with_config_toml(
             "hosted-single-tenant",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2559,19 +2541,18 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
-        let pool_max_size = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "0");
+        let secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
+        let pool_max_size = EnvGuard::set("IRONCLAW_POSTGRES_POOL_MAX_SIZE", "0");
         let (_temp, config) = boot_config_with_config_toml(
             "hosted-single-tenant",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 "#,
         );
 
@@ -2581,8 +2562,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         };
 
         assert!(
-            err.to_string()
-                .contains("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE"),
+            err.to_string().contains("IRONCLAW_POSTGRES_POOL_MAX_SIZE"),
             "error must identify pool override env var: {err:#}"
         );
         drop(pool_max_size);
@@ -2597,17 +2577,17 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://localhost/ironclaw_reborn_cli_test",
         );
-        let _secret_master_key = EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "   ");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "   ");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2625,20 +2605,19 @@ default_profile = "secure_default"
     fn build_runtime_input_production_uses_custom_url_env_name() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let _default_postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+        let _default_postgres_url = EnvGuard::clear("IRONCLAW_POSTGRES_URL");
         let _custom_postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_CUSTOM_POSTGRES_URL",
+            "IRONCLAW_CUSTOM_POSTGRES_URL",
             "postgres://localhost/ironclaw_reborn_cli_test",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_CUSTOM_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_CUSTOM_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2657,18 +2636,17 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://localhost/ironclaw_reborn_cli_test",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "migration-dry-run",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2690,10 +2668,10 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
+        let _secret_master_key = EnvGuard::clear("IRONCLAW_SECRET_MASTER_KEY");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2703,8 +2681,8 @@ default_profile = "secure_default"
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2726,7 +2704,7 @@ default_profile = "secure_default"
         let rendered = format!("{err:#}");
 
         assert!(
-            rendered.contains("IRONCLAW_REBORN_SECRET_MASTER_KEY"),
+            rendered.contains("IRONCLAW_SECRET_MASTER_KEY"),
             "error must mention missing secret master key env var, got: {rendered}"
         );
         assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
@@ -2739,11 +2717,10 @@ default_profile = "secure_default"
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (_database_sslmode, _allow_cleartext) = clear_reborn_postgres_tls_env();
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=disable",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2753,8 +2730,8 @@ default_profile = "secure_default"
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2789,20 +2766,19 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "Disable");
-        let _allow_cleartext = EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
+        let _allow_cleartext = EnvGuard::clear("IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2829,21 +2805,19 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "DISABLE");
-        let _allow_cleartext =
-            EnvGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "On");
+        let _allow_cleartext = EnvGuard::set("IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "On");
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2862,23 +2836,20 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "disable");
-        let _allow_cleartext = EnvGuard::set(
-            "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT",
-            "enabled",
-        );
+        let _allow_cleartext =
+            EnvGuard::set("IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "enabled");
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2891,7 +2862,7 @@ default_profile = "secure_default"
             .expect("invalid cleartext opt-in must fail loudly");
         let rendered = format!("{err:#}");
 
-        assert!(rendered.contains("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT"));
+        assert!(rendered.contains("IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT"));
         assert!(rendered.contains("true"));
         assert!(rendered.contains("false"));
         assert!(!rendered.contains("RAW_PASSWORD_SENTINEL_3162"));
@@ -2904,20 +2875,19 @@ default_profile = "secure_default"
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "verify-full");
-        let _allow_cleartext = EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
+        let _allow_cleartext = EnvGuard::clear("IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
         let _postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let _secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
         let (_temp, config) = boot_config_with_config_toml(
             "production",
             r#"
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -2937,11 +2907,10 @@ default_profile = "secure_default"
         let (enabled, interval) = clear_trigger_poller_env();
         let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
-            "IRONCLAW_REBORN_POSTGRES_URL",
+            "IRONCLAW_POSTGRES_URL",
             "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
         );
-        let secret_master_key =
-            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let secret_master_key = EnvGuard::set("IRONCLAW_SECRET_MASTER_KEY", "test-master-key");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2954,8 +2923,8 @@ default_owner = "prod-owner"
 
 [storage]
 backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+url_env = "IRONCLAW_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -3392,7 +3361,7 @@ poll_interval_secs = 15
     #[test]
     fn resolve_google_oauth_config_errors_when_client_id_missing() {
         let vars = HashMap::from([(
-            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI",
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
         )]);
 
@@ -3421,21 +3390,15 @@ poll_interval_secs = 15
     fn resolve_google_oauth_config_prefers_reborn_prefixed_vars() {
         let vars = HashMap::from([
             (
-                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+                "IRONCLAW_GOOGLE_CLIENT_ID",
                 "reborn-client.apps.googleusercontent.com",
             ),
+            ("IRONCLAW_GOOGLE_CLIENT_SECRET", "reborn-client-secret"),
             (
-                "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
-                "reborn-client-secret",
-            ),
-            (
-                "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+                "IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI",
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
             ),
-            (
-                "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
-                "reborn.example.com",
-            ),
+            ("IRONCLAW_GOOGLE_HOSTED_DOMAIN_HINT", "reborn.example.com"),
             (
                 "GOOGLE_CLIENT_ID",
                 "legacy-client.apps.googleusercontent.com",
@@ -3538,7 +3501,7 @@ poll_interval_secs = 15
             hosted_domain_hint: Some("config.example.com".to_string()),
         };
         let vars = HashMap::from([(
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_GOOGLE_CLIENT_ID",
             "env-client.apps.googleusercontent.com",
         )]);
 
@@ -3587,13 +3550,10 @@ poll_interval_secs = 15
         };
         let vars = HashMap::from([
             (
-                "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+                "IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI",
                 "http://127.0.0.1:3000/env/callback",
             ),
-            (
-                "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
-                "env.example.com",
-            ),
+            ("IRONCLAW_GOOGLE_HOSTED_DOMAIN_HINT", "env.example.com"),
         ]);
 
         let resolution = resolve_google_oauth_config_state_merged(
@@ -3662,7 +3622,7 @@ poll_interval_secs = 15
             redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
             hosted_domain_hint: None,
         };
-        let vars = HashMap::from([("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET", "env-secret")]);
+        let vars = HashMap::from([("IRONCLAW_GOOGLE_CLIENT_SECRET", "env-secret")]);
         let store_secret = secrecy::SecretString::from("store-secret".to_string());
 
         let resolution = resolve_google_oauth_config_state_merged(
@@ -3690,7 +3650,7 @@ poll_interval_secs = 15
             hosted_domain_hint: None,
         };
         let vars = HashMap::from([(
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_GOOGLE_CLIENT_ID",
             "env-client.apps.googleusercontent.com",
         )]);
 

@@ -99,7 +99,7 @@ impl UserDirectory for WebuiUserDirectory {
         // off-list primary.
         let Some(admitted_email) = self.admitted_email(profile) else {
             // Redacted diagnostic so an operator can see which domain to add
-            // to IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS. Logs only the
+            // to IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS. Logs only the
             // email DOMAINS the provider returned (never the local-part or
             // full address) plus whether the canonical email was verified.
             let candidate_domains: std::collections::BTreeSet<String> = profile

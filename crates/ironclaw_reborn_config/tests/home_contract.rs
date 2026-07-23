@@ -1,6 +1,8 @@
 use std::{ffi::OsString, path::Path};
 
-use ironclaw_reborn_config::{REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource};
+use ironclaw_reborn_config::{
+    IRONCLAW_HOME_ENV, REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource,
+};
 
 #[test]
 fn explicit_reborn_home_wins_and_must_not_create_directories() {
@@ -16,14 +18,14 @@ fn explicit_reborn_home_wins_and_must_not_create_directories() {
 
     assert_eq!(home.path(), explicit.as_path());
     assert_eq!(home.source(), RebornHomeSource::Env);
-    assert_eq!(home.source_label(), REBORN_HOME_ENV);
+    assert_eq!(home.source_label(), IRONCLAW_HOME_ENV);
     assert!(!explicit.exists(), "resolver must be side-effect free");
 }
 
 #[test]
-fn default_reborn_home_is_scoped_under_user_home() {
+fn default_ironclaw_home_is_scoped_under_user_home() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let expected = temp.path().join(".ironclaw").join("reborn");
+    let expected = temp.path().join(".ironclaw");
 
     let home = RebornHome::resolve_from_env_parts(None, Some(temp.path().into()), None)
         .expect("absolute HOME should resolve default Reborn home");
@@ -31,13 +33,13 @@ fn default_reborn_home_is_scoped_under_user_home() {
     assert_eq!(home.path(), expected.as_path());
     assert_eq!(home.source(), RebornHomeSource::Default);
     assert_eq!(home.source_label(), "default");
-    assert!(!temp.path().join(".ironclaw").exists());
+    assert!(!expected.exists());
 }
 
 #[test]
 fn userprofile_is_used_only_when_home_is_absent() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let expected = temp.path().join(".ironclaw").join("reborn");
+    let expected = temp.path().join(".ironclaw");
 
     let home = RebornHome::resolve_from_env_parts(None, None, Some(temp.path().into()))
         .expect("absolute USERPROFILE should resolve default Reborn home");
@@ -48,7 +50,7 @@ fn userprofile_is_used_only_when_home_is_absent() {
 #[test]
 fn userprofile_is_used_when_home_is_empty_or_invalid() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let expected = temp.path().join(".ironclaw").join("reborn");
+    let expected = temp.path().join(".ironclaw");
 
     let empty_home =
         RebornHome::resolve_from_env_parts(None, Some(OsString::new()), Some(temp.path().into()))
@@ -65,31 +67,31 @@ fn userprofile_is_used_when_home_is_empty_or_invalid() {
 }
 
 #[test]
-fn rejects_reborn_home_equal_to_home_v1_state_root() {
+fn canonical_home_can_use_the_retired_v1_state_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join(".ironclaw");
-    let err = RebornHome::resolve_from_env_parts(
+    let home = RebornHome::resolve_from_env_parts(
         Some(path.clone().into_os_string()),
         Some(temp.path().into()),
         None,
     )
-    .expect_err("Reborn home must not target default v1 state root");
+    .expect("the default IronClaw home now owns the retired v1 root");
 
-    assert!(
-        matches!(err, RebornConfigError::V1StateRoot { name, path: actual } if name == REBORN_HOME_ENV && actual == path)
-    );
+    assert_eq!(home.path(), path);
+    assert_eq!(home.source(), RebornHomeSource::Env);
 }
 
 #[test]
-fn rejects_reborn_home_equal_to_userprofile_v1_state_root() {
+fn legacy_home_still_rejects_the_retired_v1_state_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join(".ironclaw");
-    let err = RebornHome::resolve_from_env_parts(
+    let err = RebornHome::resolve_from_env_parts_with_legacy(
+        None,
         Some(path.clone().into_os_string()),
         None,
         Some(temp.path().into()),
     )
-    .expect_err("Reborn home must not target USERPROFILE v1 state root");
+    .expect_err("legacy Reborn home must preserve its v1 collision guard");
 
     assert!(
         matches!(err, RebornConfigError::V1StateRoot { name, path: actual } if name == REBORN_HOME_ENV && actual == path)
@@ -107,7 +109,8 @@ fn rejects_reborn_home_symlink_to_home_v1_state_root() {
     let reborn_link = temp.path().join("reborn-link");
     symlink(&v1_root, &reborn_link).expect("symlink reborn home to v1 root");
 
-    let err = RebornHome::resolve_from_env_parts(
+    let err = RebornHome::resolve_from_env_parts_with_legacy(
+        None,
         Some(reborn_link.clone().into_os_string()),
         Some(temp.path().into()),
         None,
@@ -126,7 +129,7 @@ fn rejects_parent_components_in_reborn_home_override() {
         .expect_err("parent components in override should fail");
 
     assert!(
-        matches!(err, RebornConfigError::ParentPath { name, path: actual } if name == REBORN_HOME_ENV && actual == path)
+        matches!(err, RebornConfigError::ParentPath { name, path: actual } if name == IRONCLAW_HOME_ENV && actual == path)
     );
 }
 
@@ -137,7 +140,7 @@ fn rejects_parent_components_that_would_lexically_resolve_to_root() {
         .expect_err("root traversal override should fail");
 
     assert!(
-        matches!(err, RebornConfigError::ParentPath { name, path: actual } if name == REBORN_HOME_ENV && actual == path)
+        matches!(err, RebornConfigError::ParentPath { name, path: actual } if name == IRONCLAW_HOME_ENV && actual == path)
     );
 }
 
@@ -157,7 +160,7 @@ fn rejects_root_reborn_home_override() {
     let err = RebornHome::resolve_from_env_parts(Some(root_path().into()), None, None)
         .expect_err("root override should fail");
 
-    assert!(matches!(err, RebornConfigError::RootPath { name, .. } if name == REBORN_HOME_ENV));
+    assert!(matches!(err, RebornConfigError::RootPath { name, .. } if name == IRONCLAW_HOME_ENV));
 }
 
 #[test]
@@ -173,7 +176,7 @@ fn rejects_empty_reborn_home_override() {
     let err = RebornHome::resolve_from_env_parts(Some(OsString::new()), None, None)
         .expect_err("empty override should fail");
 
-    assert!(matches!(err, RebornConfigError::EmptyPath { name } if name == REBORN_HOME_ENV));
+    assert!(matches!(err, RebornConfigError::EmptyPath { name } if name == IRONCLAW_HOME_ENV));
 }
 
 #[test]
@@ -183,8 +186,41 @@ fn rejects_relative_reborn_home_override() {
             .expect_err("relative override should fail");
 
     assert!(
-        matches!(err, RebornConfigError::RelativePath { name, path } if name == REBORN_HOME_ENV && path == Path::new("relative/reborn"))
+        matches!(err, RebornConfigError::RelativePath { name, path } if name == IRONCLAW_HOME_ENV && path == Path::new("relative/reborn"))
     );
+}
+
+#[test]
+fn canonical_home_wins_over_legacy_home() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let canonical = temp.path().join("canonical");
+    let legacy = temp.path().join("legacy");
+
+    let home = RebornHome::resolve_from_env_parts_with_legacy(
+        Some(canonical.clone().into_os_string()),
+        Some(legacy.into_os_string()),
+        None,
+        None,
+    )
+    .expect("canonical home should win");
+
+    assert_eq!(home.path(), canonical);
+    assert_eq!(home.source(), RebornHomeSource::Env);
+    assert_eq!(home.source_label(), IRONCLAW_HOME_ENV);
+}
+
+#[test]
+fn existing_legacy_default_is_adopted_without_moving_data() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let legacy = temp.path().join(".ironclaw").join("reborn");
+    std::fs::create_dir_all(&legacy).expect("create legacy default");
+
+    let home = RebornHome::resolve_from_env_parts(None, Some(temp.path().into()), None)
+        .expect("existing legacy default should resolve");
+
+    assert_eq!(home.path(), legacy);
+    assert_eq!(home.source(), RebornHomeSource::LegacyDefault);
+    assert_eq!(home.source_label(), "legacy-default");
 }
 
 #[test]

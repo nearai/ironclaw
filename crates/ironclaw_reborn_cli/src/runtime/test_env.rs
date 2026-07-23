@@ -1,6 +1,6 @@
 //! Crate-wide test-only env-var harness. Any test in `ironclaw_reborn_cli`
 //! that reads or mutates process env vars (`IRONCLAW_TRIGGER_POLLER_*`,
-//! `IRONCLAW_REBORN_RUNNER_*`, `IRONCLAW_REBORN_WEBUI_*`, OAuth knobs,
+//! `IRONCLAW_RUNNER_*`, `IRONCLAW_WEBUI_*`, OAuth knobs,
 //! credential-refresh knobs) must hold this single lock and mutate through
 //! `EnvGuard`.
 //!

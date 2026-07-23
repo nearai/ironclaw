@@ -9,7 +9,8 @@ configuration, v1 channels, or v1 import state.
 `ironclaw onboard` is a first-run bootstrap command for the standalone
 Reborn binary. It currently:
 
-1. resolves `IRONCLAW_REBORN_HOME` or the default `~/.ironclaw/reborn`;
+1. resolves `IRONCLAW_HOME`, then the legacy `IRONCLAW_REBORN_HOME`, then an
+   existing `~/.ironclaw/reborn`, or the new-install default `~/.ironclaw`;
 2. creates the Reborn home directory;
 3. creates missing `config.toml` and `providers.json` using the same atomic
    writer as `ironclaw config init`;
@@ -24,7 +25,7 @@ The completion marker schema is:
   "schema_version": "ironclaw.reborn.onboarding/v1",
   "completed_at": "RFC3339 timestamp",
   "reborn_home": "/absolute/path",
-  "home_source": "IRONCLAW_REBORN_HOME or default",
+  "home_source": "IRONCLAW_HOME, IRONCLAW_REBORN_HOME, legacy-default, or default",
   "config_file": "/absolute/path/config.toml",
   "providers_file": "/absolute/path/providers.json",
   "steps_completed": ["reborn_home", "config_files", "completion_marker"],
