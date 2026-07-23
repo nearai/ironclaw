@@ -68,7 +68,7 @@ fn refund_test_request(alice: &WebUiAuthenticatedCaller) -> Request<axum::body::
         .method(HttpMethod::POST)
         .uri("/api/test")
         .body(Body::empty())
-        .expect("request");
+        .expect("request"); // safety: test-only helper in a #[cfg(test)] sibling module
     request.extensions_mut().insert(alice.clone());
     request
 }
