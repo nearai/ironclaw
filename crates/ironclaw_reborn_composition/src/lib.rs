@@ -54,7 +54,6 @@ mod sandbox_composition;
 mod sandbox_egress_proxy_task;
 mod sandbox_quota;
 mod sandbox_reaper_task;
-mod sandbox_secret_lease_task;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;

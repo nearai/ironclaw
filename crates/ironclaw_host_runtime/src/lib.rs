@@ -128,10 +128,8 @@ pub use sandbox_process::{
     RebornSandboxNetworkBroker, RebornSandboxScopeKey, RebornSandboxSecretBroker,
     RebornSandboxUserKey, RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
     SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
-    SandboxReaper, SandboxReaperConfig, SandboxSecretLease, SandboxSecretLeaseError,
-    SandboxSecretLeaseResolver, SandboxSecretLeaseServer, connect_docker_with_retry,
-    sandbox_allowed_domains, sandbox_docker_readiness, sandbox_extra_allowed_domains,
-    sandbox_network_policy,
+    SandboxReaper, SandboxReaperConfig, connect_docker_with_retry, sandbox_allowed_domains,
+    sandbox_docker_readiness, sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 pub use services::{
     ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,

@@ -47,24 +47,6 @@ impl RebornSandboxUserKey {
     pub fn container_name(&self) -> String {
         format!("ironclaw-reborn-sandbox-user-{}", &self.digest[..24])
     }
-
-    /// Per-user Unix domain socket path under `sockets_root`
-    /// (`sockets_root/users/<24-hex-char-digest>/broker.sock`), for the
-    /// Phase C secret-lease daemon.
-    ///
-    /// Deliberately NOT `workspace_path`'s full 64-hex-char digest:
-    /// `sockaddr_un.sun_path` is capped at 104 bytes on macOS / 108 on
-    /// Linux — far tighter than an ordinary filesystem path budget — and
-    /// the full digest routinely blows that budget once nested under any
-    /// real application data root. Reuses the same 24-hex-char truncation
-    /// `container_name` already established for an analogous OS
-    /// length constraint (Docker container names).
-    pub fn socket_path(&self, sockets_root: &Path) -> PathBuf {
-        sockets_root
-            .join("users")
-            .join(&self.digest[..24])
-            .join("broker.sock")
-    }
 }
 
 #[cfg(test)]
@@ -151,33 +133,5 @@ mod tests {
             via_pair.workspace_path(root)
         );
         assert_eq!(via_scope.container_name(), via_pair.container_name());
-    }
-
-    #[test]
-    fn socket_path_uses_a_short_digest_and_stays_under_sun_path_limits() {
-        // Regression: `workspace_path`'s full 64-hex-char digest routinely
-        // exceeds `sockaddr_un.sun_path`'s 104-byte (macOS) / 108-byte
-        // (Linux) cap once nested under any real application data root —
-        // this is exactly what broke `spawn_sandbox_secret_lease_socket`'s
-        // bind before `socket_path` existed.
-        let root = Path::new("/var/lib/ironclaw/sandbox-workspaces/.ironclaw-broker");
-        let key = RebornSandboxUserKey::from_scope(&scope("tenant", "user", None, None));
-        let socket_path = key.socket_path(root);
-
-        assert!(
-            socket_path.to_string_lossy().len() < 100,
-            "socket path too long for sockaddr_un.sun_path: {socket_path:?}"
-        );
-        assert!(socket_path.starts_with(root.join("users")));
-        assert_eq!(socket_path.file_name().unwrap(), "broker.sock");
-    }
-
-    #[test]
-    fn socket_path_isolates_users_within_same_tenant() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxUserKey::from_scope(&scope("tenant", "user-a", None, None));
-        let right = RebornSandboxUserKey::from_scope(&scope("tenant", "user-b", None, None));
-
-        assert_ne!(left.socket_path(root), right.socket_path(root));
     }
 }

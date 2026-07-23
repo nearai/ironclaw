@@ -31,7 +31,6 @@ mod network_allowlist;
 mod reaper;
 mod registry;
 mod scope_key;
-mod secret_lease;
 pub(crate) mod shell_limits;
 mod user_key;
 
@@ -50,10 +49,6 @@ pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
 use registry::BackgroundJobRegistry;
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
-pub use secret_lease::{
-    SandboxSecretLease, SandboxSecretLeaseError, SandboxSecretLeaseResolver,
-    SandboxSecretLeaseServer,
-};
 pub use user_key::RebornSandboxUserKey;
 
 /// Docker label prefix for container metadata attached by
