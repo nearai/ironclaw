@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from emulate_provider import google_headers, slack_post
+from emulate_provider import google_headers, slack_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
 from reborn_webui_harness import (
     YOLO_PROFILE,
@@ -360,6 +360,7 @@ async def _seed_github_account(base_url: str) -> None:
             f"{base_url}/api/webchat/v2/extensions/github/setup",
             json={
                 "action": "submit",
+                "client_action_id": client_action_id(),
                 "payload": {
                     "secrets": {"github_runtime_token": EMULATE_GITHUB_BEARER},
                     "fields": {},
@@ -558,11 +559,23 @@ def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> N
 def _normalize_google_arguments(trace: dict, case: str) -> None:
     created_document = False
     created_spreadsheet = False
+    created_document_content = next(
+        (
+            call["arguments"].get("text", "")
+            for step in trace["steps"]
+            for call in step["response"].get("tool_calls", [])
+            if call["name"] == "google-docs__insert_text"
+        ),
+        "",
+    )
     seeded_spreadsheet = (
         "sheet_reborn_bug_tracker" if case.startswith("qa_7") else "sheet_reborn_abc"
     )
 
     for step in trace["steps"]:
+        if "tool_calls" not in step["response"]:
+            continue
+        normalized_calls = []
         for call in step["response"].get("tool_calls", []):
             name = call["name"]
             arguments = call["arguments"]
@@ -570,17 +583,23 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
 
             if name == "google-docs__create_document":
                 created_document = True
+                call["name"] = "google-drive__upload_file"
+                call["arguments"] = {
+                    "name": arguments["title"],
+                    "content": created_document_content,
+                    "mime_type": "text/plain",
+                }
+            elif name == "google-docs__insert_text":
+                continue
             elif name.startswith("google-docs__") and "document_id" in arguments:
-                arguments["document_id"] = (
-                    _result_binding(
-                        "google-docs__create_document",
-                        "documentId",
-                        "document_id",
-                        "id",
+                call["name"] = "google-drive__download_file"
+                call["arguments"] = {
+                    "file_id": (
+                        _result_binding("google-drive__upload_file", "id", "file_id")
+                        if created_document
+                        else "drv_near_ai_strategy"
                     )
-                    if created_document
-                    else "doc_reborn_strategy"
-                )
+                }
 
             if name == "google-sheets__create_spreadsheet":
                 created_spreadsheet = True
@@ -605,6 +624,14 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
                 arguments["message_id"] = "msg_emulate_near_inbound"
             elif name == "google-drive__download_file":
                 arguments["file_id"] = "drv_pepsico_account_brief"
+            normalized_calls.append(call)
+        step["response"]["tool_calls"] = normalized_calls
+    trace["steps"] = [
+        step
+        for step in trace["steps"]
+        if step["response"].get("type") != "tool_calls"
+        or step["response"].get("tool_calls")
+    ]
 
 
 def _normalize_slack_arguments(
@@ -751,6 +778,29 @@ def _recorded_provider_calls(trace: dict) -> list[dict]:
     ]
 
 
+def _raw_trace_uses_tool_prefix(trace_path: Path, prefix: str) -> bool:
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    return any(
+        call["name"].startswith(prefix)
+        for step in trace["steps"]
+        for call in step["response"].get("tool_calls", [])
+    )
+
+
+async def _emulate_google_supports_sheets(emulate_url: str) -> bool:
+    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
+        response = await client.get(
+            f"{emulate_url}/v4/spreadsheets/sheet_reborn_abc"
+        )
+    return response.status_code != 404
+
+
+async def _emulate_slack_supports_extension_reads(emulate_url: str) -> bool:
+    async with httpx.AsyncClient(headers=slack_headers(), timeout=15) as client:
+        response = await client.get(f"{emulate_url}/api/auth.test")
+    return response.status_code != 404
+
+
 async def _assert_google_provider_outcome(
     emulate_url: str, case: str, trace: dict
 ) -> None:
@@ -857,6 +907,18 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     """Every harvested provider journey executes through standalone Reborn."""
     server = reborn_qa_emulate_provider_server["base_url"]
     trace_path = TRACE_DIR / f"{case}.json"
+    if _raw_trace_uses_tool_prefix(
+        trace_path, "google-sheets__"
+    ) and not await _emulate_google_supports_sheets(
+        reborn_qa_emulate_provider_server["emulate_google_url"]
+    ):
+        pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
+    if _raw_trace_uses_tool_prefix(
+        trace_path, "slack__"
+    ) and not await _emulate_slack_supports_extension_reads(
+        reborn_qa_emulate_provider_server["emulate_slack_url"]
+    ):
+        pytest.skip("Emulate 0.7.0 does not expose Slack Web API GET routes")
     trace = await _load_trace(
         mock_llm_server,
         trace_path,

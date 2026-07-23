@@ -181,6 +181,52 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
         }
     );
 
+    for (command, expected_action) in [
+        (
+            "extension_install",
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                    LifecyclePackageKind::Extension,
+                    "github",
+                )
+                .unwrap(),
+            },
+        ),
+        (
+            "extension_activate",
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                    LifecyclePackageKind::Extension,
+                    "github",
+                )
+                .unwrap(),
+            },
+        ),
+        (
+            "extension_remove",
+            LifecycleProductAction::ExtensionRemove {
+                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                    LifecyclePackageKind::Extension,
+                    "github",
+                )
+                .unwrap(),
+            },
+        ),
+    ] {
+        let payload = InboundCommandPayload::new(
+            command,
+            r#"{"extension_id":"github"}"#,
+            ProductTriggerReason::BotCommand,
+        )
+        .expect("valid command payload");
+        assert_eq!(
+            ProductCommand::from_payload(&payload).expect("parse extension lifecycle command"),
+            ProductCommand::Lifecycle {
+                action: expected_action
+            }
+        );
+    }
+
     for arguments in [r#"{"id":"review-helper"}"#, r#"{"name":"review-helper"}"#] {
         let payload =
             InboundCommandPayload::new("skill_remove", arguments, ProductTriggerReason::BotCommand)

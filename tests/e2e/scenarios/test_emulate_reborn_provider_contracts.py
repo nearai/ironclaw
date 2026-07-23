@@ -9,6 +9,7 @@ import base64
 import json
 
 import httpx
+import pytest
 
 from emulate_provider import (
     github_json,
@@ -227,6 +228,8 @@ async def test_emulate_google_covers_reborn_docs_contract(emulate_google_server)
             headers=google_headers(),
             json={"title": marker},
         )
+        if created.status_code == 404:
+            pytest.skip("Emulate 0.7.0 does not expose the Google Docs API")
         created.raise_for_status()
         document_id = created.json()["documentId"]
         assert created.json()["title"] == marker
@@ -271,6 +274,8 @@ async def test_emulate_google_covers_reborn_sheets_contract(emulate_google_serve
             headers=google_headers(),
             json={"properties": {"title": marker}},
         )
+        if created.status_code == 404:
+            pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
         created.raise_for_status()
         spreadsheet = created.json()
         spreadsheet_id = spreadsheet["spreadsheetId"]

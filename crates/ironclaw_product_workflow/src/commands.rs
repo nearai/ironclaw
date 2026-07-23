@@ -349,8 +349,11 @@ fn extension_package_command(
 
 fn lifecycle_ref_argument(payload: &InboundCommandPayload) -> Result<String, String> {
     let args = payload.arguments.trim();
-    json_or_whitespace_field(args, &["id"], || {
-        format!("{}.id is required", payload.command)
+    json_or_whitespace_field(args, &["id", "extension_id"], || {
+        format!(
+            "{}.id or {}.extension_id is required",
+            payload.command, payload.command
+        )
     })
 }
 

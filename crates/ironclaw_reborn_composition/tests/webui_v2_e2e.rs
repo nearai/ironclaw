@@ -1577,7 +1577,10 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
+            json!({
+                "package_ref": package_ref,
+                "client_action_id": "webui-v2-gmail-install-before-activate"
+            }),
         ))
         .await
         .expect("install Gmail oneshot");
@@ -1606,7 +1609,9 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/gmail/activate",
-            json!({}),
+            json!({
+                "client_action_id": "webui-v2-gmail-activate-after-setup"
+            }),
         ))
         .await
         .expect("activate Gmail oneshot");
@@ -1642,7 +1647,10 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
+            json!({
+                "package_ref": package_ref,
+                "client_action_id": "webui-v2-gmail-install-without-provider"
+            }),
         ))
         .await
         .expect("install Gmail oneshot");
@@ -1658,7 +1666,9 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/gmail/activate",
-            json!({}),
+            json!({
+                "client_action_id": "webui-v2-gmail-activate-without-provider"
+            }),
         ))
         .await
         .expect("activate Gmail oneshot");
@@ -1828,7 +1838,10 @@ async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
+            json!({
+                "package_ref": package_ref,
+                "client_action_id": "webui-v2-google-drive-install-before-setup"
+            }),
         ))
         .await
         .expect("install Google Drive oneshot");

@@ -5321,6 +5321,15 @@ pub(crate) fn production_skill_management_mount_view(
     ])
 }
 
+pub(crate) fn production_system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError>
+{
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/system/extensions")?,
+        VirtualPath::new("/system/extensions")?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
 async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F>,

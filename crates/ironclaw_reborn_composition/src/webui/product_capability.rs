@@ -28,6 +28,7 @@ use ironclaw_product_workflow::{
 
 use crate::factory::{
     RebornProductionRuntimeServices, RebornServices, production_skill_management_mount_view,
+    production_system_extensions_lifecycle_mount_view,
 };
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -250,8 +251,16 @@ fn product_invocation_mounts(
         return Ok(MountView::default());
     };
     if is_extension_lifecycle_capability(&descriptor.id) {
-        return crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
-            .map_err(RebornServicesError::internal_from);
+        return match mounts {
+            ProductCapabilityMounts::LocalDev => {
+                crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+                    .map_err(RebornServicesError::internal_from)
+            }
+            ProductCapabilityMounts::Production => {
+                production_system_extensions_lifecycle_mount_view()
+                    .map_err(RebornServicesError::internal_from)
+            }
+        };
     }
     if !is_skill_management_capability(&descriptor.id) {
         return Ok(MountView::default());
@@ -614,6 +623,18 @@ mod tests {
                 mounts,
                 crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
                     .expect("expected extension lifecycle mounts")
+            );
+
+            let production_mounts = product_invocation_mounts(
+                &resource_scope(),
+                Some(&descriptor),
+                ProductCapabilityMounts::Production,
+            )
+            .expect("production extension lifecycle product mounts");
+            assert_eq!(
+                production_mounts,
+                production_system_extensions_lifecycle_mount_view()
+                    .expect("expected production extension lifecycle mounts")
             );
         }
     }
