@@ -590,18 +590,18 @@ pub struct ExtensionIngressParts {
     pub registry: Arc<ExtensionIngressRegistry>,
     /// The router's `reply_context` storage — shared with the delivery
     /// coordinator's read half (ING-11).
-    pub reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
+    pub reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStorePort>,
 }
 
 /// Build the generic ingress router over deployment bindings and the generic
 /// host's compatibility snapshot watch.
 /// `reply_context` is the durable ING-11 store (production: the
-/// filesystem-backed [`crate::extension_host::reply_contexts::FilesystemReplyContextStore`],
+/// filesystem-backed [`crate::extension_host::reply_contexts::ReplyContextStore`],
 /// so contexts stored before admission survive a restart to delivery time).
 pub(crate) fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
     deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
-    reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
+    reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStorePort>,
 ) -> ExtensionIngressParts {
     let registry = Arc::new(ExtensionIngressRegistry::default());
     let router = Arc::new(

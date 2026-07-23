@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
+// arch-exempt: large_file, mechanical lease-store test repoint to CapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 
 use super::legacy_capability_fixture_to_v2;
 use std::{
@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    FilesystemCapabilityLeaseStore, GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
+    CapabilityLeaseStore, GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
     in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{
@@ -47,22 +47,22 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_processes::{
-    BackgroundFailureStage, BackgroundProcessManager, FilesystemProcessResultStore,
-    FilesystemProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    BackgroundFailureStage, BackgroundProcessManager, ProcessError, ProcessExecutionRequest,
+    ProcessExecutionResult, ProcessExecutor, ProcessResultStore, ProcessResultStorePort,
+    ProcessStart, ProcessStatus, ProcessStore, ProcessStorePort,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, RunRecord, RunStart, RunStateApprovalStore,
-    RunStateError, RunStateStore, RunStatus,
+    ApprovalRecord, ApprovalRequestStorePort, RunRecord, RunStart, RunStateApprovalStorePort,
+    RunStateError, RunStateStorePort, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -151,8 +151,8 @@ impl TurnRunWakeNotifier for RecordingTurnRunWakeNotifier {
 pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block<
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 >(
     services: HostRuntimeServices<F, G, S, R>,
     message: &str,
@@ -185,7 +185,7 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             assert_eq!(combined_store.combined_calls(), 1);
             assert_eq!(combined_store.separate_save_calls(), 0);
-            let run_record = RunStateStore::get(
+            let run_record = RunStateStorePort::get(
                 combined_store.as_ref(),
                 &context.resource_scope,
                 context.invocation_id,
@@ -199,7 +199,7 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
                 Some(gate.approval_request_id)
             );
             assert!(
-                ApprovalRequestStore::get(
+                ApprovalRequestStorePort::get(
                     combined_store.as_ref(),
                     &context.resource_scope,
                     gate.approval_request_id,
@@ -239,15 +239,14 @@ pub(crate) fn assert_completed_outcome(
 pub(crate) type InMemoryHostRuntimeServices = HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<InMemoryBackend>,
-    FilesystemProcessResultStore<InMemoryBackend>,
+    ProcessStore<InMemoryBackend>,
+    ProcessResultStore<InMemoryBackend>,
 >;
 
 pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
-    pub(crate) runs:
-        ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    pub(crate) runs: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
     pub(crate) approvals:
-        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+        ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     pub(crate) combined_calls: AtomicUsize,
     pub(crate) separate_save_calls: AtomicUsize,
 }
@@ -272,7 +271,7 @@ impl InMemoryRecordingCombinedRunStateApprovalStore {
 }
 
 #[async_trait]
-impl RunStateStore for InMemoryRecordingCombinedRunStateApprovalStore {
+impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.runs.start(start).await
     }
@@ -331,7 +330,7 @@ impl RunStateStore for InMemoryRecordingCombinedRunStateApprovalStore {
 }
 
 #[async_trait]
-impl ApprovalRequestStore for InMemoryRecordingCombinedRunStateApprovalStore {
+impl ApprovalRequestStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
     async fn save_pending(
         &self,
         scope: ResourceScope,
@@ -382,7 +381,7 @@ impl ApprovalRequestStore for InMemoryRecordingCombinedRunStateApprovalStore {
 }
 
 #[async_trait]
-impl RunStateApprovalStore for InMemoryRecordingCombinedRunStateApprovalStore {
+impl RunStateApprovalStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
     async fn save_pending_and_block_approval(
         &self,
         scope: ResourceScope,
@@ -402,11 +401,10 @@ impl RunStateApprovalStore for InMemoryRecordingCombinedRunStateApprovalStore {
 pub(crate) struct ApprovalResumeFixture {
     pub(crate) services: InMemoryHostRuntimeServices,
     pub(crate) run_state:
-        Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    pub(crate) approval_requests: Arc<
-        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
-    >,
-    pub(crate) capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
+        Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    pub(crate) approval_requests:
+        Arc<ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>>,
+    pub(crate) capability_leases: Arc<CapabilityLeaseStore<InMemoryBackend>>,
     pub(crate) events: InMemoryEventSink,
 }
 
@@ -1088,7 +1086,7 @@ pub(crate) async fn spawn_obligation_fixture_with_result_store<R>(
     result_store: Arc<R>,
 ) -> SpawnObligationFixture
 where
-    R: ProcessResultStore + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     spawn_obligation_fixture_with_process_store_and_result_store(
         reservation_id,
@@ -1108,15 +1106,15 @@ pub(crate) async fn spawn_obligation_fixture_with_process_store_and_result_store
     result_store: Arc<R>,
 ) -> SpawnObligationFixture
 where
-    P: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    P: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
         panic!("spawn tests must not invoke the foreground dispatcher")
     }));
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -1259,7 +1257,7 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
     }
 }
 
-/// Real `FilesystemProcessResultStore` over a [`FaultInjecting`] backend armed
+/// Real `ProcessResultStore` over a [`FaultInjecting`] backend armed
 /// to fail every result write, replacing the whole-trait
 /// `FailingProcessResultStore` fake. Both `complete` (first `put` =
 /// `write_output`) and `fail` (first `put` = `write_result`) hit the injected
@@ -1267,19 +1265,19 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
 /// maps to `ProcessError::Filesystem`. Returns the store plus the fault handle
 /// so a test can observe the write attempt (`backend.count(WriteFile)`).
 pub(crate) fn result_store_failing_writes() -> (
-    Arc<FilesystemProcessResultStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<ProcessResultStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
         Fault::on(FilesystemOperation::WriteFile).backend("injected process-result write failure"),
     ));
-    let store = Arc::new(FilesystemProcessResultStore::new(scoped_processes_fs(
+    let store = Arc::new(ProcessResultStore::new(scoped_processes_fs(
         backend.clone(),
     )));
     (store, backend)
 }
 
-/// Real `FilesystemProcessStore` over a [`FaultInjecting`] backend armed to
+/// Real `ProcessStore` over a [`FaultInjecting`] backend armed to
 /// fail the terminal status transition's write, replacing the whole-trait
 /// `FailingTerminalProcessStore` fake. `start`'s record write is the 1st
 /// backend write and succeeds; the terminal transition (`complete` or `fail`,
@@ -1287,7 +1285,7 @@ pub(crate) fn result_store_failing_writes() -> (
 /// is faulted, surfacing as `ProcessError::Filesystem`. `get` /
 /// `records_for_scope` still read the live `Running` record.
 pub(crate) fn terminal_failing_process_store() -> (
-    Arc<FilesystemProcessStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<ProcessStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let backend = Arc::new(
@@ -1297,9 +1295,7 @@ pub(crate) fn terminal_failing_process_store() -> (
                 .backend("injected terminal transition write failure"),
         ),
     );
-    let store = Arc::new(FilesystemProcessStore::new(scoped_processes_fs(
-        backend.clone(),
-    )));
+    let store = Arc::new(ProcessStore::new(scoped_processes_fs(backend.clone())));
     (store, backend)
 }
 
@@ -1318,7 +1314,7 @@ fn scoped_processes_fs(
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-/// Real `FilesystemSecretStore` over a [`FaultInjecting`] backend armed to fail
+/// Real `SecretStore` over a [`FaultInjecting`] backend armed to fail
 /// every secret read, replacing the whole-trait, call-counting
 /// `CountingErrorSecretStore` fake. `metadata()` runs its genuine
 /// `read_secret` -> `get` path and the injected `FilesystemError::Backend` maps
@@ -1327,7 +1323,7 @@ fn scoped_processes_fs(
 /// store. Returns the store plus the fault handle, so a test can observe the
 /// read probes (`backend.count(ReadFile)`) instead of a bespoke counter.
 pub(crate) fn secret_store_failing_reads() -> (
-    Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<SecretStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let backend = Arc::new(
@@ -1337,7 +1333,7 @@ pub(crate) fn secret_store_failing_reads() -> (
                 .backend("injected secret read failure"),
         ),
     );
-    let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
+    let store = Arc::new(SecretStore::ephemeral_over(backend.clone()));
     (store, backend)
 }
 
@@ -1439,7 +1435,7 @@ impl ironclaw_processes::ProcessManager for FailingSpawnManager {
 }
 
 pub(crate) async fn wait_for_status(
-    store: &dyn ProcessStore,
+    store: &dyn ProcessStorePort,
     scope: &ResourceScope,
     process_id: ProcessId,
     status: ProcessStatus,
@@ -1459,7 +1455,7 @@ pub(crate) async fn wait_for_sandbox_process_result(
     executor: &RecordingSandboxProcessExecutor,
     scope: &ResourceScope,
     process_id: ProcessId,
-    result_store: &dyn ProcessResultStore,
+    result_store: &dyn ProcessResultStorePort,
 ) {
     for _ in 0..100 {
         let requests = executor.requests();

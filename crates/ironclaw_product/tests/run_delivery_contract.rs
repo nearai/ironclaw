@@ -15,7 +15,7 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, FilesystemOutboundStateStore,
+    DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore,
     OutboundStateStore, RunDeliveryCleanupRequest, RunFinalReplyDestination,
     RunFinalReplyTargetRecord, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
     TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
@@ -556,7 +556,7 @@ struct Harness {
     observer: Arc<RunDeliveryObserver>,
     connection_notices: ChannelConnectionNoticePolicy,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -598,7 +598,7 @@ fn build_harness_with_prompt(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -615,7 +615,7 @@ fn build_harness_with_prompt(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         coordinator,
@@ -1162,8 +1162,8 @@ fn triggered_external_delivery_target_preserves_typed_destination_semantics() {
 struct TriggeredHarness {
     driver: TriggeredRunDeliveryDriver,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    delivery_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -1201,7 +1201,7 @@ fn build_triggered_harness_with_prompt(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -1218,7 +1218,7 @@ fn build_triggered_harness_with_prompt(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         coordinator,
@@ -1253,7 +1253,7 @@ fn build_triggered_harness_with_prompt(
 }
 
 async fn seed_preference(
-    store: &FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
 ) {
     store
         .put_communication_preference(CommunicationPreferenceRecord {
@@ -1773,7 +1773,7 @@ fn build_event_delivery_handler(
     binding: Arc<EffectiveMembershipBindingService>,
     adapter: Arc<RecordingChannelAdapter>,
     threads: Arc<InMemorySessionThreadService>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
 ) -> Arc<RunDeliveryEventHandler> {
     build_event_delivery_handler_for_extension(
@@ -1795,7 +1795,7 @@ fn build_event_delivery_handler_for_extension<T>(
     binding: Arc<EffectiveMembershipBindingService>,
     adapter: Arc<RecordingChannelAdapter>,
     threads: Arc<InMemorySessionThreadService>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     extension_id: &str,
     installation_id: &str,
@@ -1805,7 +1805,7 @@ where
     T: TurnCoordinator + 'static,
 {
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -1820,7 +1820,7 @@ where
             as Arc<dyn ironclaw_product::ConversationBindingService>,
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         coordinator,
@@ -1853,8 +1853,8 @@ struct TriggeredLifecycleHarness {
     router: Arc<RunDeliveryEventRouter>,
     turns: Arc<EventTurnCoordinator>,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    delivery_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     threads: Arc<InMemorySessionThreadService>,
     target_resolver: Arc<StaticTriggeredTargetResolver>,
     run_id: TurnRunId,
@@ -1876,7 +1876,7 @@ fn build_triggered_lifecycle_harness() -> TriggeredLifecycleHarness {
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -1893,7 +1893,7 @@ fn build_triggered_lifecycle_harness() -> TriggeredLifecycleHarness {
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         coordinator,
@@ -2602,7 +2602,7 @@ async fn durable_handoff_drain_reaches_later_page_when_first_page_is_deferred() 
     let router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(turns as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     router.register(EXTENSION_ID, &handler);
     router.wait_until_durable_replay_idle().await;
@@ -2633,7 +2633,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     let threads = Arc::new(InMemorySessionThreadService::default());
     let filesystem = ironclaw_outbound::test_support::in_memory_backed_outbound_filesystem();
     #[allow(clippy::disallowed_methods)]
-    let store = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&filesystem)));
+    let store = Arc::new(OutboundStateStore::new(Arc::clone(&filesystem)));
     let source_handler = build_event_delivery_handler_for_extension(
         Arc::clone(&source_turns),
         Arc::clone(&binding),
@@ -2709,7 +2709,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     let replay_router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     // Destination registration can race source graph startup. A destination
     // send alone cannot settle the handoff while source cleanup is absent.
@@ -2757,7 +2757,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     );
 
     #[allow(clippy::disallowed_methods)]
-    let reopened_store = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&filesystem)));
+    let reopened_store = Arc::new(OutboundStateStore::new(Arc::clone(&filesystem)));
     let reopened_turns = Arc::new(EventTurnCoordinator::new(completed.clone()));
     let reopened_source_handler = build_event_delivery_handler(
         Arc::clone(&reopened_turns),
@@ -2781,7 +2781,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     let reopened_router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&reopened_turns) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&reopened_store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&reopened_store) as Arc<dyn OutboundStateStorePort>,
     );
     source_adapter.reports.lock().expect("reports").extend([
         DeliveryReport {
@@ -2856,7 +2856,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     );
 
     #[allow(clippy::disallowed_methods)]
-    let settled_store = Arc::new(FilesystemOutboundStateStore::new(filesystem));
+    let settled_store = Arc::new(OutboundStateStore::new(filesystem));
     let settled_turns = Arc::new(EventTurnCoordinator::new(completed.clone()));
     let settled_source_handler = build_event_delivery_handler(
         Arc::clone(&settled_turns),
@@ -2880,7 +2880,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     let settled_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&settled_turns) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&settled_store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&settled_store) as Arc<dyn OutboundStateStorePort>,
     );
     settled_router.register(DESTINATION_EXTENSION_ID, &settled_destination_handler);
     settled_router.wait_until_durable_replay_idle().await;
@@ -2951,7 +2951,7 @@ async fn completed_reply_replays_after_crash_before_volatile_observer_and_reopen
 
     let filesystem = ironclaw_outbound::test_support::in_memory_backed_outbound_filesystem();
     #[allow(clippy::disallowed_methods)]
-    let first_store = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&filesystem)));
+    let first_store = Arc::new(OutboundStateStore::new(Arc::clone(&filesystem)));
     let first_handler = build_event_delivery_handler(
         Arc::clone(&turns),
         Arc::clone(&binding),
@@ -2966,7 +2966,7 @@ async fn completed_reply_replays_after_crash_before_volatile_observer_and_reopen
     let first_router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&first_store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&first_store) as Arc<dyn OutboundStateStorePort>,
     );
     first_router.register(EXTENSION_ID, &first_handler);
     first_router.wait_until_durable_replay_idle().await;
@@ -2996,7 +2996,7 @@ async fn completed_reply_replays_after_crash_before_volatile_observer_and_reopen
     // Reopen the durable store and replay the same authoritative log. The
     // cursor and deterministic outbound attempt prevent a duplicate send.
     #[allow(clippy::disallowed_methods)]
-    let reopened_store = Arc::new(FilesystemOutboundStateStore::new(filesystem));
+    let reopened_store = Arc::new(OutboundStateStore::new(filesystem));
     let reopened_handler = build_event_delivery_handler(
         Arc::clone(&turns),
         binding,
@@ -3008,7 +3008,7 @@ async fn completed_reply_replays_after_crash_before_volatile_observer_and_reopen
     let reopened_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
-        reopened_store as Arc<dyn OutboundStateStore>,
+        reopened_store as Arc<dyn OutboundStateStorePort>,
     );
     reopened_router.register(EXTENSION_ID, &reopened_handler);
     reopened_router.wait_until_durable_replay_idle().await;
@@ -3034,9 +3034,9 @@ async fn completed_reply_replay_is_duplicate_safe_across_workers() {
     seed_final_message(&threads, run_id, "one provider send").await;
     let filesystem = ironclaw_outbound::test_support::in_memory_backed_outbound_filesystem();
     #[allow(clippy::disallowed_methods)]
-    let store_a = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&filesystem)));
+    let store_a = Arc::new(OutboundStateStore::new(Arc::clone(&filesystem)));
     #[allow(clippy::disallowed_methods)]
-    let store_b = Arc::new(FilesystemOutboundStateStore::new(filesystem));
+    let store_b = Arc::new(OutboundStateStore::new(filesystem));
     let handler_a = build_event_delivery_handler(
         Arc::clone(&turns),
         Arc::clone(&binding),
@@ -3056,12 +3056,12 @@ async fn completed_reply_replay_is_duplicate_safe_across_workers() {
     let router_a = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
-        store_a as Arc<dyn OutboundStateStore>,
+        store_a as Arc<dyn OutboundStateStorePort>,
     );
     let router_b = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(turns as Arc<dyn TurnCoordinator>),
-        store_b as Arc<dyn OutboundStateStore>,
+        store_b as Arc<dyn OutboundStateStorePort>,
     );
     router_a.register(EXTENSION_ID, &handler_a);
     router_b.register(EXTENSION_ID, &handler_b);
@@ -3116,7 +3116,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     let router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     router.register(EXTENSION_ID, &handler);
     router.wait_until_durable_replay_idle().await;
@@ -3148,7 +3148,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     let recovery_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(turns as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     recovery_router.register(EXTENSION_ID, &recovery_handler);
     recovery_router.wait_until_durable_replay_idle().await;
@@ -3189,7 +3189,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     let later_router = RunDeliveryEventRouter::new(
         later_event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(later_turns as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     later_router.register(EXTENSION_ID, &later_handler);
     later_router.wait_until_durable_replay_idle().await;
@@ -3235,7 +3235,7 @@ async fn completed_reply_replay_fails_loud_without_skipping_a_retention_gap() {
             TurnRunId::new(),
             ProductConversationRouteKind::Direct,
         ))) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     router.wait_until_durable_replay_idle().await;
     assert_eq!(
@@ -3278,7 +3278,7 @@ async fn completed_reply_replay_settles_without_send_after_membership_removal() 
     let router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(turns as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     router.register(EXTENSION_ID, &handler);
     router.wait_until_durable_replay_idle().await;
@@ -3338,7 +3338,7 @@ async fn assert_completed_run_materializes_no_channel_handoff(state: TurnRunStat
     let router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(turns as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     router.register(EXTENSION_ID, &handler);
     router.wait_until_durable_replay_idle().await;
@@ -3435,7 +3435,7 @@ async fn completed_final_delivery_dedups_across_a_post_completed_cursor_advance(
     let router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
         run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     router.register(EXTENSION_ID, &handler);
     router.wait_until_durable_replay_idle().await;
@@ -3467,7 +3467,7 @@ async fn completed_final_delivery_dedups_across_a_post_completed_cursor_advance(
     let recovery_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
         run_state_store(turns as Arc<dyn TurnCoordinator>),
-        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
     );
     recovery_router.register(EXTENSION_ID, &recovery_handler);
     recovery_router.wait_until_durable_replay_idle().await;
@@ -3516,7 +3516,7 @@ async fn accepted_user_message_reconciles_lifecycle_event_after_source_route_com
 }
 
 async fn wait_for_outcome(
-    store: &FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
     run_id: TurnRunId,
 ) -> TriggeredRunDeliveryOutcomeKind {
     for _ in 0..500 {

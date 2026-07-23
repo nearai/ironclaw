@@ -225,7 +225,7 @@ async fn trigger_targets_validate_current_authority_and_inherit_the_exact_source
     ]
     .into_iter()
     .collect();
-    let outbound_store: Arc<dyn OutboundStateStore> =
+    let outbound_store: Arc<dyn OutboundStateStorePort> =
         Arc::new(in_memory_backed_outbound_state_store());
     let external_id = RebornOutboundDeliveryTargetId::new("target:external").expect("target id");
     let external_binding = ReplyTargetBindingRef::new("reply:sealed-external").expect("binding");

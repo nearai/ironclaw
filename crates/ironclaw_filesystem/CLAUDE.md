@@ -39,7 +39,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
   path prevention).
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
   fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
-  wrap the real backend in it (`FilesystemSecretStore::ephemeral_over`,
+  wrap the real backend in it (`SecretStore::ephemeral_over`,
   `FaultInjecting::new(InMemoryBackend::new()).with_fault(...)`) and drive their
   **genuine** `Filesystem*Store` against injected backend faults — exercising
   the store's real encryption/CAS/`FilesystemError -> DomainError` mapping.

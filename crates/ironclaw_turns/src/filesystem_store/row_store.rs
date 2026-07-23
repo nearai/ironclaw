@@ -72,7 +72,7 @@ impl RowCollection {
     }
 }
 
-// #6263 Step 5b: `FilesystemTurnStateRowStore` no longer has a durability-mode
+// #6263 Step 5b: `TurnStateRowStore` no longer has a durability-mode
 // choice. A mutation whose resulting run status is NOT
 // [`is_recoverability_critical`](crate::is_recoverability_critical) returns
 // `Ok` immediately after enqueue, WITHOUT awaiting the durable ack; the
@@ -96,7 +96,7 @@ impl RowCollection {
 /// Transitions still delegate to [`TurnStateEngine`]; only the durable
 /// representation changes from whole-snapshot CAS to a typed append log plus a
 /// process-local hot snapshot cache.
-pub struct FilesystemTurnStateRowStore<F>
+pub struct TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {
@@ -145,7 +145,7 @@ struct RunStateTransitionTarget {
     retired_status: TurnStatus,
 }
 
-impl<F> FilesystemTurnStateRowStore<F>
+impl<F> TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {

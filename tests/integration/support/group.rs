@@ -54,7 +54,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_llm::testing::provider_chain_over;
@@ -75,7 +75,7 @@ use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryResourceGovernor,
+    BudgetEventSink, BudgetGateStorePort, InMemoryBudgetEventSink, InMemoryResourceGovernor,
     ResourceAccount, ResourceGovernor,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
@@ -89,8 +89,7 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_runner::subagent::{
     await_edge::{
-        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-        store::FilesystemAwaitEdgeStore,
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
     goal_store::in_memory_backed_subagent_goal_store,
@@ -102,8 +101,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateRowStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
-    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
+    InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
+    TurnStateRowStore, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -205,9 +204,9 @@ pub(crate) struct GroupSharedStorage {
     /// model hot path.
     pub(crate) scope_gateway: Arc<ScopeRegistryGateway>,
     /// The group's single shared turn-state store. All threads share one
-    /// `FilesystemTurnStateRowStore` (isolation is by `run_id`, not by path —
+    /// `TurnStateRowStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
-    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
     /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
     /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
     /// rebuild the identical scoped path independently, instead of
@@ -344,7 +343,9 @@ impl GroupCapability {
     /// re-read an auth block's `credential_requirements` from. `None` only for
     /// the `Recording` (echo) backend; the host-runtime backend always resolves
     /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
-    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+    pub(crate) fn gate_record_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
             Self::Recording => None,
@@ -352,7 +353,7 @@ impl GroupCapability {
     }
 
     /// E-DURABLE core: assert `extension_id` is present in a FRESHLY reopened
-    /// `ExtensionInstallationStore` at this backend's on-disk `storage_root`
+    /// `ExtensionInstallationStorePort` at this backend's on-disk `storage_root`
     /// (a handle independent of the live `Arc`) — proving the install
     /// persisted to disk, not just to in-memory state. One implementation
     /// behind both the harness- and group-level
@@ -592,7 +593,7 @@ impl RebornIntegrationGroup {
 
     /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
     /// owner's `(tenant, user)` scope over the shared CAS-persisted
-    /// `AutoApproveSettingStore`. In a `multiuser_approvals` group (built with
+    /// `AutoApproveSettingStorePort`. In a `multiuser_approvals` group (built with
     /// `with_run_owner_scoped_capability_dispatch`), a turn OWNED by `owner`
     /// then dispatches its capability without raising an approval gate, while
     /// any OTHER owner's identical call still gates — the per-actor isolation
@@ -609,7 +610,7 @@ impl RebornIntegrationGroup {
     }
 
     /// C-MULTIUSER: set a SPECIFIC run owner's always-allow OFF over the shared
-    /// `AutoApproveSettingStore`. Auto-approve defaults ON when a user has no
+    /// `AutoApproveSettingStorePort`. Auto-approve defaults ON when a user has no
     /// record (`AUTO_APPROVE_DEFAULT_ENABLED = true`, production), so a per-actor
     /// isolation test that needs owner B to still GATE must give B its own
     /// explicit OFF setting — exactly as `live_approvals` disables its dispatch
@@ -830,9 +831,8 @@ impl RebornIntegrationGroupBuilder {
         }
         let turns_scoped_fs =
             scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
-        let turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs))
-                .with_limits(turn_state_limits),
+        let turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>> = Arc::new(
+            TurnStateRowStore::new(Arc::clone(&turns_scoped_fs)).with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = in_memory_checkpoint_state_store();
@@ -885,8 +885,7 @@ impl RebornIntegrationGroupBuilder {
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
         // "one shared handle, never a per-store fixed view" rule.
-        let await_edge_store =
-            Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
+        let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
         let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
@@ -982,7 +981,7 @@ impl RebornIntegrationGroupBuilder {
             let accountant = build_default_budget_accountant(
                 Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
                 Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
-                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStore>,
+                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStorePort>,
                 Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
                 &BudgetDefaults::compiled_defaults(),
             );

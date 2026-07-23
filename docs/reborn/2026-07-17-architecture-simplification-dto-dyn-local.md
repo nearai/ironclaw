@@ -321,10 +321,10 @@ turn store alone is two full implementations of the same semantics:
 
 | Domain | In-memory impl | Durable impl | Reimplemented logic |
 | --- | --- | --- | --- |
-| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `FilesystemTurnStateStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
-| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `FilesystemProcessStore` + `FilesystemProcessResultStore` (~920 LOC) | process lifecycle + result store |
+| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `TurnStateRowStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
+| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `ProcessStore` + `ProcessResultStore` (~920 LOC) | process lifecycle + result store |
 | approvals | `InMemory{AutoApprove, PersistentApprovalPolicy, CapabilityPermissionOverride}Store` | matching `Filesystem*` (×3) | three separate approval stores |
-| authorization | `InMemoryCapabilityLeaseStore` | `FilesystemCapabilityLeaseStore` | lease store |
+| authorization | `InMemoryCapabilityLeaseStore` | `CapabilityLeaseStore` | lease store |
 | run_state | `InMemory{RunState, ApprovalRequest}Store` | matching `Filesystem*` (×2) | two run-state stores |
 
 Every `InMemory*Store` is a local/test-only parallel implementation of logic that
@@ -605,20 +605,20 @@ The realization that reshapes this move: **the single storage seam is already in
 the tree — it is `RootFilesystem`** (`ironclaw_filesystem`). It already has four
 production-grade backends — `InMemoryBackend`, on-disk (`LocalFilesystem`),
 `LibSqlRootFilesystem`, `PostgresRootFilesystem` — and the durable stores are
-**already generic over it**: `FilesystemTurnStateStore<F>`,
-`FilesystemProcessStore<F>`, `FilesystemCapabilityLeaseStore<F>`,
-`FilesystemRunStateStore<F>`, `FilesystemAutoApproveSettingStore<F>`, and so on. The
+**already generic over it**: `TurnStateRowStore<F>`,
+`ProcessStore<F>`, `CapabilityLeaseStore<F>`,
+`RunStateStore<F>`, `AutoApproveSettingStore<F>`, and so on. The
 `RowBackend` I earlier proposed inventing already exists and is already wired.
 
 So the move is subtractive, not additive:
 
 1. **Delete every hand-written `InMemory*Store`.** Tests instantiate the *same*
-   store the deployment runs — `FilesystemTurnStateStore<InMemoryBackend>` — so
+   store the deployment runs — `TurnStateRowStore<InMemoryBackend>` — so
    "in-memory" stops being a store and becomes a **filesystem backend**
    (`InMemoryBackend`, which already implements `RootFilesystem`). One store
    implementation per domain, exercised in tests over the in-memory backend and in
    production over libSQL/Postgres. The ~4,260-LOC `InMemoryTurnStateStore` becomes
-   deletable once `FilesystemTurnStateStore<InMemoryBackend>` covers its cases.
+   deletable once `TurnStateRowStore<InMemoryBackend>` covers its cases.
 
 2. **Backend choice is deployment config, not a type.** Which `RootFilesystem`
    impl backs a run is one value in a `DeploymentConfig` fed to a single
@@ -686,7 +686,7 @@ const LOCAL_DEV: DeploymentConfig = DeploymentConfig {
 };
 ```
 
-`build_runtime(LOCAL_DEV)` wires the ordinary `FilesystemTurnStateStore<InMemoryBackend>`,
+`build_runtime(LOCAL_DEV)` wires the ordinary `TurnStateRowStore<InMemoryBackend>`,
 the ordinary approval/capability/lease substrates, and the ordinary ports — with
 these values. The same is true of hosted and enterprise: each is a `DeploymentConfig`
 constant, and the difference between them is data a reviewer can read in one place,
@@ -1957,7 +1957,7 @@ divergent local shape at the seam.
 
 - **The turn store consolidation is the trickiest store case.** The in-memory turn
   store is larger than the filesystem one and the runner-lease uses an in-memory
-  overlay; consolidating onto `FilesystemTurnStateStore<InMemoryBackend>` is
+  overlay; consolidating onto `TurnStateRowStore<InMemoryBackend>` is
   reconcile-then-delete, not a blind delete. Do the small domains (Slice A) first to
   build confidence, turns last.
 - **Closed `RuntimeLane` enum** trades open extensibility for exhaustiveness — a

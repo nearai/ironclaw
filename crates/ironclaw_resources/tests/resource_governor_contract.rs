@@ -15,7 +15,7 @@ use rust_decimal_macros::dec;
 #[derive(Clone)]
 struct AlwaysFailingStore;
 
-impl ResourceGovernorStore for AlwaysFailingStore {
+impl ResourceGovernorStorePort for AlwaysFailingStore {
     fn update<T, F>(&self, _update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
@@ -1337,7 +1337,7 @@ fn persistent_governor_rejects_unsupported_snapshot_schema_version() {
 /// tests. Backend choice is now a property of the underlying
 /// `RootFilesystem`; this test exercises the on-disk snapshot
 /// round-trip through `ScopedFilesystem` so durability across reopen is
-/// covered by the same surface (a single `FilesystemResourceGovernorStore`
+/// covered by the same surface (a single `ResourceGovernorStore`
 /// constructed twice over the same backing store).
 #[tokio::test]
 async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_store() {
@@ -1356,7 +1356,7 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         mounts,
     ));
 
-    let store = FilesystemResourceGovernorStore::new(std::sync::Arc::clone(&scoped));
+    let store = ResourceGovernorStore::new(std::sync::Arc::clone(&scoped));
 
     let scope = sample_scope("tenant1", "user1", Some("project1"));
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -1377,10 +1377,9 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         .unwrap();
 
     // Reload from the same on-disk snapshot via a fresh
-    // FilesystemResourceGovernorStore handle over the same ScopedFilesystem.
-    let reloaded = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(
-        std::sync::Arc::clone(&scoped),
-    ));
+    // ResourceGovernorStore handle over the same ScopedFilesystem.
+    let reloaded =
+        PersistentResourceGovernor::new(ResourceGovernorStore::new(std::sync::Arc::clone(&scoped)));
     let concurrency_denial = reloaded
         .reserve(
             scope.clone(),
@@ -1731,7 +1730,7 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
         mounts,
     ));
 
-    let governor = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped));
+    let governor = PersistentResourceGovernor::new(ResourceGovernorStore::new(scoped));
 
     let err = governor
         .try_set_limit(
@@ -1747,7 +1746,7 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
 }
 
 /// Mirrors `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
-/// for `FilesystemBudgetGateStore`. Both stores route through the same
+/// for `BudgetGateStore`. Both stores route through the same
 /// shared `CasSnapshotStore` encoder (cas_snapshot.rs:221-227) and
 /// `map_cas_error` (cas_snapshot.rs:243-258), so a byte-only backend must
 /// fail closed for budget-gate writes too rather than blind-overwriting a
@@ -1779,7 +1778,7 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
         mounts,
     ));
 
-    let store = FilesystemBudgetGateStore::new(scoped);
+    let store = BudgetGateStore::new(scoped);
     let scope = sample_scope("tenant1", "user1", None);
     let gate = BudgetApprovalGate {
         id: BudgetGateId::new(),
@@ -1811,7 +1810,7 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
 /// (crates/ironclaw_secrets/src/filesystem_store.rs:2085-2127) for the PR
 /// #5234 review follow-up (Medium): no resource-caller test in this crate
 /// drove a *persistent* `FilesystemError::VersionMismatch` through
-/// `FilesystemResourceGovernorStore`/`FilesystemBudgetGateStore` to pin
+/// `ResourceGovernorStore`/`BudgetGateStore` to pin
 /// `map_cas_error`'s `CasUpdateError::RetriesExhausted` ->
 /// `ResourceError::Storage` mapping (cas_snapshot.rs:265-267). The
 /// byte-only tests above only exercise `CasUnsupported`; the helper crate
@@ -1924,7 +1923,7 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 }
 
 /// Drives a *persistent* `VersionMismatch` through
-/// `FilesystemResourceGovernorStore::try_set_limit` and pins the
+/// `ResourceGovernorStore::try_set_limit` and pins the
 /// `CasUpdateError::RetriesExhausted` -> `ResourceError::Storage` mapping
 /// (cas_snapshot.rs:265-267, PR #5234 review follow-up, Medium). Companion
 /// to `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
@@ -1946,7 +1945,7 @@ async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent
     // Resolve the snapshot's virtual path the same way the production store
     // does (alias-relative `/resources/snapshot.json` under the store's
     // default scope, `ResourceScope::system()`), so the wrapper below races
-    // the exact path `FilesystemResourceGovernorStore` writes.
+    // the exact path `ResourceGovernorStore` writes.
     let bootstrap_scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&inner),
         mounts.clone(),
@@ -1965,14 +1964,12 @@ async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent
     // see a race on a from-scratch snapshot. Bootstrapping ensures the
     // mutation under test lands on an *existing* snapshot whose every
     // retry attempt carries `CasExpectation::Version(_)`.
-    PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
-        &bootstrap_scoped,
-    )))
-    .try_set_limit(
-        ResourceAccount::tenant(TenantId::new("tenant-bootstrap").unwrap()),
-        ResourceLimits::default(),
-    )
-    .expect("bootstrap write to seed the snapshot");
+    PersistentResourceGovernor::new(ResourceGovernorStore::new(Arc::clone(&bootstrap_scoped)))
+        .try_set_limit(
+            ResourceAccount::tenant(TenantId::new("tenant-bootstrap").unwrap()),
+            ResourceLimits::default(),
+        )
+        .expect("bootstrap write to seed the snapshot");
 
     let racing = Arc::new(PersistentVersionMismatchBackend::new(
         Arc::clone(&inner),
@@ -1982,8 +1979,7 @@ async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent
         Arc::clone(&racing),
         mounts,
     ));
-    let governor =
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(racing_scoped));
+    let governor = PersistentResourceGovernor::new(ResourceGovernorStore::new(racing_scoped));
 
     let err = governor
         .try_set_limit(

@@ -27,12 +27,12 @@ use ironclaw_runner::turn_scheduler::{
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-    FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey, NoopTurnRunWakeNotifier,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileRequest,
-    SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStateStoreLimits,
+    GetRunStateRequest, IdempotencyKey, NoopTurnRunWakeNotifier, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileRequest, SanitizedCancelReason,
+    SourceBindingRef, SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore, TurnStateStoreLimits,
     TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -122,7 +122,7 @@ struct FailingClaimTransitions {
 }
 
 struct DurableLikeTurnStore {
-    inner: FilesystemTurnStateRowStore<InMemoryBackend>,
+    inner: TurnStateRowStore<InMemoryBackend>,
 }
 
 impl Default for DurableLikeTurnStore {
@@ -583,7 +583,7 @@ impl HangingExecutor {
 }
 
 struct HeartbeatTrackingTransitions {
-    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: Arc<TurnStateRowStore<InMemoryBackend>>,
     heartbeat_attempts: AtomicUsize,
     heartbeats: AtomicUsize,
     notify_heartbeat_attempt: Notify,
@@ -593,7 +593,7 @@ struct HeartbeatTrackingTransitions {
 }
 
 struct ClaimRecordingTransitions {
-    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: Arc<TurnStateRowStore<InMemoryBackend>>,
     claim_runner_ids: Mutex<Vec<TurnRunnerId>>,
 }
 
@@ -618,14 +618,14 @@ struct ChaosRule {
 }
 
 struct ChaosTransitionPort {
-    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: Arc<TurnStateRowStore<InMemoryBackend>>,
     rules: Mutex<Vec<ChaosRule>>,
     calls: Mutex<Vec<ChaosOperation>>,
     hold_after_relinquish: Mutex<Option<Arc<Notify>>>,
 }
 
 impl HeartbeatTrackingTransitions {
-    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
+    fn new(store: Arc<TurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             heartbeat_attempts: AtomicUsize::new(0),
@@ -673,7 +673,7 @@ impl HeartbeatTrackingTransitions {
 }
 
 impl ClaimRecordingTransitions {
-    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
+    fn new(store: Arc<TurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             claim_runner_ids: Mutex::new(Vec::new()),
@@ -686,7 +686,7 @@ impl ClaimRecordingTransitions {
 }
 
 impl ChaosTransitionPort {
-    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
+    fn new(store: Arc<TurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             rules: Mutex::new(Vec::new()),

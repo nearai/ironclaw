@@ -4,7 +4,7 @@
 //! `api_key_env` *name* and the config selection only carries names — inline
 //! secret values are rejected. When the webui2 settings surface lets an
 //! operator paste an actual key, the value lands here instead: encrypted in the
-//! scoped [`SecretStore`] under a fixed per-provider handle, and injected into
+//! scoped [`SecretStorePort`] under a fixed per-provider handle, and injected into
 //! the resolved `LlmConfig` at provider-build / reload time.
 //!
 //! LLM configuration is operator-wide (a single instance config, not per-user),
@@ -16,18 +16,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
 use thiserror::Error;
 
-/// Thin, operator-scoped wrapper over the shared [`SecretStore`] for LLM keys.
+/// Thin, operator-scoped wrapper over the shared [`SecretStorePort`] for LLM keys.
 #[derive(Clone)]
 pub struct LlmKeyStore {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn SecretStorePort>,
 }
 
 impl LlmKeyStore {
     /// Wrap the instance's shared secret store.
-    pub fn new(store: Arc<dyn SecretStore>) -> Self {
+    pub fn new(store: Arc<dyn SecretStorePort>) -> Self {
         Self { store }
     }
 
@@ -150,10 +150,10 @@ pub enum LlmKeyStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     fn store() -> LlmKeyStore {
-        LlmKeyStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
+        LlmKeyStore::new(Arc::new(SecretStore::ephemeral()))
     }
 
     #[tokio::test]
@@ -211,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn stored_provider_ids_ignores_unrelated_secret_handles() {
-        let store = Arc::new(FilesystemSecretStore::ephemeral());
+        let store = Arc::new(SecretStore::ephemeral());
         store
             .put(
                 scope(),

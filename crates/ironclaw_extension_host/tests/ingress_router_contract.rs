@@ -18,7 +18,7 @@ use sha2::Sha256;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
     InboundSink, InboundSinkError, IngressPortError, IngressRateLimitConfig, IngressRequest,
-    IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStore,
+    IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStorePort,
     VerificationCandidate, canonical_ingress_path,
 };
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
@@ -295,7 +295,7 @@ struct TestReplyContextStore {
 }
 
 #[async_trait::async_trait]
-impl ReplyContextStore for TestReplyContextStore {
+impl ReplyContextStorePort for TestReplyContextStore {
     async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError> {
         let mut entries = self.entries.lock().expect("reply-context fake lock");
         entries.retain(|(existing, _)| existing != &key);
@@ -381,7 +381,7 @@ async fn harness(options: HarnessOptions) -> Harness {
                 mode: options.sink_mode,
                 admitted: Arc::clone(&admitted),
             }),
-            reply_context: Arc::clone(&reply_context) as Arc<dyn ReplyContextStore>,
+            reply_context: Arc::clone(&reply_context) as Arc<dyn ReplyContextStorePort>,
         },
         options.config,
     );

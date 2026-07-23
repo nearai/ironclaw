@@ -866,7 +866,7 @@ mod tests {
     async fn projection_service_preserves_source_read_error_cause() {
         use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 
-        // The projection source is the real `FilesystemTurnStateRowStore` (which
+        // The projection source is the real `TurnStateRowStore` (which
         // implements `TurnEventProjectionSource`) over a `FaultInjecting` backend
         // armed to fail its first durable read. `read_turn_events_after` now runs
         // the store's genuine durable-row read and its
@@ -877,7 +877,7 @@ mod tests {
         let backend = std::sync::Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
             Fault::on(FilesystemOperation::ReadFile).backend("injected turn-state read failure"),
         ));
-        let source = std::sync::Arc::new(crate::FilesystemTurnStateRowStore::new(
+        let source = std::sync::Arc::new(crate::TurnStateRowStore::new(
             crate::test_support::scoped_turns_filesystem(backend),
         ));
         let service = TurnEventProjectionService::new(source);

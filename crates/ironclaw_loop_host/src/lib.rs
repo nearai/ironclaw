@@ -81,7 +81,7 @@ pub use compaction_task::{
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
-pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
+pub use filesystem_checkpoint_state::CheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,

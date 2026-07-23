@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
 use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
-use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
+use ironclaw_secrets::{SecretStore, SecretStorePort};
 use secrecy::SecretString;
 use tokio::task::JoinSet;
 
@@ -50,7 +50,7 @@ fn test_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
 
 fn test_service(
     filesystem: Arc<ScopedFilesystem<InMemoryBackend>>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
 ) -> FilesystemAuthProductServices<InMemoryBackend> {
     FilesystemAuthProductServices::new(filesystem, secret_store)
 }
@@ -135,7 +135,7 @@ async fn create_manual_token_flow(
 #[tokio::test]
 async fn filesystem_accounts_survive_service_recreation() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -178,7 +178,7 @@ async fn filesystem_accounts_survive_service_recreation() {
 #[tokio::test]
 async fn filesystem_runtime_account_selection_matches_setup_invocation_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
     setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
@@ -221,7 +221,7 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
 #[tokio::test]
 async fn filesystem_runtime_account_selection_matches_new_thread_reusable_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
     setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
@@ -269,8 +269,8 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
 #[tokio::test]
 async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -334,8 +334,8 @@ async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
 #[tokio::test]
 async fn filesystem_manual_token_submit_rotates_existing_reusable_account() {
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -429,7 +429,7 @@ async fn filesystem_manual_token_submit_rotates_existing_reusable_account() {
 #[tokio::test]
 async fn filesystem_manual_token_completion_persists_auth_flow_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let expires_at = Utc::now() + Duration::minutes(5);
@@ -506,7 +506,7 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
 #[tokio::test]
 async fn filesystem_manual_token_completion_rejects_invalid_completed_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let interaction_id =
@@ -584,7 +584,7 @@ async fn filesystem_manual_token_completion_rejects_invalid_completed_account() 
 #[tokio::test]
 async fn filesystem_manual_token_completion_expires_stale_auth_flow() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let interaction_id =
@@ -621,7 +621,7 @@ async fn filesystem_manual_token_completion_expires_stale_auth_flow() {
 #[tokio::test]
 async fn filesystem_manual_token_cancel_marks_flow_canceled_and_is_idempotent() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let interaction_id =
@@ -649,7 +649,7 @@ async fn filesystem_manual_token_cancel_marks_flow_canceled_and_is_idempotent() 
 #[tokio::test]
 async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let mut scope = test_scope();
     scope.surface = AuthSurface::Callback;
     scope.resource.thread_id = Some(ThreadId::new("thread-auth-flow").unwrap());
@@ -744,7 +744,7 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
 #[tokio::test]
 async fn filesystem_account_record_source_projects_session_scoped_accounts_for_runtime_owner() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
     setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-account").unwrap());
@@ -782,7 +782,7 @@ async fn filesystem_account_record_source_projects_session_scoped_accounts_for_r
 #[tokio::test]
 async fn filesystem_account_record_source_rejects_malformed_scan_records() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), secret_store);
     service
@@ -836,7 +836,7 @@ async fn filesystem_account_record_source_rejects_malformed_scan_records() {
 #[tokio::test]
 async fn filesystem_runtime_account_selection_tolerates_many_session_account_roots() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let service = Arc::new(test_service(filesystem, secret_store));
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
@@ -885,7 +885,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_session_account_roo
 #[tokio::test]
 async fn filesystem_runtime_account_selection_tolerates_many_account_records_per_root() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let service = Arc::new(test_service(filesystem, secret_store));
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
@@ -932,7 +932,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_account_records_per
 #[tokio::test]
 async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1026,7 +1026,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
 #[tokio::test]
 async fn filesystem_manual_token_submit_allows_only_one_concurrent_consumer() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = Arc::new(test_service(filesystem, secret_store));
 
@@ -1112,7 +1112,7 @@ fn fs_error_maps_version_mismatch_to_backend_conflict() {
 #[tokio::test]
 async fn filesystem_oauth_continuation_marker_is_idempotent() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1199,14 +1199,14 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
 async fn filesystem_manual_token_rotation_removes_previous_secret() {
     // Tests the update_binding path in create_or_update_manual_token_account:
     // after a successful token rotation the OLD access secret must be purged
-    // from SecretStore so it does not accumulate orphaned material.
+    // from SecretStorePort so it does not accumulate orphaned material.
     use ironclaw_auth::{
         CredentialAccountUpdateBinding, ManualTokenSetupRequest, SecretSubmitRequest,
     };
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1298,14 +1298,14 @@ async fn filesystem_manual_token_rotation_removes_previous_secret() {
         .await
         .unwrap();
 
-    // The old handle must have been purged from SecretStore after the rotation.
+    // The old handle must have been purged from SecretStorePort after the rotation.
     assert!(
         concrete_secret_store
             .metadata(&scope.resource, &old_handle)
             .await
             .unwrap()
             .is_none(),
-        "v1 secret must be purged from SecretStore after rotation"
+        "v1 secret must be purged from SecretStorePort after rotation"
     );
 
     // The new handle must be present.
@@ -1324,7 +1324,7 @@ async fn filesystem_manual_token_rotation_removes_previous_secret() {
             .await
             .unwrap()
             .is_some(),
-        "v2 secret must be present in SecretStore"
+        "v2 secret must be present in SecretStorePort"
     );
 }
 
@@ -1340,7 +1340,7 @@ async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_differ
     };
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
     // Account created in thread-a.
@@ -1431,8 +1431,8 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1499,7 +1499,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
         "Deactivate must retain secret material"
     );
 
-    // Uninstall: account revoked, secrets purged from SecretStore.
+    // Uninstall: account revoked, secrets purged from SecretStorePort.
     let uninstall_report = service
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
@@ -1517,7 +1517,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             .await
             .unwrap()
             .is_none(),
-        "Uninstall must delete access secret from SecretStore"
+        "Uninstall must delete access secret from SecretStorePort"
     );
     assert!(
         concrete_secret_store
@@ -1525,7 +1525,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             .await
             .unwrap()
             .is_none(),
-        "Uninstall must delete refresh secret from SecretStore"
+        "Uninstall must delete refresh secret from SecretStorePort"
     );
 }
 
@@ -1542,8 +1542,8 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let flow_scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1623,7 +1623,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
 #[tokio::test]
 async fn filesystem_lock_cache_drops_weak_entries_after_release() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let service = test_service(filesystem, secret_store);
 
     {
@@ -1651,7 +1651,7 @@ async fn filesystem_lock_cache_drops_weak_entries_after_release() {
 #[tokio::test]
 async fn filesystem_manual_token_submit_rejects_expired_interaction() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -1745,7 +1745,7 @@ async fn unavailable_auth_provider_client_validates_before_returning_backend_una
 #[tokio::test]
 async fn filesystem_list_accounts_rejects_zero_and_oversized_limit() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -1804,7 +1804,7 @@ async fn filesystem_list_accounts_rejects_zero_and_oversized_limit() {
 #[tokio::test]
 async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
     // After a successful OAuth re-auth through a bound flow, the OLD access
-    // and refresh secret handles must be deleted from SecretStore so repeated
+    // and refresh secret handles must be deleted from SecretStorePort so repeated
     // re-auths do not accumulate dead handles. Host OAuth provider clients
     // return exchange.account_id == None, so the durable flow must use the
     // update_binding account id rather than rejecting the callback.
@@ -1812,8 +1812,8 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
     use ironclaw_secrets::SecretMaterial;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1853,7 +1853,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
 
     let access_v1 = SecretHandle::new("oauth-access-v1").unwrap();
     let refresh_v1 = SecretHandle::new("oauth-refresh-v1").unwrap();
-    // Pre-populate SecretStore to simulate provider client having stored these
+    // Pre-populate SecretStorePort to simulate provider client having stored these
     // handles; this lets us verify they are purged on re-auth.
     concrete_secret_store
         .put(
@@ -2003,14 +2003,14 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
         .await
         .unwrap();
 
-    // Old handles must have been purged from SecretStore.
+    // Old handles must have been purged from SecretStorePort.
     assert!(
         concrete_secret_store
             .metadata(&scope.resource, &access_v1)
             .await
             .unwrap()
             .is_none(),
-        "v1 access handle must be purged from SecretStore after re-auth"
+        "v1 access handle must be purged from SecretStorePort after re-auth"
     );
     assert!(
         concrete_secret_store
@@ -2018,7 +2018,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             .await
             .unwrap()
             .is_none(),
-        "v1 refresh handle must be purged from SecretStore after re-auth"
+        "v1 refresh handle must be purged from SecretStorePort after re-auth"
     );
 
     // New handles must remain.
@@ -2028,7 +2028,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             .await
             .unwrap()
             .is_some(),
-        "v2 access handle must be present in SecretStore after re-auth"
+        "v2 access handle must be present in SecretStorePort after re-auth"
     );
     assert!(
         concrete_secret_store
@@ -2036,7 +2036,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             .await
             .unwrap()
             .is_some(),
-        "v2 refresh handle must be present in SecretStore after re-auth"
+        "v2 refresh handle must be present in SecretStorePort after re-auth"
     );
 }
 
@@ -2054,7 +2054,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
     use ironclaw_auth::{CredentialAccountUpdateBinding, ProviderCallbackOutcome};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let setup_scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -2213,7 +2213,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
 async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fails() {
     // create_or_update_manual_token_account (None path) stores the secret first,
     // then calls create_account_with_id(CasExpectation::Absent). If the write
-    // fails the newly-stored secret must be deleted from SecretStore so it does
+    // fails the newly-stored secret must be deleted from SecretStorePort so it does
     // not orphan in the store.
     //
     // Failure injection: derive the account ID that submit_manual_token will use
@@ -2224,8 +2224,8 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
     use ironclaw_filesystem::CasExpectation;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -2296,7 +2296,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
             .await
             .unwrap()
             .is_none(),
-        "orphaned secret must be purged from SecretStore after failed account write"
+        "orphaned secret must be purged from SecretStorePort after failed account write"
     );
 }
 
@@ -2309,7 +2309,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
     // This simulates a concurrent callback that already created the account.
     // The CAS-conflict branch should re-read, validate, update, and succeed.
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -2408,7 +2408,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2476,7 +2476,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
 #[tokio::test]
 async fn filesystem_select_unique_configured_account_single_and_multi() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2546,7 +2546,7 @@ async fn filesystem_select_unique_configured_account_single_and_multi() {
 #[tokio::test]
 async fn filesystem_select_configured_account_validates_provider_and_rejects_missing() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2606,7 +2606,7 @@ async fn filesystem_select_configured_account_validates_provider_and_rejects_mis
 #[tokio::test]
 async fn filesystem_cancel_flow_and_terminal_state_rejection() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2645,7 +2645,7 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
 async fn filesystem_fail_oauth_callback_marks_flow_failed() {
     use ironclaw_auth::{AuthErrorCode, OAuthCallbackFailureInput};
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2701,7 +2701,7 @@ async fn filesystem_fail_oauth_callback_marks_flow_failed() {
 async fn filesystem_complete_credential_selection_completes_flow() {
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2760,7 +2760,7 @@ async fn filesystem_complete_credential_selection_completes_flow() {
 async fn filesystem_create_flow_rejects_invalid_update_binding() {
     use ironclaw_auth::CredentialAccountUpdateBinding;
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2797,7 +2797,7 @@ async fn filesystem_create_flow_rejects_invalid_update_binding() {
 #[tokio::test]
 async fn filesystem_update_status_and_cross_scope_rejection() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2839,7 +2839,7 @@ async fn filesystem_update_status_and_cross_scope_rejection() {
 async fn filesystem_project_credential_recovery_returns_setup_required_when_empty() {
     use ironclaw_auth::CredentialRecoveryRequest;
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2899,7 +2899,7 @@ async fn filesystem_credential_setup_service_update_path() {
         CredentialAccountMutation, CredentialAccountUpdate, CredentialSetupService,
     };
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -2947,7 +2947,7 @@ async fn filesystem_credential_setup_service_update_path() {
 async fn filesystem_get_account_cross_scope_returns_cross_scope_denied() {
     use ironclaw_auth::AuthSurface;
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -2984,7 +2984,7 @@ async fn filesystem_get_account_cross_scope_returns_cross_scope_denied() {
 #[tokio::test]
 async fn filesystem_validate_secret_rejects_control_characters() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -3048,7 +3048,7 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
     };
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -3177,13 +3177,13 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
 async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
     // When the None-path CAS-conflict branch re-reads and overwrites an existing
     // account, the previous access/refresh secret handles must be deleted from
-    // SecretStore so repeated re-auths do not accumulate dead handles.
+    // SecretStorePort so repeated re-auths do not accumulate dead handles.
     use ironclaw_auth::ProviderCallbackOutcome;
     use ironclaw_secrets::SecretMaterial;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -3295,7 +3295,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
         "CAS-conflict branch must reuse pre-seeded account"
     );
 
-    // Old secrets must be purged from SecretStore.
+    // Old secrets must be purged from SecretStorePort.
     assert!(
         concrete_secret_store
             .metadata(&scope.resource, &old_access)
@@ -3366,7 +3366,7 @@ async fn list_refresh_candidates_covers_agent_and_project_scopes() {
         Arc::clone(&backend),
         crate::invocation_mount_view,
     ));
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let service = FilesystemAuthProductServices::new_with_root(
         Arc::clone(&scoped),
         Arc::clone(&backend),
@@ -3588,8 +3588,8 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
     use ironclaw_filesystem::CasExpectation;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -3728,7 +3728,7 @@ async fn filesystem_complete_manual_token_succeeds_across_different_invocation_i
     //
     // This test MUST FAIL before the fix (it will return CrossScopeDenied).
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Build an account scope whose invocation_id is A (the "earlier request").
     let mut account_resource = test_scope().resource;
@@ -3808,7 +3808,7 @@ async fn filesystem_complete_manual_token_still_rejects_genuinely_foreign_owner(
     // `binding_scope_owns_account` comparing the scopes — the guard itself is
     // exercised, not a path-partition miss.
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Build an account scope for user "bob".
     let mut bob_resource = test_scope().resource;
@@ -3874,7 +3874,7 @@ async fn filesystem_complete_manual_token_rejects_different_session_id() {
     // may pass, but here scope_matches would fail on session_id mismatch too —
     // either way the new binding_scope_owns_account correctly enforces it).
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Account created under session S1.
     let account_resource = test_scope().resource;
@@ -3951,7 +3951,7 @@ async fn filesystem_complete_manual_token_rejects_different_auth_surface() {
     // `CredentialMissing` rather than `CrossScopeDenied`. Both are acceptable
     // secure outcomes; this test documents which one actually occurs.
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Account created under AuthSurface::Web.
     let web_scope = test_scope(); // uses Web surface by default (see test_scope())
@@ -4018,7 +4018,7 @@ async fn filesystem_complete_credential_selection_succeeds_across_different_invo
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Account created under invocation A.
     let mut account_resource = test_scope().resource;
@@ -4115,7 +4115,7 @@ async fn filesystem_complete_credential_selection_rejects_genuinely_foreign_owne
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Account created under user "bob" (foreign owner).
     let mut bob_resource = test_scope().resource;
@@ -4208,7 +4208,7 @@ async fn filesystem_complete_credential_selection_rejects_different_session_id()
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Account created under session S1.
     let account_resource = test_scope().resource;
@@ -4305,7 +4305,7 @@ async fn filesystem_complete_credential_selection_rejects_different_auth_surface
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
 
     // Account created under AuthSurface::Web (default from test_scope()).
     let web_scope = test_scope();
@@ -4391,7 +4391,7 @@ async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_stor
     use ironclaw_auth::{AuthGateRef, TurnRunRef};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let service = test_service(filesystem, secret_store);
 
     let provider = AuthProviderId::new("github").unwrap();
@@ -4561,7 +4561,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let flow_scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let github = AuthProviderId::new("github").unwrap();

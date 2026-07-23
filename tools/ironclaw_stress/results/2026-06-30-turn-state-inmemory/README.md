@@ -10,7 +10,7 @@ concurrent same-user writers the 32-retry budget livelocks.
 
 - `--turn-state-backend {filesystem,memory,memory-persist-on-block}` — selects
   the turn-state store. `filesystem` is the current production path
-  (`FilesystemTurnStateStore`, per-user `state.json` CAS). `memory` is one shared
+  (`TurnStateRowStore`, per-user `state.json` CAS). `memory` is one shared
   in-process `InMemoryTurnStateStore` authority (coordination in memory, no
   per-step CAS), shared across all workers to model the single-process runtime.
   `memory-persist-on-block` is that same shared authority with the durable

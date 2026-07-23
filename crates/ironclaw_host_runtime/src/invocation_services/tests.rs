@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     CapabilityId, MountAlias, MountGrant, MountPermissions, ResourceScope, VirtualPath,
     runtime_policy::{RuntimeProfile, SecretMode},
 };
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 
 use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
@@ -1028,7 +1028,7 @@ fn local_resolver_hides_secret_store_when_secret_is_not_required() {
         Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(FilesystemSecretStore::ephemeral())),
+        Some(Arc::new(SecretStore::ephemeral())),
     );
     let plan = plan(
         ProcessBackendKind::None,
@@ -1081,7 +1081,7 @@ fn local_resolver_accepts_brokered_required_secret_with_secret_store() {
         Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(FilesystemSecretStore::ephemeral())),
+        Some(Arc::new(SecretStore::ephemeral())),
     );
     let mut plan = plan(
         ProcessBackendKind::None,
@@ -1109,7 +1109,7 @@ fn local_resolver_accepts_tenant_and_org_broker_required_secrets() {
         Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(FilesystemSecretStore::ephemeral())),
+        Some(Arc::new(SecretStore::ephemeral())),
     );
     for (deployment, profile, secret_mode) in [
         (
@@ -1152,7 +1152,7 @@ fn local_resolver_rejects_hosted_inherited_env_secret() {
         Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(FilesystemSecretStore::ephemeral())),
+        Some(Arc::new(SecretStore::ephemeral())),
     );
     let mut plan = plan(
         ProcessBackendKind::None,
@@ -1188,7 +1188,7 @@ fn local_resolver_accepts_required_secret_when_secret_store_is_available() {
         Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(FilesystemSecretStore::ephemeral())),
+        Some(Arc::new(SecretStore::ephemeral())),
     );
     let plan = plan(
         ProcessBackendKind::None,

@@ -9,7 +9,7 @@
 //! ("no global handle lookup unless an explicit admin-scoped API is introduced
 //! later").
 //!
-//! We build a fresh per-target-user `FilesystemSecretStore` on demand from the
+//! We build a fresh per-target-user `SecretStore` on demand from the
 //! shared root filesystem + the SAME `SecretsCrypto` the runtime's own store
 //! uses (so material written here decrypts under the user's own store and vice
 //! versa). Construction is cheap (an `Arc` clone + a fixed `MountView`).
@@ -20,8 +20,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
 use ironclaw_secrets::{
-    FilesystemSecretStore, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
-    SecretsCrypto,
+    SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretStorePort, SecretsCrypto,
 };
 
 /// Admin provisioning of per-user secrets for an arbitrary target `(tenant,
@@ -78,7 +77,7 @@ where
         &self,
         tenant: &TenantId,
         user: &UserId,
-    ) -> Result<(FilesystemSecretStore<F>, ResourceScope), SecretStoreError> {
+    ) -> Result<(SecretStore<F>, ResourceScope), SecretStoreError> {
         let scope = ResourceScope {
             tenant_id: tenant.clone(),
             user_id: user.clone(),
@@ -98,7 +97,7 @@ where
             view,
         ));
         Ok((
-            FilesystemSecretStore::new(filesystem, Arc::clone(&self.crypto)),
+            SecretStore::new(filesystem, Arc::clone(&self.crypto)),
             scope,
         ))
     }

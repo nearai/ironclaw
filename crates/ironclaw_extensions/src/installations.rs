@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
+// arch-exempt: large_file, mechanical store-port rename churn only, plan #6263
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
@@ -790,7 +792,7 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
 /// manifest-hash consistency. Domain crates validate domain-specific binding
 /// semantics when projecting their host-api sections from these records.
 #[async_trait]
-pub trait ExtensionInstallationStore: Send + Sync {
+pub trait ExtensionInstallationStorePort: Send + Sync {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError>;
@@ -843,9 +845,9 @@ pub trait ExtensionInstallationStore: Send + Sync {
 }
 
 #[async_trait]
-impl<T> ExtensionInstallationStore for Arc<T>
+impl<T> ExtensionInstallationStorePort for Arc<T>
 where
-    T: ExtensionInstallationStore + ?Sized,
+    T: ExtensionInstallationStorePort + ?Sized,
 {
     async fn list_manifests(
         &self,
@@ -931,7 +933,7 @@ const FILESYSTEM_CAS_RETRIES: usize = 5;
 /// configured root path. Secondary indexes are declared on the row prefixes so
 /// scans that gate lifecycle behavior can use the filesystem query API instead
 /// of loading a monolithic state snapshot.
-pub struct FilesystemExtensionInstallationStore {
+pub struct ExtensionInstallationStore {
     filesystem: Arc<dyn RootFilesystem>,
     root: VirtualPath,
     host_ports: HostPortCatalog,
@@ -939,16 +941,16 @@ pub struct FilesystemExtensionInstallationStore {
     cas_retries: usize,
 }
 
-impl fmt::Debug for FilesystemExtensionInstallationStore {
+impl fmt::Debug for ExtensionInstallationStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FilesystemExtensionInstallationStore")
+        f.debug_struct("ExtensionInstallationStore")
             .field("root", &self.root)
             .field("cas_retries", &self.cas_retries)
             .finish_non_exhaustive()
     }
 }
 
-impl FilesystemExtensionInstallationStore {
+impl ExtensionInstallationStore {
     pub async fn load_at(
         filesystem: Arc<dyn RootFilesystem>,
         root: VirtualPath,
@@ -1277,7 +1279,7 @@ impl FilesystemExtensionInstallationStore {
 }
 
 #[async_trait]
-impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
+impl ExtensionInstallationStorePort for ExtensionInstallationStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -1740,7 +1742,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let root = VirtualPath::new("/system/extensions/.installations/migration-test")
             .expect("valid root");
-        let store = FilesystemExtensionInstallationStore::load_at(
+        let store = ExtensionInstallationStore::load_at(
             backend.clone(),
             root.clone(),
             HostPortCatalog::empty(),
@@ -1779,7 +1781,7 @@ mod tests {
             .expect("seed legacy row");
         drop(store);
 
-        let reopened = FilesystemExtensionInstallationStore::load_at(
+        let reopened = ExtensionInstallationStore::load_at(
             backend,
             root,
             HostPortCatalog::empty(),
@@ -1821,8 +1823,8 @@ mod tests {
         assert!(store.get_manifest(&extension_id).await.unwrap().is_some());
     }
 
-    async fn filesystem_store() -> FilesystemExtensionInstallationStore {
-        FilesystemExtensionInstallationStore::load_at(
+    async fn filesystem_store() -> ExtensionInstallationStore {
+        ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
             HostPortCatalog::empty(),

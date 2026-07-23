@@ -18,7 +18,7 @@ use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelPairingCode, ChannelPairingConsumeOutcome,
     ChannelPairingError, ChannelPairingInstallationSource, ChannelPairingInterception,
     ChannelPairingInterceptor, ChannelPairingService, ChannelPairingServiceDependencies,
-    ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, FilesystemChannelPairingStore,
+    ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, ChannelPairingStore,
 };
 use ironclaw_product::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
@@ -27,7 +27,7 @@ use ironclaw_product::{
 use tokio::sync::Notify;
 
 use super::*;
-use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
+use crate::extension_host::channel_dm_targets::ChannelDmTargetStore;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelPairingOutcomeObserver,
     GenericChannelInboundSink, VerifiedEvidenceMint,
@@ -303,7 +303,7 @@ struct Fixture {
     identity: Arc<InMemoryIdentity>,
     dispatcher: Arc<RecordingDispatcher>,
     actor_pairings: Arc<RecordingActorPairings>,
-    dm_targets: Arc<FilesystemChannelDmTargetStore>,
+    dm_targets: Arc<ChannelDmTargetStore>,
 }
 
 fn fixture_with_prefixes(
@@ -319,12 +319,12 @@ fn fixture_with_prefixes(
     let identity = Arc::new(InMemoryIdentity::default());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let actor_pairings = Arc::new(RecordingActorPairings::default());
-    let dm_targets = Arc::new(FilesystemChannelDmTargetStore::new(
+    let dm_targets = Arc::new(ChannelDmTargetStore::new(
         Arc::clone(&backend),
         tenant.clone(),
         operator.clone(),
     ));
-    let store = Arc::new(FilesystemChannelPairingStore::new(
+    let store = Arc::new(ChannelPairingStore::new(
         Arc::clone(&backend),
         tenant.clone(),
         operator,

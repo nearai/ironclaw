@@ -280,7 +280,7 @@ async fn facade_disconnects_without_a_connection_scope() {
 async fn facade_removes_user_dm_target_after_admin_scope_disappears() {
     let identity_store = bound_identity_store("install-alpha");
     let filesystem = Arc::new(InMemoryBackend::new());
-    let dm_store = Arc::new(FilesystemChannelDmTargetStore::new(
+    let dm_store = Arc::new(ChannelDmTargetStore::new(
         filesystem as Arc<dyn RootFilesystem>,
         tenant(),
         UserId::new("user:operator").expect("operator"),
@@ -602,7 +602,7 @@ team_id = "/team/id"
         .expect("persist install");
     let identity_store = bound_identity_store("install-alpha");
     let extension_filesystem = Arc::new(InMemoryBackend::new());
-    let dm_store = Arc::new(FilesystemChannelDmTargetStore::new(
+    let dm_store = Arc::new(ChannelDmTargetStore::new(
         Arc::clone(&extension_filesystem) as Arc<dyn ironclaw_filesystem::RootFilesystem>,
         tenant(),
         UserId::new("user:operator").expect("user"),
@@ -711,7 +711,7 @@ team_id = "/team/id"
     let facade = GenericChannelConnectionFacade::new(
         tenant(),
         Vec::new(),
-        Some(installation_store as Arc<dyn ExtensionInstallationStore>),
+        Some(installation_store as Arc<dyn ExtensionInstallationStorePort>),
         identity_store.clone(),
         identity_store.clone(),
         None,
@@ -909,7 +909,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
     let facade = GenericChannelConnectionFacade::new(
         tenant(),
         Vec::new(),
-        Some(installation_store as Arc<dyn ExtensionInstallationStore>),
+        Some(installation_store as Arc<dyn ExtensionInstallationStorePort>),
         identity_store.clone(),
         identity_store,
         None,

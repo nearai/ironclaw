@@ -235,12 +235,12 @@ impl ProductConversationSubjectRouteResolver for AdminConfigurationSubjectRouteR
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extension_host::{AdminConfigurationService, FilesystemAdminConfigurationStore};
+    use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
     use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, ResourceScope};
     use ironclaw_product::ProductConversationRouteKey;
-    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
+    use ironclaw_secrets::{SecretStore, SecretStore};
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
@@ -315,10 +315,10 @@ supports_threads = false
         )
         .expect("resource scope");
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let admin = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
                     filesystem,
                     crate::invocation_mount_view,
                 ))),

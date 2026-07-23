@@ -101,7 +101,7 @@ capability/storage selections, then calls
 — no separate runtime construction may remain in builder.rs.
 
 ### 3a. Turn-state store — ONE shared store, isolation by run_id (not path)
-Build ONE `FilesystemTurnStateStore` at group construction (replacing the
+Build ONE `TurnStateRowStore` at group construction (replacing the
 per-thread stores). NOTE for the implementer: `turns_scope_path`
 (tests/support/reborn/filesystem.rs:26-48) yields
 `/tenants/{tenant}/agents/{agent}/users/{owner}/turns` with **no `thread_id`** —

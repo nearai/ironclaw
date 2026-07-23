@@ -2,10 +2,10 @@
 //!
 //! This module hosts both filesystem-backed stores this crate exposes:
 //!
-//! - [`FilesystemResourceGovernorStore`] — the resource-governor compaction
+//! - [`ResourceGovernorStore`] — the resource-governor compaction
 //!   snapshot at `/resources/snapshot.json` (and the legacy transactional
 //!   store used by snapshot-focused contract tests).
-//! - [`FilesystemBudgetGateStore`] — the budget-approval gate snapshot
+//! - [`BudgetGateStore`] — the budget-approval gate snapshot
 //!   at `/resources/budget-gates.json`.
 //!
 //! Both persist a single JSON snapshot under the caller-supplied
@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 use crate::cas_snapshot::{CasSnapshotStore, Snapshot};
 use crate::gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
-    BudgetGateStore,
+    BudgetGateStorePort,
 };
-use crate::{ResourceError, ResourceGovernorSnapshot, ResourceGovernorStore};
+use crate::{ResourceError, ResourceGovernorSnapshot, ResourceGovernorStorePort};
 
 const GOVERNOR_SNAPSHOT_PATH: &str = "/resources/snapshot.json";
 const GATES_SNAPSHOT_PATH: &str = "/resources/budget-gates.json";
@@ -72,15 +72,15 @@ const GATES_SNAPSHOT_PATH: &str = "/resources/budget-gates.json";
 /// caps applied across all tenants), which is why the snapshot lives
 /// under [`ResourceScope::system`] rather than a tenant scope —
 /// tenant-scoped resource accounting is a future capability that would
-/// change the [`ResourceGovernorStore`] trait surface.
-pub struct FilesystemResourceGovernorStore<F>
+/// change the [`ResourceGovernorStorePort`] trait surface.
+pub struct ResourceGovernorStore<F>
 where
     F: RootFilesystem,
 {
     store: CasSnapshotStore<F>,
 }
 
-impl<F> Clone for FilesystemResourceGovernorStore<F>
+impl<F> Clone for ResourceGovernorStore<F>
 where
     F: RootFilesystem,
 {
@@ -91,7 +91,7 @@ where
     }
 }
 
-impl<F> FilesystemResourceGovernorStore<F>
+impl<F> ResourceGovernorStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -107,7 +107,7 @@ where
     }
 }
 
-impl<F> ResourceGovernorStore for FilesystemResourceGovernorStore<F>
+impl<F> ResourceGovernorStorePort for ResourceGovernorStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -143,7 +143,7 @@ where
 /// every read or write (review feedback Thermo-Nuclear #2: scope at the
 /// store-operation boundary instead of at construction time).
 #[derive(Clone)]
-pub struct FilesystemBudgetGateStore<F>
+pub struct BudgetGateStore<F>
 where
     F: RootFilesystem,
 {
@@ -158,18 +158,18 @@ where
     terminal_retention: Option<chrono::Duration>,
 }
 
-impl<F> std::fmt::Debug for FilesystemBudgetGateStore<F>
+impl<F> std::fmt::Debug for BudgetGateStore<F>
 where
     F: RootFilesystem,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FilesystemBudgetGateStore")
+        f.debug_struct("BudgetGateStore")
             .field("retention", &self.terminal_retention)
             .finish()
     }
 }
 
-impl<F> FilesystemBudgetGateStore<F>
+impl<F> BudgetGateStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -235,7 +235,7 @@ where
     }
 }
 
-impl<F> BudgetGateStore for FilesystemBudgetGateStore<F>
+impl<F> BudgetGateStorePort for BudgetGateStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -421,7 +421,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // FilesystemResourceGovernorStore
+    // ResourceGovernorStore
     // -----------------------------------------------------------------
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-a", "alice");
 
-        let store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped));
+        let store = ResourceGovernorStore::new(Arc::clone(&scoped));
         let scope = sample_scope("tenant-a", "alice", Some("p1"));
         let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
@@ -450,9 +450,8 @@ mod tests {
             .unwrap();
 
         // Reload from the same on-disk snapshot.
-        let reloaded = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(
-            Arc::clone(&scoped),
-        ));
+        let reloaded =
+            PersistentResourceGovernor::new(ResourceGovernorStore::new(Arc::clone(&scoped)));
         assert_eq!(
             reloaded.reserved_for(&account).unwrap().concurrency_slots,
             1
@@ -480,10 +479,8 @@ mod tests {
         let scoped_a = scoped_resources_fs(Arc::clone(&backend), "tenant-a", "alice");
         let scoped_b = scoped_resources_fs(Arc::clone(&backend), "tenant-b", "alice");
 
-        let governor_a =
-            PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped_a));
-        let governor_b =
-            PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped_b));
+        let governor_a = PersistentResourceGovernor::new(ResourceGovernorStore::new(scoped_a));
+        let governor_b = PersistentResourceGovernor::new(ResourceGovernorStore::new(scoped_b));
 
         let scope_a = sample_scope("tenant-a", "alice", Some("p1"));
         let scope_b = sample_scope("tenant-b", "alice", Some("p1"));
@@ -548,7 +545,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // FilesystemBudgetGateStore
+    // BudgetGateStore
     // -----------------------------------------------------------------
 
     fn gate_scope(tenant: &str, user: &str) -> ResourceScope {
@@ -591,7 +588,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
         let scope = gate_scope("tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = BudgetGateStore::new(scoped);
         let gate = sample_gate();
         let id = gate.id;
         store.open(&scope, gate.clone()).unwrap();
@@ -601,7 +598,7 @@ mod tests {
     }
 
     /// Regression for #3841 follow-up: pending gates must NOT be lost
-    /// on process restart. A fresh `FilesystemBudgetGateStore` over
+    /// on process restart. A fresh `BudgetGateStore` over
     /// the same backend filesystem must rehydrate the prior snapshot.
     #[test]
     fn pending_gate_survives_restart_via_fresh_handle() {
@@ -611,11 +608,11 @@ mod tests {
         let scope = gate_scope("tenant-fs", "alice");
         {
             let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-            let store = FilesystemBudgetGateStore::new(scoped);
+            let store = BudgetGateStore::new(scoped);
             store.open(&scope, gate).unwrap();
         }
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = BudgetGateStore::new(scoped);
         let reloaded = store.get(&scope, id).unwrap().unwrap();
         assert_eq!(reloaded.id, id);
         assert!(matches!(reloaded.status, BudgetGateStatus::Pending));
@@ -629,7 +626,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scope = gate_scope("tenant-fs", "alice");
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = BudgetGateStore::new(scoped);
         let gate = sample_gate();
         let id = gate.id;
         store.open(&scope, gate).unwrap();
@@ -649,7 +646,7 @@ mod tests {
         ));
 
         let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let store2 = BudgetGateStore::new(scoped2);
         let reloaded = store2.get(&scope, id).unwrap().unwrap();
         assert!(matches!(
             reloaded.status,
@@ -663,7 +660,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scope = gate_scope("tenant-fs", "alice");
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = BudgetGateStore::new(scoped);
         let gate = sample_gate();
         let id = gate.id;
         let increased_limit = ResourceLimits::default().set_max_usd(dec!(1000.00));
@@ -682,7 +679,7 @@ mod tests {
             .unwrap();
 
         let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let store2 = BudgetGateStore::new(scoped2);
         let reloaded = store2.get(&scope, id).unwrap().unwrap();
         assert!(matches!(
             reloaded.status,
@@ -698,7 +695,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scope = gate_scope("tenant-fs", "alice");
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = BudgetGateStore::new(scoped);
         let mut gate = sample_gate();
         gate.expires_at = Utc::now() - chrono::Duration::hours(1);
         let id = gate.id;
@@ -708,7 +705,7 @@ mod tests {
         assert_eq!(expired[0].id, id);
 
         let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let store2 = BudgetGateStore::new(scoped2);
         let reloaded = store2.get(&scope, id).unwrap().unwrap();
         assert!(matches!(reloaded.status, BudgetGateStatus::Expired { .. }));
     }
@@ -722,8 +719,8 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scope = gate_scope("tenant-retention", "alice");
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-retention", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped)
-            .with_terminal_retention(Some(chrono::Duration::days(7)));
+        let store =
+            BudgetGateStore::new(scoped).with_terminal_retention(Some(chrono::Duration::days(7)));
 
         let stale = sample_gate();
         let stale_id = stale.id;
@@ -764,14 +761,14 @@ mod tests {
 
         let scope_a = gate_scope("tenant-a", "alice");
         let scoped_a = scoped_resources_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store_a = FilesystemBudgetGateStore::new(scoped_a);
+        let store_a = BudgetGateStore::new(scoped_a);
         let gate_a = sample_gate();
         let id_a = gate_a.id;
         store_a.open(&scope_a, gate_a).unwrap();
 
         let scope_b = gate_scope("tenant-b", "bob");
         let scoped_b = scoped_resources_fs(Arc::clone(&backend), "tenant-b", "bob");
-        let store_b = FilesystemBudgetGateStore::new(scoped_b);
+        let store_b = BudgetGateStore::new(scoped_b);
         let gate_b = sample_gate();
         let id_b = gate_b.id;
         store_b.open(&scope_b, gate_b).unwrap();

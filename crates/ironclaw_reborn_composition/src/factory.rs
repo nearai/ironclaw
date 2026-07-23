@@ -76,21 +76,21 @@ use crate::{
     RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
-    FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
-    FilesystemToolPermissionOverrideStore,
+    AutoApproveSettingStore, PersistentApprovalPolicyStore,
+    ToolPermissionOverrideStore,
 };
 use ironclaw_auth::{AuthProductScope, AuthSurface};
-use ironclaw_authorization::FilesystemCapabilityLeaseStore;
+use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
 };
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
-use ironclaw_extension_host::{AdminConfigurationService, FilesystemAdminConfigurationStore};
+use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
-    FilesystemExtensionInstallationStore, SharedExtensionRegistry,
+    ExtensionInstallationStore, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
@@ -117,26 +117,26 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
-use ironclaw_loop_host::FilesystemCheckpointStateStore;
+use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
-use ironclaw_outbound::FilesystemOutboundStateStore;
+use ironclaw_outbound::OutboundStateStore;
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::{
     ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
-    CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry, FilesystemChannelPairingStore,
+    CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry, ChannelPairingStore,
     LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
     ProductAuthTurnGateResumeDispatcher, ProjectService, RunFinalReplyRoutingService,
 };
 use ironclaw_projects::ProjectRepository;
-use ironclaw_resources::FilesystemBudgetGateStore;
+use ironclaw_resources::BudgetGateStore;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemResourceGovernor, ResourceGovernor,
 };
-use ironclaw_run_state::FilesystemApprovalRequestStore;
-use ironclaw_secrets::FilesystemCredentialBroker;
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_secrets::CredentialBroker;
+use ironclaw_secrets::SecretStore;
 use ironclaw_secrets::SecretStore;
 use ironclaw_threads::FilesystemSessionThreadService;
 use ironclaw_threads::SessionThreadService;
@@ -146,7 +146,7 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::FilesystemTurnStateRowStore;
+use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::{
     CheckpointStateStore, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
@@ -234,19 +234,19 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 type ComposedResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
 
 pub(crate) type ComposedApprovalRequestStore =
-    FilesystemApprovalRequestStore<CompositeRootFilesystem>;
+    ApprovalRequestStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedCapabilityLeaseStore =
-    FilesystemCapabilityLeaseStore<CompositeRootFilesystem>;
+    CapabilityLeaseStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedPersistentApprovalPolicyStore =
-    FilesystemPersistentApprovalPolicyStore<CompositeRootFilesystem>;
+    PersistentApprovalPolicyStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedToolPermissionOverrideStore =
-    FilesystemToolPermissionOverrideStore<CompositeRootFilesystem>;
+    ToolPermissionOverrideStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedAutoApproveSettingStore =
-    FilesystemAutoApproveSettingStore<CompositeRootFilesystem>;
+    AutoApproveSettingStore<CompositeRootFilesystem>;
 
 fn apply_post_edit_check_from_env<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
@@ -398,7 +398,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
-    pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
+    pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     /// Late-rebindable turn-run source the trigger active-run lookup reads
@@ -421,9 +421,9 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) current_delivery_targets:
         Arc<crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver>,
     pub(crate) channel_identity_store:
-        Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>,
+        Arc<crate::extension_host::channel_identity_store::ChannelIdentityStore>,
     pub(crate) channel_dm_target_store:
-        Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
+        Arc<crate::extension_host::channel_dm_targets::ChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -441,13 +441,13 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
-    pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    pub(crate) turn_state: Arc<TurnStateRowStore<CompositeRootFilesystem>>,
+    pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
-    pub(crate) budget_gate_store: Arc<dyn BudgetGateStore>,
+    pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
@@ -464,7 +464,7 @@ pub(crate) struct RebornRuntimeStores {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
-    pub(crate) secret_store: Arc<dyn SecretStore>,
+    pub(crate) secret_store: Arc<dyn SecretStorePort>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
@@ -671,7 +671,7 @@ impl std::fmt::Debug for RebornRuntimeStores {
             .field("readiness", &self.readiness)
             .field("extension_management", &true)
             .field("scoped_filesystem", &"Arc<ScopedFilesystem>")
-            .field("turn_state", &"Arc<FilesystemTurnStateRowStore>");
+            .field("turn_state", &"Arc<TurnStateRowStore>");
         debug.finish()
     }
 }
@@ -682,12 +682,12 @@ pub(crate) fn filesystem_reborn_identity_store<F>(
     actor_user_id: UserId,
     agent_id: ironclaw_host_api::AgentId,
     project_id: Option<ironclaw_host_api::ProjectId>,
-) -> Arc<ironclaw_reborn_identity::FilesystemRebornIdentityStore<F>>
+) -> Arc<ironclaw_reborn_identity::RebornIdentityStore<F>>
 where
     F: RootFilesystem + 'static,
 {
     Arc::new(
-        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+        ironclaw_reborn_identity::RebornIdentityStore::new(
             scoped_filesystem,
             tenant_id,
             actor_user_id,
@@ -754,7 +754,7 @@ struct ProductAuthServicesCompositionInput {
         Option<Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>>,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
     credential_account_visibility_policy: Option<
         Arc<dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy>,
@@ -941,11 +941,11 @@ where
 fn production_turn_state_store<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: ironclaw_turns::TurnStateStoreLimits,
-) -> FilesystemTurnStateRowStore<F>
+) -> TurnStateRowStore<F>
 where
     F: RootFilesystem + 'static,
 {
-    FilesystemTurnStateRowStore::new(filesystem).with_limits(limits)
+    TurnStateRowStore::new(filesystem).with_limits(limits)
 }
 
 async fn local_dev_trigger_repository(
@@ -1627,7 +1627,7 @@ pub(crate) async fn build_secret_store<F>(
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
 ) -> Result<
     (
-        Arc<FilesystemSecretStore<F>>,
+        Arc<SecretStore<F>>,
         Arc<ironclaw_secrets::SecretsCrypto>,
     ),
     RebornBuildError,
@@ -1644,7 +1644,7 @@ where
     // share the SAME master key — secrets written admin-side decrypt under the
     // user's own store and vice versa.
     let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
-    let store = Arc::new(FilesystemSecretStore::new(
+    let store = Arc::new(SecretStore::new(
         scoped_filesystem,
         Arc::clone(&crypto),
     ));
@@ -1669,13 +1669,13 @@ where
 ///   already relied on as idempotent elsewhere in this module's tests.
 pub async fn open_local_dev_secret_store(
     root: &Path,
-) -> Result<Arc<dyn SecretStore>, RebornBuildError> {
+) -> Result<Arc<dyn SecretStorePort>, RebornBuildError> {
     let db = open_local_dev_libsql_database(root).await?;
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
     filesystem.run_migrations().await?;
     let scoped = crate::wrap_scoped(filesystem);
     let (store, _crypto) = build_secret_store(root, scoped, None).await?;
-    Ok(store as Arc<dyn SecretStore>)
+    Ok(store as Arc<dyn SecretStorePort>)
 }
 
 /// Where a resolved local-dev master key came from, used to name the source in
@@ -2015,13 +2015,13 @@ fn local_dev_scoped_filesystem(
 /// Unified bundle of outbound store handles returned by [`local_dev_outbound_store`].
 ///
 /// All four trait roles must be satisfied on construction.  Every role is an
-/// `Arc` clone of a single `FilesystemOutboundStateStore` — which implements all
+/// `Arc` clone of a single `OutboundStateStore` — which implements all
 /// four outbound-store traits — so the WebUI delivery-defaults facade and the
 /// Slack delivery path share one backing tree.
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct OutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
+    pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
@@ -2077,12 +2077,12 @@ fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> Outboun
     // — are Arc-cloned from this single instance so the WebUI delivery-defaults
     // facade and the Slack delivery path share the same backing tree.
     #[allow(clippy::disallowed_methods)]
-    let store: Arc<FilesystemOutboundStateStore<CompositeRootFilesystem>> = Arc::new(
-        FilesystemOutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
+    let store: Arc<OutboundStateStore<CompositeRootFilesystem>> = Arc::new(
+        OutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
     );
     OutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+        outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
@@ -2959,7 +2959,7 @@ async fn build_local_storage_production_shaped(
         explicit_secret_master_key,
     )
     .await?;
-    let secret_credentials = FilesystemSecretCredentialStores::new(scoped_filesystem, crypto);
+    let secret_credentials = SecretCredentialStores::new(scoped_filesystem, crypto);
     let resource_governor = filesystem_resource_governor(&filesystem);
     if let Some(singleton) = postgres_resource_governor_singleton {
         ensure_postgres_resource_governor_authority_for_build(singleton)?;
@@ -3138,8 +3138,8 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
 type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
     F,
     FilesystemResourceGovernor<F>,
-    ironclaw_processes::FilesystemProcessStore<F>,
-    ironclaw_processes::FilesystemProcessResultStore<F>,
+    ironclaw_processes::ProcessStore<F>,
+    ironclaw_processes::ProcessResultStore<F>,
 >;
 
 fn substrate_only_default_owner_id() -> Result<UserId, crate::RebornCompositionError> {
@@ -3165,7 +3165,7 @@ where
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
             resource_governor,
-            event_store: FilesystemProductionEventStoresInput::Config(config.event_store),
+            event_store: ProductionEventStoresInput::Config(config.event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -3220,7 +3220,7 @@ where
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
             resource_governor,
-            event_store: FilesystemProductionEventStoresInput::Prebuilt(event_store),
+            event_store: ProductionEventStoresInput::Prebuilt(event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -3259,7 +3259,7 @@ where
 {
     filesystem: Arc<F>,
     resource_governor: FilesystemResourceGovernor<F>,
-    event_store: FilesystemProductionEventStoresInput,
+    event_store: ProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     trust_policy: Arc<TPolicy>,
     runtime_policy: crate::RebornProductionRuntimePolicy,
@@ -3267,7 +3267,7 @@ where
     surface_version: CapabilitySurfaceVersion,
 }
 
-enum FilesystemProductionEventStoresInput {
+enum ProductionEventStoresInput {
     Config(ironclaw_reborn_event_store::RebornEventStoreConfig),
     Prebuilt(ironclaw_reborn_event_store::RebornEventStores),
 }
@@ -3352,10 +3352,10 @@ where
     .await?;
     let resource_governor = warm_resource_governor_for_composition(resource_governor).await?;
     let governor = Arc::new(resource_governor);
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
-    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+    let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
@@ -3383,7 +3383,7 @@ where
     )
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
     let services = match event_store {
-        FilesystemProductionEventStoresInput::Config(config) => {
+        ProductionEventStoresInput::Config(config) => {
             services
                 .with_reborn_event_store_config(
                     ironclaw_reborn_event_store::RebornProfile::Production,
@@ -3391,7 +3391,7 @@ where
                 )
                 .await?
         }
-        FilesystemProductionEventStoresInput::Prebuilt(stores) => {
+        ProductionEventStoresInput::Prebuilt(stores) => {
             services.with_production_reborn_event_stores(stores)
         }
     };
@@ -3432,12 +3432,12 @@ where
 /// The secret store and credential broker are deliberately built together from
 /// one scoped filesystem and one crypto handle so production composition does
 /// not grow parallel ad hoc secret/credential stores.
-struct FilesystemSecretCredentialStores<F>
+struct SecretCredentialStores<F>
 where
     F: RootFilesystem + 'static,
 {
-    secret_store: Arc<FilesystemSecretStore<F>>,
-    credential_broker: Arc<FilesystemCredentialBroker<F>>,
+    secret_store: Arc<SecretStore<F>>,
+    credential_broker: Arc<CredentialBroker<F>>,
     /// Retained so `build_backend_production` can build the admin secret
     /// provisioner over the SAME crypto the runtime's own secret store uses —
     /// material written by the provisioner must decrypt under the user's own
@@ -3445,7 +3445,7 @@ where
     crypto: Arc<ironclaw_secrets::SecretsCrypto>,
 }
 
-impl<F> FilesystemSecretCredentialStores<F>
+impl<F> SecretCredentialStores<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -3454,11 +3454,11 @@ where
         crypto: Arc<ironclaw_secrets::SecretsCrypto>,
     ) -> Self {
         Self {
-            secret_store: Arc::new(FilesystemSecretStore::new(
+            secret_store: Arc::new(SecretStore::new(
                 Arc::clone(&scoped_filesystem),
                 Arc::clone(&crypto),
             )),
-            credential_broker: Arc::new(FilesystemCredentialBroker::new(
+            credential_broker: Arc::new(CredentialBroker::new(
                 scoped_filesystem,
                 Arc::clone(&crypto),
             )),
@@ -3480,14 +3480,14 @@ where
 async fn build_filesystem_secret_credential_stores<F>(
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     master_key: Option<ironclaw_secrets::SecretMaterial>,
-) -> Result<FilesystemSecretCredentialStores<F>, crate::RebornCompositionError>
+) -> Result<SecretCredentialStores<F>, crate::RebornCompositionError>
 where
     F: RootFilesystem + 'static,
 {
     let master_key = resolve_explicit_or_keychain_master_key(master_key)
         .await?
         .ok_or(crate::RebornCompositionError::MissingSecretMasterKey)?;
-    FilesystemSecretCredentialStores::from_master_key(scoped_filesystem, master_key)
+    SecretCredentialStores::from_master_key(scoped_filesystem, master_key)
 }
 
 async fn resolve_explicit_or_keychain_master_key(
@@ -3510,7 +3510,7 @@ struct ProductionStoreBundle {
     resource_governor: ComposedResourceGovernor,
     leases: Arc<ComposedCapabilityLeaseStore>,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
-    secret_credentials: FilesystemSecretCredentialStores<CompositeRootFilesystem>,
+    secret_credentials: SecretCredentialStores<CompositeRootFilesystem>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
 }
 
@@ -3523,13 +3523,13 @@ impl ProductionStoreBundle {
     ) -> Result<Self, RebornBuildError> {
         validate_reborn_runtime_storage(&filesystem).await?;
         let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-        let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        let leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
         )));
-        let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(
             Arc::clone(&scoped_filesystem),
         ));
-        let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
+        let secret_credentials = SecretCredentialStores::from_master_key(
             Arc::clone(&scoped_filesystem),
             secret_master_key,
         )?;
@@ -3549,15 +3549,15 @@ impl ProductionStoreBundle {
     async fn with_secret_credentials(
         filesystem: Arc<CompositeRootFilesystem>,
         resource_governor: ComposedResourceGovernor,
-        secret_credentials: FilesystemSecretCredentialStores<CompositeRootFilesystem>,
+        secret_credentials: SecretCredentialStores<CompositeRootFilesystem>,
         event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     ) -> Result<Self, RebornBuildError> {
         validate_reborn_runtime_storage(&filesystem).await?;
         let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-        let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        let leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
         )));
-        let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(
             Arc::clone(&scoped_filesystem),
         ));
         let resource_governor = warm_resource_governor_for_build(resource_governor).await?;
@@ -3698,7 +3698,7 @@ async fn build_backend_production(
     let turn_state_filesystem =
         owner_turn_state_filesystem(Arc::clone(&stores.filesystem), &turn_state_scope)
             .map_err(RebornBuildError::Mount)?;
-    let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let secret_store: Arc<dyn SecretStorePort> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
         owner_user_id.clone(),
@@ -3752,7 +3752,7 @@ async fn build_backend_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
     let capability_policy =
@@ -3825,8 +3825,8 @@ async fn build_backend_production(
             Arc::clone(&current_delivery_targets) as Arc<dyn CurrentDeliveryTargetResolver>,
         )),
     });
-    let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
-        FilesystemCheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
+    let checkpoint_state_store: Arc<dyn CheckpointStateStorePort> = Arc::new(
+        CheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
     );
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
@@ -3837,7 +3837,7 @@ async fn build_backend_production(
             .with_event_sink(Arc::clone(&budget_event_sink)),
     );
     let production_resource_governor: Arc<dyn ResourceGovernor> = resource_governor.clone();
-    let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
+    let budget_gate_store: Arc<dyn BudgetGateStorePort> = Arc::new(BudgetGateStore::new(
         Arc::clone(&stores.scoped_filesystem),
     ));
     let event_stores = ironclaw_reborn_event_store::build_reborn_event_stores(
@@ -4198,7 +4198,7 @@ async fn build_backend_production(
     let admin_configuration_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let admin_configuration = Arc::new(
         AdminConfigurationService::new(
-            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+            AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
                 admin_configuration_filesystem,
                 crate::invocation_mount_view,
             ))),
@@ -4225,13 +4225,13 @@ async fn build_backend_production(
             }
         })?;
     let extension_installation_state_path =
-        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+        ExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state path is invalid: {error}"),
             }
         })?;
-    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
-        FilesystemExtensionInstallationStore::load_at(
+    let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
+        ExtensionInstallationStore::load_at(
             extension_filesystem.clone(),
             extension_installation_state_path,
             extension_host_ports,
@@ -4344,14 +4344,14 @@ async fn build_backend_production(
     };
     let fold_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let channel_identity_store = Arc::new(
-        crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+        crate::extension_host::channel_identity_store::ChannelIdentityStore::new(
             Arc::clone(&fold_filesystem),
             channel_egress_scope.tenant_id.clone(),
             channel_egress_scope.user_id.clone(),
         ),
     );
     let channel_dm_target_store = Arc::new(
-        crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
+        crate::extension_host::channel_dm_targets::ChannelDmTargetStore::new(
             Arc::clone(&fold_filesystem),
             channel_egress_scope.tenant_id.clone(),
             channel_egress_scope.user_id.clone(),
@@ -4518,7 +4518,7 @@ async fn build_backend_production(
             generic.host.snapshot_watch(),
             Arc::clone(&deployment_channels),
             Arc::new(
-                crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
+                crate::extension_host::reply_contexts::ReplyContextStore::new(
                     Arc::clone(&fold_filesystem),
                     channel_egress_scope.tenant_id.clone(),
                     channel_egress_scope.user_id.clone(),
@@ -4542,7 +4542,7 @@ async fn build_backend_production(
                     continue;
                 }
                 let extension_id = descriptor.extension_id.clone();
-                let pairing_store = Arc::new(FilesystemChannelPairingStore::new(
+                let pairing_store = Arc::new(ChannelPairingStore::new(
                     Arc::clone(&fold_filesystem),
                     channel_egress_scope.tenant_id.clone(),
                     channel_egress_scope.user_id.clone(),

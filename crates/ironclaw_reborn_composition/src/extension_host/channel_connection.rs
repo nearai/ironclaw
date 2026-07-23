@@ -34,7 +34,7 @@ use ironclaw_product::{
     disconnect_channel_in_order,
 };
 
-use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
+use crate::extension_host::channel_dm_targets::ChannelDmTargetStore;
 use crate::extension_host::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource,
     admin_configuration_connection_scope_source, discover_channel_extensions,
@@ -145,7 +145,7 @@ pub(crate) struct GenericChannelConnectionFacade {
     entries: Vec<ChannelConnectionEntry>,
     /// Generic discovery + scope source. `None` when the composed runtime
     /// has no durable installation store — only lane entries report then.
-    installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+    installation_store: Option<Arc<dyn ExtensionInstallationStorePort>>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     /// Genuinely optional: compositions without product auth cannot have
@@ -160,7 +160,7 @@ pub(crate) struct GenericChannelConnectionFacade {
     /// Generic DM-target store: discovered entries get a disconnect cleanup
     /// that drops the caller's provisioned DM target. `None` when the
     /// composed runtime carries no durable channel storage.
-    dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
+    dm_target_store: Option<Arc<ChannelDmTargetStore>>,
     /// Mandatory product-owned durable channel state. Disconnect must revoke
     /// every caller-owned direct route before deleting the identity binding;
     /// unavailable cleanup fails closed.
@@ -177,12 +177,12 @@ impl GenericChannelConnectionFacade {
     pub(crate) fn new(
         tenant_id: TenantId,
         entries: Vec<ChannelConnectionEntry>,
-        installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+        installation_store: Option<Arc<dyn ExtensionInstallationStorePort>>,
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
         identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
         account_status_reader: Option<Arc<dyn ChannelAccountStatusReader>>,
-        dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
+        dm_target_store: Option<Arc<ChannelDmTargetStore>>,
         workflow_state: Arc<ChannelWorkflowStateService>,
         channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     ) -> Self {

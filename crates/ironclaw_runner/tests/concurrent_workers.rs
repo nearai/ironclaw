@@ -38,11 +38,11 @@ use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
-    EventCursor, FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, LoopCheckpointStore, LoopExit, LoopExitId, LoopFailed,
-    LoopFailureKind, ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnRunId, TurnRunWake,
-    TurnScope, TurnStateStore, TurnStateStoreLimits, TurnStatus,
+    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    LoopCheckpointStore, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef,
+    RunProfileResolutionRequest, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnRunId, TurnRunWake, TurnScope, TurnStateRowStore,
+    TurnStateStore, TurnStateStoreLimits, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopRunContext, PromptMode,
@@ -161,7 +161,7 @@ async fn submit_run_on_thread(
     thread_id: &ThreadId,
     thread_service: &InMemorySessionThreadService,
     thread_scope: &ThreadScope,
-    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
+    turn_store: &TurnStateRowStore<InMemoryBackend>,
     resolver: &InMemoryRunProfileResolver,
     idempotency_key: &str,
     user_id: &UserId,
@@ -241,7 +241,7 @@ async fn submit_run_on_thread(
 }
 
 async fn wait_for_status(
-    store: &FilesystemTurnStateRowStore<InMemoryBackend>,
+    store: &TurnStateRowStore<InMemoryBackend>,
     scope: &TurnScope,
     run_id: TurnRunId,
     expected: TurnStatus,
@@ -276,7 +276,7 @@ async fn submit_owned_run_on_thread(
     thread_id: &ThreadId,
     thread_service: &InMemorySessionThreadService,
     thread_scope: &ThreadScope,
-    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
+    turn_store: &TurnStateRowStore<InMemoryBackend>,
     resolver: &InMemoryRunProfileResolver,
     idempotency_key: &str,
     user_id: &UserId,

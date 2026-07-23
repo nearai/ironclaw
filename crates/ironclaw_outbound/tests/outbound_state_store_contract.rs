@@ -43,26 +43,26 @@ fn build_scoped_fs<F: RootFilesystem>(
 
 fn build_outbound_store_for_backend(
     backend: Arc<InMemoryBackend>,
-) -> FilesystemOutboundStateStore<InMemoryBackend> {
-    FilesystemOutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
+) -> OutboundStateStore<InMemoryBackend> {
+    OutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
 }
 
 fn build_outbound_store_with_permissions<F: RootFilesystem>(
     backend: Arc<F>,
     permissions: MountPermissions,
-) -> FilesystemOutboundStateStore<F> {
+) -> OutboundStateStore<F> {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/outbound").expect("alias"),
         VirtualPath::new(TEST_OUTBOUND_ROOT).expect("target"),
         permissions,
     )])
     .expect("mount view");
-    FilesystemOutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+    OutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
 #[tokio::test]
 async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
-    // The new FilesystemOutboundStateStore runs the same contract suite as
+    // The new OutboundStateStore runs the same contract suite as
     // the in-memory and SQL backends, demonstrating that it satisfies the
     // OutboundStateStore trait identically. The InMemoryBackend from
     // ironclaw_filesystem stands in as the underlying mount; in production
@@ -140,7 +140,7 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
-// deleted. The FilesystemOutboundStateStore over LibSqlRootFilesystem /
+// deleted. The OutboundStateStore over LibSqlRootFilesystem /
 // PostgresRootFilesystem (driven by the production `MountView`) replaces
 // them; durability across reopen is now a property of the
 // `RootFilesystem` backend, not of an outbound-specific persistence
@@ -644,7 +644,7 @@ where
 
 async fn filesystem_store_rejects_mismatched_communication_preference_identity(
     backend: &Arc<InMemoryBackend>,
-    store: &FilesystemOutboundStateStore<InMemoryBackend>,
+    store: &OutboundStateStore<InMemoryBackend>,
 ) {
     let tenant_id = TenantId::new("tenant-outbound-corrupt").unwrap();
     let user_id = UserId::new("user-outbound-corrupt").unwrap();
@@ -781,7 +781,7 @@ async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
 ) {
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
     let store =
-        FilesystemOutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+        OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
     let tenant_id = TenantId::new("tenant-outbound-cas").unwrap();
     let user_id = UserId::new("user-outbound-cas").unwrap();
     racing
@@ -815,7 +815,7 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
 ) {
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
     let store =
-        FilesystemOutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+        OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
     let tenant_id = TenantId::new("tenant-outbound-update-cas").unwrap();
     let user_id = UserId::new("user-outbound-update-cas").unwrap();
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
@@ -867,7 +867,7 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
 async fn filesystem_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
     let inner = Arc::new(InMemoryBackend::new());
     let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
-    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     ));
@@ -901,7 +901,7 @@ async fn filesystem_store_rejects_communication_preference_write_on_unsupported_
 async fn delivery_send_claim_fails_closed_on_unsupported_cas_mount() {
     let inner = Arc::new(InMemoryBackend::new());
     let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
-    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     ));
@@ -1782,7 +1782,7 @@ fn now() -> ironclaw_host_api::Timestamp {
 
 async fn put_preference_and_find_virtual_path(
     backend: &Arc<InMemoryBackend>,
-    store: &FilesystemOutboundStateStore<InMemoryBackend>,
+    store: &OutboundStateStore<InMemoryBackend>,
     record: CommunicationPreferenceRecord,
 ) -> (CommunicationPreferenceKey, VirtualPath) {
     let before = communication_preference_virtual_paths(backend).await;
@@ -2158,7 +2158,7 @@ impl RootFilesystem for UnsupportedCriticalCasBackend {
 async fn advance_subscription_cursor_retries_through_cas_conflict() {
     let inner = Arc::new(InMemoryBackend::new());
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(&inner)));
-    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&racing),
         "/engine/tenants/test/users/test/outbound",
     ));
@@ -2325,11 +2325,11 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
 #[tokio::test]
 async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_ids() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store_a = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store_a = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         "/engine/tenants/a/users/alice/outbound",
     ));
-    let store_b = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store_b = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         "/engine/tenants/b/users/alice/outbound",
     ));
@@ -2432,7 +2432,7 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
 /// Defense-in-depth regression for the tenant-isolation indexed
 /// projection (see
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
-/// every `FilesystemOutboundStateStore` write decorates its `Entry`
+/// every `OutboundStateStore` write decorates its `Entry`
 /// with a `tenant_id` projection so an admin-tier query can filter
 /// explicitly by tenant and a path-rewriting bug surfaces as a
 /// query-time mismatch.
@@ -2448,7 +2448,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         Arc::clone(&backend),
         "/engine/tenants/tenant-outbound/users/user-outbound/outbound",
     );
-    let store = FilesystemOutboundStateStore::new(Arc::clone(&scoped));
+    let store = OutboundStateStore::new(Arc::clone(&scoped));
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
     store
@@ -2869,11 +2869,11 @@ async fn cleanup_put_rejects_invalid_existing_snapshot_without_writing() {
 async fn cleanup_completion_retries_delete_when_second_store_adds_sibling_record() {
     let inner = Arc::new(InMemoryBackend::new());
     let backend = Arc::new(DeletePauseBackend::new(inner));
-    let first = Arc::new(FilesystemOutboundStateStore::new(build_scoped_fs(
+    let first = Arc::new(OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     )));
-    let second = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let second = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     ));
@@ -2921,11 +2921,11 @@ async fn cleanup_completion_retries_delete_when_second_store_adds_sibling_record
 async fn cleanup_completion_uses_shared_retry_budget_under_two_store_contention() {
     let inner = Arc::new(InMemoryBackend::new());
     let backend = Arc::new(DeletePauseBackend::new(inner));
-    let first = Arc::new(FilesystemOutboundStateStore::new(build_scoped_fs(
+    let first = Arc::new(OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     )));
-    let second = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let second = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     ));
@@ -2978,11 +2978,11 @@ async fn cleanup_completion_uses_shared_retry_budget_under_two_store_contention(
 async fn cleanup_completion_rechecks_aba_recreation_by_second_store() {
     let inner = Arc::new(InMemoryBackend::new());
     let backend = Arc::new(DeletePauseBackend::new(inner));
-    let first = Arc::new(FilesystemOutboundStateStore::new(build_scoped_fs(
+    let first = Arc::new(OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     )));
-    let second = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let second = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
     ));

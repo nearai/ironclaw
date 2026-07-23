@@ -1992,7 +1992,7 @@ pub trait SubagentGoalStore: Send + Sync {
 /// Production goal store. Backs `SubagentGoalStore` with a scoped filesystem
 /// mount owned by runner/composition wiring, so a child goal survives process
 /// restart without a bespoke in-process cache.
-pub struct FilesystemSubagentGoalStore<F> {
+pub struct SubagentGoalStore<F> {
     // Concrete scoped filesystem handle supplied by the implementer.
 }
 ```
@@ -2067,7 +2067,7 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
    assert the goal is still readable.
 
 7. **`goal_store_is_send_sync`** — `fn assert_send_sync<T: Send + Sync>(){}`;
-   `assert_send_sync::<Arc<dyn SubagentGoalStore>>()` — Phase 2 shares it via
+   `assert_send_sync::<Arc<dyn SubagentGoalStorePort>>()` — Phase 2 shares it via
    `Arc`.
 
 Shared `SubagentGoalStore` contract tests must run against:

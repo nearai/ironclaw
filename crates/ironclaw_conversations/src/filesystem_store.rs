@@ -63,7 +63,7 @@ use crate::{
 const STATE_PREFIX: &str = "/conversations";
 
 /// Maximum number of compare-and-swap retries before
-/// [`FilesystemConversationStateStore::save_state`] returns a
+/// [`ConversationStateStore::save_state`] returns a
 /// `DurableState` error. Five attempts mirrors the budgets used by the
 /// secrets, processes, and run-state stores — enough to absorb common
 /// contention while failing loudly on pathological loops.
@@ -75,14 +75,14 @@ const FILESYSTEM_CAS_RETRIES: usize = 5;
 /// Construct with an [`Arc<ScopedFilesystem<F>>`] over any
 /// [`RootFilesystem`]. Tenant/user isolation lives in the caller's
 /// [`MountView`](ironclaw_host_api::MountView), not in this store.
-pub struct FilesystemConversationStateStore<F: ?Sized>
+pub struct ConversationStateStore<F: ?Sized>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemConversationStateStore<F>
+impl<F> ConversationStateStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -201,7 +201,7 @@ impl StoredConversationState {
 }
 
 #[async_trait]
-impl<F> ConversationStateRepository for FilesystemConversationStateStore<F>
+impl<F> ConversationStateRepository for ConversationStateStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -414,7 +414,7 @@ fn filesystem_error(error: FilesystemError) -> InboundTurnError {
 /// Filesystem-backed equivalent of the legacy
 /// `RebornLibSqlConversationServices` / `RebornPostgresConversationServices`
 /// wrappers. Wires an [`InMemoryConversationServices`] over a
-/// [`FilesystemConversationStateStore`] so the in-process state is
+/// [`ConversationStateStore`] so the in-process state is
 /// rehydrated from the filesystem at construction and every mutation
 /// reaches durable storage before returning.
 ///
@@ -432,7 +432,7 @@ impl RebornFilesystemConversationServices {
     where
         F: RootFilesystem + ?Sized + 'static,
     {
-        let store = Arc::new(FilesystemConversationStateStore::new(filesystem));
+        let store = Arc::new(ConversationStateStore::new(filesystem));
         Ok(Self {
             inner: InMemoryConversationServices::with_state_repository(store).await?,
         })

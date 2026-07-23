@@ -176,7 +176,7 @@ async fn in_memory_run_state_rejects_duplicate_invocation_in_same_tenant_user() 
 #[tokio::test]
 async fn filesystem_run_state_rejects_duplicate_invocation_in_same_tenant_user() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemRunStateStore::new(scoped_run_state_fs(fs));
+    let store = RunStateStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
 
@@ -218,8 +218,8 @@ async fn filesystem_run_state_rejects_duplicate_invocation_in_same_tenant_user()
 async fn filesystem_run_state_duplicate_start_is_serialized_across_store_instances() {
     let fs = Arc::new(ConcurrentMissingReadFilesystem::new(engine_filesystem()));
     let scoped = scoped_run_state_fs(fs);
-    let first_store = FilesystemRunStateStore::new(Arc::clone(&scoped));
-    let second_store = FilesystemRunStateStore::new(scoped);
+    let first_store = RunStateStore::new(Arc::clone(&scoped));
+    let second_store = RunStateStore::new(scoped);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
 
@@ -270,12 +270,12 @@ async fn filesystem_run_state_duplicate_start_is_serialized_across_store_instanc
 #[tokio::test]
 async fn run_state_allows_same_invocation_id_in_different_tenants() {
     let backend = Arc::new(engine_filesystem());
-    let store_a = FilesystemRunStateStore::new(scoped_run_state_fs_at(
+    let store_a = RunStateStore::new(scoped_run_state_fs_at(
         Arc::clone(&backend),
         "tenant1",
         "user1",
     ));
-    let store_b = FilesystemRunStateStore::new(scoped_run_state_fs_at(
+    let store_b = RunStateStore::new(scoped_run_state_fs_at(
         Arc::clone(&backend),
         "tenant2",
         "user1",
@@ -358,7 +358,7 @@ async fn in_memory_run_state_hides_records_from_other_tenants_and_users() {
 async fn filesystem_run_state_store_persists_records_under_run_state_alias() {
     let fs = Arc::new(engine_filesystem());
     let scoped = scoped_run_state_fs(fs);
-    let store = FilesystemRunStateStore::new(Arc::clone(&scoped));
+    let store = RunStateStore::new(Arc::clone(&scoped));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -377,7 +377,7 @@ async fn filesystem_run_state_store_persists_records_under_run_state_alias() {
         .await
         .unwrap();
 
-    let reloaded = FilesystemRunStateStore::new(Arc::clone(&scoped))
+    let reloaded = RunStateStore::new(Arc::clone(&scoped))
         .get(&scope, invocation_id)
         .await
         .unwrap()
@@ -386,7 +386,7 @@ async fn filesystem_run_state_store_persists_records_under_run_state_alias() {
     assert_eq!(reloaded.status, RunStatus::BlockedApproval);
     assert_eq!(reloaded.approval_request_id, Some(approval.id));
     assert_eq!(
-        FilesystemRunStateStore::new(scoped)
+        RunStateStore::new(scoped)
             .records_for_scope(&scope)
             .await
             .unwrap()
@@ -398,7 +398,7 @@ async fn filesystem_run_state_store_persists_records_under_run_state_alias() {
 #[tokio::test]
 async fn filesystem_run_state_store_hides_records_from_other_tenants_and_users() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemRunStateStore::new(scoped_run_state_fs(fs));
+    let store = RunStateStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
     let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
@@ -431,7 +431,7 @@ async fn filesystem_run_state_store_hides_records_from_other_tenants_and_users()
 async fn filesystem_approval_request_store_persists_pending_requests_under_approvals_alias() {
     let fs = Arc::new(engine_filesystem());
     let scoped = scoped_run_state_fs(fs);
-    let store = FilesystemApprovalRequestStore::new(Arc::clone(&scoped));
+    let store = ApprovalRequestStore::new(Arc::clone(&scoped));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -444,7 +444,7 @@ async fn filesystem_approval_request_store_persists_pending_requests_under_appro
     assert_eq!(record.scope, scope);
     assert_eq!(record.status, ApprovalStatus::Pending);
     assert_eq!(record.request, approval);
-    let reloaded = FilesystemApprovalRequestStore::new(scoped)
+    let reloaded = ApprovalRequestStore::new(scoped)
         .get(&record.scope, record.request.id)
         .await
         .unwrap()
@@ -456,8 +456,8 @@ async fn filesystem_approval_request_store_persists_pending_requests_under_appro
 async fn filesystem_approval_request_duplicate_save_is_serialized_across_store_instances() {
     let fs = Arc::new(ConcurrentMissingReadFilesystem::new(engine_filesystem()));
     let scoped = scoped_run_state_fs(fs);
-    let first_store = FilesystemApprovalRequestStore::new(Arc::clone(&scoped));
-    let second_store = FilesystemApprovalRequestStore::new(scoped);
+    let first_store = ApprovalRequestStore::new(Arc::clone(&scoped));
+    let second_store = ApprovalRequestStore::new(scoped);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -495,7 +495,7 @@ async fn filesystem_approval_request_duplicate_save_is_serialized_across_store_i
 #[tokio::test]
 async fn filesystem_approval_request_listing_ignores_records_deleted_after_list() {
     let fs = Arc::new(DisappearingApprovalReadFilesystem::new(engine_filesystem()));
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(Arc::clone(&fs)));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(Arc::clone(&fs)));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -527,7 +527,7 @@ async fn in_memory_approval_request_store_discards_pending_request() {
 #[tokio::test]
 async fn filesystem_approval_request_store_discards_pending_request() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -601,7 +601,7 @@ async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
 #[tokio::test]
 async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -655,7 +655,7 @@ async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
 #[tokio::test]
 async fn filesystem_discard_does_not_clobber_resolved_approval() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -720,7 +720,7 @@ async fn filesystem_discard_toctou_race_loses_to_concurrent_approve() {
     let request_id = approval.id;
 
     // Save the pending approval via the bypass path — hook is not armed yet.
-    FilesystemApprovalRequestStore::new(Arc::clone(&bypass_scoped))
+    ApprovalRequestStore::new(Arc::clone(&bypass_scoped))
         .save_pending(scope.clone(), approval)
         .await
         .unwrap();
@@ -735,8 +735,7 @@ async fn filesystem_discard_toctou_race_loses_to_concurrent_approve() {
     ));
 
     // The discard store drives discard_pending through the hook filesystem.
-    let discard_store =
-        FilesystemApprovalRequestStore::new(scoped_run_state_fs(Arc::clone(&hook_fs)));
+    let discard_store = ApprovalRequestStore::new(scoped_run_state_fs(Arc::clone(&hook_fs)));
 
     // discard_pending must:
     //   • read Pending@V  →  hook fires  →  approve() bumps version to V+1
@@ -766,12 +765,12 @@ async fn filesystem_discard_toctou_race_loses_to_concurrent_approve() {
 #[tokio::test]
 async fn approval_store_allows_same_request_id_in_different_tenants() {
     let backend = Arc::new(engine_filesystem());
-    let store_a = FilesystemApprovalRequestStore::new(scoped_run_state_fs_at(
+    let store_a = ApprovalRequestStore::new(scoped_run_state_fs_at(
         Arc::clone(&backend),
         "tenant1",
         "user1",
     ));
-    let store_b = FilesystemApprovalRequestStore::new(scoped_run_state_fs_at(
+    let store_b = ApprovalRequestStore::new(scoped_run_state_fs_at(
         Arc::clone(&backend),
         "tenant2",
         "user1",
@@ -813,7 +812,7 @@ async fn approval_store_allows_same_request_id_in_different_tenants() {
 #[tokio::test]
 async fn approval_request_store_hides_records_from_other_tenants_and_users() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
     let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
@@ -871,7 +870,7 @@ async fn run_state_isolates_records_by_agent_scope() {
 #[tokio::test]
 async fn filesystem_run_state_uses_agent_scoped_paths() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemRunStateStore::new(scoped_run_state_fs(fs));
+    let store = RunStateStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let agent_a = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-a"));
     let agent_b = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-b"));
@@ -950,7 +949,7 @@ async fn run_state_isolates_records_by_project_scope() {
 #[tokio::test]
 async fn filesystem_run_state_isolates_records_by_project_scope() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemRunStateStore::new(scoped_run_state_fs(fs));
+    let store = RunStateStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let project_a = sample_scope(invocation_id, "tenant1", "user1");
     let mut project_b = project_a.clone();
@@ -1054,7 +1053,7 @@ async fn approval_request_store_isolates_records_by_project_scope() {
 #[tokio::test]
 async fn filesystem_approval_request_store_isolates_records_by_project_scope() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let project_a = sample_scope(invocation_id, "tenant1", "user1");
     let mut project_b = project_a.clone();
@@ -1098,10 +1097,10 @@ async fn filesystem_run_state_store_isolates_two_tenants_with_same_user_project_
     let scoped_a = scoped_run_state_fs_at(Arc::clone(&backend), "tenant-a", "alice");
     let scoped_b = scoped_run_state_fs_at(Arc::clone(&backend), "tenant-b", "alice");
 
-    let runs_a = FilesystemRunStateStore::new(Arc::clone(&scoped_a));
-    let runs_b = FilesystemRunStateStore::new(Arc::clone(&scoped_b));
-    let approvals_a = FilesystemApprovalRequestStore::new(scoped_a);
-    let approvals_b = FilesystemApprovalRequestStore::new(scoped_b);
+    let runs_a = RunStateStore::new(Arc::clone(&scoped_a));
+    let runs_b = RunStateStore::new(Arc::clone(&scoped_b));
+    let approvals_a = ApprovalRequestStore::new(scoped_a);
+    let approvals_b = ApprovalRequestStore::new(scoped_b);
 
     // Identical `(user_id, project_id, invocation_id)` for both — the only
     // thing keeping the two stores apart is the mount-time tenant prefix.
@@ -1208,7 +1207,7 @@ async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
         )
         .expect("mount /engine at temp dir");
     let scoped = scoped_run_state_fs(Arc::new(local_fs));
-    let store = FilesystemApprovalRequestStore::new(scoped);
+    let store = ApprovalRequestStore::new(scoped);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "test-tenant", "test-user");
     let approval = approval_request(invocation_id);
@@ -1221,7 +1220,7 @@ async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
 }
 
 /// Caller-level mirror of `filesystem_approval_store_fails_closed_on_byte_only_backend`
-/// for `FilesystemRunStateStore::start`: a regression that drops
+/// for `RunStateStore::start`: a regression that drops
 /// `RUN_STATE_RECORD_KIND` from the run-record encoder (`record_entry`), or
 /// breaks the `CasUnsupported` mapping, would let `start` silently succeed
 /// against a byte-only backend instead of failing closed.
@@ -1236,7 +1235,7 @@ async fn filesystem_run_state_store_start_fails_closed_on_byte_only_backend() {
         )
         .expect("mount /engine at temp dir");
     let scoped = scoped_run_state_fs(Arc::new(local_fs));
-    let store = FilesystemRunStateStore::new(scoped);
+    let store = RunStateStore::new(scoped);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "test-tenant", "test-user");
     let capability_id = CapabilityId::new("echo.say").unwrap();
@@ -1272,7 +1271,7 @@ struct RaceApproveOnFirstRead {
     /// Bypass store: wraps `inner` via a `ScopedFilesystem<InMemoryBackend>`
     /// that does NOT pass through this hook.  approve() on this store bumps
     /// the CAS version without re-entering `RaceApproveOnFirstRead::get`.
-    bypass_store: FilesystemApprovalRequestStore<InMemoryBackend>,
+    bypass_store: ApprovalRequestStore<InMemoryBackend>,
     scope: ResourceScope,
     request_id: ApprovalRequestId,
 }
@@ -1287,7 +1286,7 @@ impl RaceApproveOnFirstRead {
         Self {
             inner,
             armed: AtomicBool::new(true),
-            bypass_store: FilesystemApprovalRequestStore::new(bypass_scoped),
+            bypass_store: ApprovalRequestStore::new(bypass_scoped),
             scope,
             request_id,
         }
@@ -1542,14 +1541,14 @@ fn engine_filesystem() -> InMemoryBackend {
 /// fixed `/run-state` mount: isolates by agent/project/mission/thread (path) but
 /// not tenant/user (mount-scoped); cross-tenant isolation is exercised by the
 /// `filesystem_run_state_store_hides_records_from_other_tenants_and_users` test.
-fn in_mem_run_state_store() -> FilesystemRunStateStore<InMemoryBackend> {
-    FilesystemRunStateStore::new(scoped_run_state_fs(Arc::new(engine_filesystem())))
+fn in_mem_run_state_store() -> RunStateStore<InMemoryBackend> {
+    RunStateStore::new(scoped_run_state_fs(Arc::new(engine_filesystem())))
 }
 
 /// The production approval-request store over a fresh in-memory backend — the
 /// drop-in for the deleted `InMemoryApprovalRequestStore`.
-fn in_mem_approval_request_store() -> FilesystemApprovalRequestStore<InMemoryBackend> {
-    FilesystemApprovalRequestStore::new(scoped_run_state_fs(Arc::new(engine_filesystem())))
+fn in_mem_approval_request_store() -> ApprovalRequestStore<InMemoryBackend> {
+    ApprovalRequestStore::new(scoped_run_state_fs(Arc::new(engine_filesystem())))
 }
 
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] that exposes

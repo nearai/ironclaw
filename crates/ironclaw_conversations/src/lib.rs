@@ -6,7 +6,7 @@
 //! asking the turn coordinator to parse raw channel payloads or store message
 //! content.
 //!
-//! Durable persistence is provided by [`FilesystemConversationStateStore`]
+//! Durable persistence is provided by [`ConversationStateStore`]
 //! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
 //! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
 //! local-disk) is made at the filesystem layer — the consumer-store level
@@ -23,9 +23,7 @@ mod trusted_trigger;
 mod types;
 
 pub use error::InboundTurnError;
-pub use filesystem_store::{
-    FilesystemConversationStateStore, RebornFilesystemConversationServices,
-};
+pub use filesystem_store::{ConversationStateStore, RebornFilesystemConversationServices};
 pub use ids::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
     ExternalConversationRef, ExternalEventId, InboundMessageContentRef,

@@ -6,7 +6,7 @@ use ironclaw_extensions::{
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    FilesystemExtensionInstallationStore, HostApiContractRegistry, InstallationOwner,
+    ExtensionInstallationStore, HostApiContractRegistry, InstallationOwner,
     MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::{Filter, InMemoryBackend, Page, RootFilesystem};
@@ -24,8 +24,8 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-async fn filesystem_store() -> FilesystemExtensionInstallationStore {
-    FilesystemExtensionInstallationStore::load_at(
+async fn filesystem_store() -> ExtensionInstallationStore {
+    ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").unwrap(),
         HostPortCatalog::empty(),
@@ -488,7 +488,7 @@ async fn installations_sort_by_id() {
 async fn filesystem_store_persists_manifest_and_installation_as_rows() {
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
     let root = VirtualPath::new("/system/extensions/.installations/reload").unwrap();
-    let store = FilesystemExtensionInstallationStore::load_at(
+    let store = ExtensionInstallationStore::load_at(
         Arc::clone(&filesystem),
         root.clone(),
         HostPortCatalog::empty(),
@@ -529,7 +529,7 @@ async fn filesystem_store_persists_manifest_and_installation_as_rows() {
         "extension_installation_record"
     );
 
-    let reloaded = FilesystemExtensionInstallationStore::load_at(
+    let reloaded = ExtensionInstallationStore::load_at(
         filesystem,
         root,
         HostPortCatalog::empty(),

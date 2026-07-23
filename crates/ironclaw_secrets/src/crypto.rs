@@ -205,7 +205,7 @@ pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_rec
 /// `(user_id, name)`.
 ///
 /// Production storage code reaches this through the higher-level
-/// `SecretStore` / `SecretsStore` API and never needs to call it directly.
+/// `SecretStorePort` / `SecretsStore` API and never needs to call it directly.
 /// It is `pub` so contract tests and integration fixtures that bypass the
 /// store and write directly to `reborn_secret_records` can construct
 /// ciphertext the production code will accept.

@@ -326,15 +326,13 @@ pub fn open_reborn_identity_resolver(
     let filesystem = std::sync::Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
         root, view,
     ));
-    std::sync::Arc::new(
-        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            filesystem,
-            tenant_id.clone(),
-            UserId::new("test-owner").expect("user"),
-            AgentId::new("test-agent").expect("agent"),
-            None,
-        ),
-    )
+    std::sync::Arc::new(ironclaw_reborn_identity::RebornIdentityStore::new(
+        filesystem,
+        tenant_id.clone(),
+        UserId::new("test-owner").expect("user"), // safety: test-support-only static valid ID
+        AgentId::new("test-agent").expect("agent"), // safety: test-support-only static valid ID
+        None,
+    ))
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
@@ -430,7 +428,7 @@ use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
@@ -446,15 +444,15 @@ use thiserror::Error;
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
     FilesystemResourceGovernor<LibSqlRootFilesystem>,
-    FilesystemProcessStore<LibSqlRootFilesystem>,
-    FilesystemProcessResultStore<LibSqlRootFilesystem>,
+    ProcessStore<LibSqlRootFilesystem>,
+    ProcessResultStore<LibSqlRootFilesystem>,
 >;
 
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
     FilesystemResourceGovernor<PostgresRootFilesystem>,
-    FilesystemProcessStore<PostgresRootFilesystem>,
-    FilesystemProcessResultStore<PostgresRootFilesystem>,
+    ProcessStore<PostgresRootFilesystem>,
+    ProcessResultStore<PostgresRootFilesystem>,
 >;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
@@ -921,7 +919,7 @@ mod two_tenant_isolation_tests {
     //! Regression test for the cross-tenant collision finding from the
     //! 2026-05-17 serrrfirat review.
     //!
-    //! Drives the public `SecretStore` surface from two distinct
+    //! Drives the public `SecretStorePort` surface from two distinct
     //! `(tenant, user)` scopes that share identical agent/project/handle,
     //! against the production-shape `wrap_scoped`/`invocation_mount_view`
     //! wiring over an `InMemoryBackend`. Without per-tenant path
@@ -936,7 +934,7 @@ mod two_tenant_isolation_tests {
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
-    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
     use secrecy::ExposeSecret;
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
@@ -964,7 +962,7 @@ mod two_tenant_isolation_tests {
     async fn two_tenants_with_same_agent_project_handle_do_not_collide_on_put() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = wrap_scoped(Arc::clone(&backend));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
 
         let handle = SecretHandle::new("oauth_token").unwrap();
         let scope_a = scope("tenant_a", "alice");
@@ -1002,7 +1000,7 @@ mod two_tenant_isolation_tests {
 #[cfg(test)]
 mod gate_record_production_mount_tests {
     //! Production-shape mount coverage for the `/gate-records` alias: drives the
-    //! `GateRecordStore` seam over the real `wrap_scoped`/`invocation_mount_view`
+    //! `GateRecordStorePort` seam over the real `wrap_scoped`/`invocation_mount_view`
     //! wiring. Pins two things: the alias is actually registered in
     //! [`PER_USER_ALIASES`] (an unregistered alias fails every save with
     //! `MountNotFound`, making the store unusable in production), and the
@@ -1013,7 +1011,7 @@ mod gate_record_production_mount_tests {
     use ironclaw_host_api::{
         GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
     };
-    use ironclaw_run_state::{FilesystemGateRecordStore, GateRecordStore};
+    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
@@ -1030,7 +1028,7 @@ mod gate_record_production_mount_tests {
     #[tokio::test]
     async fn gate_records_save_and_load_through_the_production_mount_view() {
         let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
-        let store = FilesystemGateRecordStore::new(scoped);
+        let store = GateRecordStore::new(scoped);
         let record = GateRecord::Approval {
             summary: SafeSummary::new("awaiting decision").unwrap(), // safety: fixed-valid test fixture
         };

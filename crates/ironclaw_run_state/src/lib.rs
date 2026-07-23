@@ -4,8 +4,8 @@
 //! invocations. It is separate from runtime events: events are append-only
 //! history, while run state answers "what is this invocation waiting on now?".
 //!
-//! Durable persistence is provided by [`FilesystemRunStateStore`],
-//! [`FilesystemApprovalRequestStore`], and [`FilesystemGateRecordStore`] over a
+//! Durable persistence is provided by [`RunStateStore`],
+//! [`ApprovalRequestStore`], and [`GateRecordStore`] over a
 //! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
 //! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
 //! local-disk) is made at the filesystem layer — the consumer-store level no
@@ -123,7 +123,7 @@ impl From<FilesystemError> for RunStateError {
 
 /// Current-state store for invocation lifecycle.
 #[async_trait]
-pub trait RunStateStore: Send + Sync {
+pub trait RunStateStorePort: Send + Sync {
     /// Creates a running invocation record in the exact resource-owner scope.
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError>;
 
@@ -174,7 +174,7 @@ pub trait RunStateStore: Send + Sync {
 
 /// Store for approval requests emitted by authorization decisions.
 #[async_trait]
-pub trait ApprovalRequestStore: Send + Sync {
+pub trait ApprovalRequestStorePort: Send + Sync {
     /// Persists a pending approval request in the exact resource-owner scope without resolving it.
     async fn save_pending(
         &self,
@@ -227,10 +227,10 @@ pub trait ApprovalRequestStore: Send + Sync {
 ///
 /// Production composition should prefer this interface when the same durable backend
 /// owns both invocation state and approval records. It prevents a crash between
-/// `ApprovalRequestStore::save_pending` and `RunStateStore::block_approval` from
+/// `ApprovalRequestStorePort::save_pending` and `RunStateStorePort::block_approval` from
 /// leaving a user-actionable approval disconnected from a blocked run.
 #[async_trait]
-pub trait RunStateApprovalStore: RunStateStore + ApprovalRequestStore {
+pub trait RunStateApprovalStorePort: RunStateStorePort + ApprovalRequestStorePort {
     async fn save_pending_and_block_approval(
         &self,
         scope: ResourceScope,
@@ -250,20 +250,20 @@ pub trait RunStateApprovalStore: RunStateStore + ApprovalRequestStore {
 /// must outlive the turn that produced it, so it needs persistence keyed by
 /// `GateRef`. (The sibling terminal `DenyRecord` is same-turn and needs no store.)
 ///
-/// This port mirrors [`ApprovalRequestStore`]: resource-owner scoped, wrong-scope
+/// This port mirrors [`ApprovalRequestStorePort`]: resource-owner scoped, wrong-scope
 /// lookups look unknown. It intentionally exposes no removal method — a
 /// `GateRecord` is host-owned, write-once, model-visible content with no status
-/// field to tombstone, so (unlike `ApprovalRequestStore::discard_pending`, which
+/// field to tombstone, so (unlike `ApprovalRequestStorePort::discard_pending`, which
 /// tombstones a lifecycle *status*) there is no scope-safe soft-delete to mirror,
 /// and hard deletion of retained model-visible data would need an explicit
 /// product/retention contract (`database.md` "Data safety").
 #[async_trait]
-pub trait GateRecordStore: Send + Sync {
+pub trait GateRecordStorePort: Send + Sync {
     /// Persists the gate record for `gate_ref` in the exact resource-owner scope.
     ///
     /// Write-once: a `gate_ref` that already has a record is a
     /// [`RunStateError::GateRecordAlreadyExists`], mirroring
-    /// [`ApprovalRequestStore::save_pending`]. `GateRef`s are freshly minted per
+    /// [`ApprovalRequestStorePort::save_pending`]. `GateRef`s are freshly minted per
     /// gate, so a collision is a caller invariant violation, not an update path.
     async fn save(
         &self,
@@ -305,14 +305,14 @@ const GATE_RECORD_KIND: &str = "gate_record";
 /// / `user_id`. Within-tenant axes (agent/project/mission/thread) remain in
 /// the alias-relative path because they are not covered by the per-tenant
 /// `MountAlias`.
-pub struct FilesystemRunStateStore<F>
+pub struct RunStateStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemRunStateStore<F>
+impl<F> RunStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -390,7 +390,7 @@ where
 }
 
 #[async_trait]
-impl<F> RunStateStore for FilesystemRunStateStore<F>
+impl<F> RunStateStorePort for RunStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -526,18 +526,18 @@ where
 
 /// Filesystem-backed approval request store under the `/approvals` mount alias.
 ///
-/// See [`FilesystemRunStateStore`] for the structural-tenant-isolation
+/// See [`RunStateStore`] for the structural-tenant-isolation
 /// rationale; this store applies the same shape to approval-request records
 /// under a sibling mount alias so a single composition can wire run state
 /// and approvals to distinct alias targets while sharing one backend.
-pub struct FilesystemApprovalRequestStore<F>
+pub struct ApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemApprovalRequestStore<F>
+impl<F> ApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
@@ -573,7 +573,7 @@ where
 
     /// Read-modify-write an approval record using the shared lock-free CAS helper.
     ///
-    /// Mirrors `FilesystemRunStateStore::apply_update` — no per-record mutex,
+    /// Mirrors `RunStateStore::apply_update` — no per-record mutex,
     /// no lock held across `.await`.
     async fn update_status(
         &self,
@@ -617,7 +617,7 @@ where
 }
 
 #[async_trait]
-impl<F> ApprovalRequestStore for FilesystemApprovalRequestStore<F>
+impl<F> ApprovalRequestStorePort for ApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
@@ -743,7 +743,7 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                // See `FilesystemRunStateStore::records_for_scope` — `list_dir`
+                // See `RunStateStore::records_for_scope` — `list_dir`
                 // returns post-resolution `VirtualPath`s; rebuild the
                 // alias-relative `ScopedPath` so the follow-up `get` runs
                 // through the per-op ACL.
@@ -766,7 +766,7 @@ where
 
 /// Durable wrapper carrying the resource-owner scope alongside the host-owned
 /// [`GateRecord`]. `GateRecord` is a `host_api` vocabulary type with no scope
-/// field; persisting the scope beside it lets [`FilesystemGateRecordStore::load`]
+/// field; persisting the scope beside it lets [`GateRecordStore::load`]
 /// apply the same `same_scope_owner` defense-in-depth check the sibling
 /// [`ApprovalRecord`] does, so a wrong-scope read looks unknown. The scope is
 /// storage metadata only — `load` returns the bare [`GateRecord`].
@@ -778,18 +778,18 @@ struct StoredGateRecord {
 
 /// Filesystem-backed gate-record store under the `/gate-records` mount alias.
 ///
-/// See [`FilesystemRunStateStore`] for the structural-tenant-isolation
+/// See [`RunStateStore`] for the structural-tenant-isolation
 /// rationale; this store applies the same shape to gate records under a sibling
 /// mount alias so a single composition can wire run state, approvals, and gate
 /// records to distinct alias targets while sharing one backend.
-pub struct FilesystemGateRecordStore<F>
+pub struct GateRecordStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemGateRecordStore<F>
+impl<F> GateRecordStore<F>
 where
     F: RootFilesystem,
 {
@@ -808,7 +808,7 @@ where
 }
 
 #[async_trait]
-impl<F> GateRecordStore for FilesystemGateRecordStore<F>
+impl<F> GateRecordStorePort for GateRecordStore<F>
 where
     F: RootFilesystem,
 {

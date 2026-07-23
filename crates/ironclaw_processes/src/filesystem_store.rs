@@ -37,11 +37,11 @@ use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::types::{
-    ProcessError, ProcessRecord, ProcessResultRecord, ProcessResultStore, ProcessStart,
-    ProcessStatus, ProcessStore, ensure_status_transition, invalid_path, same_scope_owner,
+    ProcessError, ProcessRecord, ProcessResultRecord, ProcessResultStorePort, ProcessStart,
+    ProcessStatus, ProcessStorePort, ensure_status_transition, invalid_path, same_scope_owner,
 };
 
-/// Filesystem-backed [`ProcessStore`].
+/// Filesystem-backed [`ProcessStorePort`].
 ///
 /// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`] —
 /// typically a composite root in production or the in-memory backend in
@@ -51,7 +51,7 @@ use crate::types::{
 /// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend
 /// dispatch — so tenant isolation is structural, not a convention this
 /// crate has to remember.
-pub struct FilesystemProcessStore<F>
+pub struct ProcessStore<F>
 where
     F: RootFilesystem,
 {
@@ -59,7 +59,7 @@ where
     transition_lock: AsyncMutex<()>,
 }
 
-impl<F> FilesystemProcessStore<F>
+impl<F> ProcessStore<F>
 where
     F: RootFilesystem,
 {
@@ -67,7 +67,7 @@ where
     ///
     /// **Single-instance invariant**: the `transition_lock` only serializes
     /// `start` and `update_status` (i.e. `complete`/`fail`/`kill`) within a
-    /// single `FilesystemProcessStore` instance. Operating multiple instances
+    /// single `ProcessStore` instance. Operating multiple instances
     /// concurrently against the same on-disk root is unsupported and will
     /// race on the JSON record files. Construct the store once and share via
     /// `Arc` (see [`from_arc`](Self::from_arc)).
@@ -218,14 +218,14 @@ where
 }
 
 /// Maximum number of compare-and-swap retries before
-/// [`FilesystemProcessStore::update_status`] returns a `Filesystem`
+/// [`ProcessStore::update_status`] returns a `Filesystem`
 /// error. Five attempts mirrors the retry budget used by the secrets and
 /// authorization stores and is enough to absorb common contention while
 /// failing loudly on pathological loops.
 const MAX_CAS_RETRIES: usize = 5;
 
 #[async_trait]
-impl<F> ProcessStore for FilesystemProcessStore<F>
+impl<F> ProcessStorePort for ProcessStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -359,7 +359,7 @@ where
     }
 }
 
-impl<F> FilesystemProcessStore<F>
+impl<F> ProcessStore<F>
 where
     F: RootFilesystem,
 {
@@ -414,14 +414,14 @@ where
     }
 }
 
-pub struct FilesystemProcessResultStore<F>
+pub struct ProcessResultStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemProcessResultStore<F>
+impl<F> ProcessResultStore<F>
 where
     F: RootFilesystem,
 {
@@ -487,7 +487,7 @@ where
 }
 
 #[async_trait]
-impl<F> ProcessResultStore for FilesystemProcessResultStore<F>
+impl<F> ProcessResultStorePort for ProcessResultStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -748,7 +748,7 @@ fn is_unsupported(error: &FilesystemError) -> bool {
 ///
 /// The on-disk JSON body is unchanged from the migration commit; we only
 /// decorate the entry with indexed projections so backends that support
-/// records can answer [`ProcessStore::records_for_scope`] through
+/// records can answer [`ProcessStorePort::records_for_scope`] through
 /// [`RootFilesystem::query`] instead of an N+1 list+get scan.
 fn process_record_entry(body: Vec<u8>, record: &ProcessRecord) -> Entry {
     let mut entry = Entry::bytes(body)

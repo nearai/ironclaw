@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     AdminConfigurationCommit, AdminConfigurationIdempotencyKey, AdminConfigurationRecord,
     AdminConfigurationRequestDigest, AdminConfigurationReserveOutcome,
-    AdminConfigurationStoreError, AdminConfigurationValueRef, FilesystemAdminConfigurationStore,
+    AdminConfigurationStoreError, AdminConfigurationValueRef, AdminConfigurationStore,
 };
 
 const MAX_VALUE_BYTES: usize = 16 * 1024;
@@ -135,7 +135,7 @@ where
     F: RootFilesystem + ?Sized,
     S: SecretStore + ?Sized,
 {
-    store: FilesystemAdminConfigurationStore<F>,
+    store: AdminConfigurationStore<F>,
     secrets: Arc<S>,
     descriptors: BTreeMap<AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor>,
 }
@@ -146,7 +146,7 @@ where
     S: SecretStore + ?Sized,
 {
     pub fn new(
-        store: FilesystemAdminConfigurationStore<F>,
+        store: AdminConfigurationStore<F>,
         secrets: Arc<S>,
         descriptors: impl IntoIterator<Item = ExtensionAdminConfigurationDescriptor>,
     ) -> Result<Self, AdminConfigurationServiceError> {

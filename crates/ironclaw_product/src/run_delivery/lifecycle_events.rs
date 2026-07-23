@@ -84,7 +84,7 @@ struct DurableRunDeliveryReplay {
     /// a scheduled trigger the volatile driver owns, or a context-less run)
     /// leaks a permanent pending row that every later drain re-scans.
     run_state: Arc<dyn TurnStateStore>,
-    outbound_state: Arc<dyn OutboundStateStore>,
+    outbound_state: Arc<dyn OutboundStateStorePort>,
     active: AtomicBool,
     dirty: AtomicBool,
     idle: Notify,
@@ -161,7 +161,7 @@ impl RunDeliveryEventRouter {
     pub fn new(
         source: Arc<dyn TurnEventProjectionSource>,
         run_state: Arc<dyn TurnStateStore>,
-        outbound_state: Arc<dyn OutboundStateStore>,
+        outbound_state: Arc<dyn OutboundStateStorePort>,
     ) -> Self {
         let router = Self::build(Some(DurableRunDeliveryReplay {
             source,

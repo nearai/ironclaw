@@ -28,14 +28,14 @@ use crate::{CurrentDeliveryTargetResolver, ProductWorkflowError};
 /// participates in the decision.
 pub struct TriggerFinalReplyTargetService {
     source_turn_state: Arc<dyn TurnStateStore>,
-    run_targets: Arc<dyn OutboundStateStore>,
+    run_targets: Arc<dyn OutboundStateStorePort>,
     current_targets: Arc<dyn CurrentDeliveryTargetResolver>,
 }
 
 impl TriggerFinalReplyTargetService {
     pub fn new(
         source_turn_state: Arc<dyn TurnStateStore>,
-        run_targets: Arc<dyn OutboundStateStore>,
+        run_targets: Arc<dyn OutboundStateStorePort>,
         current_targets: Arc<dyn CurrentDeliveryTargetResolver>,
     ) -> Self {
         Self {
@@ -194,13 +194,13 @@ impl TriggerFinalReplyTargetService {
 /// owns target resolution and durable route persistence.
 pub struct RunFinalReplyRoutingService {
     current_targets: Arc<dyn CurrentDeliveryTargetResolver>,
-    store: Arc<dyn OutboundStateStore>,
+    store: Arc<dyn OutboundStateStorePort>,
 }
 
 impl RunFinalReplyRoutingService {
     pub fn new(
         current_targets: Arc<dyn CurrentDeliveryTargetResolver>,
-        store: Arc<dyn OutboundStateStore>,
+        store: Arc<dyn OutboundStateStorePort>,
     ) -> Self {
         Self {
             current_targets,

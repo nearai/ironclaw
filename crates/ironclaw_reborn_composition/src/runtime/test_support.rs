@@ -21,9 +21,10 @@ fn build_approval_interaction_service_with_parts(
         parts.approval_requests.clone(),
         parts.capability_leases.clone(),
     ));
-    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
-        parts.persistent_approval_policies.clone();
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+    let persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
+    > = parts.persistent_approval_policies.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
         parts.tool_permission_overrides.clone();
 
     Ok(Arc::new(
@@ -108,7 +109,7 @@ impl RebornRuntime {
     /// this runtime's own turn state (e.g.
     /// `RebornIntegrationGroup`, whose runs execute against its own
     /// `shared.turn_store` via a separate `build_default_planned_runtime`).
-    /// Generic over `F` so any `FilesystemTurnStateRowStore<F>`-backed store can be
+    /// Generic over `F` so any `TurnStateRowStore<F>`-backed store can be
     /// passed directly, without this crate exposing `TurnRunSnapshotSource`
     /// outside itself.
     ///
@@ -120,7 +121,7 @@ impl RebornRuntime {
     pub fn local_dev_approval_interaction_service_with_turn_state_for_test<F>(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+        turn_state: Arc<ironclaw_turns::TurnStateRowStore<F>>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -148,7 +149,7 @@ impl RebornRuntime {
     pub fn local_dev_auth_interaction_service_with_turn_state_for_test<F>(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+        turn_state: Arc<ironclaw_turns::TurnStateRowStore<F>>,
     ) -> Option<Arc<dyn AuthInteractionService>>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,

@@ -10,7 +10,7 @@
 //! methods.
 //!
 //! Both traits are implemented by the one
-//! [`FilesystemRebornIdentityStore`](crate::FilesystemRebornIdentityStore), so
+//! [`RebornIdentityStore`](crate::RebornIdentityStore), so
 //! the composition root gets both surfaces from a single `Arc`.
 
 use std::collections::BTreeMap;
@@ -76,7 +76,7 @@ pub struct RebornUserProfileUpdate {
 }
 
 /// Admin CRUD over canonical user records. Implemented by
-/// [`FilesystemRebornIdentityStore`](crate::FilesystemRebornIdentityStore).
+/// [`RebornIdentityStore`](crate::RebornIdentityStore).
 ///
 /// This trait is a **port**: it is defined here (bottom of the Reborn stack)
 /// and its only production implementor is the filesystem store. The composition

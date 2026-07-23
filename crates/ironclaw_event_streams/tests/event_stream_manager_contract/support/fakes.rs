@@ -654,7 +654,7 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
     }
 }
 
-/// The production [`FilesystemOutboundStateStore`] over a [`FaultInjecting`]
+/// The production [`OutboundStateStore`] over a [`FaultInjecting`]
 /// in-memory backend armed to fail every policy read with a backend fault.
 /// Replaces the former `FailingOutboundStore { kind: Backend }`: the store now
 /// runs its real `get_json` read and genuine `FilesystemError::Backend ->
@@ -664,7 +664,7 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
 /// notification policy through `ScopedFilesystem::get`, so a `ReadFile` fault
 /// surfaces as `OutboundError::Backend`.
 fn outbound_store_failing_backend_reads()
--> Arc<FilesystemOutboundStateStore<FaultInjecting<InMemoryBackend>>> {
+-> Arc<OutboundStateStore<FaultInjecting<InMemoryBackend>>> {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
         Fault::on(FilesystemOperation::ReadFile).backend("injected outbound backend failure"),
     ));
@@ -677,15 +677,15 @@ fn outbound_store_failing_backend_reads()
     )])
     .expect("static valid outbound mount view");
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-    // The `disallowed_methods` lint reserves `FilesystemOutboundStateStore::new`
+    // The `disallowed_methods` lint reserves `OutboundStateStore::new`
     // for composition's owned construction site; this fault-injection test seam
     // is the sanctioned use, matching `ironclaw_outbound::test_support`.
     #[allow(clippy::disallowed_methods)]
-    Arc::new(FilesystemOutboundStateStore::new(scoped))
+    Arc::new(OutboundStateStore::new(scoped))
 }
 
 /// Injects the non-filesystem [`OutboundError`] variants the real
-/// `FilesystemOutboundStateStore` can never emit from a backend fault
+/// `OutboundStateStore` can never emit from a backend fault
 /// (`AccessDenied`, caller-bug `InvalidRequest`, `PreferenceTargetMissing` — its
 /// `OutboundStateStore` impl only ever maps a filesystem error to `Backend` /
 /// `CasConflict` / `Serialization`). These lock the manager's

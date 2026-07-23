@@ -111,7 +111,7 @@ pub use channel_pairing::{
     ChannelPairingIdentityBindOutcome, ChannelPairingIdentityStore,
     ChannelPairingInstallationSource, ChannelPairingInterception, ChannelPairingInterceptor,
     ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
-    ChannelPairingStatus, ChannelPairingTemplateValues, FilesystemChannelPairingStore,
+    ChannelPairingStatus, ChannelPairingTemplateValues, ChannelPairingStore,
 };
 pub use channel_workflow_state::{
     ChannelDisconnectActions, ChannelWorkflowState, ChannelWorkflowStateError,

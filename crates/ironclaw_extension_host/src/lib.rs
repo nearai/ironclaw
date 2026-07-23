@@ -44,8 +44,8 @@ pub use admin_configuration_service::{
 pub use admin_configuration_store::{
     AdminConfigurationCommit, AdminConfigurationIdempotencyKey, AdminConfigurationRecord,
     AdminConfigurationRequestDigest, AdminConfigurationReservation,
-    AdminConfigurationReserveOutcome, AdminConfigurationStoreError, AdminConfigurationValueRef,
-    FilesystemAdminConfigurationStore,
+    AdminConfigurationReserveOutcome, AdminConfigurationStore, AdminConfigurationStoreError,
+    AdminConfigurationValueRef,
 };
 pub use capability_projection::{CapabilityProjectionError, project_capability_ids};
 pub use deployment_channels::{

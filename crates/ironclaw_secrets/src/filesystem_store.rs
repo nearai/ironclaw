@@ -62,7 +62,7 @@ use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
     CredentialBrokerError, CredentialSession, CredentialSessionId, CredentialSessionStore,
     DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretError, SecretLease, SecretLeaseId, SecretLeaseStatus,
-    SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretsCrypto,
+    SecretMaterial, SecretMetadata, SecretStoreError, SecretStorePort, SecretsCrypto,
     credential_account_aad, credential_session_aad, filesystem_secret_aad,
 };
 
@@ -191,9 +191,9 @@ impl SerializableCredentialSession {
     }
 }
 
-// -- FilesystemSecretStore --------------------------------------------------
+// -- SecretStore --------------------------------------------------
 
-/// Filesystem-backed [`SecretStore`].
+/// Filesystem-backed [`SecretStorePort`].
 ///
 /// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`].
 /// Encryption is currently embedded (see the module docstring) and uses the
@@ -203,7 +203,7 @@ impl SerializableCredentialSession {
 /// to a per-tenant/per-user [`VirtualPath`](ironclaw_host_api::VirtualPath)
 /// before any backend dispatch, so two stores wrapping the same backend with
 /// different mounts cannot read each other's data.
-pub struct FilesystemSecretStore<F>
+pub struct SecretStore<F>
 where
     F: RootFilesystem,
 {
@@ -213,7 +213,7 @@ where
     tenant_index_roots: Mutex<HashSet<String>>,
 }
 
-impl<F> FilesystemSecretStore<F>
+impl<F> SecretStore<F>
 where
     F: RootFilesystem,
 {
@@ -239,7 +239,7 @@ where
         }
     }
 
-    /// Like [`FilesystemSecretStore::ephemeral`], but over a caller-supplied
+    /// Like [`SecretStore::ephemeral`], but over a caller-supplied
     /// backend mounted under the same tenant-rewriting `/secrets` view and an
     /// ephemeral master key.
     ///
@@ -247,7 +247,7 @@ where
     /// `ironclaw_filesystem::FaultInjecting` and drive the **real** store
     /// against injected backend faults, exercising its encryption, CAS write,
     /// and `FilesystemError -> SecretStoreError` mapping — instead of
-    /// substituting a whole-trait `SecretStore` fake that runs none of that.
+    /// substituting a whole-trait `SecretStorePort` fake that runs none of that.
     pub fn ephemeral_over(backend: Arc<F>) -> Self {
         let scoped = ScopedFilesystem::new(backend, ephemeral_secrets_mount_view);
         Self::new(Arc::new(scoped), Arc::new(SecretsCrypto::ephemeral()))
@@ -363,21 +363,21 @@ where
 /// Redacted `Debug`: never walks the backend or crypto state, so no secret
 /// material, ciphertext, or lease contents can leak through `{:?}` output
 /// (test wrappers `#[derive(Debug)]` around this store).
-impl<F> std::fmt::Debug for FilesystemSecretStore<F>
+impl<F> std::fmt::Debug for SecretStore<F>
 where
     F: RootFilesystem,
 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FilesystemSecretStore")
+            .debug_struct("SecretStore")
             .field("filesystem", &self.filesystem)
             .field("lease_ttl", &self.lease_ttl)
             .finish_non_exhaustive()
     }
 }
 
-impl FilesystemSecretStore<InMemoryBackend> {
-    /// Volatile, encrypted secret store: the production `FilesystemSecretStore`
+impl SecretStore<InMemoryBackend> {
+    /// Volatile, encrypted secret store: the production `SecretStore`
     /// over a fresh [`InMemoryBackend`] with an ephemeral master key and a
     /// tenant-rewriting mount resolver (`/secrets` ->
     /// `/tenants/<tenant>/users/<user>/secrets`), matching production
@@ -390,7 +390,7 @@ impl FilesystemSecretStore<InMemoryBackend> {
 }
 
 /// Tenant-rewriting `/secrets` mount resolver used by
-/// [`FilesystemSecretStore::ephemeral`]. Mirrors production composition's
+/// [`SecretStore::ephemeral`]. Mirrors production composition's
 /// `invocation_mount_view` for the `/secrets` alias, including the
 /// `__system__` path segment for the reserved system sentinel scope (the raw
 /// sentinel contains control bytes and is not path-safe).
@@ -413,7 +413,7 @@ fn ephemeral_scope_path_segment(value: &str) -> &str {
 }
 
 #[async_trait]
-impl<F> SecretStore for FilesystemSecretStore<F>
+impl<F> SecretStorePort for SecretStore<F>
 where
     F: RootFilesystem,
 {
@@ -736,7 +736,7 @@ where
     }
 }
 
-// -- FilesystemCredentialBroker --------------------------------------------
+// -- CredentialBroker --------------------------------------------
 
 /// Filesystem-backed implementation of [`CredentialAccountStore`] and
 /// [`CredentialSessionStore`].
@@ -745,7 +745,7 @@ where
 /// broker (matching `InMemoryCredentialBroker`). The shared broker also keeps
 /// the account/session foreign-key relationship intact on the filesystem
 /// (sessions read accounts on `create_session` analogues outside this crate).
-pub struct FilesystemCredentialBroker<F>
+pub struct CredentialBroker<F>
 where
     F: RootFilesystem,
 {
@@ -754,7 +754,7 @@ where
     tenant_index_roots: Mutex<HashSet<String>>,
 }
 
-impl<F> FilesystemCredentialBroker<F>
+impl<F> CredentialBroker<F>
 where
     F: RootFilesystem,
 {
@@ -826,7 +826,7 @@ where
 }
 
 #[async_trait]
-impl<F> CredentialAccountStore for FilesystemCredentialBroker<F>
+impl<F> CredentialAccountStore for CredentialBroker<F>
 where
     F: RootFilesystem,
 {
@@ -934,7 +934,7 @@ where
 }
 
 #[async_trait]
-impl<F> CredentialSessionStore for FilesystemCredentialBroker<F>
+impl<F> CredentialSessionStore for CredentialBroker<F>
 where
     F: RootFilesystem,
 {
@@ -1667,7 +1667,7 @@ mod tests {
     async fn filesystem_secret_store_round_trips_material() {
         let fs = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&fs));
-        let store = FilesystemSecretStore::new(scoped, test_crypto());
+        let store = SecretStore::new(scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
 
@@ -1696,10 +1696,7 @@ mod tests {
         const CONSUMERS: usize = 32;
 
         let fs = Arc::new(InMemoryBackend::new());
-        let store = Arc::new(FilesystemSecretStore::new(
-            default_scoped_fs(fs),
-            test_crypto(),
-        ));
+        let store = Arc::new(SecretStore::new(default_scoped_fs(fs), test_crypto()));
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -1751,7 +1748,7 @@ mod tests {
     async fn filesystem_secret_store_lists_metadata_for_scope_owner() {
         let fs = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&fs));
-        let store = FilesystemSecretStore::new(scoped, test_crypto());
+        let store = SecretStore::new(scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let mut other_project_scope = scope.clone();
         other_project_scope.project_id = Some(ProjectId::new("project-b").unwrap());
@@ -1807,7 +1804,7 @@ mod tests {
     async fn filesystem_secret_store_round_trips_system_scope() {
         let fs = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&fs));
-        let store = FilesystemSecretStore::new(scoped, test_crypto());
+        let store = SecretStore::new(scoped, test_crypto());
         let scope = ResourceScope::system();
         let handle = SecretHandle::new("llm_provider_nearai_api_key").unwrap();
 
@@ -1830,8 +1827,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_delete_skips_pre_read() {
         let backend = Arc::new(DeleteCountingBackend::new(Arc::new(InMemoryBackend::new())));
-        let store =
-            FilesystemSecretStore::new(default_scoped_fs(Arc::clone(&backend)), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(Arc::clone(&backend)), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
 
@@ -1861,7 +1857,7 @@ mod tests {
     async fn filesystem_secret_store_encrypts_at_rest() {
         let fs = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&fs));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
 
@@ -1900,7 +1896,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_isolates_projects_within_same_mount() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
         let mut scope_project_a = sample_scope("tenant-a", "user-a");
         scope_project_a.project_id = Some(ProjectId::new("project-a").unwrap());
         let mut scope_project_b = scope_project_a.clone();
@@ -1937,7 +1933,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_revoke_blocks_consume() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -1965,7 +1961,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_revoke_after_consume_is_idempotent() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -1999,7 +1995,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_revoke_is_idempotent_on_revoked() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -2022,7 +2018,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_missing_secret_does_not_create_lease() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("missing").unwrap();
 
@@ -2034,7 +2030,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_credential_broker_round_trips_account_and_session() {
         let fs = Arc::new(InMemoryBackend::new());
-        let broker = FilesystemCredentialBroker::new(default_scoped_fs(fs), test_crypto());
+        let broker = CredentialBroker::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("openai_prod").unwrap();
         let account = sample_account(
@@ -2098,7 +2094,7 @@ mod tests {
     async fn filesystem_credential_broker_account_at_rest_is_encrypted() {
         let fs = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&fs));
-        let broker = FilesystemCredentialBroker::new(Arc::clone(&scoped), test_crypto());
+        let broker = CredentialBroker::new(Arc::clone(&scoped), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("github_prod").unwrap();
         let mut account = sample_account(
@@ -2391,7 +2387,7 @@ mod tests {
         // VersionMismatch.
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let bootstrap_store = SecretStore::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         bootstrap_store
@@ -2415,7 +2411,7 @@ mod tests {
             .unwrap();
         let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
         let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
-        let racing_store = FilesystemSecretStore::new(racing_scoped, test_crypto());
+        let racing_store = SecretStore::new(racing_scoped, test_crypto());
 
         let material = racing_store.consume(&scope, lease.id).await.unwrap();
         assert_eq!(material.expose_secret(), "super-secret-cas");
@@ -2433,7 +2429,7 @@ mod tests {
     async fn filesystem_broker_consume_session_use_retries_on_version_mismatch() {
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_broker = FilesystemCredentialBroker::new(bootstrap_scoped, test_crypto());
+        let bootstrap_broker = CredentialBroker::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("openai_cas").unwrap();
         let account = sample_account(
@@ -2471,7 +2467,7 @@ mod tests {
 
         let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
         let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
-        let racing_broker = FilesystemCredentialBroker::new(racing_scoped, test_crypto());
+        let racing_broker = CredentialBroker::new(racing_scoped, test_crypto());
 
         racing_broker
             .consume_session_use(&scope, correlation, Utc::now())
@@ -2509,7 +2505,7 @@ mod tests {
     async fn filesystem_secret_store_revoke_retries_on_version_mismatch() {
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let bootstrap_store = SecretStore::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         bootstrap_store
@@ -2530,7 +2526,7 @@ mod tests {
             .unwrap();
         let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
         let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
-        let racing_store = FilesystemSecretStore::new(racing_scoped, test_crypto());
+        let racing_store = SecretStore::new(racing_scoped, test_crypto());
 
         let revoked = racing_store.revoke(&scope, lease.id).await.unwrap();
         assert_eq!(revoked.status, SecretLeaseStatus::Revoked);
@@ -2555,7 +2551,7 @@ mod tests {
     async fn filesystem_secret_store_revoke_exhausts_cas_retry_budget() {
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let bootstrap_store = SecretStore::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         bootstrap_store
@@ -2576,7 +2572,7 @@ mod tests {
             .unwrap();
         let racing = StdArc::new(AlwaysRacingBackend::new(StdArc::clone(&inner), watched));
         let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
-        let racing_store = FilesystemSecretStore::new(racing_scoped, test_crypto());
+        let racing_store = SecretStore::new(racing_scoped, test_crypto());
 
         let error = racing_store.revoke(&scope, lease.id).await.unwrap_err();
         match error {
@@ -2601,7 +2597,7 @@ mod tests {
     async fn filesystem_broker_consume_session_use_exhausts_cas_retry_budget() {
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_broker = FilesystemCredentialBroker::new(bootstrap_scoped, test_crypto());
+        let bootstrap_broker = CredentialBroker::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("openai_exhaust").unwrap();
         let account = sample_account(
@@ -2639,7 +2635,7 @@ mod tests {
 
         let racing = StdArc::new(AlwaysRacingBackend::new(StdArc::clone(&inner), watched));
         let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
-        let racing_broker = FilesystemCredentialBroker::new(racing_scoped, test_crypto());
+        let racing_broker = CredentialBroker::new(racing_scoped, test_crypto());
 
         let error = racing_broker
             .consume_session_use(&scope, correlation, Utc::now())
@@ -2664,7 +2660,7 @@ mod tests {
     /// whose `/secrets` alias resolves to a different tenant-scoped
     /// [`VirtualPath`] subtree. Writing the same `(user_id, project_id,
     /// handle)` tuple on tenant A's store must NOT make the secret visible
-    /// from tenant B's store. Before this migration, `FilesystemSecretStore`
+    /// from tenant B's store. Before this migration, `SecretStore`
     /// held a raw `Arc<F: RootFilesystem>` and encoded tenant identity in
     /// the path itself — any composition layer that forgot to prefix the
     /// path with tenant would leak across tenants, with the type system
@@ -2674,14 +2670,14 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_isolates_two_tenants_with_same_user_project_ids() {
         let backend = Arc::new(InMemoryBackend::new());
-        let store_a = FilesystemSecretStore::new(
+        let store_a = SecretStore::new(
             build_scoped_fs(
                 Arc::clone(&backend),
                 "/secrets/tenants/a/users/alice/secrets",
             ),
             test_crypto(),
         );
-        let store_b = FilesystemSecretStore::new(
+        let store_b = SecretStore::new(
             build_scoped_fs(
                 Arc::clone(&backend),
                 "/secrets/tenants/b/users/alice/secrets",
@@ -2764,7 +2760,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_aad_validates_cross_invocation_within_same_owner() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
 
         // Same tenant/user/agent/project across both invocations; only the
         // invocation/mission/thread fields differ.
@@ -2828,7 +2824,7 @@ mod tests {
 
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&backend));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
         let scope = sample_scope("tenant-a", "alice");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -2916,7 +2912,7 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = default_scoped_fs(Arc::clone(&backend));
         // Negative TTL: every issued lease is born past its expiry.
-        let store = FilesystemSecretStore::with_lease_ttl(
+        let store = SecretStore::with_lease_ttl(
             Arc::clone(&scoped),
             test_crypto(),
             chrono::Duration::seconds(-1),
@@ -2997,7 +2993,7 @@ mod tests {
     async fn filesystem_secret_store_consume_fails_closed_on_cas_unsupported_backend() {
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let bootstrap_store = SecretStore::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         bootstrap_store
@@ -3013,7 +3009,7 @@ mod tests {
 
         let unsupported = StdArc::new(CasUnsupportedBackend::new(StdArc::clone(&inner)));
         let unsupported_scoped = default_scoped_fs(StdArc::clone(&unsupported));
-        let unsupported_store = FilesystemSecretStore::new(unsupported_scoped, test_crypto());
+        let unsupported_store = SecretStore::new(unsupported_scoped, test_crypto());
 
         let error = unsupported_store
             .consume(&scope, lease.id)
@@ -3038,7 +3034,7 @@ mod tests {
     async fn filesystem_broker_consume_session_use_fails_closed_on_cas_unsupported_backend() {
         let inner = StdArc::new(InMemoryBackend::new());
         let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
-        let bootstrap_broker = FilesystemCredentialBroker::new(bootstrap_scoped, test_crypto());
+        let bootstrap_broker = CredentialBroker::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("openai_cas_unsupported").unwrap();
         let account = sample_account(
@@ -3071,7 +3067,7 @@ mod tests {
 
         let unsupported = StdArc::new(CasUnsupportedBackend::new(StdArc::clone(&inner)));
         let unsupported_scoped = default_scoped_fs(StdArc::clone(&unsupported));
-        let unsupported_broker = FilesystemCredentialBroker::new(unsupported_scoped, test_crypto());
+        let unsupported_broker = CredentialBroker::new(unsupported_scoped, test_crypto());
 
         let error = unsupported_broker
             .consume_session_use(&scope, correlation, Utc::now())

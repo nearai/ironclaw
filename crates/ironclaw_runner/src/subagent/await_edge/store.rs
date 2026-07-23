@@ -22,7 +22,7 @@ use super::{
 };
 use crate::subagent::await_edge::roster::{self, RosterKey};
 
-/// Test-only fault-injection hooks for [`FilesystemAwaitEdgeStore::close_with_release`]'s
+/// Test-only fault-injection hooks for [`AwaitEdgeStore::close_with_release`]'s
 /// two named crash windows (§5.5 round-7 scenarios (a) and (b)). Bundled into
 /// one struct instead of two more positional `Option<&dyn Fn()>` parameters —
 /// keeps that method under `clippy::too_many_arguments` without an exemption.
@@ -35,13 +35,13 @@ pub struct CloseCrashHooks<'a> {
 
 /// Thin CAS wrapper around one shared `Arc<ScopedFilesystem<F>>`. Generic
 /// over the backend, matching every other filesystem-backed reborn store
-/// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`) — never
+/// (`goal_store.rs`'s `SubagentGoalStore<F>`) — never
 /// `Arc<dyn RootFilesystem>`.
-pub struct FilesystemAwaitEdgeStore<F: RootFilesystem + ?Sized> {
+pub struct AwaitEdgeStore<F: RootFilesystem + ?Sized> {
     fs: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemAwaitEdgeStore<F>
+impl<F> AwaitEdgeStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -646,7 +646,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<F> ironclaw_loop_host::AwaitEdgeWriter for FilesystemAwaitEdgeStore<F>
+impl<F> ironclaw_loop_host::AwaitEdgeWriter for AwaitEdgeStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -706,7 +706,7 @@ where
 /// spoofed, independent of terminal/delivery state. Reuses [`Self::list_group`]'s
 /// same list+filter-by-`gate_ref` logic under the parent's edge directory.
 #[async_trait::async_trait]
-impl<F> crate::loop_exit_applier::AwaitDependentRunEvidenceStore for FilesystemAwaitEdgeStore<F>
+impl<F> crate::loop_exit_applier::AwaitDependentRunEvidenceStore for AwaitEdgeStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -808,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_then_settle_then_close_deletes_edge() {
-        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let store = AwaitEdgeStore::new(scoped_fs());
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -856,7 +856,7 @@ mod tests {
     #[tokio::test]
     async fn open_bumps_roster_marker_version_again_after_edge_write() {
         let fs = scoped_fs();
-        let store = FilesystemAwaitEdgeStore::new(Arc::clone(&fs));
+        let store = AwaitEdgeStore::new(Arc::clone(&fs));
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -889,7 +889,7 @@ mod tests {
     #[tokio::test]
     async fn close_with_release_prunes_roster_marker_once_scopes_last_edge_is_gone() {
         let fs = scoped_fs();
-        let store = FilesystemAwaitEdgeStore::new(Arc::clone(&fs));
+        let store = AwaitEdgeStore::new(Arc::clone(&fs));
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -943,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn close_with_release_leaves_roster_marker_when_sibling_edge_still_open() {
         let fs = scoped_fs();
-        let store = FilesystemAwaitEdgeStore::new(Arc::clone(&fs));
+        let store = AwaitEdgeStore::new(Arc::clone(&fs));
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child_a = TurnRunId::new();
@@ -999,7 +999,7 @@ mod tests {
     // without re-invoking `release_fn` (mirrors the scenario-(b) test below).
     #[tokio::test]
     async fn crash_before_prune_then_recovery_completes_prune_and_delete_without_double_release() {
-        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let store = AwaitEdgeStore::new(scoped_fs());
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -1108,7 +1108,7 @@ mod tests {
         // Pins §2 round-4: using the terminal-state CAS's version for the
         // delete would fail VersionMismatch every time, since the
         // Claimed->Released transition bumps the version again afterward.
-        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let store = AwaitEdgeStore::new(scoped_fs());
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn reservation_release_tri_state_transitions_and_retry_unlock() {
-        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let store = AwaitEdgeStore::new(scoped_fs());
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -1234,7 +1234,7 @@ mod tests {
     // the release call.
     #[tokio::test]
     async fn mid_prune_crash_then_recovery_completes_delete_without_double_release() {
-        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let store = AwaitEdgeStore::new(scoped_fs());
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -1365,7 +1365,7 @@ mod tests {
     /// `close_with_release` must tolerate.
     #[tokio::test]
     async fn concurrent_mark_released_race_is_benign_not_a_close_failure() {
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(scoped_fs()));
+        let store = Arc::new(AwaitEdgeStore::new(scoped_fs()));
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child = TurnRunId::new();
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_group_filters_by_gate_ref() {
-        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let store = AwaitEdgeStore::new(scoped_fs());
         let scope = turn_scope();
         let parent = TurnRunId::new();
         let child_a = TurnRunId::new();

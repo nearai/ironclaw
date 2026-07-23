@@ -280,13 +280,13 @@ impl ChannelConnectionTestBundle {
     /// Restart-survival probe (T5 of issue #6105): evaluate the SAME
     /// active-binding predicate as
     /// [`Self::has_any_active_identity_binding`] for EACH of `user_ids`, but
-    /// through ONE fresh `FilesystemChannelIdentityStore` over ONE fresh
+    /// through ONE fresh `ChannelIdentityStore` over ONE fresh
     /// local-dev root filesystem reopened at `storage_root` — fully
     /// independent of the live runtime's in-memory handles. This is the
     /// integration-tier approximation of a process restart: it proves the
     /// durable binding is reconstructible the way production reconstructs it
     /// on boot (`build_runtime` →
-    /// `FilesystemChannelIdentityStore::new` over the composed local-dev
+    /// `ChannelIdentityStore::new` over the composed local-dev
     /// root). Results come back in `user_ids` order; the single reopen means
     /// a positive probe and its non-vacuity control read the same
     /// reconstructed store. Tests only.
@@ -304,7 +304,7 @@ impl ChannelConnectionTestBundle {
             .await
             .map_err(|error| error.to_string())?;
         let store = Arc::new(
-            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+            crate::extension_host::channel_identity_store::ChannelIdentityStore::new(
                 filesystem,
                 self.identity_store_tenant_id.clone(),
                 self.identity_store_user_id.clone(),

@@ -590,7 +590,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
     use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     #[derive(Debug)]
     struct NoopDispatcher;
@@ -685,7 +685,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
             ])),
             client_credentials: Arc::new(StaticTestCredentials),
             egress: Arc::new(PanicEgress),
-            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(SecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )
@@ -695,7 +695,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
     ));
     let gate_driver = Arc::new(OAuthGateFlowDriver::new(
         engine,
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
     ));
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))

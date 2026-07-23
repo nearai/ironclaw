@@ -86,7 +86,7 @@ const REBORN_HEALTH_PATH: &str = "/api/health";
 
 /// Authentication contract the Reborn binary supplies. The composition
 /// layer is intentionally agnostic about WHERE bearer tokens come from
-/// — env vars, the host's `SecretStore`, OIDC JWTs verified by the
+/// — env vars, the host's `SecretStorePort`, OIDC JWTs verified by the
 /// caller — so the same `webui_v2_app` works for the CLI binary and
 /// for any future ingress fronting the same routes.
 ///

@@ -62,8 +62,8 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
-    pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
+    pub(super) approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    pub(super) capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store the built capability port persists
     /// pending-gate records into (wires the #6245 production gap closed).
     pub(super) gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
@@ -159,8 +159,8 @@ struct RefreshingCapabilityPort {
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,

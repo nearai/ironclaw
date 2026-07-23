@@ -1,4 +1,4 @@
-//! Write-behind window machinery for [`FilesystemTurnStateRowStore`]: the
+//! Write-behind window machinery for [`TurnStateRowStore`]: the
 //! bounded pending-ack backpressure window, the critical-vs-async commit
 //! barrier, degradation guards, and the journal enqueue/await plumbing. Moved
 //! verbatim from the module root during the #6263 decomposition; behavior is
@@ -11,12 +11,12 @@ use ironclaw_filesystem::RootFilesystem;
 use crate::TurnError;
 
 use super::{
-    FilesystemTurnStateRowStore, PendingRowCommit,
+    PendingRowCommit, TurnStateRowStore,
     delta::{RowSnapshotState, SnapshotDelta},
     journal::{DeltaAck, DeltaJournal},
 };
 
-impl<F> FilesystemTurnStateRowStore<F>
+impl<F> TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {

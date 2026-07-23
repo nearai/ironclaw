@@ -6,7 +6,7 @@ use std::{
 use chrono::Utc;
 use uuid::Uuid;
 
-use ironclaw_authorization::CapabilityLeaseStore;
+use ironclaw_authorization::CapabilityLeaseStorePort;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExecutionContext, ExtensionId, InvocationId, MountView,
     ResourceScope, RuntimeKind, TrustClass, UserId,
@@ -23,7 +23,7 @@ use ironclaw_loop_host::{
 use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_runner::thread_scope::ThreadScopeResolver;
 
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -109,11 +109,11 @@ pub(super) fn capability_wiring(
     let workspace_mounts = services.workspace_mounts.clone();
     let memory_mounts = services.memory_mounts.clone();
     let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
-    let approval_requests: Arc<dyn ApprovalRequestStore> = services.approval_requests.clone();
-    let capability_leases: Arc<dyn CapabilityLeaseStore> = services.capability_leases.clone();
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+    let approval_requests: Arc<dyn ApprovalRequestStorePort> = services.approval_requests.clone();
+    let capability_leases: Arc<dyn CapabilityLeaseStorePort> = services.capability_leases.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
         services.tool_permission_overrides.clone();
-    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
         services.auto_approve_settings.clone();
     let approval_settings: Arc<dyn ApprovalSettingsProvider> =
         Arc::new(StoreApprovalSettingsProvider::new(
@@ -159,12 +159,11 @@ pub(super) fn capability_wiring(
     // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
     let capability_store_filesystem =
         crate::wrap_scoped(Arc::clone(&services.extension_filesystem));
-    let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
-        Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-            Arc::clone(&capability_store_filesystem),
-        ));
-    let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
-        ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
+    let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
+        ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+    );
+    let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = Arc::new(
+        ironclaw_capabilities::ReplayPayloadStore::new(capability_store_filesystem),
     );
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RefreshingLoopCapabilityPortFactory {
@@ -219,14 +218,14 @@ struct RefreshingLoopCapabilityPortFactory {
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store; one instance per runtime, shared
     /// by reference into every port this factory builds.
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     /// Durable host-private replay-payload store (§5.3 Stage 2a-i); one instance
     /// per runtime, shared by reference into every port this factory builds.
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     /// Per-runtime catalog of client-supplied ("external") tools. Shared across
     /// all runs in this runtime so a parked external-tool call and its later
     /// client-submitted output (across a pause/resume) hit the same store.

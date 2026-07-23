@@ -1,5 +1,5 @@
 // arch-exempt: large_file, filesystem turn-state contract suite decomposition, plan #5662
-//! Contract tests for [`FilesystemTurnStateRowStore`] against a
+//! Contract tests for [`TurnStateRowStore`] against a
 //! [`ScopedFilesystem`] over a CAS-capable filesystem backend. The persistent
 //! shape is a lower-churn `/turns/state.json` snapshot; active runner leases
 //! are memory-backed and fall back to the snapshot after restart.
@@ -26,17 +26,16 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
-    CheckpointSchemaId, EventCursor, FilesystemTurnStateBlockPersistence,
-    FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore, LoopExitMapping,
-    ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
-    TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore, TurnStateStoreLimits,
-    TurnStatus,
+    CheckpointSchemaId, EventCursor, FilesystemTurnStateBlockPersistence, GateRef,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    LoopCheckpointStore, LoopExitMapping, ProductTurnContext, PutLoopCheckpointRequest,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter,
+    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind, TurnEventProjectionSource,
+    TurnId, TurnLeaseToken, TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateRowStore,
+    TurnStateStore, TurnStateStoreLimits, TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
@@ -202,15 +201,15 @@ where
     scoped_turns_fs_at(backend, "test-tenant", "test-user")
 }
 
-fn strict_row_store<F>(scoped: Arc<ScopedFilesystem<F>>) -> FilesystemTurnStateRowStore<F>
+fn strict_row_store<F>(scoped: Arc<ScopedFilesystem<F>>) -> TurnStateRowStore<F>
 where
     F: RootFilesystem + 'static,
 {
-    FilesystemTurnStateRowStore::new(scoped)
+    TurnStateRowStore::new(scoped)
 }
 
 async fn retry_get_run_state<F>(
-    store: &FilesystemTurnStateRowStore<F>,
+    store: &TurnStateRowStore<F>,
     scope: TurnScope,
     run_id: TurnRunId,
 ) -> ironclaw_turns::TurnRunState
@@ -237,7 +236,7 @@ where
 }
 
 async fn retry_read_turn_events<F>(
-    store: &FilesystemTurnStateRowStore<F>,
+    store: &TurnStateRowStore<F>,
     scope: &TurnScope,
 ) -> ironclaw_turns::TurnEventPage
 where
@@ -774,7 +773,7 @@ fn accepted_turn_id(response: &SubmitTurnResponse) -> TurnId {
 async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapshot() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
 
     let claimed = store
         .claim_next_run(ClaimRunRequest {
@@ -809,7 +808,7 @@ async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapsh
 async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(turn_scope("thread-fs-row-persist"), "idem-fs-row-persist");
@@ -848,7 +847,7 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
     assert_eq!(blocked.status, TurnStatus::BlockedApproval);
     assert_eq!(blocked.checkpoint_id, Some(checkpoint_id));
 
-    let reopened_blocked = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let reopened_blocked = TurnStateRowStore::new(Arc::clone(&scoped));
     let blocked_state = reopened_blocked
         .get_run_state(GetRunStateRequest {
             scope: request.scope.clone(),
@@ -928,7 +927,7 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         "row store should persist typed transition deltas in the append log"
     );
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: request.scope,
@@ -1000,7 +999,7 @@ async fn filesystem_turn_state_row_store_refreshes_stale_active_lock_cache_befor
 async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_run() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-stale-get-run-state");
@@ -1042,7 +1041,7 @@ async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_ru
     store.drain().await.expect("drain claim");
     drop(store);
 
-    let reopened = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let reopened = TurnStateRowStore::new(Arc::clone(&scoped));
     let refreshed = reopened
         .get_run_state(GetRunStateRequest { scope, run_id })
         .await
@@ -1058,7 +1057,7 @@ async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
     // sink (the row store's legacy-blob importer reads exactly this artifact).
     let source_backend = Arc::new(engine_filesystem());
     let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
-    let source = FilesystemTurnStateRowStore::new(Arc::clone(&source_scoped));
+    let source = TurnStateRowStore::new(Arc::clone(&source_scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let scope = turn_scope("thread-fs-row-migrate-legacy");
     let run_id = TurnRunId::new();
@@ -1093,7 +1092,7 @@ async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
         "block-persistence must write the blob-shaped state snapshot"
     );
 
-    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let row_store = TurnStateRowStore::new(Arc::clone(&scoped));
     let state = row_store
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
@@ -1127,7 +1126,7 @@ async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
         "migration keeps the legacy blob as rollback evidence"
     );
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let reopened_state = reopened
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
@@ -1164,7 +1163,7 @@ async fn filesystem_turn_state_row_store_migrates_block_persistence_gate_park_sn
     //    in-memory authority did when a run parked on a gate.
     let source_backend = Arc::new(engine_filesystem());
     let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
-    let source = FilesystemTurnStateRowStore::new(Arc::clone(&source_scoped));
+    let source = TurnStateRowStore::new(Arc::clone(&source_scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let scope = turn_scope("thread-block-persist-migrate");
     let request = submit_request_for(scope.clone(), "idem-block-persist-migrate");
@@ -1227,7 +1226,7 @@ async fn filesystem_turn_state_row_store_migrates_block_persistence_gate_park_sn
 
     // 3) Open the row store over the same fresh backend; the first read triggers
     //    the automatic legacy-blob import, recovering the gate-parked turn.
-    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&target_scoped));
+    let row_store = TurnStateRowStore::new(Arc::clone(&target_scoped));
     let migrated = row_store
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
@@ -1242,7 +1241,7 @@ async fn filesystem_turn_state_row_store_migrates_block_persistence_gate_park_sn
     );
 
     // 4) The gate-parked run is durable rows now: it rehydrates on a fresh reopen.
-    let reopened = FilesystemTurnStateRowStore::new(target_scoped);
+    let reopened = TurnStateRowStore::new(target_scoped);
     let reopened_state = reopened
         .get_run_state(GetRunStateRequest { scope, run_id })
         .await
@@ -1254,7 +1253,7 @@ async fn filesystem_turn_state_row_store_migrates_block_persistence_gate_park_sn
 async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_rows_exist() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let row_store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let row_scope = turn_scope("thread-fs-row-existing-wins");
     let row_run_id = TurnRunId::new();
@@ -1281,7 +1280,7 @@ async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_row
     stale_request.requested_run_id = Some(stale_run_id);
     let stale_source_backend = Arc::new(engine_filesystem());
     let stale_source_scoped = scoped_turns_fs(Arc::clone(&stale_source_backend));
-    let stale_source = FilesystemTurnStateRowStore::new(Arc::clone(&stale_source_scoped));
+    let stale_source = TurnStateRowStore::new(Arc::clone(&stale_source_scoped));
     stale_source
         .submit_turn(stale_request, &AllowAllTurnAdmissionPolicy, &resolver)
         .await
@@ -1299,7 +1298,7 @@ async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_row
         "stale legacy fixture must write a blob next to existing rows"
     );
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: row_scope,
@@ -1361,7 +1360,7 @@ async fn filesystem_turn_state_row_store_concurrent_submits_preserve_all_runs() 
     }
     assert_eq!(accepted.len(), workers);
 
-    let reopened = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let reopened = TurnStateRowStore::new(Arc::clone(&scoped));
     for (scope, run_id) in accepted {
         let state = reopened
             .get_run_state(GetRunStateRequest { scope, run_id })
@@ -1566,8 +1565,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losin
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
-            .with_apply_timeout(Duration::from_millis(100)),
+        TurnStateRowStore::new(Arc::clone(&scoped)).with_apply_timeout(Duration::from_millis(100)),
     );
     let resolver = InMemoryRunProfileResolver::default();
     let parent_scope = turn_scope("thread-fs-row-checkpoint-timeout");
@@ -1611,7 +1609,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losin
 
     backend.release_blocked_append();
     for _ in 0..8 {
-        let reopened = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+        let reopened = TurnStateRowStore::new(Arc::clone(&scoped));
         let snapshot = reopened.persistence_snapshot().await.unwrap();
         if snapshot
             .loop_checkpoints
@@ -1629,8 +1627,8 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losin
 async fn filesystem_turn_state_row_store_get_loop_checkpoint_refreshes_stale_cached_rows() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let writer = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
-    let reader = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let writer = TurnStateRowStore::new(Arc::clone(&scoped));
+    let reader = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let scope = turn_scope("thread-fs-row-checkpoint-stale-cache");
     let response = writer
@@ -1684,7 +1682,7 @@ async fn filesystem_turn_state_row_store_get_loop_checkpoint_refreshes_stale_cac
 async fn filesystem_turn_state_row_store_append_failure_clears_hot_cache() {
     let backend = Arc::new(RejectingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let scope = turn_scope("thread-fs-row-reject-append");
     let run_id = TurnRunId::new();
     let mut request = submit_request_for(scope.clone(), "idem-fs-row-reject-append");
@@ -1714,7 +1712,7 @@ async fn filesystem_turn_state_row_store_append_failure_clears_hot_cache() {
 async fn filesystem_turn_state_row_store_materializes_unadvanced_prior_delta_before_cursor() {
     let backend = Arc::new(FailOncePutFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let first_scope = turn_scope("thread-fs-row-recover-prior-1");
     let first_run_id = TurnRunId::new();
@@ -1736,7 +1734,7 @@ async fn filesystem_turn_state_row_store_materializes_unadvanced_prior_delta_bef
         .await
         .unwrap();
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let first = retry_get_run_state(&reopened, first_scope, first_run_id).await;
     assert_eq!(first.status, TurnStatus::Queued);
     let second = retry_get_run_state(&reopened, second_scope, second_run_id).await;
@@ -1747,7 +1745,7 @@ async fn filesystem_turn_state_row_store_materializes_unadvanced_prior_delta_bef
 async fn filesystem_turn_state_row_store_event_projection_replays_unmaterialized_journal() {
     let backend = Arc::new(FailOncePutFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let scope = turn_scope("thread-fs-row-event-replay");
     let run_id = TurnRunId::new();
@@ -1759,7 +1757,7 @@ async fn filesystem_turn_state_row_store_event_projection_replays_unmaterialized
         .await
         .unwrap();
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let events = retry_read_turn_events(&reopened, &scope).await;
     assert!(
         events
@@ -1774,7 +1772,7 @@ async fn filesystem_turn_state_row_store_event_projection_replays_unmaterialized
 async fn filesystem_turn_state_row_store_loop_checkpoint_survives_concurrent_full_snapshot_apply() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(TurnStateRowStore::new(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
     let parent_scope = turn_scope("thread-fs-row-checkpoint-race-parent");
     let parent_response = store
@@ -1871,7 +1869,7 @@ async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable(
         .set_max_events(2)
         .set_max_terminal_records(1)
         .set_max_idempotency_records(1);
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
+    let store = TurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let resolver = InMemoryRunProfileResolver::default();
 
     let first_scope = turn_scope("thread-fs-row-evicted-terminal-1");
@@ -1968,7 +1966,7 @@ async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable(
         "events are Tier 2 run-record rows and must survive cache event eviction"
     );
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped).with_limits(limits);
+    let reopened = TurnStateRowStore::new(scoped).with_limits(limits);
     let reopened_hot_snapshot = reopened.persistence_snapshot().await.unwrap();
     assert!(
         !reopened_hot_snapshot
@@ -2016,7 +2014,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
         max_idempotency_records: 1,
         ..TurnStateStoreLimits::default()
     };
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
+    let store = TurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let resolver = InMemoryRunProfileResolver::default();
 
     let first_scope = turn_scope("thread-fs-row-loop-exit-terminal-1");
@@ -2101,7 +2099,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
         .unwrap();
     assert_eq!(completed.status, TurnStatus::Completed);
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped).with_limits(limits);
+    let reopened = TurnStateRowStore::new(scoped).with_limits(limits);
     let reopened_completed = reopened
         .get_run_state(GetRunStateRequest {
             scope: first_scope.clone(),
@@ -2128,7 +2126,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
 async fn filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2226,7 +2224,7 @@ async fn filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row() {
 async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_append_delta() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2300,7 +2298,7 @@ async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_a
 async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_after_reopen() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2331,7 +2329,7 @@ async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_
         .and_then(|record| record.last_heartbeat_at)
         .expect("claimed heartbeat timestamp");
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     tokio::time::sleep(Duration::from_millis(5)).await;
     reopened
         .heartbeat(HeartbeatRequest {
@@ -2361,7 +2359,7 @@ async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_
 async fn filesystem_turn_state_store_recover_expired_leases_uses_memory_runner_lease() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2450,7 +2448,7 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_memory_runner_l
 async fn filesystem_turn_state_store_complete_run_uses_memory_runner_lease() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2511,7 +2509,7 @@ async fn filesystem_turn_state_store_complete_run_uses_memory_runner_lease() {
 async fn filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidecar() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2588,7 +2586,7 @@ async fn filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidec
 async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_lease_status() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2649,7 +2647,7 @@ async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_leas
 async fn filesystem_turn_state_store_heartbeat_succeeds_while_durable_append_is_blocked() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(scoped));
+    let store = Arc::new(TurnStateRowStore::new(scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2741,7 +2739,7 @@ fn child_run_request(
 async fn filesystem_turn_state_store_persists_submit_and_reopens() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(turn_scope("thread-fs-persist"), "idem-fs-persist");
@@ -2753,7 +2751,7 @@ async fn filesystem_turn_state_store_persists_submit_and_reopens() {
 
     // Re-construct the store over the same scoped filesystem; the on-disk
     // snapshot must rehydrate the queued run.
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: request.scope,
@@ -2769,7 +2767,7 @@ async fn filesystem_turn_state_store_persists_submit_and_reopens() {
 async fn filesystem_turn_state_store_reuses_fresh_snapshot_for_read_only_lookup() {
     let backend = Arc::new(CountingFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(turn_scope("thread-fs-read-cache"), "idem-fs-read-cache");
@@ -2808,7 +2806,7 @@ async fn filesystem_turn_state_store_reuses_fresh_snapshot_for_read_only_lookup(
 async fn filesystem_turn_state_store_snapshot_reads_overlap_apply_write() {
     let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(TurnStateRowStore::new(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
 
     let existing_request = submit_request_for(turn_scope("thread-fs-overlap-a"), "idem-overlap-a");
@@ -2860,7 +2858,7 @@ async fn filesystem_turn_state_store_snapshot_reads_overlap_apply_write() {
 async fn filesystem_turn_state_store_cas_writers_overlap_blocked_snapshot_write() {
     let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(TurnStateRowStore::new(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
 
     store
@@ -2979,7 +2977,7 @@ async fn filesystem_turn_state_store_rejects_byte_only_backend_before_persisting
     // same class of backend when the durable journal append fails.)
     let backend = Arc::new(byte_only_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let request = submit_request_for(turn_scope("thread-fs-byte-only"), "idem-byte-only");
 
@@ -3008,7 +3006,7 @@ async fn filesystem_turn_state_store_rejects_byte_only_backend_before_persisting
 async fn durable_event_log_replay_fails_closed_on_byte_only_backend() {
     let backend = Arc::new(byte_only_filesystem());
     let scoped = scoped_turns_fs(backend);
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
 
     let error = store
         .read_turn_event_log_after(None, 32)
@@ -3033,8 +3031,8 @@ async fn filesystem_turn_state_store_hides_records_from_other_tenants_via_mount_
     let scoped_a = scoped_turns_fs_at(Arc::clone(&backend), "tenant-a", "alice");
     let scoped_b = scoped_turns_fs_at(Arc::clone(&backend), "tenant-b", "alice");
 
-    let store_a = FilesystemTurnStateRowStore::new(Arc::clone(&scoped_a));
-    let store_b = FilesystemTurnStateRowStore::new(Arc::clone(&scoped_b));
+    let store_a = TurnStateRowStore::new(Arc::clone(&scoped_a));
+    let store_b = TurnStateRowStore::new(Arc::clone(&scoped_b));
     let resolver = InMemoryRunProfileResolver::default();
 
     let scope_a = TurnScope::new(
@@ -3104,7 +3102,7 @@ async fn filesystem_turn_state_store_hides_records_from_other_tenants_via_mount_
 async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let parent_scope = turn_scope("thread-fs-parent");
@@ -3154,7 +3152,7 @@ async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
         .await
         .unwrap();
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let children = reopened.children_of(&parent_scope, parent).await.unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].run_id, child_run_id);
@@ -3192,7 +3190,7 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
     // one-shot legacy-blob migration instead.)
     let source_backend = Arc::new(engine_filesystem());
     let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&source_scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&source_scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let parent_scope = turn_scope("thread-fs-scope-parent");
@@ -3245,7 +3243,7 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
         .persist(&snapshot)
         .await;
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     assert_eq!(
         reopened
             .children_of(&parent_scope, parent)
@@ -3314,7 +3312,7 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
     // section renders the correct origin after a restart.
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     // Submit with a non-None product context.
@@ -3335,7 +3333,7 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
     let run_id = accepted_run_id(&response);
 
     // Re-open the store — this forces a full deserialize from the snapshot.
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: request.scope.clone(),
@@ -3364,7 +3362,7 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
         .unwrap();
     let run_id_none = accepted_run_id(&response_none);
 
-    let reopened2 = FilesystemTurnStateRowStore::new(scoped_turns_fs(Arc::clone(&backend)));
+    let reopened2 = TurnStateRowStore::new(scoped_turns_fs(Arc::clone(&backend)));
     let state_none = reopened2
         .get_run_state(GetRunStateRequest {
             scope: request_none.scope,
@@ -3445,7 +3443,7 @@ async fn mark_events_index_backfilled(scoped: &ScopedFilesystem<CompositeRootFil
 async fn filesystem_turn_state_events_query_isolates_scopes_across_threads() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let scope_a = turn_scope("thread-events-a");
@@ -3510,7 +3508,7 @@ async fn filesystem_turn_state_events_query_isolates_scopes_across_threads() {
 async fn filesystem_turn_state_event_log_replays_across_scopes_by_global_cursor() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let scope_a = turn_scope("thread-event-log-a");
@@ -3547,7 +3545,7 @@ async fn filesystem_turn_state_event_log_replays_across_scopes_by_global_cursor(
     assert_ne!(first.entries[0].scope, second.entries[0].scope);
     assert!(second.entries[0].cursor > first.entries[0].cursor);
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let after_reopen = reopened
         .read_turn_event_log_after(Some(first.next_cursor), 1)
         .await
@@ -3567,7 +3565,7 @@ async fn filesystem_turn_state_events_query_hides_rows_missing_index_projection(
     write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, 1, TurnRunId::new())).await;
     mark_events_index_backfilled(&scoped).await;
 
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
     let page = store
         .read_turn_events_after(&scope, None, None, 100)
         .await
@@ -3589,7 +3587,7 @@ async fn filesystem_turn_state_events_backfill_reprojects_preexisting_rows() {
     let run_id = TurnRunId::new();
     write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, 1, run_id)).await;
 
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let page = store
         .read_turn_events_after(&scope, None, None, 100)
         .await
@@ -3601,7 +3599,7 @@ async fn filesystem_turn_state_events_backfill_reprojects_preexisting_rows() {
         "backfill must re-project a pre-upgrade event row so the indexed query surfaces it"
     );
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let reopened_page = reopened
         .read_turn_events_after(&scope, None, None, 100)
         .await
@@ -3673,7 +3671,7 @@ async fn filesystem_turn_state_events_backfill_skips_tombstones_and_reprojects_l
         }
     }
 
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let page = store
         .read_turn_events_after(&scope, None, None, 100)
         .await

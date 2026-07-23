@@ -65,9 +65,9 @@ progress/projection payloads and non-text modality defaults remain deferred.
   is closed. `RebornLocalRuntimeServices` now owns a single outbound store
   exposing preferences, state, gate-routes, and triggered-delivery handles;
   `slack_host_beta` consumes those handles rather than constructing a private
-  `FilesystemOutboundStateStore`. The `/outbound` grant was removed from
+  `OutboundStateStore`. The `/outbound` grant was removed from
   `slack_host_state_mount_view`, and a `clippy::disallowed-methods` lint bans
-  `FilesystemOutboundStateStore::new` outside the factory.
+  `OutboundStateStore::new` outside the factory.
 - The staged Slack provider is not yet wired into the WebUI/API bundle and
   should not become user-selectable until the scoped authority model below is
   implemented.

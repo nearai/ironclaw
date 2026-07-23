@@ -47,7 +47,7 @@ use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 
 use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_root_filesystem};
@@ -145,7 +145,7 @@ pub(super) fn local_dev_host_runtime_with_web_access(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(handlers))
     .with_first_party_http_egress(http_egress)
     .with_trust_policy(Arc::new(web_access_first_party_trust_policy()?));

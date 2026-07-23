@@ -13,7 +13,7 @@ mod filesystem_store;
 pub mod keychain;
 mod legacy_store;
 
-pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
+pub use filesystem_store::{CredentialBroker, SecretStore};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -68,7 +68,7 @@ pub struct SecretMetadata {
     pub handle: SecretHandle,
     /// When the secret material expires, if known.
     ///
-    /// Populated only for access tokens written through [`SecretStore::put`] with a
+    /// Populated only for access tokens written through [`SecretStorePort::put`] with a
     /// non-`None` `expires_at` argument (e.g. OAuth access tokens). Legacy records
     /// and secrets written without a TTL leave this `None`.
     pub expires_at: Option<Timestamp>,
@@ -987,7 +987,7 @@ fn validate_credential_id(kind: &'static str, value: &str) -> Result<(), Credent
 
 /// Scoped secret store contract.
 #[async_trait]
-pub trait SecretStore: Send + Sync {
+pub trait SecretStorePort: Send + Sync {
     /// Stores or replaces a secret under the caller's tenant/user/project scope and returns redacted metadata.
     ///
     /// Intended for trusted setup, composition, migration, or storage-code paths that are already

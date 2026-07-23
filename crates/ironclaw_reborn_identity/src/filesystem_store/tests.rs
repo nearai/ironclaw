@@ -1,4 +1,4 @@
-//! Behavioral matrix for [`FilesystemRebornIdentityStore`](super::FilesystemRebornIdentityStore).
+//! Behavioral matrix for [`RebornIdentityStore`](super::RebornIdentityStore).
 //!
 //! These drive the store through its public resolver surface against an
 //! in-memory backend, plus a two-store/shared-backend stand-in for two runtime
@@ -13,7 +13,7 @@ use crate::{
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-fn store_on(root: Arc<InMemoryBackend>) -> FilesystemRebornIdentityStore<InMemoryBackend> {
+fn store_on(root: Arc<InMemoryBackend>) -> RebornIdentityStore<InMemoryBackend> {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         root,
         MountView::new(vec![MountGrant::new(
@@ -23,7 +23,7 @@ fn store_on(root: Arc<InMemoryBackend>) -> FilesystemRebornIdentityStore<InMemor
         )])
         .unwrap(),
     ));
-    FilesystemRebornIdentityStore::new(
+    RebornIdentityStore::new(
         scoped,
         TenantId::new("tenant-host").unwrap(),
         UserId::new("user:host").unwrap(),
@@ -32,7 +32,7 @@ fn store_on(root: Arc<InMemoryBackend>) -> FilesystemRebornIdentityStore<InMemor
     )
 }
 
-fn store() -> FilesystemRebornIdentityStore<InMemoryBackend> {
+fn store() -> RebornIdentityStore<InMemoryBackend> {
     store_on(Arc::new(InMemoryBackend::default()))
 }
 
@@ -40,8 +40,8 @@ fn store() -> FilesystemRebornIdentityStore<InMemoryBackend> {
 /// the in-test stand-in for two runtime processes whose per-key locks do not
 /// serialize each other across the durable substrate.
 fn store_pair() -> (
-    FilesystemRebornIdentityStore<InMemoryBackend>,
-    FilesystemRebornIdentityStore<InMemoryBackend>,
+    RebornIdentityStore<InMemoryBackend>,
+    RebornIdentityStore<InMemoryBackend>,
 ) {
     let root = Arc::new(InMemoryBackend::default());
     (store_on(Arc::clone(&root)), store_on(root))

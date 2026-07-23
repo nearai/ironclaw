@@ -77,7 +77,7 @@ tracked as #5616.)
 ## User directory surface (`RebornUserDirectory`)
 
 A **separate** trait from `RebornIdentityResolver`, implemented by the same
-`FilesystemRebornIdentityStore`, for the operator/admin surface that enumerates
+`RebornIdentityStore`, for the operator/admin surface that enumerates
 and manages the `StoredUser` records. It is kept apart from the resolver so admin
 CRUD cannot perturb the mint/link/create invariants above, and so the resolver's
 contract tests are not entangled with admin methods. Its only production

@@ -5,7 +5,7 @@ use ironclaw_extensions::{
     ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
     ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
     InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::InMemoryBackend;
@@ -31,10 +31,10 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-async fn filesystem_store() -> FilesystemExtensionInstallationStore {
+async fn filesystem_store() -> ExtensionInstallationStore {
     let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
     register_product_adapter_host_api_contract(&mut contracts).unwrap();
-    FilesystemExtensionInstallationStore::load_at(
+    ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").unwrap(),
         HostPortCatalog::empty(),
@@ -360,7 +360,7 @@ handle = "outbound_token"
 #[tokio::test]
 async fn arc_store_delegation_works() {
     let store = filesystem_store().await;
-    let arc_store: Arc<dyn ExtensionInstallationStore> = Arc::new(store);
+    let arc_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(store);
     arc_store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await

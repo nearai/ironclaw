@@ -320,18 +320,18 @@ mod tests {
         InvocationId, MountAlias, MountGrant, MountPermissions, MountView, RequestedTrustClass,
         TenantId, UserId, VirtualPath,
     };
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     use super::*;
-    use crate::FilesystemAdminConfigurationStore;
+    use crate::AdminConfigurationStore;
 
     #[tokio::test]
     async fn non_channel_oauth_credentials_resolve_from_manifest_admin_configuration() {
         let descriptor = descriptor("provider.example", "oauth_client_id", "oauth_client_secret");
         let service = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(scoped_admin_fs()),
-                Arc::new(FilesystemSecretStore::ephemeral()),
+                AdminConfigurationStore::new(scoped_admin_fs()),
+                Arc::new(SecretStore::ephemeral()),
                 [descriptor.clone()],
             )
             .expect("descriptor catalog"),
@@ -373,8 +373,8 @@ mod tests {
         let second = descriptor("provider.two", "shared_client_id", "second_secret");
         let service = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(scoped_admin_fs()),
-                Arc::new(FilesystemSecretStore::ephemeral()),
+                AdminConfigurationStore::new(scoped_admin_fs()),
+                Arc::new(SecretStore::ephemeral()),
                 [first.clone(), second.clone()],
             )
             .expect("descriptor catalog"),
@@ -402,8 +402,8 @@ mod tests {
         let descriptor = descriptor("provider.example", "oauth_client_id", "oauth_client_secret");
         let service = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(scoped_admin_fs()),
-                Arc::new(FilesystemSecretStore::ephemeral()),
+                AdminConfigurationStore::new(scoped_admin_fs()),
+                Arc::new(SecretStore::ephemeral()),
                 [descriptor.clone()],
             )
             .expect("descriptor catalog"),
@@ -516,8 +516,8 @@ mod tests {
         let second = descriptor("provider.two", "shared_client_id", "second_secret");
         let service = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(scoped_admin_fs()),
-                Arc::new(FilesystemSecretStore::ephemeral()),
+                AdminConfigurationStore::new(scoped_admin_fs()),
+                Arc::new(SecretStore::ephemeral()),
                 [first.clone(), second.clone()],
             )
             .expect("descriptor catalog"),

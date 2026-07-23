@@ -251,7 +251,7 @@ pub trait ProcessManager: Send + Sync {
 }
 
 #[async_trait]
-pub trait ProcessResultStore: Send + Sync {
+pub trait ProcessResultStorePort: Send + Sync {
     /// Stores successful process output separately from the lifecycle record.
     async fn complete(
         &self,
@@ -296,7 +296,7 @@ pub trait ProcessResultStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait ProcessStore: Send + Sync {
+pub trait ProcessStorePort: Send + Sync {
     /// Persists a running process record without storing raw input.
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
 

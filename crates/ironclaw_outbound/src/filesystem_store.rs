@@ -142,14 +142,14 @@ struct RunDeliveryCleanupSnapshot {
 /// HSM-decorated, …) — the store doesn't care which. Tenant isolation is
 /// enforced by the [`MountView`](ironclaw_host_api::MountView) the
 /// composition layer hands the scoped filesystem at construction time.
-pub struct FilesystemOutboundStateStore<F>
+pub struct OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemOutboundStateStore<F>
+impl<F> OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -483,7 +483,7 @@ where
 }
 
 #[async_trait]
-impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
+impl<F> CommunicationPreferenceRepository for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -541,7 +541,7 @@ where
 }
 
 #[async_trait]
-impl<F> OutboundStateStore for FilesystemOutboundStateStore<F>
+impl<F> OutboundStateStore for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -1424,7 +1424,7 @@ fn delivered_gate_route_conv_idx_path(
     .map_err(|_| OutboundError::Backend)
 }
 
-/// Outcome of a [`FilesystemOutboundStateStore::retry_conv_idx`] merge
+/// Outcome of a [`OutboundStateStore::retry_conv_idx`] merge
 /// callback: either write back an updated route list or delete the now-empty
 /// index file.
 enum ConvIdxUpdate {
@@ -1588,7 +1588,7 @@ fn delivery_scope_index_key() -> IndexKey {
 }
 
 #[async_trait]
-impl<F> TriggeredRunDeliveryStore for FilesystemOutboundStateStore<F>
+impl<F> TriggeredRunDeliveryStore for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -1637,7 +1637,7 @@ where
 }
 
 #[async_trait]
-impl<F> DeliveredGateRouteStore for FilesystemOutboundStateStore<F>
+impl<F> DeliveredGateRouteStore for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -2003,7 +2003,7 @@ mod tests {
     use ironclaw_turns::{TurnRunId, TurnScope};
 
     use super::{
-        DeliveredGateRouteConversationIndexFile, FilesystemOutboundStateStore, SCOPE_NONE_SENTINEL,
+        DeliveredGateRouteConversationIndexFile, OutboundStateStore, SCOPE_NONE_SENTINEL,
         thread_scope_key,
     };
     use crate::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
@@ -2031,14 +2031,14 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
-    /// Build a `FilesystemOutboundStateStore` backed by an `InMemoryBackend`
+    /// Build a `OutboundStateStore` backed by an `InMemoryBackend`
     /// for testing the `DeliveredGateRouteStore` implementation.
     fn build_gate_route_store(
         tenant_id: &TenantId,
         user_id: &UserId,
-    ) -> FilesystemOutboundStateStore<InMemoryBackend> {
+    ) -> OutboundStateStore<InMemoryBackend> {
         let backend = Arc::new(InMemoryBackend::new());
-        FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend, tenant_id, user_id,
         ))
     }
@@ -2719,23 +2719,23 @@ mod tests {
         assert_eq!(routes[0].gate_ref, "gate:v1-compat-ref");
     }
 
-    /// Build two `FilesystemOutboundStateStore` instances sharing the same
+    /// Build two `OutboundStateStore` instances sharing the same
     /// `InMemoryBackend`, allowing a second writer to simulate a concurrent
     /// mid-flight mutation of the same index files.
     fn build_shared_backend_stores(
         tenant_id: &TenantId,
         user_id: &UserId,
     ) -> (
-        FilesystemOutboundStateStore<InMemoryBackend>,
-        FilesystemOutboundStateStore<InMemoryBackend>,
+        OutboundStateStore<InMemoryBackend>,
+        OutboundStateStore<InMemoryBackend>,
     ) {
         let backend = Arc::new(InMemoryBackend::new());
-        let store_a = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_a = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend.clone(),
             tenant_id,
             user_id,
         ));
-        let store_b = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_b = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend, tenant_id, user_id,
         ));
         (store_a, store_b)
@@ -3007,12 +3007,12 @@ mod tests {
 
         // Each store is scoped to its own user, but shares the same backend.
         let backend = Arc::new(InMemoryBackend::new());
-        let store_a = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_a = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend.clone(),
             &tenant_id,
             &user_a,
         ));
-        let store_b = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_b = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend, &tenant_id, &user_b,
         ));
 

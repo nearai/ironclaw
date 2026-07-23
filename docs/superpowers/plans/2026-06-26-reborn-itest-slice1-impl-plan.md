@@ -190,7 +190,7 @@ gateway and only the parts the greeting needs):
    `turn_scope` (`TurnScope::new_with_owner(..)`).
 5. Thread harness: `RebornThreadHarness::filesystem_temp(thread_scope.clone())`.
 6. Turn store (InMemory): `turn_backend = Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new()))`;
-   `turn_store = Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs(turn_backend, &binding)?))`.
+   `turn_store = Arc::new(TurnStateRowStore::new(scoped_turns_fs(turn_backend, &binding)?))`.
    (`scoped_turns_fs` + the two turn type aliases promoted to `pub(crate)` in harness.rs — see §6.)
 7. **Real model gateway:**
    ```rust

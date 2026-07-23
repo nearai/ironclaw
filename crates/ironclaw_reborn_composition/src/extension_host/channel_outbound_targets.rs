@@ -42,7 +42,7 @@ use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::extension_host::channel_dm_targets::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
-    FilesystemChannelDmTargetStore,
+    ChannelDmTargetStore,
 };
 use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
@@ -260,8 +260,8 @@ pub(crate) struct GenericChannelOutboundTargetDeps {
     /// Durable caller-membership authority. The active snapshot and
     /// administrator configuration are tenant-global and therefore cannot
     /// authorize a requesting user's personal target access.
-    pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
-    pub(crate) dm_targets: Arc<FilesystemChannelDmTargetStore>,
+    pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    pub(crate) dm_targets: Arc<ChannelDmTargetStore>,
     pub(crate) identity: ChannelOutboundTargetIdentity,
 }
 

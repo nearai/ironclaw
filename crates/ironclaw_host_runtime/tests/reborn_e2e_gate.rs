@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
@@ -30,13 +30,13 @@ use ironclaw_host_runtime::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -549,7 +549,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let capability_id = script_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
     let staged_policy = sample_policy();
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -646,15 +646,14 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
 type InMemoryServices = HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<InMemoryBackend>,
-    FilesystemProcessResultStore<InMemoryBackend>,
+    ProcessStore<InMemoryBackend>,
+    ProcessResultStore<InMemoryBackend>,
 >;
 
 struct ApprovalFixture {
     services: InMemoryServices,
-    run_state:
-        Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
+    run_state: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    capability_leases: Arc<CapabilityLeaseStore<InMemoryBackend>>,
     events: InMemoryEventSink,
 }
 

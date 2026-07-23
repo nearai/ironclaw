@@ -3,10 +3,10 @@
 //! This is the single, private execution core of turn-state semantics —
 //! admission, lifecycle, spawn-tree, run-transition, checkpoint and event
 //! projection logic — materialized transiently inside the
-//! [`FilesystemTurnStateRowStore`](super::row_store::FilesystemTurnStateRowStore)
+//! [`TurnStateRowStore`](super::row_store::TurnStateRowStore)
 //! `apply` closure from the durable rows. It is NOT a store: it has no
 //! durability, no persistence backend, and is not exported from the crate.
-//! The one public turn-state store is `FilesystemTurnStateRowStore`.
+//! The one public turn-state store is `TurnStateRowStore`.
 //!
 //! Only [`TurnStateStoreLimits`] (the row store's config) is re-exported
 //! publicly from the crate root; the engine type stays `pub(crate)`.

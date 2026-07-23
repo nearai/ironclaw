@@ -37,7 +37,7 @@ pub use admission::{
 };
 pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
-    CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
+    CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStorePort,
     GetCheckpointStateRequest, GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
     RedactedCheckpointPayload, checkpoint_state_metadata_matches_request, new_checkpoint_state_ref,
@@ -60,7 +60,7 @@ pub use external_tool_catalog::{
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
 pub use filesystem_store::{
-    FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, TurnStateStoreLimits,
+    FilesystemTurnStateBlockPersistence, TurnStateRowStore, TurnStateStoreLimits,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,

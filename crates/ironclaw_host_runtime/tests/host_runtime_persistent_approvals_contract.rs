@@ -7,9 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    FilesystemPersistentApprovalPolicyStore, PersistentApprovalAction, PersistentApprovalPolicy,
-    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
-    PersistentApprovalPolicyStore, test_support::in_memory_backed_persistent_approval_policy_store,
+    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalPolicyStorePort,
+    test_support::in_memory_backed_persistent_approval_policy_store,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
@@ -22,7 +23,7 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::{
     ProcessError, ProcessManager, ProcessRecord, ProcessStart, ProcessStatus,
 };
-use ironclaw_run_state::{RunStart, RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStart, RunStateStorePort, RunStatus};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 
@@ -55,7 +56,7 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
         })
         .await
         .expect("seed persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -130,7 +131,7 @@ async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
         })
         .await
         .expect("seed persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     // Park the invocation in BlockedAuth, mirroring the state after the initial
     // dispatch raised AuthRequired and opened the credential gate.
@@ -222,7 +223,7 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
         })
         .await
         .expect("seed user persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -264,9 +265,7 @@ async fn default_runtime_uses_threadless_filesystem_policy_after_thread_change()
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let scoped = scoped_approval_fs();
-    let policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(Arc::clone(
-        &scoped,
-    )));
+    let policies = Arc::new(PersistentApprovalPolicyStore::new(Arc::clone(&scoped)));
     let mut context = execution_context_without_grants();
     let original_thread = ThreadId::new("thread-original").unwrap();
     let current_thread = ThreadId::new("thread-current").unwrap();
@@ -297,7 +296,7 @@ async fn default_runtime_uses_threadless_filesystem_policy_after_thread_change()
         })
         .await
         .expect("seed persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -360,7 +359,7 @@ async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
         })
         .await
         .expect("seed tenant persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -443,7 +442,7 @@ async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
         })
         .await
         .expect("seed usable user persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -484,7 +483,7 @@ async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
-    let policies: Arc<dyn PersistentApprovalPolicyStore> =
+    let policies: Arc<dyn PersistentApprovalPolicyStorePort> =
         Arc::new(FailingLookupPersistentApprovalPolicyStore);
     let context = execution_context_without_grants();
 
@@ -549,7 +548,7 @@ async fn default_runtime_reuses_persistent_policy_for_manifest_ask() {
         })
         .await
         .expect("seed persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -612,7 +611,7 @@ async fn default_runtime_skips_expired_persistent_policy() {
         })
         .await
         .expect("seed expired persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -683,7 +682,7 @@ async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope()
         })
         .await
         .expect("seed persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -747,7 +746,7 @@ async fn default_runtime_uses_persistent_policy_as_spawn_capability_authority() 
         })
         .await
         .expect("seed spawn persistent policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -837,7 +836,7 @@ impl ProcessManager for RecordingProcessManager {
 struct FailingLookupPersistentApprovalPolicyStore;
 
 #[async_trait]
-impl PersistentApprovalPolicyStore for FailingLookupPersistentApprovalPolicyStore {
+impl PersistentApprovalPolicyStorePort for FailingLookupPersistentApprovalPolicyStore {
     async fn allow(
         &self,
         _input: PersistentApprovalPolicyInput,

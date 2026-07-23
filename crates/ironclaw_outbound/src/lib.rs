@@ -50,7 +50,7 @@ pub use delivery_targets::{
     OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 pub use error::OutboundError;
-pub use filesystem_store::FilesystemOutboundStateStore;
+pub use filesystem_store::OutboundStateStore;
 pub use ids::{
     OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
     TriggerOriginRef,
@@ -67,7 +67,7 @@ pub use run_final_reply_target::{
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
-pub use store::OutboundStateStore;
+pub use store::OutboundStateStorePort;
 pub use triggered_run_delivery::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };

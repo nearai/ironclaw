@@ -1,6 +1,6 @@
 //! The two apply engines (whole-snapshot and targeted-delta), overlay-store
 //! acquisition, snapshot-cache preparation for mutation, and the run-state
-//! transition wrappers for [`FilesystemTurnStateRowStore`]. Moved verbatim from
+//! transition wrappers for [`TurnStateRowStore`]. Moved verbatim from
 //! the module root during the #6263 decomposition; behavior is unchanged.
 
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    FilesystemTurnStateRowStore, PendingRowCommit, RowApplyOutcome, RunStateTransitionTarget,
+    PendingRowCommit, RowApplyOutcome, RunStateTransitionTarget, TurnStateRowStore,
     delta::{
         RowSnapshotState, SnapshotDelta, preserve_loop_checkpoints, row_store_durable_delta,
         row_store_hot_cache_snapshot, snapshot_delta,
@@ -26,7 +26,7 @@ use super::{
     delta_is_recoverability_critical, turn_state_write_span,
 };
 
-impl<F> FilesystemTurnStateRowStore<F>
+impl<F> TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {

@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    FilesystemTurnStateRowStore, PendingRowCommit, RunStateTransitionTarget,
+    PendingRowCommit, RunStateTransitionTarget, TurnStateRowStore,
     delta::{
         SnapshotDelta, blocked_run_targeted_delta, claimed_run_targeted_delta, full_snapshot_delta,
         retry_turn_full_delta, row_store_durable_delta, run_state_targeted_delta,
@@ -33,7 +33,7 @@ use crate::filesystem_store::{
 };
 
 #[async_trait]
-impl<F> TurnStateStore for FilesystemTurnStateRowStore<F>
+impl<F> TurnStateStore for TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {
@@ -278,7 +278,7 @@ where
 }
 
 #[async_trait]
-impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateRowStore<F>
+impl<F> TurnSpawnTreeStateStore for TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {
@@ -393,7 +393,7 @@ where
 }
 
 #[async_trait]
-impl<F> TurnEventProjectionSource for FilesystemTurnStateRowStore<F>
+impl<F> TurnEventProjectionSource for TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {
@@ -419,7 +419,7 @@ where
 }
 
 #[async_trait]
-impl<F> LoopCheckpointStore for FilesystemTurnStateRowStore<F>
+impl<F> LoopCheckpointStore for TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {
@@ -520,7 +520,7 @@ where
 }
 
 #[async_trait]
-impl<F> TurnRunTransitionPort for FilesystemTurnStateRowStore<F>
+impl<F> TurnRunTransitionPort for TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {

@@ -1,6 +1,6 @@
 # Turn-state row store — WriteBehind vs WriteThrough over libSQL — 2026-07-20 (#6263 Step 4)
 
-Measures the `FilesystemTurnStateRowStore` durability policies over a **real
+Measures the `TurnStateRowStore` durability policies over a **real
 libSQL** local file (the prior 2026-07-19 study measured the row mechanism over
 `InMemoryBackend`; this run puts them on the durable backend the production
 `inmemory-turn-state` profile actually uses). Two questions:
@@ -71,7 +71,7 @@ These store-tier numbers show WriteBehind's advantage, but Step 4 **ships the ro
 store at `WriteThrough`, not `WriteBehind`**, because WriteBehind has a
 runtime-breaking read-after-write defect at the store tier:
 
-- `FilesystemTurnStateRowStore::get_run_state` (and the other durable-read query
+- `TurnStateRowStore::get_run_state` (and the other durable-read query
   methods) read **materialized rows, not the hot cache**
   (`filesystem_store/row_store/traits.rs`). Under WriteBehind a just-submitted
   run's row is still async-materializing, so `get_run_state` returns

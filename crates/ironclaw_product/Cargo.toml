@@ -66,7 +66,7 @@ ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-# ProductLive planned-loop harness builds a `FilesystemReplayPayloadStore` over
+# ProductLive planned-loop harness builds a `ReplayPayloadStore` over
 # an in-memory filesystem so approval/auth resumes reconstitute their replay
 # input (mirrors production's capability-store wiring).
 ironclaw_capabilities = { path = "../ironclaw_capabilities", version = "0.1.0" }
