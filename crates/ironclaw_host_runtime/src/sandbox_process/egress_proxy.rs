@@ -19,11 +19,12 @@
 //! allowed/denied, at `debug` level) — secret material in query strings or
 //! headers must never reach the logs.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkPolicy;
+use ironclaw_network::network_denies_resolved_ip;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
@@ -73,48 +74,22 @@ impl HostResolver for DnsResolver {
     }
 }
 
-/// Returns the matched deny rule if `ip` falls in a private, loopback,
-/// link-local, CGNAT, or unique-local range — the exact set enumerated in
-/// the E2 amendment. `Ipv4Addr::is_private()` alone does not cover
-/// link-local (`169.254.0.0/16`, which includes the `169.254.169.254` cloud
-/// metadata address) or CGNAT (`100.64.0.0/10`), so both get an explicit
-/// check alongside the std helpers.
+/// Returns a fixed audit label if `ip` is private, loopback, link-local, or
+/// otherwise reserved, per `ironclaw_network`'s canonical range check —
+/// delegated to via [`network_denies_resolved_ip`] rather than
+/// re-implemented here. This proxy previously hand-rolled its own range
+/// list and it had already drifted behind that canonical check, missing
+/// `0.0.0.0/8`, IPv6 link-local `fe80::/10`, and the `fc00::/7` half of the
+/// RFC 4193 unique-local range. The canonical check also unwraps
+/// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to their v4 form itself,
+/// and additionally denies broadcast/multicast/documentation addresses — a
+/// strictly larger deny set, which is fine for an egress guard. The label
+/// collapses every reason to one generic string rather than re-deriving a
+/// granular one: the canonical check only returns `bool`, and a second,
+/// independently-maintained granular reason table would recreate exactly
+/// the kind of drift-prone duplication this delegation removes.
 fn denied_ip_reason(ip: IpAddr) -> Option<&'static str> {
-    match ip {
-        IpAddr::V4(v4) => denied_ipv4_reason(v4),
-        IpAddr::V6(v6) => {
-            // An IPv4-mapped IPv6 address (::ffff:a.b.c.d) carries a v4
-            // address end to end; classify it as its mapped v4 form rather
-            // than letting it slip through the v6 checks unclassified.
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return denied_ipv4_reason(mapped);
-            }
-            if v6.is_loopback() {
-                Some("loopback (::1)")
-            } else if v6.segments()[0] & 0xffc0 == 0xfe80 {
-                Some("link-local (fe80::/10)")
-            } else if v6.segments()[0] >> 8 == 0xfd {
-                Some("unique-local (fd00::/8)")
-            } else {
-                None
-            }
-        }
-    }
-}
-
-fn denied_ipv4_reason(v4: Ipv4Addr) -> Option<&'static str> {
-    let octets = v4.octets();
-    if v4.is_loopback() {
-        Some("loopback (127.0.0.0/8)")
-    } else if v4.is_private() {
-        Some("private (10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)")
-    } else if v4.is_link_local() {
-        Some("link-local (169.254.0.0/16, incl. cloud metadata 169.254.169.254)")
-    } else if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-        Some("CGNAT (100.64.0.0/10)")
-    } else {
-        None
-    }
+    network_denies_resolved_ip(ip).then_some("private_or_reserved_ip")
 }
 
 /// Resolves `host:port` and applies the dial-time private-IP guard when
@@ -598,6 +573,18 @@ async fn handle_plain_http(
         return Ok(());
     }
 
+    if port != 80 {
+        tracing::debug!(
+            host = %host_only,
+            port,
+            action = "deny",
+            rule = "plain_http_port_not_80",
+            "egress proxy: plain HTTP denied"
+        );
+        write_denied_response(&mut client, &host_only).await?;
+        return Ok(());
+    }
+
     let dial_addr = match resolve_dial_addr(resolver, &host_only, port, deny_private_ips).await {
         Ok(Ok(addr)) => addr,
         Ok(Err(rule)) => {
@@ -897,7 +884,11 @@ mod tests {
     /// `denied_ip_reason` is the pure classification function both dial
     /// paths gate on; exercise every range named in the E2 amendment plus
     /// one public v4/v6 example each, so the range math is pinned
-    /// independent of any live connection.
+    /// independent of any live connection. Also covers the ranges
+    /// `ironclaw_network`'s canonical range check catches that this proxy's
+    /// former hand-rolled range list drifted behind: `0.0.0.0/8` and the
+    /// `fc00::/8` half of the RFC 4193 unique-local range (the hand-rolled
+    /// check only matched `fd00::/8`).
     #[test]
     fn denied_ip_reason_covers_every_e2_range() {
         let denied = [
@@ -911,6 +902,7 @@ mod tests {
             ("100.64.0.1", "CGNAT lower bound"),
             ("100.100.100.100", "CGNAT mid-range"),
             ("100.127.255.255", "CGNAT upper bound"),
+            ("0.0.0.0", "0.0.0.0/8"),
         ];
         for (ip, label) in denied {
             let ip: IpAddr = ip.parse().expect("valid literal");
@@ -933,6 +925,7 @@ mod tests {
                 "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
                 "unicast link-local upper bound",
             ),
+            ("fc00::1", "unique-local ULA fc00::/8 half of RFC 4193"),
         ];
         for (ip, label) in denied_v6 {
             let ip: IpAddr = ip.parse().expect("valid literal");
@@ -985,6 +978,45 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 403"),
             "expected 403 Forbidden, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Mirrors `connect_to_allowed_host_non_443_port_returns_403`: the
+    /// plain-HTTP forward path pins its dial port to 80 the same way the
+    /// CONNECT path pins to 443 — an allowlisted host named with a non-80
+    /// port in the absolute-URI target must still be denied, closing off
+    /// pivoting an allowlisted host to an arbitrary TCP port through the
+    /// plain-HTTP forward (before the fix, only the hostname allowlist was
+    /// applied here, so `GET http://allowed-host:22/` relayed straight
+    /// through to port 22).
+    #[tokio::test]
+    async fn plain_http_to_allowed_host_non_80_port_returns_403() {
+        let proxy = EgressAllowlistProxy::new(policy_allowing(&["github.com"]));
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        client
+            .write_all(b"GET http://github.com:22/ HTTP/1.1\r\nHost: github.com:22\r\n\r\n")
+            .await
+            .expect("plain HTTP request writes");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full 403 response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "expected 403 Forbidden for a non-80 plain-HTTP port, got: {response}"
         );
 
         let _ = shutdown_tx.send(true);

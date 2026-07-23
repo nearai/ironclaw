@@ -26,9 +26,13 @@ use crate::input::RebornRuntimeProcessBinding;
 /// sandboxed shell container's `http_proxy`/`https_proxy` env should point
 /// at. Takes priority over [`SANDBOX_HTTP_PROXY_PORT_ENV`] when both are set.
 ///
-/// Soft-enforcement model (mirrors legacy IronClaw's sandbox): the container
-/// keeps normal bridge networking and is steered through this proxy, which
-/// enforces the egress allowlist (`ironclaw_host_runtime::sandbox_process::egress_proxy`).
+/// Hard (topological) enforcement model: the sandboxed container is placed
+/// on a pinned, Docker `internal: true` network with no default route off
+/// the host (`ironclaw_host_runtime::sandbox_process::exec_transport`'s
+/// `SANDBOX_EGRESS_NETWORK_NAME`), so this proxy is the container's only
+/// path to the outside world — not a steering convention layered on normal
+/// bridge networking. It enforces the egress allowlist
+/// (`ironclaw_host_runtime::sandbox_process::egress_proxy`).
 const SANDBOX_HTTP_PROXY_URL_ENV: &str = "IRONCLAW_SANDBOX_HTTP_PROXY";
 
 /// Port of an allowlist proxy reachable via the Docker host-gateway address
