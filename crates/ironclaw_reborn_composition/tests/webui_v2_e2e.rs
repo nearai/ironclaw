@@ -16,17 +16,21 @@
 
 #![cfg(feature = "test-support")]
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_auth::{
-    AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, ProviderScope,
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    CredentialAccountListRequest, CredentialAccountStatus, CredentialOwnership,
+    NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -42,13 +46,14 @@ use ironclaw_loop_host::{
     HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    ChannelExtensionBinding, OAuthClientConfig, PollSettings, RebornBuildInput, RebornRuntime,
+    RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
+use secrecy::SecretString;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tower::ServiceExt;
@@ -63,6 +68,78 @@ const USER_B: &str = "e2e-viewer-b";
 const AGENT: &str = "e2e-agent";
 const SENSITIVE_TOOL_SENTINEL: &str = "sk-e2e-progress-secret";
 const MEMORY_ISOLATION_MARKER: &str = "webui-memory-owner-a-secret-5460";
+const SLACK_TEAM_ID: &str = "T-E2E-SLACK";
+const SLACK_APP_ID: &str = "A-E2E-SLACK";
+const SLACK_USER_ID: &str = "U-E2E-SLACK";
+const SLACK_BOT_TOKEN: &str = "xoxb-e2e-slack-bot";
+
+const SLACK_SCOPES: &[&str] = &[
+    "search:read",
+    "channels:history",
+    "groups:history",
+    "im:history",
+    "mpim:history",
+    "channels:read",
+    "groups:read",
+    "im:read",
+    "mpim:read",
+    "users:read",
+    "chat:write",
+];
+
+#[derive(Default)]
+struct SlackOAuthNetworkEgress {
+    urls: StdMutex<Vec<String>>,
+}
+
+impl SlackOAuthNetworkEgress {
+    fn urls(&self) -> Vec<String> {
+        self.urls.lock().expect("Slack egress lock").clone()
+    }
+}
+
+#[async_trait]
+impl ironclaw_network::NetworkHttpEgress for SlackOAuthNetworkEgress {
+    async fn execute(
+        &self,
+        request: ironclaw_network::NetworkHttpRequest,
+    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
+        self.urls
+            .lock()
+            .expect("Slack egress lock")
+            .push(request.url.clone());
+        let body = if request.url.ends_with("/api/oauth.v2.access") {
+            json!({
+                "ok": true,
+                "authed_user": {
+                    "id": SLACK_USER_ID,
+                    "access_token": "xoxp-e2e-slack-user",
+                    "scope": SLACK_SCOPES.join(",")
+                },
+                "team": {"id": SLACK_TEAM_ID},
+                "app_id": SLACK_APP_ID
+            })
+            .to_string()
+            .into_bytes()
+        } else if request.url.ends_with("/api/conversations.open") {
+            json!({"ok": true, "channel": {"id": "D-E2E-SLACK"}})
+                .to_string()
+                .into_bytes()
+        } else {
+            panic!("unexpected Slack OAuth test request: {}", request.url);
+        };
+        Ok(ironclaw_network::NetworkHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            usage: ironclaw_network::NetworkUsage {
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                resolved_ip: None,
+            },
+            body,
+        })
+    }
+}
 
 // ─── auth stub ────────────────────────────────────────────────────────
 
@@ -644,6 +721,67 @@ fn test_google_oauth_backend() -> OAuthClientConfig {
     .expect("valid test google oauth client config")
 }
 
+fn test_slack_oauth_backend() -> OAuthClientConfig {
+    OAuthClientConfig::new(
+        "e2e-slack-client-id",
+        "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback",
+        Some(SecretString::from("e2e-slack-client-secret".to_string())),
+    )
+    .expect("valid test Slack OAuth client config")
+}
+
+async fn build_slack_oauth_harness() -> (Harness, Arc<SlackOAuthNetworkEgress>) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    std::fs::create_dir_all(&storage_root).expect("create Slack e2e storage root");
+    std::fs::write(
+        storage_root.join(".reborn-local-dev-secrets-master-key"),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .expect("seed hermetic Slack e2e secrets master key");
+    let network_egress = Arc::new(SlackOAuthNetworkEgress::default());
+    let build_input = RebornBuildInput::local_dev(USER, storage_root)
+        .with_runtime_policy(local_dev_effective_policy())
+        .with_vendor_oauth_client("slack", test_slack_oauth_backend())
+        .with_network_http_egress_for_test(network_egress.clone())
+        .with_channel_extension_bindings(vec![ChannelExtensionBinding {
+            extension_id: "slack".to_string(),
+            adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+            inbound_payload_classifier: None,
+            preference_target_codec: None,
+        }]);
+    let input = RebornRuntimeInput::from_services(build_input)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "e2e-slack-source".to_string(),
+            reply_target_binding_id: "e2e-slack-reply".to_string(),
+        })
+        .with_model_gateway_override(Arc::new(ToolCallingGateway::default()));
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let channel_identity_binding = runtime
+        .channel_identity_binding_config()
+        .expect("Slack runtime exposes channel identity binding");
+    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(ValidTokenForUser::new(USER)),
+        vec![HeaderValue::from_static("http://localhost:0")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_channel_identity_binding(channel_identity_binding);
+    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    (
+        Harness {
+            runtime,
+            router,
+            _root: Some(root),
+        },
+        network_egress,
+    )
+}
+
 async fn build_harness_at_with_runtime_owner_and_auth_user(
     storage_root: PathBuf,
     root: Option<tempfile::TempDir>,
@@ -849,6 +987,18 @@ fn bearer_get_with_last_event_id(uri: &str, last_event_id: Option<&str>) -> Requ
         builder = builder.header("Last-Event-ID", last_event_id);
     }
     builder.body(Body::empty()).expect("bearer GET request")
+}
+
+fn public_callback_get(uri: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("public callback GET request");
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 10], 443))));
+    request
 }
 
 #[derive(Default, Debug)]
@@ -1619,6 +1769,190 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     );
     assert_eq!(activate_body["success"], true);
     assert_eq!(activate_body["activated"], true);
+}
+
+/// Regression coverage for the shipped Slack personal-connect journey. This
+/// deliberately starts at the authenticated WebUI extension card and returns
+/// through the public provider callback; no direct credential seeding or
+/// channel-identity helper is allowed in the path.
+#[tokio::test]
+async fn webui_v2_slack_personal_oauth_callback_persists_connected_projection() {
+    let (harness, network_egress) = build_slack_oauth_harness().await;
+    let package_ref = json!({"kind": "extension", "id": "slack"});
+    let oauth_invocation_id = InvocationId::new();
+
+    let install = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/install",
+            json!({"package_ref": package_ref}),
+        ))
+        .await
+        .expect("install Slack oneshot");
+    assert_eq!(install.status(), StatusCode::OK);
+
+    let configure = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/slack/setup",
+            json!({
+                "action": "submit",
+                "payload": {
+                    "fields": {
+                        "slack_team_id": SLACK_TEAM_ID,
+                        "slack_api_app_id": SLACK_APP_ID
+                    },
+                    "secrets": {
+                        "slack_bot_token": SLACK_BOT_TOKEN,
+                        "slack_signing_secret": "e2e-slack-signing-secret"
+                    }
+                }
+            }),
+        ))
+        .await
+        .expect("configure Slack oneshot");
+    assert_eq!(configure.status(), StatusCode::OK);
+
+    let start = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/slack/setup/oauth/start",
+            json!({
+                "provider": "slack",
+                "account_label": "Personal Slack",
+                "scopes": SLACK_SCOPES,
+                "expires_at": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+                "invocation_id": oauth_invocation_id.to_string()
+            }),
+        ))
+        .await
+        .expect("start Slack OAuth oneshot");
+    assert_eq!(start.status(), StatusCode::OK);
+    let start_body = read_json(start).await;
+    let authorization_url = url::Url::parse(
+        start_body["authorization_url"]
+            .as_str()
+            .expect("Slack authorization URL"),
+    )
+    .expect("valid Slack authorization URL");
+    assert_eq!(authorization_url.host_str(), Some("slack.com"));
+    let state = authorization_url
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("Slack OAuth state");
+    let callback_scopes = SLACK_SCOPES.join("%20");
+    let callback = harness
+        .router
+        .clone()
+        .oneshot(public_callback_get(&format!(
+            "/api/reborn/product-auth/oauth/slack/callback?state={state}&code=e2e-slack-code&scope={callback_scopes}"
+        )))
+        .await
+        .expect("Slack OAuth callback oneshot");
+    assert_eq!(callback.status(), StatusCode::OK);
+    let callback_body = read_json(callback).await;
+    assert_eq!(callback_body["status"], "completed");
+
+    let product_auth = harness
+        .runtime
+        .services()
+        .product_auth
+        .as_ref()
+        .expect("local-dev runtime wires product auth");
+    let accounts = product_auth
+        .credential_account_service()
+        .list_accounts(CredentialAccountListRequest::new(
+            AuthProductScope::new(
+                ResourceScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(USER).expect("user"),
+                    agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: oauth_invocation_id,
+                },
+                AuthSurface::Callback,
+            ),
+            AuthProviderId::new("slack").expect("Slack provider id"),
+        ))
+        .await
+        .expect("list persisted Slack accounts");
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(
+        accounts.accounts[0].status,
+        CredentialAccountStatus::Configured
+    );
+
+    // The Extensions UI follows a completed first-time OAuth callback with
+    // the ordinary activation route. Keep that caller step in this journey:
+    // setup OAuth flows are intentionally SetupOnly, while activation makes
+    // the configured channel live and publishes its ready projection.
+    let activate = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/slack/activate",
+            json!({}),
+        ))
+        .await
+        .expect("activate Slack oneshot");
+    assert_eq!(activate.status(), StatusCode::OK);
+    let activate_body = read_json(activate).await;
+    assert_eq!(
+        activate_body["success"], true,
+        "activation: {activate_body}"
+    );
+    assert_eq!(
+        activate_body["activated"], true,
+        "activation: {activate_body}"
+    );
+
+    let extensions = harness
+        .router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/extensions"))
+        .await
+        .expect("list extensions oneshot");
+    assert_eq!(extensions.status(), StatusCode::OK);
+    let extensions_body = read_json(extensions).await;
+    let slack = extensions_body["extensions"]
+        .as_array()
+        .expect("extensions array")
+        .iter()
+        .find(|extension| extension["package_ref"]["id"] == "slack")
+        .expect("installed Slack projection");
+    assert_eq!(slack["authenticated"], true, "Slack projection: {slack}");
+    assert_eq!(slack["needs_setup"], false, "Slack projection: {slack}");
+    assert_eq!(
+        slack["auth_accounts"][0]["accounts"][0]["state"], "connected",
+        "Slack projection must expose the persisted connected account: {slack}"
+    );
+
+    let urls = network_egress.urls();
+    assert_eq!(
+        urls.iter()
+            .filter(|url| url.ends_with("/api/oauth.v2.access"))
+            .count(),
+        1,
+        "the real callback must perform exactly one Slack token exchange: {urls:?}"
+    );
+    assert_eq!(
+        urls.iter()
+            .filter(|url| url.ends_with("/api/conversations.open"))
+            .count(),
+        1,
+        "the identity bind must provision exactly one personal Slack DM target: {urls:?}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 /// The provider-instance readiness map's 400 path

@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Automation delivery:** honor each trigger's creator-selected outbound
   target at fire time instead of silently falling back to the user-wide
   default.
+- **Telegram automation delivery:** expose paired Telegram DMs as caller-owned
+  outbound targets so routines can select and persist Telegram delivery.
 - **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
   through the shared lifecycle before deleting any channel installation, so
   removing Telegram, Slack, or a future channel unpairs it on every surface.
