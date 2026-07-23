@@ -1612,14 +1612,6 @@ impl HostRuntimeCapabilityHarness {
         // resolved user) is captured once for the lifetime of the returned
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
-        let mut caller_scope = run_context.scope.to_resource_scope();
-        caller_scope.user_id = dispatch_user.clone();
-        let lifecycle_caller = ironclaw_product_workflow::LifecycleProductSurfaceContext {
-            tenant_id: caller_scope.tenant_id,
-            user_id: caller_scope.user_id,
-            agent_id: caller_scope.agent_id,
-            project_id: caller_scope.project_id,
-        };
         // ONE shared io, both roles: production assigns a single
         // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.
@@ -1745,11 +1737,11 @@ impl HostRuntimeCapabilityHarness {
         // this must be an empty set for it, not treated as activation-backed.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             if let Some(services) = self.reborn_services.as_ref() {
+                // #6520 folded caller-scoping into the lifecycle facade the
+                // method reads through; provider trust decisions are
+                // tenant-level activation facts, so no per-run caller arg.
                 match services
-                    .local_dev_active_extension_authority_for_test(
-                        &execution_extension,
-                        lifecycle_caller,
-                    )
+                    .local_dev_active_extension_authority_for_test(&execution_extension)
                     .await
                 {
                     Some(active_authority) => active_authority

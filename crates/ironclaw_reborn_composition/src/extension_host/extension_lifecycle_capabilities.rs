@@ -1016,8 +1016,6 @@ mod tests {
             install_context.resource_scope.clone(),
             services
                 .product_auth
-                .as_ref()
-                .expect("product auth")
                 .runtime_credential_account_selection_service(),
         );
         let reconciled = extension_management

@@ -6,8 +6,7 @@
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
 use ironclaw_reborn_composition::{
-    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOAuthSetup,
-    FirstPartyPackageOnboarding,
+    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
 };
 
 /// The GSuite family's catalog search aliases, folded into the neutral bundle so

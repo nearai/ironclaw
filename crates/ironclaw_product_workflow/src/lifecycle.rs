@@ -822,7 +822,7 @@ mod tests {
                             "version": "1",
                             "description": "ready",
                             "source": "host_bundled",
-                            "runtime_kind": "mcp_server",
+                            "runtime_kind": "first_party",
                             "visible_read_only_capability_ids": [],
                             "credential_requirements": []
                         },
@@ -836,7 +836,7 @@ mod tests {
                             "version": "1",
                             "description": "setup needed",
                             "source": "host_bundled",
-                            "runtime_kind": "mcp_server",
+                            "runtime_kind": "first_party",
                             "visible_read_only_capability_ids": [],
                             "credential_requirements": []
                         },

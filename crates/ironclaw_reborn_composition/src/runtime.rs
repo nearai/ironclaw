@@ -1569,6 +1569,45 @@ impl RebornRuntime {
             .map(|status| status.connected)
     }
 
+    /// The manifest-composed connection-notice policy for one channel
+    /// extension — mirrors the notices the production run-delivery observer
+    /// reads. Tests only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pairing_connection_notices_for_test(
+        &self,
+        extension_id: &str,
+    ) -> Option<ironclaw_product_workflow::ChannelConnectionNoticePolicy> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        Some(service.connection_notices().clone())
+    }
+
+    /// The production protected pairing route mount (`pairing/{mint,status,
+    /// unpair}`) over the composed pairing registry. Tests only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn channel_pairing_route_mount_for_test(
+        &self,
+    ) -> Option<crate::webui::route_mounts::ProtectedRouteMount> {
+        self.channel_pairing.as_ref().map(|registry| {
+            crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
+                registry,
+            ))
+        })
+    }
+
+    /// Seed one tenant-admin configuration group through the composed
+    /// resolver, mirroring the production admin replace capability. Tests
+    /// only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn configure_admin_group_for_test(
+        &self,
+        group_id: &str,
+        values: Vec<(String, String)>,
+    ) -> Result<(), String> {
+        self.admin_configuration_resolver
+            .configure_admin_group_for_test(group_id, values)
+            .await
+    }
+
     #[cfg(feature = "test-support")]
     pub fn register_static_channel_egress_credentials_for_test(
         &self,
@@ -4062,15 +4101,20 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     if let Some(display_previews) = display_previews {
         projection_services = projection_services.with_display_previews(display_previews);
     }
-    // Wire auth-challenge enrichment when the product-auth bundle exposes a
-    // flow record source (local-dev / test mode). Production deployments without
-    // a wired flow_record_source fall back to the plain 4-field AuthPromptView.
-    let projection_services =
-        if let Some(provider) = services.product_auth.as_auth_challenge_provider() {
-            projection_services.with_auth_challenges(provider)
-        } else {
-            projection_services
-        };
+    // One recipe-driven challenge provider feeds both WebUI projections and
+    // external-channel delivery. OAuth/manual challenges delegate to
+    // product-auth; host-issued pairing delegates to the canonical pairing
+    // service and reuses its live code/deep-link/expiry presentation.
+    let auth_challenges =
+        crate::extension_host::run_delivery_ports::RecipeAuthChallengeProvider::compose(
+            services.product_auth.as_auth_challenge_provider(),
+            services.channel_pairing.clone(),
+        );
+    let projection_services = if let Some(provider) = auth_challenges.clone() {
+        projection_services.with_auth_challenges(provider)
+    } else {
+        projection_services
+    };
 
     // Generic channel host assembly (extension-runtime P6 S2): reconcile
     // per-extension inbound-channel registrations from the generic host's
@@ -4087,7 +4131,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
             as Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>);
         let blocked_auth_prompts = Some(Arc::new(
             crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
-                services.product_auth.as_auth_challenge_provider(),
+                auth_challenges.clone(),
             ),
         )
             as Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>);
@@ -4109,6 +4153,18 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
             run_delivery_events: Arc::clone(&channel_run_delivery_events),
         })
     };
+
+    // The current-delivery-target resolver serves live channel targets only
+    // once the assembly exists; attach it so outbound target listings reflect
+    // the running channel host (#6520 — a detached resolver lists nothing).
+    if let Some(assembly) = channel_host_assembly.as_ref() {
+        services
+            .current_delivery_targets
+            .attach_assembly(assembly)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("current delivery target resolver could not attach: {error}"),
+            })?;
+    }
 
     // The binary-assembled channel-extension extras (extension-runtime
     // DEL-7): gate-reply classifiers + preference-target codecs registered

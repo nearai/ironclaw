@@ -3975,6 +3975,14 @@ async fn build_backend_production(
     // inventory.
     available_extensions =
         available_extensions.with_reserved_bundled_ids(first_party_reserved_ids.clone());
+    // Manifest-derived account-setup declarations (#6520): every catalog
+    // package's `[account_setup]` projection joins the binary-injected extras
+    // from the deployment seam. Duplicates fail loudly at `declare()` below.
+    let account_setup_descriptors = {
+        let mut descriptors = available_extensions.account_setup_descriptors();
+        descriptors.extend(account_setup_descriptors);
+        descriptors
+    };
     let admin_configuration_uses = available_extensions.admin_configuration_uses();
     let mut admin_configuration_consumers = std::collections::BTreeMap::new();
     for usage in &admin_configuration_uses {
@@ -4290,7 +4298,20 @@ async fn build_backend_production(
         .await?;
         extension_management.attach_generic_host(Arc::clone(&generic.host));
         if let Some(ports) = services.product_auth_provider_runtime_ports() {
-            extension_management.attach_discovery_runtime_ports(ports);
+            extension_management.attach_discovery_runtime_ports(ports.clone());
+            // Restored-from-durable hosted-MCP installs re-run bounded
+            // discovery so their published tool surface matches the live
+            // server before the runtime serves (#6520 boot reconcile).
+            extension_management
+                .reconcile_hosted_mcp_runtime_after_restore(
+                    &channel_egress_scope,
+                    product_auth_services.runtime_credential_account_selection_service(),
+                    ports.runtime_http_egress(),
+                )
+                .await
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("hosted MCP runtime state could not be reconciled: {error}"),
+                })?;
         }
         services.set_extension_tool_resolver(generic.resolver);
         let ingress_parts = crate::extension_host::extension_ingress::build_extension_ingress(

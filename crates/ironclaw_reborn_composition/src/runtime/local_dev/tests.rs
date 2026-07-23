@@ -36,8 +36,7 @@ mod tests {
         OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
     };
     use ironclaw_product_workflow::{
-        LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-        LifecycleProductFacade, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+        LifecyclePackageKind, LifecyclePackageRef, OutboundPreferencesProductFacade,
         RebornOutboundDeliveryTargetId,
     };
     use ironclaw_threads::{
@@ -58,8 +57,8 @@ mod tests {
     };
 
     use crate::extension_host::extension_lifecycle_capabilities::{
-        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
+        EXTENSION_SEARCH_CAPABILITY_ID,
     };
     use crate::outbound::{
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
@@ -375,19 +374,6 @@ mod tests {
         )
     }
 
-    /// #5459 P1: lifecycle context acting AS the runtime's tenant operator, so
-    /// test installs are tenant-shared and visible to every surface user —
-    /// what these runtime-surface tests always meant. A `lifecycle_context`
-    /// user would now produce a PRIVATE install invisible to the run's user.
-    fn operator_lifecycle_context(label: &str, operator: &UserId) -> LifecycleProductContext {
-        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-            tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-            user_id: operator.clone(),
-            agent_id: None,
-            project_id: None,
-        })
-    }
-
     #[derive(Debug, Default)]
     struct UnavailableModelGateway;
 
@@ -643,7 +629,12 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context(label).await;
-        install_gsuite_extensions(&services, extension_state).await;
+        install_gsuite_extensions(
+            &services,
+            &UserId::new(user).expect("surface user id"),
+            extension_state,
+        )
+        .await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
@@ -676,102 +667,37 @@ mod tests {
 
     async fn install_gsuite_extensions(
         services: &crate::factory::RebornRuntimeStores,
+        surface_user: &UserId,
         extension_state: GsuiteExtensionState,
     ) {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
         let extension_management = runtime_surfaces.extension_management.clone();
-        // #5459 P1: install AS the runtime's tenant operator so the extensions
-        // are tenant-shared (what these surface tests always meant) — a
-        // non-operator context would now produce a private install invisible
-        // to the run's surface user.
-        let operator = extension_management
-            .tenant_operator_user_id_for_test()
-            .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            runtime_surfaces.skill_management.clone(),
-        )
-        .with_extension_management(extension_management)
-        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        // #6520 membership: every install is private to its caller
+        // (`derive_owner`), so install AS the run's surface user — an
+        // operator install would be invisible to that user. #6520 also
+        // removed the public Activate action; a bare install seeds the
+        // pre-readiness row, and the Activated state drives the port's
+        // prechecked activation directly (creds treated as present).
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
                     .expect("valid extension ref");
-            let operator_context = |label: &str| {
-                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                    tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-                    user_id: operator.clone(),
-                    agent_id: None,
-                    project_id: None,
-                })
-            };
-            facade
-                .execute(
-                    operator_context(extension_id),
-                    LifecycleProductAction::ExtensionInstall {
-                        package_ref: package_ref.clone(),
-                    },
-                )
+            extension_management
+                .install(package_ref.clone(), surface_user)
                 .await
                 .expect("install GSuite extension");
             if matches!(extension_state, GsuiteExtensionState::Activated) {
-                facade
-                    .execute(
-                        operator_context(extension_id),
-                        LifecycleProductAction::ExtensionActivate { package_ref },
+                extension_management
+                    .activate_with_prechecked_credentials_for_test(
+                        package_ref,
+                        crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                        surface_user,
                     )
                     .await
                     .expect("activate GSuite extension");
             }
-        }
-    }
-
-    struct ConfiguredRuntimeCredentialAccounts;
-
-    #[async_trait::async_trait]
-    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
-        for ConfiguredRuntimeCredentialAccounts
-    {
-        async fn select_configured_account_for_binding(
-            &self,
-            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
-            _runtime_scope: ironclaw_auth::AuthProductScope,
-        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
-            Err(ironclaw_auth::AuthProductError::CredentialMissing)
-        }
-
-        async fn select_unique_configured_runtime_account(
-            &self,
-            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
-        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
-            let now = chrono::Utc::now();
-            Ok(ironclaw_auth::CredentialAccount {
-                id: ironclaw_auth::CredentialAccountId::new(),
-                scope: ironclaw_auth::AuthProductScope::new(
-                    ironclaw_host_api::ResourceScope::local_default(
-                        UserId::new("configured-credential-user").expect("user id"),
-                        ironclaw_host_api::InvocationId::new(),
-                    )
-                    .expect("resource scope"),
-                    ironclaw_auth::AuthSurface::Api,
-                ),
-                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
-                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
-                    .expect("account label"),
-                status: ironclaw_auth::CredentialAccountStatus::Configured,
-                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
-                ),
-                refresh_secret: None,
-                scopes: Vec::new(),
-                provider_identity: None,
-                created_at: now,
-                updated_at: now,
-            })
         }
     }
 
@@ -2113,18 +2039,25 @@ mod tests {
             NetworkPolicy::default()
         );
 
-        for capability_id in [
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-        ] {
-            let grant = grant_for(capability_id);
-            assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
-            assert_eq!(grant.constraints.mounts, system_extensions_lifecycle_mounts);
-            assert_eq!(grant.constraints.network, NetworkPolicy::default());
-        }
-        let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
+        let extension_remove_grant = grant_for(EXTENSION_REMOVE_CAPABILITY_ID);
         assert_eq!(
-            extension_activate_grant.constraints.allowed_effects,
+            extension_remove_grant.constraints.allowed_effects,
+            local_dev_allowed_effects
+        );
+        assert_eq!(
+            extension_remove_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
+        assert_eq!(
+            extension_remove_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        // #6520 removed the separate activate capability; install drives
+        // readiness and carries activate's wider grant (discovery network).
+        let extension_install_grant = grant_for(EXTENSION_INSTALL_CAPABILITY_ID);
+        assert_eq!(
+            extension_install_grant.constraints.allowed_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -2133,11 +2066,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            extension_activate_grant.constraints.mounts,
+            extension_install_grant.constraints.mounts,
             system_extensions_lifecycle_mounts
         );
         assert_eq!(
-            extension_activate_grant
+            extension_install_grant
                 .constraints
                 .network
                 .allowed_targets
@@ -2147,7 +2080,7 @@ mod tests {
             vec!["*"]
         );
         assert!(
-            extension_activate_grant
+            extension_install_grant
                 .constraints
                 .network
                 .deny_private_ip_ranges
@@ -3666,7 +3599,9 @@ mod tests {
             OutboundDeliveryTargetEntry {
                 summary: slack_target_summary,
                 capabilities: slack_target_capabilities,
-                reply_target_binding_ref: slack_reply_target.clone(),
+                destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                    reply_target_binding_ref: slack_reply_target.clone(),
+                },
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -4396,7 +4331,9 @@ mod tests {
                     auth_prompts: false,
                     modalities: Vec::new(),
                 },
-                reply_target_binding_ref: slack_reply_target.clone(),
+                destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                    reply_target_binding_ref: slack_reply_target.clone(),
+                },
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -5209,29 +5146,22 @@ mod tests {
                 .local_runtime_for_test()
                 .expect("local runtime substrate");
             let extension_management = runtime_surfaces.extension_management.clone();
-            let operator = extension_management
-                .tenant_operator_user_id_for_test()
-                .clone();
-            let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-                runtime_surfaces.skill_management.clone(),
-            )
-            .with_extension_management(extension_management)
-            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+            // #6520 membership: installs are private to their caller, so
+            // install AS the surface user whose capability port is asserted
+            // below; there is no separate Activate action — the port's
+            // prechecked activation publishes the surface directly.
+            let surface_user = UserId::new("local-dev-github-user").expect("user id");
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
-            facade
-                .execute(
-                    operator_lifecycle_context("github-install", &operator),
-                    LifecycleProductAction::ExtensionInstall {
-                        package_ref: package_ref.clone(),
-                    },
-                )
+            extension_management
+                .install(package_ref.clone(), &surface_user)
                 .await
                 .expect("install github extension");
-            facade
-                .execute(
-                    operator_lifecycle_context("github-activate", &operator),
-                    LifecycleProductAction::ExtensionActivate { package_ref },
+            extension_management
+                .activate_with_prechecked_credentials_for_test(
+                    package_ref,
+                    crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                    &surface_user,
                 )
                 .await
                 .expect("activate github extension");
@@ -5311,29 +5241,21 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate");
         let extension_management = runtime_surfaces.extension_management.clone();
-        let operator = extension_management
-            .tenant_operator_user_id_for_test()
-            .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            runtime_surfaces.skill_management.clone(),
-        )
-        .with_extension_management(extension_management)
-        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        // #6520 membership: installs are private to their caller, so install
+        // AS the surface user whose capability port is asserted; there is no
+        // separate Activate action — prechecked activation publishes directly.
+        let surface_user = UserId::new("local-dev-live-github-user").expect("user id");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
-        facade
-            .execute(
-                operator_lifecycle_context("github-live-install", &operator),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
-            )
+        extension_management
+            .install(package_ref.clone(), &surface_user)
             .await
             .expect("install github extension");
-        facade
-            .execute(
-                operator_lifecycle_context("github-live-activate", &operator),
-                LifecycleProductAction::ExtensionActivate { package_ref },
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                package_ref,
+                crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                &surface_user,
             )
             .await
             .expect("activate github extension");
@@ -5522,29 +5444,21 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate");
         let extension_management = runtime_surfaces.extension_management.clone();
-        let operator = extension_management
-            .tenant_operator_user_id_for_test()
-            .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            runtime_surfaces.skill_management.clone(),
-        )
-        .with_extension_management(extension_management)
-        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        // #6520 membership: installs are private to their caller, so install
+        // AS the surface user whose capability port is asserted; there is no
+        // separate Activate action — prechecked activation publishes directly.
+        let surface_user = UserId::new("local-dev-mid-response-user").expect("user id");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
-        facade
-            .execute(
-                operator_lifecycle_context("mid-response-install", &operator),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
-            )
+        extension_management
+            .install(package_ref.clone(), &surface_user)
             .await
             .expect("install github extension");
-        facade
-            .execute(
-                operator_lifecycle_context("mid-response-activate", &operator),
-                LifecycleProductAction::ExtensionActivate { package_ref },
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                package_ref,
+                crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                &surface_user,
             )
             .await
             .expect("activate github extension");

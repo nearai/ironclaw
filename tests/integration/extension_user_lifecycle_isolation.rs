@@ -26,8 +26,8 @@ use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    build_reborn_runtime, build_webui_services, local_dev_runtime_policy,
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
+    build_reborn_runtime, build_webui_services, local_dev_build_input, local_dev_runtime_policy,
 };
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
@@ -263,14 +263,14 @@ impl LifecycleIsolationFixture {
         agent_id: AgentId,
         operator_id: UserId,
     ) -> Self {
-        let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
+        let input = local_dev_build_input(operator_id.as_str(), storage_root.clone())
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             ));
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(input)
+            RebornRuntimeInput::from_build_input(input)
                 .with_identity(RebornRuntimeIdentity {
                     tenant_id: tenant_id.as_str().to_string(),
                     agent_id: agent_id.as_str().to_string(),

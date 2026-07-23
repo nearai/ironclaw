@@ -1528,6 +1528,7 @@ input_schema_ref = "schemas/rogue/noop.input.v1.json"
         let mut catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .expect("catalog load must not abort on an invalid third-party admin manifest");
@@ -1705,6 +1706,8 @@ input_schema_ref = "schemas/{id}/noop.input.v1.json"
             channel_presentation: None,
             assets: Vec::new(),
             onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
         }
     }
 

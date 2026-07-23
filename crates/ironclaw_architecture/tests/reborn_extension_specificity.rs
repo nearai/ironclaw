@@ -483,11 +483,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          provider/source it refers to",
     ),
     (
-        "crates/ironclaw_webui/frontend/src/pages/chat/lib/gates.ts",
-        "github",
-        "WebUI browser-login SSO provider button/route, not the extensions vendor",
-    ),
-    (
         "crates/ironclaw_webui/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
@@ -1065,7 +1060,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_product_adapters/src/outbound.rs", "github"),
     ("crates/ironclaw_product_adapters/src/outbound.rs", "google"),
     ("crates/ironclaw_product_adapters/src/outbound.rs", "notion"),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "slack"),
     (
         "crates/ironclaw_product_adapters/src/outbound.rs",
         "telegram",
@@ -1136,11 +1130,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // (Google API hosts) and web-access (Exa MCP) egress it no longer
     // special-cases — the code routes purely on manifest-declared targets.
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_reborn_composition/src/runtime/extension_surface.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_reborn_composition/src/runtime/extension_surface.rs",
         "web-access",
     ),
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) still assembled in composition because [mcp].server is patched from llm_admin config; DEFERRED — finish per the handoff (move static data to first_party_extensions::packages::nearai_mcp, inject the URL through the with_channel_extension_bindings-style seam)
@@ -1254,7 +1248,16 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_composition/src/lib.rs", "slack"),
+    // Merge-relocated pre-existing debt: the generic-ingress test module
+    // drives the real Slack/Telegram adapters through the shared sink.
+    (
+        "crates/ironclaw_reborn_composition/src/extension_host/extension_ingress.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/extension_host/extension_ingress.rs",
+        "telegram",
+    ),
     (
         "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
         "github",

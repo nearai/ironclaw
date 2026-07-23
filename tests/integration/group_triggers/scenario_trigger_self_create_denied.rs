@@ -157,6 +157,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .create_recording_capability_port(
             &run_context,
             &Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
         )
         .await?;
     assert_capability_denied(

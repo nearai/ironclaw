@@ -10,7 +10,6 @@ use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantA
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -29,7 +28,7 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState};
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
@@ -285,7 +284,7 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
             Ok(vec![OutboundDeliveryTargetEntry {
                 summary: self.entry.summary.clone(),
                 capabilities: self.entry.capabilities.clone(),
-                reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
+                destination: self.entry.destination.clone(),
                 owner: OutboundDeliveryTargetOwner::for_scope(caller),
             }])
         }
@@ -332,10 +331,12 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
             auth_prompts: true,
             modalities: Vec::new(),
         },
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-            "reply:registry-validation",
-        )
-        .expect("binding ref"),
+        destination: ironclaw_outbound::RunFinalReplyDestination::External {
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:registry-validation",
+            )
+            .expect("binding ref"),
+        },
         // Overwritten with the querying caller by `OneTargetProvider::list`;
         // set to the scope identity here for clarity.
         owner: OutboundDeliveryTargetOwner::new(
@@ -1083,28 +1084,30 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     let calendar_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
         .expect("valid ref");
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-gsuite-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            gmail_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(gmail_ref.clone(), &caller)
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_test(gmail_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(
+            gmail_ref,
+            ExtensionActivationMode::Static,
+            &caller,
+        )
         .await
         .expect("activate Gmail");
     extension_management
-        .install(
-            calendar_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(calendar_ref.clone(), &caller)
         .await
         .expect("install Google Calendar");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             calendar_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Google Calendar");
@@ -1226,26 +1229,24 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         ironclaw_extensions::CapabilityVisibility::HostInternal
     );
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-notion-mcp-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            notion_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(notion_ref.clone(), &caller)
         .await
         .expect("install Notion MCP");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             notion_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new("local-dev-notion-mcp-owner").expect("valid user"),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
+                scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
+                    .expect("valid scope"),
                 runtime_http_egress: Arc::new(
                     HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
                 ),
             },
+            &caller,
         )
         .await
         .expect("activate Notion MCP with scripted discovery");
@@ -1288,17 +1289,18 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     let web_access_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").expect("valid ref");
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-web-access-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            web_access_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(web_access_ref.clone(), &caller)
         .await
         .expect("install Web Access");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             web_access_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Web Access");
@@ -1723,14 +1725,25 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
+    // #6520 lifecycle projection is caller-scoped and takes the production
+    // credential gate; the owner is the operator this runtime was built with.
+    let owner_scope =
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        owner_scope.clone(),
+        services
+            .product_auth
+            .runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
         .project(
             nearai_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
+            &owner_scope.user_id,
+            Some(&credential_gate),
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     // v3 hosted-MCP surface: boot-time bootstrap activates the package
     // statically, publishing the host-internal MCP connection template
@@ -1778,6 +1791,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
                     "web_search",
                 )),
             },
+            &UserId::new(owner).expect("valid lifecycle caller"),
         )
         .await
         .expect("scripted NEAR AI discovery activation");
@@ -1984,14 +1998,21 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         outcome,
         crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
     );
+    // #6520 lifecycle projection is caller-scoped and takes the production
+    // credential gate; the owner is the operator this runtime was built with.
+    let owner_scope =
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        owner_scope.clone(),
+        services
+            .product_auth
+            .runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref, &owner_scope.user_id, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     // v3 hosted-MCP surface: reinstall-and-activate publishes the
     // host-internal MCP connection template plus the statically pinned
