@@ -11980,7 +11980,7 @@ async fn operator_setup_run_is_available_as_product_capability() {
         resolution,
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
-    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.snapshot_count(), 1);
     assert_eq!(
         llm_config
             .upsert_provider_calls

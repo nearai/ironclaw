@@ -1806,7 +1806,10 @@ fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesErr
     if trimmed.is_empty() || trimmed.len() > LLM_BASE_URL_MAX_BYTES {
         return Err(operator_setup_validation_error("base_url"));
     }
-    let parsed = Url::parse(trimmed).map_err(|_| operator_setup_validation_error("base_url"))?;
+    let parsed = Url::parse(trimmed).map_err(|error| {
+        tracing::debug!(%error, "failed to parse operator setup base URL");
+        operator_setup_validation_error("base_url")
+    })?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(operator_setup_validation_error("base_url"));
     }
@@ -2646,8 +2649,14 @@ where
         input: serde_json::Value,
     ) -> Result<(), RebornServicesError> {
         let request: RebornOperatorSetupRequest =
-            serde_json::from_value(input).map_err(|_| operator_setup_validation_error("input"))?;
-        self.apply_operator_setup_request(caller, request).await
+            serde_json::from_value(input).map_err(|error| {
+                tracing::debug!(?error, "failed to decode operator setup input");
+                operator_setup_validation_error("input")
+            })?;
+        self.apply_operator_setup_request(caller.clone(), request)
+            .await?;
+        self.build_operator_setup_view(caller).await?;
+        Ok(())
     }
 
     async fn apply_operator_setup_request(
@@ -3106,8 +3115,7 @@ where
             ProductOperationId::AdminUserDeleteSecret => {
                 let request: RebornAdminDeleteSecretProductRequest =
                     product_command_input(request.input)?;
-                let handle = SecretHandle::new(request.handle)
-                    .map_err(|_| product_capability_input_error("handle"))?;
+                let handle = product_secret_handle(request.handle)?;
                 ProductOperationResponse::json(
                     self.delete_admin_user_secret(caller, request.user_id, handle)
                         .await?,
@@ -6228,6 +6236,13 @@ where
     serde_json::from_value(input).map_err(|error| {
         tracing::debug!(?error, "failed to decode product command input");
         product_capability_input_error("input")
+    })
+}
+
+fn product_secret_handle(handle: String) -> Result<SecretHandle, RebornServicesError> {
+    SecretHandle::new(handle).map_err(|error| {
+        tracing::debug!(%error, "admin user secret handle validation failed");
+        product_capability_input_error("handle")
     })
 }
 

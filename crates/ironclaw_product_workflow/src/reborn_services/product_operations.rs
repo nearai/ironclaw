@@ -244,8 +244,7 @@ impl ProductOperationHandler {
             Self::AdminUserPutSecret => {
                 let request: RebornAdminPutSecretProductRequest =
                     product_command_input(input.into_json()?)?;
-                let handle = SecretHandle::new(request.handle)
-                    .map_err(|_| product_capability_input_error("handle"))?;
+                let handle = product_secret_handle(request.handle)?;
                 services
                     .put_admin_user_secret(
                         caller,
@@ -261,8 +260,7 @@ impl ProductOperationHandler {
             Self::AdminUserDeleteSecret => {
                 let request: RebornAdminDeleteSecretProductRequest =
                     product_command_input(input.into_json()?)?;
-                let handle = SecretHandle::new(request.handle)
-                    .map_err(|_| product_capability_input_error("handle"))?;
+                let handle = product_secret_handle(request.handle)?;
                 services
                     .delete_admin_user_secret(caller, request.user_id, handle)
                     .await?;
