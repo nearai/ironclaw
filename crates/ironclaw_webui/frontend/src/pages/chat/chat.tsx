@@ -20,7 +20,12 @@ import { SuggestionChips } from "./components/suggestion-chips";
 import { TypingIndicator } from "./components/typing-indicator";
 import { useChat } from "./hooks/useChat";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
-import { NEW_DRAFT_KEY } from "./lib/draft-store";
+import { authScope } from "../../lib/auth-scope";
+import {
+  NEW_DRAFT_KEY,
+  setDraft,
+  setStagedAttachments,
+} from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
@@ -67,6 +72,8 @@ export function Chat({
 }) {
   const t = useT();
   const { showChatLogsShortcut } = useInterfacePreferences();
+  const [isSubmittingFirstMessage, setIsSubmittingFirstMessage] =
+    React.useState(false);
   const {
     messages,
     isProcessing,
@@ -143,18 +150,22 @@ export function Chat({
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
+  const newConversationIsProcessing =
+    !activeThreadId && isSubmittingFirstMessage;
+  const chatIsProcessing =
+    activeThreadIsProcessing || newConversationIsProcessing;
   const activeRunId = activeRun?.runId || null;
   const streamingAssistantTextVisible = hasVisibleStreamingAssistantText(
     messages,
     activeRunId
   );
   const showTypingIndicator =
-    activeThreadIsProcessing &&
+    chatIsProcessing &&
     !activeThreadHasGate &&
     !streamingAssistantTextVisible;
   const hasMessages =
     messages.length > 0 ||
-    activeThreadIsProcessing ||
+    chatIsProcessing ||
     activeThreadHasGate ||
     activeThreadHasOnboarding;
   // Don't show the landing composer when history failed to load — show the
@@ -173,7 +184,7 @@ export function Chat({
   const composerSendDisabled =
     activeThreadHasGate ||
     activeThreadHasOnboarding ||
-    (activeThreadIsProcessing &&
+    (chatIsProcessing &&
       !activeThreadHasGate &&
       !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
@@ -185,6 +196,12 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
+  // The pending state replaces the landing input with the dock input. If the
+  // first send fails, remount that dock as pending clears so it initializes
+  // from the draft store restored by handleSend.
+  const composerInstanceKey = newConversationIsProcessing
+    ? "first-message-submitting"
+    : "chat-composer";
   const logsPath =
     activeThreadId && showChatLogsShortcut
       ? buildScopedLogsPath({ threadId: activeThreadId })
@@ -198,22 +215,58 @@ export function Chat({
       !activeThreadHasOnboarding
   );
   const handleSend = React.useCallback(
-    async (content, { images = [], attachments = [], displayContent } = {}) => {
+    async (
+      content,
+      {
+        images = [],
+        attachments = [],
+        displayContent,
+        preserveExistingDraft = false,
+      } = {}
+    ) => {
       if (activeThreadHasGate) {
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
-      const response = await send(content, {
-        images,
-        attachments,
-        displayContent,
-        threadId: activeThreadId,
-      });
-      const responseThreadId = response?.thread_id || activeThreadId;
-      if (!activeThreadId && responseThreadId && onSelectThread) {
-        onSelectThread(responseThreadId, { replace: true });
+      const isFirstMessage = !activeThreadId;
+      const submittedScope = isFirstMessage ? authScope() : null;
+      const restoreFirstMessageDraft = () => {
+        if (
+          !isFirstMessage ||
+          preserveExistingDraft ||
+          authScope() !== submittedScope
+        ) {
+          return;
+        }
+        const submittedText =
+          typeof displayContent === "string"
+            ? displayContent
+            : images.length > 0 || attachments.length > 0
+              ? ""
+              : content;
+        setDraft(NEW_DRAFT_KEY, submittedText);
+        setStagedAttachments(NEW_DRAFT_KEY, attachments);
+      };
+      if (isFirstMessage) setIsSubmittingFirstMessage(true);
+      try {
+        const response = await send(content, {
+          images,
+          attachments,
+          displayContent,
+          threadId: activeThreadId,
+        });
+        if (response === null) restoreFirstMessageDraft();
+        const responseThreadId = response?.thread_id || activeThreadId;
+        if (!activeThreadId && responseThreadId && onSelectThread) {
+          onSelectThread(responseThreadId, { replace: true });
+        }
+        return response;
+      } catch (error) {
+        restoreFirstMessageDraft();
+        throw error;
+      } finally {
+        if (isFirstMessage) setIsSubmittingFirstMessage(false);
       }
-      return response;
     },
     [
       activeThreadId,
@@ -229,7 +282,9 @@ export function Chat({
     async (text) => {
       if (composerSendDisabled) return;
       setSuggestions([]);
-      await handleSend(text);
+      // A suggestion is independent of anything staged in the landing
+      // composer. Leave that draft untouched if creating the thread fails.
+      await handleSend(text, { preserveExistingDraft: true });
     },
     [composerSendDisabled, handleSend, setSuggestions]
   );
@@ -344,7 +399,7 @@ export function Chat({
             onRetryMessage={retryMessage}
             threadId={activeThreadId}
             logsPath={logsPath}
-            pending={activeThreadIsProcessing}
+            pending={chatIsProcessing}
           >
             {recoveryNotice &&
             (
@@ -446,8 +501,9 @@ export function Chat({
           />
 
           <ChatInput
+            key={composerInstanceKey}
             onSend={handleSend}
-            disabled={false}
+            disabled={newConversationIsProcessing}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}
             resetKey={composerResetKey}

@@ -81,7 +81,14 @@ function renderChat({
   threadStateUpdates = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
+  authScopeFn = () => "test-scope",
+  setDraftCalls = [],
+  setStagedAttachmentsCalls = [],
+  draftStore = new Map(),
+  stagedAttachmentsStore = new Map(),
 }) {
+  const stateSlots = [];
+  let stateIndex = 0;
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -107,13 +114,25 @@ function renderChat({
       },
       useMemo: (fn) => fn(),
       useRef: (initial) => ({ current: initial }),
-      useState: (initial) => [
-        typeof initial === "function" ? initial() : initial,
-        () => {},
-      ],
+      useState: (initial) => {
+        const index = stateIndex;
+        stateIndex += 1;
+        if (!(index in stateSlots)) {
+          stateSlots[index] =
+            typeof initial === "function" ? initial() : initial;
+        }
+        return [
+          stateSlots[index],
+          (next) => {
+            stateSlots[index] =
+              typeof next === "function" ? next(stateSlots[index]) : next;
+          },
+        ];
+      },
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
+    authScope: authScopeFn,
     buildRuntimeContext: () => ({}),
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: (threadId) =>
@@ -121,6 +140,16 @@ function renderChat({
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
+    setDraft: (key, text) => {
+      setDraftCalls.push({ key, text });
+      if (text) draftStore.set(key, text);
+      else draftStore.delete(key);
+    },
+    setStagedAttachments: (key, attachments) => {
+      setStagedAttachmentsCalls.push({ key, attachments });
+      if (attachments.length > 0) stagedAttachmentsStore.set(key, attachments);
+      else stagedAttachmentsStore.delete(key);
+    },
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
     setTimeout: () => 1,
@@ -135,15 +164,20 @@ function renderChat({
   };
 
   vm.runInNewContext(chatSourceForTest(), context);
-  const tree = context.globalThis.__testExports.Chat({
+  const props = {
     threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
     onSelectThread: () => {},
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
-  });
-  return { tree, components };
+  };
+  const render = () => {
+    stateIndex = 0;
+    return context.globalThis.__testExports.Chat(props);
+  };
+  const tree = render();
+  return { tree, components, render };
 }
 
 test("Chat cancel button routes through active thread run cancellation", async () => {
@@ -233,6 +267,191 @@ test("Chat shows typing indicator before assistant text streams", () => {
   });
 
   assert.ok(findComponent(tree, components.TypingIndicator));
+});
+
+test("Chat shows typing indicator while the first message creates its thread", async () => {
+  let resolveSend;
+  const sendPending = new Promise((resolve) => {
+    resolveSend = resolve;
+  });
+  const { tree, components, render } = renderChat({
+    activeThreadId: null,
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "idle",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: () => sendPending,
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const sendPromise = componentProps(emptyState, components.EmptyState).onSend("hello");
+  const pendingTree = render();
+
+  assert.ok(findComponent(pendingTree, components.TypingIndicator));
+  assert.equal(findComponent(pendingTree, components.EmptyState), null);
+  assert.equal(
+    componentProps(
+      findComponent(pendingTree, components.MessageList),
+      components.MessageList,
+    ).pending,
+    true,
+  );
+
+  resolveSend({ thread_id: "thread-created" });
+  await sendPromise;
+});
+
+test("Chat restores the first-message draft after thread creation fails", async () => {
+  let rejectSend;
+  const setDraftCalls = [];
+  const setStagedAttachmentsCalls = [];
+  const stagedAttachment = {
+    id: "attachment-1",
+    filename: "notes.txt",
+    media_type: "text/plain",
+  };
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: [],
+    sseStatus: "idle",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: () =>
+      new Promise((_, reject) => {
+        rejectSend = reject;
+      }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const { tree, components, render } = renderChat({
+    activeThreadId: null,
+    hookState,
+    setDraftCalls,
+    setStagedAttachmentsCalls,
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const sendPromise = componentProps(emptyState, components.EmptyState).onSend(
+    "hello",
+    { attachments: [stagedAttachment], displayContent: "hello" },
+  );
+  const pendingTree = render();
+  const pendingComposer = componentProps(
+    findComponent(pendingTree, components.ChatInput),
+    components.ChatInput,
+  );
+  assert.equal(pendingComposer.disabled, true);
+  assert.equal(pendingComposer.key, "first-message-submitting");
+
+  hookState.messages.push({ id: "request-error", role: "error" });
+  rejectSend(new Error("Thread service unavailable"));
+  await assert.rejects(sendPromise, /Thread service unavailable/);
+
+  const failedTree = render();
+  const restoredComposer = componentProps(
+    findComponent(failedTree, components.ChatInput),
+    components.ChatInput,
+  );
+  assert.equal(restoredComposer.disabled, false);
+  assert.equal(restoredComposer.key, "chat-composer");
+  assert.deepEqual(setDraftCalls, [{ key: "new", text: "hello" }]);
+  assert.equal(setStagedAttachmentsCalls.length, 1);
+  assert.equal(setStagedAttachmentsCalls[0].key, "new");
+  assert.deepEqual(
+    Array.from(setStagedAttachmentsCalls[0].attachments),
+    [stagedAttachment],
+  );
+});
+
+test("Chat preserves the landing draft when a first-message suggestion fails", async () => {
+  let rejectSend;
+  const setDraftCalls = [];
+  const setStagedAttachmentsCalls = [];
+  const existingAttachment = {
+    id: "existing-attachment",
+    filename: "existing.txt",
+    media_type: "text/plain",
+  };
+  const draftStore = new Map([["new", "separate landing draft"]]);
+  const stagedAttachmentsStore = new Map([["new", [existingAttachment]]]);
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: ["Suggested prompt"],
+    sseStatus: "idle",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: () =>
+      new Promise((_, reject) => {
+        rejectSend = reject;
+      }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const { tree, components, render } = renderChat({
+    activeThreadId: null,
+    hookState,
+    setDraftCalls,
+    setStagedAttachmentsCalls,
+    draftStore,
+    stagedAttachmentsStore,
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const suggestionPromise = componentProps(
+    emptyState,
+    components.EmptyState,
+  ).onSuggestion("Suggested prompt");
+  render();
+
+  hookState.messages.push({ id: "request-error", role: "error" });
+  rejectSend(new Error("Thread service unavailable"));
+  await assert.rejects(suggestionPromise, /Thread service unavailable/);
+
+  const failedTree = render();
+  const restoredComposer = componentProps(
+    findComponent(failedTree, components.ChatInput),
+    components.ChatInput,
+  );
+  assert.equal(restoredComposer.key, "chat-composer");
+  assert.deepEqual(setDraftCalls, []);
+  assert.deepEqual(setStagedAttachmentsCalls, []);
+  assert.equal(draftStore.get("new"), "separate landing draft");
+  assert.deepEqual(stagedAttachmentsStore.get("new"), [existingAttachment]);
 });
 
 test("Chat hides typing indicator once the active run streams assistant text", () => {
