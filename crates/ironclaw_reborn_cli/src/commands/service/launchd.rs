@@ -1,3 +1,4 @@
+// arch-exempt: large_file, service command backend awaits composition helper extraction, plan #4471
 //! macOS launchd generators, path resolution, status matching, and verb
 //! bodies for `ironclaw service`.
 

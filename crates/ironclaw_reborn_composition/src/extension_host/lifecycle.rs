@@ -1,3 +1,4 @@
+// arch-exempt: optional_arc, lifecycle facade wires optional composition ports, plan #4471
 use std::{path::PathBuf, sync::Arc};
 
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
