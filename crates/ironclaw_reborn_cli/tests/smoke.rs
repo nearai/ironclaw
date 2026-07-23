@@ -74,17 +74,22 @@ fn fake_reborn_bin(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(bin_dir).expect("fake bin dir");
-    let bin = bin_dir.join("ironclaw");
-    std::fs::write(
-        &bin,
+    let write_executable = |path: &Path, contents: &str| {
+        std::fs::write(path, contents).expect("write fake executable");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake executable");
+    };
+    write_executable(
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
-    )
-    .expect("write fake reborn bin");
-    let mut permissions = std::fs::metadata(&bin)
-        .expect("fake bin metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&bin, permissions).expect("chmod fake bin");
+    );
+    write_executable(
+        &bin_dir.join("realpath"),
+        "#!/bin/sh\n[ \"${1:-}\" != \"-e\" ] || shift\n[ \"${1:-}\" != \"--\" ] || shift\nprintf '%s\\n' \"$1\"\n",
+    );
 }
 
 #[cfg(unix)]
@@ -3585,18 +3590,15 @@ fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
 }
 
 #[test]
-fn doctor_default_home_is_reborn_scoped_and_dry_run() {
+fn doctor_default_home_is_canonical_and_dry_run() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let reborn_home = temp.path().join(".ironclaw").join("reborn");
+    let ironclaw_home = temp.path().join(".ironclaw");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_remove("IRONCLAW_HOME")
         .env("HOME", temp.path())
-        .env_remove("USERPROFILE")
-        .env_remove("IRONCLAW_PROFILE")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         output.status.success(),
@@ -3605,14 +3607,14 @@ fn doctor_default_home_is_reborn_scoped_and_dry_run() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(reborn_home.to_str().expect("utf8 path")),
+        stdout.contains(ironclaw_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
     assert!(stdout.contains("(default)"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev"), "stdout: {stdout}");
     assert!(
         !temp.path().join(".ironclaw").exists(),
-        "doctor should not create default Reborn or v1 state directories"
+        "doctor should not create the default IronClaw state directory"
     );
 }
 
@@ -3726,62 +3728,68 @@ fn run_rejects_invalid_profile() {
 }
 
 #[test]
-fn run_rejects_reborn_home_equal_to_explicit_v1_base_dir() {
+fn run_rejects_legacy_home_equal_to_explicit_v1_base_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let v1_root = temp.path().join("v1-state");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("run")
-        .env("IRONCLAW_HOME", &v1_root)
+        .env("IRONCLAW_REBORN_HOME", &v1_root)
         .env("IRONCLAW_BASE_DIR", &v1_root)
         .output()
-        .expect("ironclaw-reborn run should run");
+        .expect("ironclaw run should run");
 
-    assert!(!output.status.success(), "run should reject v1 root");
+    assert!(!output.status.success(), "run should reject legacy v1 root");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("IRONCLAW_HOME must not point at the v1 IronClaw state root"),
+        stderr.contains("IRONCLAW_REBORN_HOME must not point at the v1 IronClaw state root"),
         "stderr: {stderr}"
     );
 }
 
 #[test]
-fn doctor_rejects_reborn_home_equal_to_explicit_v1_base_dir() {
+fn doctor_rejects_legacy_home_equal_to_explicit_v1_base_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let v1_root = temp.path().join("v1-state");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env("IRONCLAW_HOME", &v1_root)
+        .env("IRONCLAW_REBORN_HOME", &v1_root)
         .env("IRONCLAW_BASE_DIR", &v1_root)
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
-    assert!(!output.status.success(), "doctor should reject v1 root");
+    assert!(
+        !output.status.success(),
+        "doctor should reject legacy v1 root"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("IRONCLAW_HOME must not point at the v1 IronClaw state root"),
+        stderr.contains("IRONCLAW_REBORN_HOME must not point at the v1 IronClaw state root"),
         "stderr: {stderr}"
     );
 }
 
 #[test]
-fn doctor_rejects_reborn_home_equal_to_relative_explicit_v1_base_dir() {
+fn doctor_rejects_legacy_home_equal_to_relative_explicit_v1_base_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let v1_root = temp.path().join("v1-state");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
         .current_dir(temp.path())
-        .env("IRONCLAW_HOME", &v1_root)
+        .env("IRONCLAW_REBORN_HOME", &v1_root)
         .env("IRONCLAW_BASE_DIR", "v1-state")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
-    assert!(!output.status.success(), "doctor should reject v1 root");
+    assert!(
+        !output.status.success(),
+        "doctor should reject legacy v1 root"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("IRONCLAW_HOME must not point at the v1 IronClaw state root"),
+        stderr.contains("IRONCLAW_REBORN_HOME must not point at the v1 IronClaw state root"),
         "stderr: {stderr}"
     );
 }
