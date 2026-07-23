@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
 };
 

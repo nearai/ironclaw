@@ -9,16 +9,17 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    PermissionMode, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
+    RebornSetOutboundPreferencesRequest,
 };
 
 pub(crate) fn extend_builtin_first_party_package(
@@ -101,14 +102,14 @@ impl FirstPartyCapabilityHandler for SetOutboundPreferencesHandler {
 fn authenticated_caller(
     request: &FirstPartyCapabilityRequest,
     started: Instant,
-) -> Result<WebUiAuthenticatedCaller, FirstPartyCapabilityError> {
+) -> Result<ProductSurfaceCaller, FirstPartyCapabilityError> {
     if request.authenticated_actor_user_id.as_ref() != Some(&request.scope.user_id) {
         return Err(dispatch_error(
             RuntimeDispatchErrorKind::PolicyDenied,
             started,
         ));
     }
-    Ok(WebUiAuthenticatedCaller::new(
+    Ok(ProductSurfaceCaller::new(
         request.scope.tenant_id.clone(),
         request.scope.user_id.clone(),
         request.scope.agent_id.clone(),
@@ -130,18 +131,16 @@ fn ensure_declared(
     }
 }
 
-fn map_services_error(
-    error: ironclaw_product_workflow::RebornServicesError,
-) -> RuntimeDispatchErrorKind {
+fn map_services_error(error: ProductSurfaceError) -> RuntimeDispatchErrorKind {
     match (error.code, error.kind) {
-        (RebornServicesErrorCode::InvalidRequest, _) | (RebornServicesErrorCode::NotFound, _) => {
+        (ProductSurfaceErrorCode::InvalidRequest, _) | (ProductSurfaceErrorCode::NotFound, _) => {
             RuntimeDispatchErrorKind::InputEncode
         }
-        (RebornServicesErrorCode::Forbidden, _) => RuntimeDispatchErrorKind::PolicyDenied,
-        (RebornServicesErrorCode::Unavailable, RebornServicesErrorKind::ServiceUnavailable) => {
+        (ProductSurfaceErrorCode::Forbidden, _) => RuntimeDispatchErrorKind::PolicyDenied,
+        (ProductSurfaceErrorCode::Unavailable, ProductSurfaceErrorKind::ServiceUnavailable) => {
             RuntimeDispatchErrorKind::Backend
         }
-        (RebornServicesErrorCode::Conflict, _) => RuntimeDispatchErrorKind::OperationFailed,
+        (ProductSurfaceErrorCode::Conflict, _) => RuntimeDispatchErrorKind::OperationFailed,
         _ => RuntimeDispatchErrorKind::Backend,
     }
 }

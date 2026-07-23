@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{CredentialStageError, ResourceScope, RuntimeCredentialAuthRequirement};
-use ironclaw_product_workflow::ProductWorkflowError;
+use ironclaw_product::ProductWorkflowError;
 
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::product_auth::credentials::runtime_credentials::{

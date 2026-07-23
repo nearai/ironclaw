@@ -81,7 +81,7 @@ pub struct RebornUserProfileUpdate {
 /// This trait is a **port**: it is defined here (bottom of the Reborn stack)
 /// and its only production implementor is the filesystem store. The composition
 /// root adapts it up to the product-workflow admin service, so admin CRUD never
-/// forces `ironclaw_product_workflow` to depend on this crate (the dependency
+/// forces `ironclaw_product` to depend on this crate (the dependency
 /// boundary the architecture tests enforce).
 #[async_trait]
 pub trait RebornUserDirectory: Send + Sync {

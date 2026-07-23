@@ -23,8 +23,11 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
-use ironclaw_host_api::{ExtensionId, RecipeSecretField, ResourceScope, SecretHandle};
-use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
+use ironclaw_host_api::{
+    ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    RecipeSecretField, ResourceScope, SecretHandle,
+};
+use ironclaw_product::ProductWorkflowError;
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 
 use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
@@ -547,7 +550,7 @@ fn admin_configuration_error(
     }
 }
 
-/// The production [`ironclaw_product_workflow::ChannelConfigFacade`] port
+/// The production [`ironclaw_product::ChannelConfigFacade`] port
 /// over [`ChannelConfigService`] — the surface the WebUI setup facade and
 /// the lifecycle configure action route through.
 pub(crate) struct RebornChannelConfigFacade {
@@ -561,22 +564,20 @@ impl RebornChannelConfigFacade {
 }
 
 #[async_trait]
-impl ironclaw_product_workflow::ChannelConfigFacade for RebornChannelConfigFacade {
+impl ironclaw_product::ChannelConfigFacade for RebornChannelConfigFacade {
     async fn field_status(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Vec<ironclaw_product_workflow::RebornChannelConfigField>, RebornServicesError> {
+    ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
         match self.service.status(extension_id).await {
             Ok(statuses) => Ok(statuses
                 .into_iter()
-                .map(
-                    |status| ironclaw_product_workflow::RebornChannelConfigField {
-                        name: status.handle,
-                        label: status.label,
-                        secret: status.secret,
-                        provided: status.provided,
-                    },
-                )
+                .map(|status| ironclaw_product::RebornChannelConfigField {
+                    name: status.handle,
+                    label: status.label,
+                    secret: status.secret,
+                    provided: status.provided,
+                })
                 .collect()),
             // A not-yet-installed extension has nothing to configure; the
             // setup view renders for it, so this projection stays empty
@@ -590,7 +591,7 @@ impl ironclaw_product_workflow::ChannelConfigFacade for RebornChannelConfigFacad
         &self,
         extension_id: &ExtensionId,
         values: Vec<(String, String)>,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         self.service
             .save(extension_id, values)
             .await
@@ -598,28 +599,27 @@ impl ironclaw_product_workflow::ChannelConfigFacade for RebornChannelConfigFacad
     }
 }
 
-fn map_channel_config_error(error: ChannelConfigError) -> RebornServicesError {
-    use ironclaw_product_workflow::{RebornServicesErrorCode, RebornServicesErrorKind};
+fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
     match error {
-        ChannelConfigError::NotInstalled { .. } => RebornServicesError {
-            code: RebornServicesErrorCode::NotFound,
-            kind: RebornServicesErrorKind::NotFound,
+        ChannelConfigError::NotInstalled { .. } => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::NotFound,
+            kind: ProductSurfaceErrorKind::NotFound,
             status_code: 404,
             retryable: false,
             field: None,
             validation_code: None,
         },
-        ChannelConfigError::UnknownField { .. } => RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        ChannelConfigError::UnknownField { .. } => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: None,
             validation_code: None,
         },
-        ChannelConfigError::Storage { .. } => RebornServicesError {
-            code: RebornServicesErrorCode::Unavailable,
-            kind: RebornServicesErrorKind::ServiceUnavailable,
+        ChannelConfigError::Storage { .. } => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Unavailable,
+            kind: ProductSurfaceErrorKind::ServiceUnavailable,
             status_code: 503,
             retryable: true,
             field: None,
@@ -628,9 +628,9 @@ fn map_channel_config_error(error: ChannelConfigError) -> RebornServicesError {
         // The save persisted but the §6.5 reactivate cycle failed: the host
         // record is left per §6.1 with the typed reason; the operator fixes
         // the value and saves again.
-        ChannelConfigError::Reactivation { .. } => RebornServicesError {
-            code: RebornServicesErrorCode::Conflict,
-            kind: RebornServicesErrorKind::Conflict,
+        ChannelConfigError::Reactivation { .. } => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Conflict,
+            kind: ProductSurfaceErrorKind::Conflict,
             status_code: 409,
             retryable: false,
             field: None,

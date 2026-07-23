@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{CapabilityId, ToolAdapter};
-use ironclaw_product_adapters::ChannelAdapter;
+use ironclaw_product::ChannelAdapter;
 
 /// One activated extension's bound behavior plus its resolved contract.
 pub struct ActiveExtension {

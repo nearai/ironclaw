@@ -150,8 +150,8 @@ git commit -m "feat(traces): fetch_account_traces_via_sink (GET /v1/account/trac
 
 **Files:**
 - Modify: the services facade trait + default impl that backs
-  `state.services().trace_credits(...)` (in `crates/ironclaw_product_workflow/`;
-  find it via `grep -rn "fn trace_credits" crates/ironclaw_product_workflow`).
+  `state.services().trace_credits(...)` (in `crates/ironclaw_product/`;
+  find it via `grep -rn "fn trace_credits" crates/ironclaw_product`).
 - Test: the facade's own tests if present; otherwise covered by Task 3's contract test.
 
 **Interfaces:**
@@ -203,13 +203,13 @@ call `fetch_account_traces_via_sink` via the facade's host-egress sink, map
 
 - [ ] **Step 3: Build**
 
-Run: `cargo build -p ironclaw_product_workflow`
+Run: `cargo build -p ironclaw_product`
 Expected: compiles.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/ironclaw_product_workflow/
+git add crates/ironclaw_product/
 git commit -m "feat(reborn): trace_account_traces facade method + wire types"
 ```
 

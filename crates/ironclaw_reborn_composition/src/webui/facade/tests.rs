@@ -20,11 +20,12 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     ActivityId, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
-    MountView, Resolution, TenantId, UserId, VirtualPath,
+    MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId, UserId,
+    VirtualPath,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
-    OPERATOR_SERVICE_LIFECYCLE_OPERATION, ProductCapabilityDescriptor, RebornOperatorToolCatalog,
+    OPERATOR_SERVICE_LIFECYCLE_COMMAND, ProductCapabilityDescriptor, RebornOperatorToolCatalog,
     RebornOperatorToolInfo,
 };
 use std::time::Duration;
@@ -380,18 +381,20 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
         .expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui services build");
 
-    let error = OPERATOR_SERVICE_LIFECYCLE_OPERATION
-        .execute_on(
-            bundle.api.as_ref(),
-            caller("bob"),
-            ironclaw_product_workflow::RebornOperatorServiceLifecycleRequest {
-                action: ironclaw_product_workflow::RebornOperatorServiceLifecycleAction::Status,
+    let surface =
+        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), caller("bob"));
+    let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
+        .invoke_on(
+            &surface,
+            ironclaw_product::RebornOperatorServiceLifecycleRequest {
+                action: ironclaw_product::RebornOperatorServiceLifecycleAction::Status,
             },
+            ironclaw_host_api::ActivityId::new(),
         )
         .await
         .expect_err("non-owner caller is rejected before lifecycle dispatch");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
     assert_eq!(error.status_code, 403);
 }
 
@@ -741,18 +744,20 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
     );
 }
 
-fn caller(user_id: &str) -> WebUiAuthenticatedCaller {
+fn caller(user_id: &str) -> ProductSurfaceCaller {
     caller_in_tenant("tenant-alpha", user_id)
 }
 
 async fn invoke_lifecycle_product_capability(
     bundle: &RebornWebuiBundle,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     capability: ProductCapabilityDescriptor,
     input: serde_json::Value,
-) -> Result<Resolution, RebornServicesError> {
+) -> Result<Resolution, ProductSurfaceError> {
+    let surface =
+        ironclaw_host_api::BoundProductSurface::new(Arc::clone(&bundle.product_surface), caller);
     capability
-        .invoke_on(bundle.api.as_ref(), caller, input, ActivityId::new())
+        .invoke_on(&surface, input, ActivityId::new())
         .await
 }
 
@@ -807,8 +812,8 @@ output_schema_ref = "schemas/{capability_name}.output.json"
     .expect("package builds")
 }
 
-fn caller_in_tenant(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller_in_tenant(tenant_id: &str, user_id: &str) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         TenantId::new(tenant_id).expect("tenant"),
         UserId::new(user_id).expect("user"),
         None,

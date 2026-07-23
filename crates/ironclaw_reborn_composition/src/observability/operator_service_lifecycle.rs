@@ -20,11 +20,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    TenantId, UserId,
+};
+use ironclaw_product::{
     OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
 };
 
 const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";
@@ -792,16 +794,16 @@ impl OperatorServiceLifecycle {
 
     fn ensure_authorized_operator(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<(), RebornServicesError> {
+        caller: &ProductSurfaceCaller,
+    ) -> Result<(), ProductSurfaceError> {
         if self.operator_identity.as_ref().is_some_and(|operator| {
             caller.tenant_id == operator.tenant_id && caller.user_id == operator.user_id
         }) {
             return Ok(());
         }
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Forbidden,
+            kind: ProductSurfaceErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -820,16 +822,16 @@ impl Default for OperatorServiceLifecycle {
 impl OperatorServiceLifecycleService for OperatorServiceLifecycle {
     async fn control_service(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+    ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError> {
         self.ensure_authorized_operator(&caller)?;
         let permit = self
             .operation_permits
             .clone()
             .acquire_owned()
             .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         let service = self.clone();
         let action = request.action;
         tokio::task::spawn_blocking(move || {
@@ -844,7 +846,7 @@ impl OperatorServiceLifecycleService for OperatorServiceLifecycle {
         .await
         .map_err(|error| {
             tracing::debug!(%error, "service lifecycle task failed");
-            RebornServicesError::internal_from("service lifecycle task failed")
+            ProductSurfaceError::internal_from("service lifecycle task failed")
         })
     }
 }
@@ -1850,7 +1852,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .await
             .expect_err("non-operator rejected");
 
-        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
     }
 
@@ -1873,7 +1875,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .await
             .expect_err("cross-tenant caller rejected");
 
-        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
     }
 
@@ -1900,8 +1902,8 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         assert!(response.remediation.is_some());
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             ironclaw_host_api::TenantId::new("tenant-test").expect("tenant"),
             ironclaw_host_api::UserId::new("user-test").expect("user"),
             Some(ironclaw_host_api::AgentId::new("agent-test").expect("agent")),

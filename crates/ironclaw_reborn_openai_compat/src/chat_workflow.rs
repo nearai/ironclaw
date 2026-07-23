@@ -33,20 +33,32 @@ use axum::Json;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use ironclaw_attachments::InboundAttachment;
-use ironclaw_host_api::ThreadId;
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{
+    ActivityId, BoundProductSurface, ProductSurface, ProductSurfaceCaller, ThreadId,
+};
+use ironclaw_product::{
+    CREATE_THREAD_COMMAND, ProductCreateThreadRequest, ProductInboundAttachment,
+    ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,
+};
+use ironclaw_product::{
     ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
     ProjectionSubscriptionRequest, ProtocolAuthEvidence, UserMessagePayload,
 };
-use ironclaw_product_workflow::{
-    ProductSurface, WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiInboundAttachment,
-    WebUiSendMessageRequest,
-};
+use uuid::Uuid;
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
 pub const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "chat_completion";
+
+fn openai_product_activity_id(surface: &str, operation_id: &str, public_id: &str) -> ActivityId {
+    let mut seed = Vec::new();
+    for segment in ["openai-compat", surface, operation_id, public_id] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    ActivityId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed))
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatAuthenticatedCaller {
@@ -97,8 +109,8 @@ impl OpenAiCompatAuthenticatedCaller {
         &self.auth_evidence
     }
 
-    pub(crate) fn product_surface_caller(&self) -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    pub(crate) fn product_surface_caller(&self) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             self.scope.tenant_id().clone(),
             self.scope.user_id().clone(),
             self.scope.agent_id().cloned(),
@@ -426,11 +438,16 @@ impl OpenAiChatCompletionsWorkflow {
         attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
         self.ensure_chat_thread(caller, public_id).await?;
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
         let ack = product_ack_from_reborn_submit(
-            self.product_surface
-                .submit_turn(
-                    caller.product_surface_caller(),
+            SUBMIT_TURN_COMMAND
+                .invoke_on(
+                    &surface,
                     chat_surface_submit_request(public_id, user_message_payload, attachments),
+                    openai_product_activity_id("chat", SUBMIT_TURN_COMMAND.id, public_id.as_str()),
                 )
                 .await?,
         );
@@ -480,14 +497,19 @@ impl OpenAiChatCompletionsWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
     ) -> Result<(), OpenAiCompatHttpError> {
-        self.product_surface
-            .create_thread(
-                caller.product_surface_caller(),
-                WebUiCreateThreadRequest {
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
+        CREATE_THREAD_COMMAND
+            .invoke_on(
+                &surface,
+                ProductCreateThreadRequest {
                     client_action_id: Some(public_id.as_str().to_string()),
                     requested_thread_id: Some(public_id.as_str().to_string()),
                     project_id: None,
                 },
+                openai_product_activity_id("chat", CREATE_THREAD_COMMAND.id, public_id.as_str()),
             )
             .await?;
         Ok(())
@@ -529,20 +551,20 @@ fn chat_surface_submit_request(
     public_id: &OpenAiChatCompletionId,
     user_message_payload: UserMessagePayload,
     attachments: Vec<InboundAttachment>,
-) -> WebUiSendMessageRequest {
-    WebUiSendMessageRequest {
+) -> ProductSubmitTurnRequest {
+    ProductSubmitTurnRequest {
         client_action_id: Some(public_id.as_str().to_string()),
         thread_id: Some(public_id.as_str().to_string()),
         content: Some(user_message_payload.text),
-        attachments: webui_attachments(attachments),
+        attachments: product_attachments(attachments),
         model: user_message_payload.requested_model,
     }
 }
 
-fn webui_attachments(attachments: Vec<InboundAttachment>) -> Vec<WebUiInboundAttachment> {
+fn product_attachments(attachments: Vec<InboundAttachment>) -> Vec<ProductInboundAttachment> {
     attachments
         .into_iter()
-        .map(|attachment| WebUiInboundAttachment {
+        .map(|attachment| ProductInboundAttachment {
             mime_type: attachment.mime_type,
             filename: attachment.filename,
             data_base64: base64::engine::general_purpose::STANDARD.encode(attachment.bytes),
@@ -744,7 +766,7 @@ fn chat_user_message_and_attachments(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_product::ProductInboundAck;
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::accepted_ack_from_ack;

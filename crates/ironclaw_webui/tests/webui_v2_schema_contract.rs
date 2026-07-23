@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, ThreadId};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
     ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase, ProgressKind,

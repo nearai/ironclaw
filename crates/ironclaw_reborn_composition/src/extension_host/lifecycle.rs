@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     ExtensionId, HostApiError, HostPath, InstallationState, InvocationId, MountView, ResourceScope,
     RuntimeHttpEgress, UserId, VirtualPath,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
@@ -771,7 +771,7 @@ mod tests {
         AgentId, HostPath, MountAlias, MountGrant, MountPermissions, ProjectId, TenantId,
         VirtualPath,
     };
-    use ironclaw_product_workflow::LifecycleProductSurfaceContext;
+    use ironclaw_product::LifecycleProductSurfaceContext;
 
     #[tokio::test]
     async fn skill_lifecycle_facade_installs_lists_and_removes_via_skill_management() {

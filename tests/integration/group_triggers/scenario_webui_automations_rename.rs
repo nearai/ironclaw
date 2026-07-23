@@ -8,7 +8,7 @@ use super::reborn_support::webui_mount::{
     get_json, mount_webui_v2_router, post_json, webui_caller_for,
 };
 use axum::http::StatusCode;
-use ironclaw_product_workflow::RebornServices;
+use ironclaw_product::RebornServices;
 use serde_json::json;
 use std::sync::Arc;
 

@@ -54,6 +54,7 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, InvocationId, InvocationOrigin, MountView,
@@ -66,14 +67,14 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ChannelAdapter, InboundOutcome, ParsedProductInbound, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
     UserMessagePayload, VerifiedInbound,
 };
-use ironclaw_product_workflow::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ProductSurface,
-    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+use ironclaw_product::{
+    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -220,7 +221,7 @@ impl PostAdmissionObserver for RecordingForwardObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
+        error: ironclaw_product::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -311,7 +312,7 @@ async fn preresolve_vendor_turn_scope(
     };
     let message = messages.first().expect("one normalized message");
     // Mirror of the sink's envelope assembly (`extension_ingress.rs::admit`).
-    let context = ironclaw_product_adapters::TrustedInboundContext::from_verified_evidence(
+    let context = ironclaw_product::TrustedInboundContext::from_verified_evidence(
         ProductAdapterId::new(adapter_id).expect("adapter id"),
         AdapterInstallationId::new(installation_id).expect("installation id"),
         Utc::now(),
@@ -362,7 +363,7 @@ impl VendorIngress {
         harness: &RebornIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
     ) -> Self {
-        let surface = harness.product_workflow_for_test() as Arc<dyn ProductSurface>;
+        let surface = harness.product_workflow_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
@@ -995,7 +996,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     .to_string();
     // The run's scope is the vendor conversation's binding, not this harness
     // thread's — register its scripted model before the POST admits the turn.
-    let evidence = ironclaw_product_adapters::auth::mark_request_signature_verified(
+    let evidence = ironclaw_product::auth::mark_request_signature_verified(
         "X-Slack-Signature".to_string(),
         Some("X-Slack-Request-Timestamp".to_string()),
         SLACK_INSTALLATION,
@@ -1084,6 +1085,13 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 #[case::postgres(StorageMode::Postgres)]
 #[tokio::test]
 async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage: StorageMode) {
+    Box::pin(telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(
+        storage,
+    ))
+    .await;
+}
+
+async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: StorageMode) {
     let group = RebornIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()
@@ -1379,7 +1387,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         }
     })
     .to_string();
-    let evidence = ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
+    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
         "X-Telegram-Bot-Api-Secret-Token".to_string(),
         TELEGRAM_INSTALLATION,
     );
@@ -1681,7 +1689,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             .extension_ingress_parts()
             .expect("composition built the generic ingress"),
     );
-    let evidence = ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
+    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
         "X-Telegram-Bot-Api-Secret-Token".to_string(),
         TELEGRAM_INSTALLATION,
     );

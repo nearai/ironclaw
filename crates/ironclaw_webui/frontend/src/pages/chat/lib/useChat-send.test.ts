@@ -605,7 +605,7 @@ test("useChat.send: forwards staged attachments to sendMessage in wire shape", a
   const body = sentBody();
   assert.equal(body.content, "please review");
   assert.equal(body.threadId, threadId);
-  // The wire shape the v2 ingress (`WebUiInboundAttachment`) expects —
+  // The wire shape the v2 ingress (`ProductInboundAttachment`) expects —
   // never the staged camelCase object, never `[non_text_content]`.
   assert.deepEqual(body.attachments, [
     { mime_type: "text/plain", filename: "notes.txt", data_base64: "bm90ZQ==" },

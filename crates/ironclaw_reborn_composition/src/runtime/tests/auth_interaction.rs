@@ -12,7 +12,7 @@ use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductWorkflowError,
 };
 use ironclaw_turns::{TurnActor, TurnScope};

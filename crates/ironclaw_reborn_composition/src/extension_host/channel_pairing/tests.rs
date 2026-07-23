@@ -7,7 +7,7 @@ use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
     ProductTriggerReason,
 };

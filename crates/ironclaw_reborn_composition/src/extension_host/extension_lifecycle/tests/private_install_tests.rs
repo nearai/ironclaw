@@ -12,7 +12,7 @@
 //! `Tenant` in a single row write.
 
 use super::*;
-use ironclaw_product_workflow::LifecycleInstallScope;
+use ironclaw_product::LifecycleInstallScope;
 
 /// Membership install rules through the facade: members install
 /// independently (second member JOINS, not "unavailable"), each sees a
@@ -584,12 +584,12 @@ async fn active_capabilities_carry_installation_owner() {
 /// mirrors `LifecycleProductCommandService` dispatching `/extension_*`
 /// commands as `LifecycleProductContext::Command`.
 fn lifecycle_command_context_for_user(user: &str) -> LifecycleProductContext {
-    use ironclaw_product_adapters::{
+    use ironclaw_product::{
+        ActionFingerprintKey, ProductActionId, ProductCommandContext, SourceBindingKey,
+    };
+    use ironclaw_product::{
         AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
         ExternalEventId, ProductAdapterId, ProductTriggerReason, ProtocolAuthEvidence,
-    };
-    use ironclaw_product_workflow::{
-        ActionFingerprintKey, ProductActionId, ProductCommandContext, SourceBindingKey,
     };
 
     let adapter_id = ProductAdapterId::new("test_adapter").expect("valid adapter");
