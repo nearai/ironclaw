@@ -1045,13 +1045,6 @@ registerPack("de", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "Kopplung",
-  "pairing.instructions": "Geben Sie den Code vom Kanal ein, um die Kopplung abzuschließen.",
-  "pairing.placeholder": "Pairing‑Code eingeben…",
-  "pairing.approve": "Freigeben",
-  "pairing.success": "Kopplung abgeschlossen.",
-  "pairing.error": "Kopplung fehlgeschlagen.",
-  "pairing.none": "Keine ausstehenden Pairing‑Anfragen.",
   "pairing.connect": "Verbinden",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("de", {
   "markdown.showMore": "Mehr anzeigen",
   "markdown.showLess": "Weniger anzeigen",
   "pairing.connectTitle": "{name} verbinden",
-  "pairing.openAndPaste": "Öffne {name}, hole den Kopplungscode und füge ihn hier ein.",
+  "pairing.connectInstructions": "Folge den Verbindungsschritten für {name}, um fortzufahren.",
   "pairing.connectFromExtensions": "Verbinde {name} über die Erweiterungsseite, um fortzufahren.",
-  "pairing.checkCodeAndRetry": "Kopplung fehlgeschlagen. Prüfe den Code und versuche es erneut.",
-  "pairing.resumeFailed": "{name} ist verbunden, aber dieser Chat konnte nicht fortgesetzt werden. Lade die Seite neu, um weiterzumachen.",
+  "pairing.connectFailedRetry": "Verbindung fehlgeschlagen. Versuche es erneut.",
   "extensions.authUrlHttpsRequired": "Die Authentifizierungs-URL muss HTTPS verwenden.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Konfiguriert; leer lassen, um beizubehalten",

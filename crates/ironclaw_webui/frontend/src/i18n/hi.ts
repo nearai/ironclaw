@@ -1045,13 +1045,6 @@ registerPack("hi", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "पेयरिंग",
-  "pairing.instructions": "पेयरिंग समाप्त करने के लिए चैनल से कोड दर्ज करें।",
-  "pairing.placeholder": "पेयरिंग कोड दर्ज करें…",
-  "pairing.approve": "स्वीकृत करें",
-  "pairing.success": "पेयरिंग पूर्ण।",
-  "pairing.error": "पेयरिंग विफल.",
-  "pairing.none": "कोई लंबित युग्मन अनुरोध नहीं।",
   "pairing.connect": "कनेक्ट",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("hi", {
   "markdown.showMore": "और दिखाएं",
   "markdown.showLess": "कम दिखाएं",
   "pairing.connectTitle": "{name} कनेक्ट करें",
-  "pairing.openAndPaste": "{name} खोलें, पेयरिंग कोड लें और यहां पेस्ट करें।",
+  "pairing.connectInstructions": "जारी रखने के लिए {name} के कनेक्शन चरणों का पालन करें।",
   "pairing.connectFromExtensions": "जारी रखने के लिए एक्सटेंशन पेज से {name} कनेक्ट करें।",
-  "pairing.checkCodeAndRetry": "पेयरिंग विफल हुई। कोड जांचें और फिर से प्रयास करें।",
-  "pairing.resumeFailed": "{name} कनेक्ट हो गया, लेकिन यह चैट जारी नहीं रह सकी। जारी रखने के लिए पेज फिर से लोड करें।",
+  "pairing.connectFailedRetry": "कनेक्शन विफल रहा। फिर से प्रयास करें।",
   "extensions.authUrlHttpsRequired": "ऑथेंटिकेशन URL में HTTPS होना चाहिए।",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "कॉन्फ़िगर है; बनाए रखने के लिए खाली छोड़ें",

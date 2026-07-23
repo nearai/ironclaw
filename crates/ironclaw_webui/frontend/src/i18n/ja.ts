@@ -1045,13 +1045,6 @@ registerPack("ja", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "ペアリング",
-  "pairing.instructions": "チャンネルからのコードを入力してペアリングを完了します。",
-  "pairing.placeholder": "ペアリングコードを入力…",
-  "pairing.approve": "承認",
-  "pairing.success": "ペアリングが完了しました。",
-  "pairing.error": "ペアリングに失敗しました。",
-  "pairing.none": "保留中のペアリング要求はありません。",
   "pairing.connect": "接続",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("ja", {
   "markdown.showMore": "もっと表示",
   "markdown.showLess": "表示を減らす",
   "pairing.connectTitle": "{name} に接続",
-  "pairing.openAndPaste": "{name} を開き、ペアリングコードを取得してここに貼り付けてください。",
+  "pairing.connectInstructions": "続けるには、{name} の接続手順に従ってください。",
   "pairing.connectFromExtensions": "続行するには、拡張機能ページで {name} に接続してください。",
-  "pairing.checkCodeAndRetry": "ペアリングに失敗しました。コードを確認してもう一度お試しください。",
-  "pairing.resumeFailed": "{name} は接続されましたが、このチャットを続行できませんでした。ページを再読み込みして続けてください。",
+  "pairing.connectFailedRetry": "接続に失敗しました。もう一度お試しください。",
   "extensions.authUrlHttpsRequired": "認証 URL には HTTPS が必要です。",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "設定済み。保持する場合は空欄",

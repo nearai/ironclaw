@@ -1045,13 +1045,6 @@ registerPack("zh-CN", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "配对",
-  "pairing.instructions": "输入频道上提供出的专属配对代码数字来进行连接并且完善验证完成设置了。",
-  "pairing.placeholder": "输入配对码…",
-  "pairing.approve": "批准",
-  "pairing.success": "现在这种关联配对验证过程是成功已办到了的！可以进行了。",
-  "pairing.error": "所尝试运行的上述匹配过程遭意外遇到并遇到发生了不可知失败原因。麻烦可稍后检查或者再从头重做配对要求步骤和密码输入信息。",
-  "pairing.none": "没有待处理的配对请求。",
   "pairing.connect": "点击通过去连接验证并校验这种配对工作",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("zh-CN", {
   "markdown.showMore": "显示更多",
   "markdown.showLess": "显示更少",
   "pairing.connectTitle": "连接 {name}",
-  "pairing.openAndPaste": "打开 {name}，获取配对码并粘贴到这里。",
+  "pairing.connectInstructions": "请按照 {name} 的连接步骤操作以继续。",
   "pairing.connectFromExtensions": "请从扩展页面连接 {name} 后继续。",
-  "pairing.checkCodeAndRetry": "配对失败。请检查代码后重试。",
-  "pairing.resumeFailed": "{name} 已连接，但此聊天无法继续。请重新加载页面后继续。",
+  "pairing.connectFailedRetry": "连接失败。请重试。",
   "extensions.authUrlHttpsRequired": "认证 URL 必须使用 HTTPS。",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "已配置；留空则保留",

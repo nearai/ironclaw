@@ -1045,13 +1045,6 @@ registerPack("uk", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "Парування",
-  "pairing.instructions": "Введіть код із каналу, щоб завершити створення пари.",
-  "pairing.placeholder": "Введіть код парування…",
-  "pairing.approve": "Підтвердити",
-  "pairing.success": "Сполучення завершено.",
-  "pairing.error": "Помилка створення пари.",
-  "pairing.none": "Немає запитів на парування в очікуванні.",
   "pairing.connect": "Підключитися",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("uk", {
   "markdown.showMore": "Показати більше",
   "markdown.showLess": "Показати менше",
   "pairing.connectTitle": "Підключити {name}",
-  "pairing.openAndPaste": "Відкрийте {name}, отримайте код сполучення та вставте його тут.",
+  "pairing.connectInstructions": "Виконайте кроки підключення для {name}, щоб продовжити.",
   "pairing.connectFromExtensions": "Підключіть {name} на сторінці Розширення, щоб продовжити.",
-  "pairing.checkCodeAndRetry": "Сполучення не вдалося. Перевірте код і спробуйте ще раз.",
-  "pairing.resumeFailed": "{name} підключено, але цей чат не вдалося продовжити. Перезавантажте сторінку, щоб продовжити.",
+  "pairing.connectFailedRetry": "Не вдалося підключитися. Спробуйте ще раз.",
   "extensions.authUrlHttpsRequired": "URL автентифікації має використовувати HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Налаштовано; залиште порожнім, щоб зберегти",

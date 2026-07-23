@@ -123,6 +123,22 @@ export function gateFromProjectionGate(gate) {
   };
 }
 
+// A "channel connection" gate is a host-issued pairing gate that also carries
+// the manifest connection context. Both the chat composer affordance
+// (`activeThreadHasChannelConnectionGate`) and the pairing-card selector in
+// chat.tsx derive from this ONE predicate, so a gate can never be treated as a
+// channel-connect by the composer and a token-paste by the card.
+//
+// Backend invariant (crates/ironclaw_product_workflow/src/auth_prompt.rs):
+// `connection` is populated only when `challenge_kind == pairing`, never on
+// `manual_token`/`oauth_url`. Requiring the pairing kind here keeps the
+// frontend consistent even if that invariant is ever relaxed upstream.
+export function channelConnectionFromGate(gate) {
+  if (!gate || gate.kind !== "auth_required") return null;
+  if (gate.challengeKind !== "pairing") return null;
+  return gate.connection || null;
+}
+
 function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
   if (!approvalContext) return gate;
   const approvalDetails = approvalDetailsFromContext(approvalContext);

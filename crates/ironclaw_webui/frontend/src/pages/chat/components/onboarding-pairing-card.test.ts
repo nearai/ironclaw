@@ -48,11 +48,11 @@ function tForTest(key, params = {}) {
   const values = {
     "common.dismiss": "Dismiss",
     "connection.connecting": "Connecting...",
-    "pairing.checkCodeAndRetry": "Connection failed. Try again.",
+    "pairing.connectFailedRetry": "Connection failed. Try again.",
     "pairing.connect": "Connect",
     "pairing.connectFromExtensions": `Connect ${params.name} from Extensions.`,
     "pairing.connectTitle": `Connect ${params.name}`,
-    "pairing.openAndPaste": `Follow the connection instructions for ${params.name}.`,
+    "pairing.connectInstructions": `Follow the connection steps for ${params.name} to continue.`,
   };
   return values[key] || key;
 }

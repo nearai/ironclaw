@@ -31,7 +31,17 @@ function findInput(root, type) {
   return found;
 }
 
-function createConfigurationGroupHarness(initialGroup) {
+function findForm(root) {
+  let found = null;
+  visit(root, (node) => {
+    if (!found && typeof node === "object" && node.type === "form") {
+      found = node;
+    }
+  });
+  return found;
+}
+
+function createConfigurationGroupHarness(initialGroup, stateOverrides = {}) {
   const hooks = [];
   const pendingUpdates = [];
   let cursor = 0;
@@ -90,6 +100,7 @@ function createConfigurationGroupHarness(initialGroup) {
     saveError: null,
     save: async () => {},
     resetSave: () => {},
+    ...stateOverrides,
   };
   let rendered;
 
@@ -245,4 +256,67 @@ test("configuration group keeps repeated secret pastes mounted and dirty across 
 
   assert.equal(findInput(rendered, "password").props.value, pasted.repeat(3));
   assert.equal(findInput(rendered, "text").props.value, "https://refetched.example.test");
+});
+
+test("configuration group reseeds from the group returned by save, not the pre-save values", async () => {
+  const fixtureGroup = {
+    group_id: "vendor.fixture.credentials",
+    display_name: "Fixture deployment credentials",
+    description: "Manifest-declared fixture fields",
+    revision: 4,
+    complete: true,
+    used_by: [{ package_id: "vendor.fixture", display_name: "Fixture", installed: false }],
+    fields: [
+      {
+        handle: "fixture_client_secret",
+        label: "Client secret",
+        secret: true,
+        required: true,
+        provided: true,
+        value: "server-secret-material-must-never-render",
+      },
+      {
+        handle: "fixture_endpoint",
+        label: "Endpoint",
+        secret: false,
+        required: true,
+        provided: true,
+        value: "https://old.example.test",
+      },
+    ],
+  };
+  // `save` resolves WITH the persisted group — the non-secret value differs from
+  // both the loaded value and whatever the operator typed, and the secret is
+  // returned write-only (value: null).
+  const savedGroup = {
+    ...fixtureGroup,
+    revision: 5,
+    fields: fixtureGroup.fields.map((field) => field.secret
+      ? { ...field, value: null }
+      : { ...field, value: "https://saved.example.test" }),
+  };
+  const harness = createConfigurationGroupHarness(fixtureGroup, {
+    save: async () => savedGroup,
+  });
+  let rendered = harness.render();
+
+  // Type a throwaway value into the non-secret field so we can prove the
+  // post-save reseed comes from the SAVED group, not this pre-save input.
+  const typeEvent = { currentTarget: { value: "https://typed.example.test" } };
+  findInput(rendered, "text").props.onChange(typeEvent);
+  typeEvent.currentTarget = null;
+  harness.flushUpdates();
+  rendered = harness.render();
+  assert.equal(findInput(rendered, "text").props.value, "https://typed.example.test");
+
+  // Submit; the mutation resolves with the saved group.
+  await findForm(rendered).props.onSubmit({ preventDefault() {} });
+  harness.flushUpdates();
+  rendered = harness.render();
+
+  // Reseeded from the SAVED group's non-secret value (exercises the
+  // `savedGroup?.fields` branch), not the typed value nor the loaded value.
+  assert.equal(findInput(rendered, "text").props.value, "https://saved.example.test");
+  // The secret stays blank after save — never the server-returned material.
+  assert.equal(findInput(rendered, "password").props.value, "");
 });

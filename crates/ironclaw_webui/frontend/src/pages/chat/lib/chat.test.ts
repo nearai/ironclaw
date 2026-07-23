@@ -5,6 +5,7 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
+import { channelConnectionFromGate } from "./gates";
 
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.tsx", import.meta.url), "utf8");
@@ -121,6 +122,7 @@ function renderChat({
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
+    channelConnectionFromGate,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
     setTimeout: () => 1,
@@ -540,6 +542,65 @@ test("Chat renders the pairing card from a channel-connection gate and blocks co
     /chat\.finishPairingBeforeSend/,
   );
   assert.equal(sendCount, 0);
+});
+
+test("Chat aligns the composer notice and card for a non-pairing gate carrying connection context", () => {
+  // Backend invariant (crates/ironclaw_product_workflow/src/auth_prompt.rs):
+  // `connection` rides ONLY on pairing gates. This pins the frontend so that
+  // even if a manual_token gate ever carried one, the composer affordance and
+  // the rendered card cannot disagree — both key off `channelConnectionFromGate`.
+  // Before the fix the composer claimed "finish pairing" while the token-paste
+  // card rendered.
+  const pendingGate = {
+    kind: "auth_required",
+    challengeKind: "manual_token",
+    requestId: "request-1",
+    runId: "run-1",
+    gateRef: "gate-1",
+    connection: {
+      channel: "telegram",
+      strategy: "web_generated_code",
+      instructions: "stray connection context",
+    },
+  };
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "awaiting_gate" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  // The manual_token gate renders the token-paste card, not the pairing panel.
+  assert.ok(
+    findComponent(tree, components.AuthTokenCard),
+    "manual_token gate renders the token card",
+  );
+  assert.equal(
+    findComponent(tree, components.OnboardingPairingCard),
+    null,
+    "a non-pairing gate must not render the pairing card",
+  );
+  // ...and the composer shows the generic gate notice, never the pairing one.
+  const chatInput = findComponent(tree, components.ChatInput);
+  const inputProps = componentProps(chatInput, components.ChatInput);
+  assert.equal(inputProps.sendDisabled, true);
+  assert.equal(inputProps.statusText, "chat.resolveApprovalBeforeSend");
 });
 
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {

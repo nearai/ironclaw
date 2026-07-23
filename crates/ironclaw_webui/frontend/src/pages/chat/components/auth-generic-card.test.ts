@@ -47,8 +47,13 @@ test("AuthGenericCard never promises settings without an actionable settings rou
     AuthGateShell() {},
   };
   vm.runInNewContext(authGenericCardSourceForTest(), context);
+  // A `remediation` field is NOT part of the auth-gate wire contract: neither
+  // `AuthPromptView` nor `AuthPromptContextView` (the two shapes gates.ts
+  // normalizes from) carries one, so gates.ts never populates it. Passing a
+  // stray value here pins that the card ignores it and always shows the neutral
+  // fallback copy — the dead `gate?.remediation ||` branch must stay deleted.
   const rendered = context.globalThis.__testExports.AuthGenericCard({
-    gate: { challengeKind: "other" },
+    gate: { challengeKind: "other", remediation: "REMEDIATION-SHOULD-NOT-RENDER" },
     onCancel() {},
   });
   assert.ok(
@@ -58,6 +63,17 @@ test("AuthGenericCard never promises settings without an actionable settings rou
   assert.ok(
     !translationKeys.includes("authGate.unsupportedChallenge"),
     "the retired settings-specific fallback key must not be requested",
+  );
+
+  let rendersRemediation = false;
+  walk(rendered, (value) => {
+    if (typeof value === "string" && value.includes("REMEDIATION-SHOULD-NOT-RENDER")) {
+      rendersRemediation = true;
+    }
+  });
+  assert.ok(
+    !rendersRemediation,
+    "the card must not render a backend-absent remediation field",
   );
 
   let promisesSettings = false;
