@@ -33,6 +33,8 @@ on:
       - "docs/reborn/**"
       - "scripts/reborn-e2e-rust.sh"
       - "scripts/ci/check-ironclaw-serve-e2e-manifest.py"
+      - "scripts/ci/check-no-deleted-binary-refs.py"
+      - "scripts/ci/test-check-no-deleted-binary-refs.py"
       - "tests/e2e/**"
       - "build.rs"
       - "providers.json"
@@ -74,7 +76,7 @@ jobs:
 
           # Keep this pattern in sync with the push `paths:` filter in the
           # `on:` block above.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/check-ironclaw-serve-e2e-manifest\.py$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/check-(ironclaw-serve-e2e-manifest|no-deleted-binary-refs)\.py$|scripts/ci/test-check-no-deleted-binary-refs\.py$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"
@@ -166,6 +168,11 @@ jobs:
 
       - name: Check retained IronClaw serve E2E inventory
         run: python3 scripts/ci/check-ironclaw-serve-e2e-manifest.py
+
+      - name: Reject deleted-binary E2E regressions
+        run: |
+          python3 scripts/ci/check-no-deleted-binary-refs.py
+          python3 scripts/ci/test-check-no-deleted-binary-refs.py
 
       - name: Install WebUI frontend dependencies
         run: |

@@ -1,260 +1,111 @@
-# IronClaw E2E Tests
+# IronClaw Python E2E tests
 
-Browser-level end-to-end tests for the IronClaw web gateway using Python + Playwright.
-
-## Prerequisites
-
-- Python 3.11+
-- Rust toolchain (for building ironclaw)
-- Chromium (installed via Playwright)
-- Node.js with `npx` (for Emulate-backed provider fixtures)
+The Python E2E suite exercises the shipping `ironclaw serve` process through
+its WebChat v2, OpenAI-compatible, admin, extension, channel, and provider
+surfaces. The retired gateway harness and its browser fixtures are not part of
+this tree.
 
 ## Setup
 
-```bash
-cd tests/e2e
-pip install -e .
-playwright install chromium
-```
-
-## Build ironclaw
-
-The tests need the ironclaw binary built with libsql support:
+From the repository root:
 
 ```bash
-cargo build -p ironclaw
+python3 -m venv tests/e2e/.venv
+tests/e2e/.venv/bin/pip install -e tests/e2e
+tests/e2e/.venv/bin/playwright install chromium
+cargo build -p ironclaw --bin ironclaw
 ```
+
+Provider-contract tests also require Node.js. CI uses a pinned Emulate checkout;
+local runs can set `IRONCLAW_EMULATE_CLI` to an equivalent CLI.
 
 ## Run tests
 
 ```bash
-# From repo root
-pytest tests/e2e/ -v
+# One scenario
+tests/e2e/.venv/bin/pytest \
+  tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
 
-# Run a single scenario
-pytest tests/e2e/scenarios/test_chat.py -v
+# Retained product contracts migrated to the serve harness
+grep -v '^#' tests/e2e/ironclaw_serve_e2e_tests.txt \
+  | sed '/^[[:space:]]*$/d' \
+  | xargs tests/e2e/.venv/bin/pytest -v --timeout=120
 
-# With visible browser (not headless)
-HEADED=1 pytest tests/e2e/scenarios/test_connection.py -v
+# Full current Python suite
+tests/e2e/.venv/bin/pytest tests/e2e/scenarios -v
 ```
 
-## Architecture
+Set `HEADED=1` when debugging Playwright locally.
 
-Tests start two subprocesses:
-1. **Mock LLM** (`mock_llm.py`) -- fake OpenAI-compat server with canned responses
-2. **IronClaw** -- the real binary with gateway enabled, pointing to the mock LLM
+## Harness and fixtures
 
-Then Playwright drives a headless Chromium browser against the gateway, making DOM assertions.
+`reborn_webui_harness.py` owns the shared `ironclaw serve` lifecycle. It starts
+the shipping binary on a reserved loopback address with isolated home,
+workspace, configuration, and persistence paths, waits for `/api/health`, and
+uses SIGINT for graceful teardown.
 
-## Scenarios
+Use the `reborn_v2_*` fixtures exported by that module:
 
-| File | What it tests |
-|------|--------------|
-| `test_connection.py` | Auth, tab navigation, connection status |
-| `test_chat.py` | Send message, SSE streaming, response rendering |
-| `test_skills.py` | ClawHub search, skill install/remove |
-| `test_tool_approval.py` | Tool approval overlay (approve, deny, always, params toggle) |
-| `test_sse_reconnect.py` | SSE reconnection handling, keepalive comments, restart recovery, stale reconnect IDs, and connection-limit coverage |
-| `test_html_injection.py` | HTML injection security |
-| `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
-| `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
-| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
-| `test_reborn_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |
+- `reborn_v2_server` for authenticated HTTP contract tests;
+- `reborn_v2_page` and `reborn_v2_browser` for WebChat v2 browser tests;
+- `reborn_v2_yolo_server` or `reborn_v2_yolo_page` only where the test
+  explicitly covers unprompted capability execution;
+- specialized restartable, private-install, or OpenAI-compatible fixtures only
+  for the contract named by the scenario.
 
-## Reborn coverage gate
+`mock_llm.py` provides deterministic OpenAI-compatible model responses.
+`conftest.py` owns the shared binary build, mock LLM, Emulate services,
+test-tool archives, and the fake Slack provider used by the retained channel
+E2E.
 
-The GitHub Actions Code Coverage workflow uses
-`tests/e2e/reborn_coverage_tests.txt` instead of running every scenario in this
-directory. That manifest is intentionally limited to tests that boot
-`ironclaw serve` and cover the Reborn WebChat v2 or OpenAI-compatible
-API surface. Legacy gateway tests and `ENGINE_V2=true` compatibility tests stay
-in the E2E suite, but they are not part of the Reborn coverage gate. Manifest
-entries may be pytest node IDs when only part of a broader scenario file belongs
-in this gate.
+## CI inventories
 
-The narrower `tests/e2e/ironclaw_serve_e2e_tests.txt` inventory owns retained
-Python product coverage while the deleted-binary fixtures are removed. It
-groups served scenarios by auth/OAuth, conversation/thread, and
-engine/tool/extension behavior. Validate it with:
+The suite has three explicit inventories:
+
+- `reborn_coverage_tests.txt` selects the serve-backed coverage gate;
+- `reborn_responses_e2e_tests.txt` selects the OpenAI-compatible API contract;
+- `ironclaw_serve_e2e_tests.txt` preserves the migrated auth/OAuth,
+  conversation/thread, and engine/tool/extension product contracts.
+
+Validate the retained inventory and the deleted-binary boundary with:
 
 ```bash
 python3 scripts/ci/check-ironclaw-serve-e2e-manifest.py
+python3 scripts/ci/check-no-deleted-binary-refs.py
+python3 scripts/ci/test-check-no-deleted-binary-refs.py
 ```
 
-## Adding new scenarios
+The final command deliberately creates a temporary bad workflow and verifies
+that the static guard rejects it.
 
-1. Create `tests/e2e/scenarios/test_<name>.py`
-2. Use the `page` fixture for a fresh browser page
-3. Use selectors from `helpers.py` (update `SEL` dict if new elements are needed)
-4. Keep tests deterministic -- use the mock LLM, not real providers
+## Adding a scenario
 
-## Emulate-backed provider fixtures
+1. Add `tests/e2e/scenarios/test_<contract>.py`.
+2. Import the smallest suitable `reborn_v2_*` fixture from
+   `reborn_webui_harness`.
+3. Use `SEL_V2` for browser selectors and local route/provider doubles for
+   deterministic external data.
+4. Test through the caller when a classifier or helper gates a side effect.
+5. Add the test to an inventory only when it belongs to that inventory's
+   documented contract.
+6. Run the scenario, the relevant inventory checker, and the deleted-binary
+   guard.
 
-Emulate coverage is intentionally limited to provider APIs that match Reborn
-features already present in the codebase:
+## Emulate-backed provider coverage
 
-- Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
-  event create/delete, and Drive upload/update/readback with two isolated users.
-- Slack: auth, conversations, channel/thread/DM delivery, reactions, user
-  lookup, membership, self-authored/last-sent identity, missing email/scope,
-  mention encoding, two isolated DM targets, and exact-count readback.
-- GitHub: authenticated user, repo create/list/metadata, fork list/create,
-  release create/latest/list, issue create/read/comment/list/search, PR
-  create/read/list/files/review/comment/merge, search, branch/ref mutation,
-  Git blob/tree/commit read/write, Actions workflow/run route readback, two
-  repositories with distinct latest releases, and private-account isolation.
+Emulate fixtures cover provider behavior that maps to shipped features:
 
-Google Docs, Sheets, and Slides exist as first-party extension assets, but
-Emulate 0.7.0 does not expose those API families directly. Cover those with
-Drive metadata where useful, or a separate fake/provider fixture if the
-document API behavior itself is the contract under test.
+- Google Gmail, Calendar, and Drive stateful reads and writes;
+- Slack channel, thread, DM, reaction, identity, and scope behavior;
+- GitHub repository, issue, pull request, search, branch, release, fork, Git
+  object, and Actions route behavior.
 
-GitHub file-content tools use the `/contents` API, and workflow dispatch needs
-seeded workflow rows. Emulate 0.7.0 exposes Git blob/tree/commit/ref APIs and
-Actions workflow/run routes, but it does not expose `/contents` routes or a
-seed hook for workflows. The provider contract therefore covers the emulatable
-Git object mutation/readback path plus empty Actions route readback, not direct
-`/contents` file create/update/delete or workflow dispatch.
+Provider-only contracts prove the fixture layer. Full-path tests must still
+install and authenticate through IronClaw, drive the mediated product surface,
+and verify provider-issued state with read-back.
 
-The direct provider-contract tests prove the emulator fixture layer. Full-path
-Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
-provider fixture, install/auth the extension through IronClaw, drive
-`/api/chat/send` with the scripted mock LLM, and assert provider state through
-Emulate readback.
+## Test debt
 
-Do not duplicate account binding, refresh/reconnect, malformed-provider,
-duplicate-inbound, or repeated-delivery contracts as provider-only fixtures.
-Those are caller/runtime properties and remain covered at their existing
-hermetic seams (`runtime_credentials`, `gsuite_core`,
-`github_wasm_runtime_contract`, `idempotent_replay`, trigger/outbound
-integration tests, and `test_v2_auth_oauth_matrix.py`). Emulate supplies the
-provider state for full-path flows; it is not an OAuth authority or a fault
-injection proxy.
-
-### Manual QA mapping
-
-The Emulate provider contracts map to the manual QA sheet only where Emulate
-can represent the backing provider API. Fully emulatable rows covered here:
-2A-2C, 3A/3D, 4A-4C/4E provider outputs, 5A-5B, 6A, 7A, and 8A/8D Slack
-delivery. Partially emulatable rows covered here: 2D-2F use Calendar/Drive/Gmail
-but not native Google Docs or live news; 4D uses GitHub release APIs and Slack
-delivery but not the model-authored routine; 5C-5D use Drive text plus Slack DM
-but not Google Docs; 6C-6E cover Gmail inputs and Drive-style write/readback but
-not Google Sheets; 7C-7E cover Slack inputs/delivery but not Google Sheets; 8B-8C
-need a separate fake HN/search endpoint. Telegram and Twitter/X rows 1A-1C are
-not covered by Emulate.
-
-## Live Persona Failure Notes
-
-For the live 20+ turn persona workflows and recurring tool-misuse patterns seen
-there, see [`LIVE_TOOL_FAILURES.md`](./LIVE_TOOL_FAILURES.md).
-
-## Skip/xfail debt
-
-For the current inventory of E2E skips/xfails and the policy for keeping browser
-lifecycle tests deterministic, see [`E2E_DEBT.md`](./E2E_DEBT.md).
-
-## Mocking API responses with `page.route()`
-
-For tabs that depend on external data (extensions, jobs, memory, routines), use
-Playwright's `page.route()` to intercept the browser's HTTP requests to the
-ironclaw gateway and return deterministic fixture JSON. This avoids needing
-real installed binaries, live external services, or complex database setup.
-
-### Basic pattern
-
-```python
-import json
-
-async def test_something(page):
-    # 1. Set up route intercepts BEFORE navigation triggers the fetch
-    # Always use async def handlers — route.fulfill() is a coroutine and must be awaited.
-    async def handle_tools(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"tools": [{"name": "echo", "description": "Echo"}]}),
-        )
-
-    await page.route("**/api/extensions/tools", handle_tools)
-
-    # 2. Navigate / interact to trigger the fetch
-    await page.locator('.tab-bar button[data-tab="extensions"]').click()
-
-    # 3. Assert on the rendered DOM
-    rows = page.locator("#tools-tbody tr")
-    assert await rows.count() == 1
-```
-
-### Matching only the exact path
-
-`**/api/extensions` matches `http://host/api/extensions` but NOT sub-paths
-like `http://host/api/extensions/install`. For the bare list endpoint, add
-a check inside the handler:
-
-```python
-async def handle_ext_list(route):
-    path = route.request.url.split("?")[0]
-    if path.endswith("/api/extensions"):
-        await route.fulfill(json={"extensions": []})
-    else:
-        await route.continue_()   # Let sub-paths through to the real server
-
-await page.route("**/api/extensions*", handle_ext_list)
-```
-
-### Mocking method-specific behaviour (GET vs POST)
-
-```python
-async def handle_setup(route):
-    if route.request.method == "GET":
-        await route.fulfill(json={"secrets": [...]})
-    else:  # POST
-        await route.fulfill(json={"success": True})
-
-await page.route("**/api/extensions/my-ext/setup", handle_setup)
-```
-
-### Counting calls (for reload tests)
-
-```python
-calls = []
-
-async def counting_handler(route):
-    calls.append(1)
-    await route.fulfill(json={"extensions": []})
-
-await page.route("**/api/extensions", counting_handler)
-# ... interact ...
-assert len(calls) == 2   # called twice (initial + after some action)
-```
-
-### Applying the pattern to other tabs
-
-| Tab | Key API endpoints to mock |
-|-----|--------------------------|
-| **Jobs** | `/api/jobs`, `/api/jobs/{id}`, `/api/jobs/{id}/events` |
-| **Memory** | `/api/memory/search`, `/api/memory/tree`, `/api/memory/read` |
-| **Routines** | `/api/routines`, `/api/routines/{id}/runs` |
-
-### Injecting state directly via `page.evaluate()`
-
-For purely client-side UI (components rendered entirely in JS without API calls),
-call the JavaScript function directly to skip the network layer entirely:
-
-```python
-# Show an approval card without needing a real tool execution
-await page.evaluate("""
-    showApproval({
-        request_id: 'test-001',
-        thread_id: currentThreadId,
-        tool_name: 'shell',
-        description: 'Run something',
-    })
-""")
-```
-
-This is the pattern used in most of `test_tool_approval.py` and parts of
-`test_extensions.py` (auth card, configure modal). The waiting-approval
-regression in `test_tool_approval.py` uses a real tool call instead so it can
-exercise backend approval state.
+See [E2E_DEBT.md](E2E_DEBT.md). Runtime skips are reserved for genuinely
+optional external prerequisites; required serve-backed CI contracts should fail
+instead of silently skipping.

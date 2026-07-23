@@ -96,9 +96,6 @@ class RunShDispatchTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(f"Unknown live canary lane: {lane}", result.stdout)
                 self.assertIn("MIGRATION.md", result.stdout)
-                self.assertNotIn("scripts/auth_canary/", result.stdout)
-                self.assertNotIn("scripts/auth_live_canary/", result.stdout)
-                self.assertNotIn("scripts/workflow_canary/", result.stdout)
 
     def test_workflow_exposes_only_retained_dispatch_choices(self):
         workflow = (ROOT / ".github" / "workflows" / "live-canary.yml").read_text(

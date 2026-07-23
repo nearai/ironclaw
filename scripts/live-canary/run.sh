@@ -3,11 +3,10 @@
 # `set -x` (or an inherited `-x` from the caller) can't interpolate
 # job-level secrets that appear in environment-derived command args
 # into workflow logs. See
-# `.github/workflows/live-canary.yml` auth-live-seeded / auth-browser-
-# consent lanes — sensitive secrets are materialised to files in the
-# runner tempdir, and callers read them via
-# `scripts/live_canary/common.py::env_secret`, but this guard is
-# belt-and-braces for anything else that might transit env vars.
+# `.github/workflows/live-canary.yml` — sensitive secrets are materialised to
+# files in the runner tempdir, and callers read them via
+# `scripts/live_canary/common.py::env_secret`. This guard also protects
+# anything else that might transit environment variables.
 set +x
 set -euo pipefail
 
@@ -75,10 +74,8 @@ finish() {
 }
 
 emit_results_json() {
-  # No-op for non-cargo lanes (auth-* uses JUnit XML, workflow-canary
-  # writes its own results.json from python). The helper bails silently
-  # when it can't find a `test result:` line or when the output file
-  # already exists.
+  # No-op for non-cargo lanes. The helper bails silently when it cannot find a
+  # `test result:` line or when the output file already exists.
   python3 "$(dirname "$0")/emit_results_json.py" \
     --log "${LOG_FILE}" \
     --out "${RESULTS_FILE}" \

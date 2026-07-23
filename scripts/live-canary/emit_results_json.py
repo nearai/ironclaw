@@ -5,14 +5,11 @@ notify_slack.py::parse_results_json can already consume.
 Invoked from scripts/live-canary/run.sh at the end of every cargo-based
 lane. Skipped (early-exits as no-op) when:
 
-  * --out already exists — workflow-canary writes its own results.json
-    via scripts/workflow_canary/run_workflow_canary.py, and that file
-    must not be overwritten.
-  * The log contains no `test result:` line — auth-* lanes use pytest +
-    JUnit XML and produce no cargo-style output, so there is nothing to
-    scrape.
+  * --out already exists — a lane-specific result must not be overwritten.
+  * The log contains no `test result:` line, so there is no cargo-style output
+    to scrape.
 
-Schema matches the workflow-canary contract (see parse_results_json):
+Schema matches the live-canary notification contract (see parse_results_json):
 
     {"results": [
         {"provider": "...", "mode": "<test_name>",

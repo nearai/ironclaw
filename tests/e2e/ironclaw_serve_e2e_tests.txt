@@ -5,7 +5,7 @@
 # on product contracts that survive removal of the legacy gateway fixtures.
 
 # category: auth-oauth
-# replaces: test_v2_auth_oauth_matrix.py and legacy hosted auth fixtures
+# replacement scope: auth matrix and hosted auth contracts
 tests/e2e/scenarios/test_reborn_webui_v2_product_auth_api.py
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py
 

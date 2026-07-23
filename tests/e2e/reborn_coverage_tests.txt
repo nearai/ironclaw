@@ -1,14 +1,10 @@
 # Reborn E2E coverage gate.
 #
-# Keep this list limited to tests that exercise the standalone
-# `ironclaw-reborn serve` binary and its Reborn WebChat v2 / OpenAI-compatible
-# API surface. Do not add legacy `ironclaw` gateway tests, even when they run
-# with ENGINE_V2=true; those belong in compatibility/runtime E2E jobs, not this
-# Reborn coverage gate.
+# Keep this list limited to tests that exercise the shipping `ironclaw serve`
+# binary and its WebChat v2 / OpenAI-compatible API surface.
 #
 # Direct Emulate provider-contract tests are useful QA, but they mostly validate
-# the provider fixture layer. Full-path hosted OAuth tests currently start the
-# legacy gateway binary, so they are intentionally excluded here too.
+# the provider fixture layer and are intentionally excluded here.
 #
 # Pytest node IDs are allowed. Use them when a scenario file contains broader
 # provider-fixture or model-tool-choice coverage that should stay in the normal

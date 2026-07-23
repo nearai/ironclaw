@@ -121,6 +121,15 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "deleted-binary regression guard" \
+  "scripts/ci/check-no-deleted-binary-refs.py
+scripts/ci/test-check-no-deleted-binary-refs.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn root tests and support" \
   "tests/reborn_qa_smoke_scenarios_e2e.rs
 tests/integration/support/harness/mod.rs
