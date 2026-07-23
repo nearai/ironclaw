@@ -30,8 +30,16 @@
 //! exist and are still wired. The doc's plan is explicit that the type count rises
 //! before it falls (~14 → ~18 → ~11) while the new vocabulary and the old shapes
 //! coexist; the mirror-DTO ratchet's frozen allowlist is what will make the old
-//! shapes "may only disappear". Nothing in this module is wired into the dispatch
-//! path yet — that is a later slice.
+//! shapes "may only disappear".
+//!
+//! These vocabulary types are now consumed on the live path (the wiring slice has
+//! landed): [`InvocationOrigin`] is sealed at the membrane and read by the
+//! capability authorization fold ([`crate::ExecutionContext::resolved_origin`],
+//! the `origin`→gate matrix) and by the first-party trigger-mutation policy that
+//! denies `ScheduledLoopRun`, and [`Invocation`]/[`Actor`] back the
+//! `ironclaw_capabilities` `authorize()` path. The retired shapes still coexist,
+//! but the earlier "nothing in this module is wired into the dispatch path yet"
+//! note no longer holds.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

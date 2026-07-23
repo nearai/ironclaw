@@ -1681,6 +1681,16 @@ impl RebornProductAuthServices {
                 completed.continuation,
                 AuthContinuationRef::LifecycleActivation { .. }
             ) {
+                // `BackendUnavailable` here covers two re-drivable cases that must
+                // NOT be fenced: a genuine transient store fault, AND a
+                // *setup-incomplete* lifecycle continuation — the
+                // `LifecycleAuthContinuationDispatcher` deliberately returns this
+                // retryable code when an OAuth requirement completed but other
+                // manifest-declared setup still blocks the fan-out. Returning
+                // early (below) leaves `continuation_emitted_at` unstamped, so a
+                // later `reconcile_oauth_flow` re-drives the continuation once
+                // readiness is Active rather than treating it as permanently
+                // dispatched.
                 if dispatch_error_code == AuthErrorCode::BackendUnavailable {
                     return Err(AuthProductError::BackendUnavailable);
                 }

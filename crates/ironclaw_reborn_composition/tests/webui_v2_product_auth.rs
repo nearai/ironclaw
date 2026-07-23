@@ -2,7 +2,7 @@
 
 // arch-exempt: large_file, caller-level product-auth route regression coverage, plan #5905
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +77,48 @@ impl RebornAuthContinuationDispatcher for RecordingAuthDispatcher {
     ) -> Result<(), AuthProductError> {
         self.events.lock().expect("auth events lock").push(event);
         Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+}
+
+/// Returns a queued sequence of dispatch outcomes, one per call — models a
+/// lifecycle continuation whose fan-out is first deferred (a retryable error,
+/// e.g. setup still incomplete) and later succeeds once readiness settles.
+struct SequencedAuthDispatcher {
+    outcomes: Mutex<VecDeque<Result<(), AuthProductError>>>,
+    events: Mutex<Vec<AuthContinuationEvent>>,
+}
+
+impl SequencedAuthDispatcher {
+    fn new(outcomes: impl IntoIterator<Item = Result<(), AuthProductError>>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into_iter().collect()),
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn dispatch_count(&self) -> usize {
+        self.events.lock().expect("auth events lock").len()
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for SequencedAuthDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.events.lock().expect("auth events lock").push(event);
+        self.outcomes
+            .lock()
+            .expect("outcomes lock")
+            .pop_front()
+            .expect("a queued dispatch outcome for each reconcile pass")
     }
     async fn dispatch_canceled_auth_continuation(
         &self,
@@ -728,6 +770,140 @@ async fn seed_completed_unfenced_selection_flow(
     assert_eq!(completed.status, AuthFlowStatus::Completed);
     assert!(completed.continuation_emitted_at.is_none());
     flow.id
+}
+
+/// Seed a completed-but-unfenced flow whose continuation is a lifecycle
+/// activation (the shape the `LifecycleAuthContinuationDispatcher` handles),
+/// mirroring [`seed_completed_unfenced_selection_flow`].
+async fn seed_completed_unfenced_lifecycle_flow(
+    shared: &InMemoryAuthProductServices,
+    scope: AuthProductScope,
+    package_id: &str,
+) -> AuthFlowId {
+    let provider = AuthProviderId::new("google").expect("provider");
+    let account = shared
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: provider.clone(),
+            label: CredentialAccountLabel::new("lifecycle google").expect("account label"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(
+                SecretHandle::new("lifecycle-account-secret").expect("secret handle"),
+            ),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("repo").expect("provider scope")],
+        })
+        .await
+        .expect("seed configured credential account");
+    let flow = shared
+        .create_flow(NewAuthFlow {
+            id: Some(AuthFlowId::new()),
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider,
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new(package_id)
+                    .expect("lifecycle package ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .expect("seed lifecycle-activation flow");
+    let completed = shared
+        .complete_credential_selection(
+            &scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("complete flow without dispatching its continuation");
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert!(completed.continuation_emitted_at.is_none());
+    flow.id
+}
+
+/// Item 3: a lifecycle continuation whose fan-out is deferred (the dispatcher
+/// reports a retryable error — the shape `LifecycleAuthContinuationDispatcher`
+/// returns when OAuth completed but setup is still incomplete) must leave the
+/// completed flow UNFENCED, so a later reconcile finishes the fan-out. A plain
+/// success would durably fence it and permanently strand the blocked runs.
+#[tokio::test]
+async fn product_auth_deferred_lifecycle_continuation_stays_redrivable_until_readiness() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(SequencedAuthDispatcher::new([
+        Err(AuthProductError::BackendUnavailable), // first pass: setup incomplete
+        Ok(()),                                    // later reconcile: readiness Active
+    ]));
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        dispatcher.clone(),
+    ));
+    let app = build_app_with_product_auth_service(product_auth);
+    let invocation_id = InvocationId::new();
+    let scope = callback_scope_for(USER, invocation_id);
+    let flow_id =
+        seed_completed_unfenced_lifecycle_flow(&shared, scope.clone(), "google-calendar").await;
+
+    // First reconcile: the fan-out is deferred → the flow must stay UN-fenced.
+    let first = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+    assert_ne!(
+        first.status(),
+        StatusCode::OK,
+        "a deferred continuation surfaces as retryable, not a settled success"
+    );
+    assert_eq!(dispatcher.dispatch_count(), 1);
+    assert!(
+        shared
+            .get_flow(&scope, flow_id)
+            .await
+            .expect("read reconciled flow")
+            .expect("reconciled flow exists")
+            .continuation_emitted_at
+            .is_none(),
+        "a deferred (retryable) continuation must not be durably fenced",
+    );
+
+    // Later reconcile: readiness now Active → the same continuation re-drives,
+    // fans out, and only NOW is the flow fenced. Not permanently stuck.
+    let second = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        2,
+        "the deferred continuation re-drove on the readiness reconcile"
+    );
+    assert!(
+        shared
+            .get_flow(&scope, flow_id)
+            .await
+            .expect("read reconciled flow")
+            .expect("reconciled flow exists")
+            .continuation_emitted_at
+            .is_some(),
+        "the successful reconcile finally fences the continuation",
+    );
 }
 
 fn google_oauth_start_body(extra_fields: serde_json::Value) -> serde_json::Value {
