@@ -17,8 +17,7 @@ use crate::runtime::{
 
 pub(crate) const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
-const SKILL_ACTIVATE_DESCRIPTION: &str =
-    "Activate one or more listed Reborn skills for the current loop run";
+const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use only exact listed names.";
 const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
 pub(super) fn skill_activation_capability(
@@ -127,7 +126,7 @@ fn skill_activate_input_schema() -> serde_json::Value {
                 "items": { "type": "string" },
                 "minItems": 1,
                 "maxItems": MAX_SKILL_ACTIVATE_NAMES,
-                "description": "Skill names from skill_list to activate for this run"
+                "description": "Exact skill names copied from the available-skills list"
             }
         },
         "required": ["names"],
