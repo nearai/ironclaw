@@ -7784,3 +7784,47 @@ async fn list_projects_queries_product_surface_view() {
     assert_eq!(queries.len(), 1);
     assert_eq!(queries[0].view_id.as_str(), PROJECTS_VIEW.id);
 }
+
+#[tokio::test]
+async fn remove_extension_uses_client_gesture_idempotency_not_permanent_input_deduplication() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    // Two distinct client gestures, then a response-lost retry of the second.
+    // The live-repro defect: an input-derived activity id permanently
+    // deduplicated every remove of one extension, replaying the first
+    // remove's recorded success (reinstall → remove silently no-ops).
+    for client_action_id in [
+        "remove-gesture-one",
+        "remove-gesture-two",
+        "remove-gesture-two",
+    ] {
+        services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/google-calendar/remove")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"client_action_id":"{client_action_id}"}}"#,
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 3);
+    assert_ne!(
+        calls[0].2, calls[1].2,
+        "separate remove gestures must never replay one permanent cached lifecycle outcome"
+    );
+    assert_eq!(
+        calls[1].2, calls[2].2,
+        "the remove client action id must survive response-lost retries as the ProductSurface activity id"
+    );
+}

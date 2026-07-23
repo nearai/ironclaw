@@ -874,6 +874,49 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
         "telegram install must persist a durable installation row"
     );
 
+    // Acceptance contract: membership is bound to the true product caller.
+    // The installer's caller-scoped WebUI projection lists telegram; another
+    // member of the same tenant does NOT see the private membership.
+    let installer_view: ironclaw_product::RebornExtensionListResponse =
+        ironclaw_product::EXTENSIONS_VIEW
+            .query_on(
+                &ironclaw_host_api::BoundProductSurface::new(
+                    Arc::clone(&bundle.product_surface),
+                    caller.clone(),
+                ),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("installer extensions view");
+    assert!(
+        installer_view
+            .extensions
+            .iter()
+            .any(|extension| extension.package_ref.id.as_str() == "telegram"),
+        "the installing member's projection must list telegram"
+    );
+    let other_member_view: ironclaw_product::RebornExtensionListResponse =
+        ironclaw_product::EXTENSIONS_VIEW
+            .query_on(
+                &ironclaw_host_api::BoundProductSurface::new(
+                    Arc::clone(&bundle.product_surface),
+                    caller_in_tenant("tenant-alpha", "channel-remove-bystander"),
+                ),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("bystander extensions view");
+    assert!(
+        !other_member_view.extensions.iter().any(|extension| {
+            extension.package_ref.id.as_str() == "telegram"
+                && extension.installation_state
+                    != ironclaw_product::LifecyclePublicState::Uninstalled
+        }),
+        "another member must not see the installer's private telegram membership"
+    );
+
     let remove = invoke_lifecycle_product_capability(
         &bundle,
         caller,

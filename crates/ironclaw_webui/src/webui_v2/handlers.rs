@@ -2171,16 +2171,30 @@ pub async fn remove_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+    Json(body): Json<RemoveExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let resolution = invoke_product_capability(
+    // #6520 gesture idempotency: the activity id MUST carry the client
+    // gesture. An input-derived id is permanent input deduplication — a
+    // second remove of the same extension (e.g. after a reinstall) would
+    // silently replay the first remove's recorded success without
+    // dispatching, leaving the durable membership installed.
+    let client_action_id = parse_client_action_id(body.client_action_id)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        &package_ref,
+        &client_action_id,
+    )?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller,
         EXTENSION_REMOVE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -3532,6 +3546,15 @@ pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
     /// Client gesture id (#6520): one distinct install gesture = one stable
     /// ActivityId; a response-lost retry replays the same gesture.
+    pub client_action_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveExtensionBody {
+    /// Client gesture id (#6520): one distinct remove gesture = one stable
+    /// ActivityId; a response-lost retry replays the same gesture. Required —
+    /// an input-derived fallback would permanently deduplicate every remove
+    /// of the same extension.
     pub client_action_id: Option<String>,
 }
 

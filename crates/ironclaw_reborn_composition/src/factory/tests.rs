@@ -3198,3 +3198,54 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
         "expected at least one bundled channel extension with a pairing service",
     );
 }
+
+/// Live-repro regression (demo-stack defect): removing an installed channel
+/// extension through the lifecycle port with an authenticated actor must
+/// actually delete the caller's durable membership — and must be POSSIBLE in
+/// every composition that can install one (the channel-connection disconnect
+/// slot is filled at factory tier, not only in `build_reborn_runtime`).
+#[tokio::test]
+async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "local-dev-telegram-remove-owner",
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &runtime_surfaces.extension_management;
+    let caller = UserId::new("telegram-remove-user").expect("user id");
+    let telegram_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").expect("valid ref");
+
+    extension_management
+        .install(telegram_ref.clone(), &caller)
+        .await
+        .expect("install telegram");
+
+    let removal_scope =
+        default_runtime_owner_scope(caller.clone()).expect("telegram removal scope");
+    let removed = extension_management
+        .remove(telegram_ref.clone(), &removal_scope, Some(&caller))
+        .await
+        .expect("remove telegram");
+    assert!(
+        matches!(
+            removed.payload.as_ref(),
+            Some(ironclaw_product::LifecycleProductPayload::ExtensionRemove { removed: true })
+        ),
+        "remove must report the membership it deleted, got {:?}",
+        removed.payload
+    );
+
+    let projection = extension_management
+        .project(telegram_ref, &caller, None)
+        .await
+        .expect("project telegram after remove");
+    assert_eq!(
+        projection.phase,
+        ironclaw_product::LifecyclePublicState::Uninstalled,
+        "removed telegram must project uninstalled for its former member",
+    );
+}
