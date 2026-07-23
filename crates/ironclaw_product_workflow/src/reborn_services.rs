@@ -2089,6 +2089,33 @@ fn operator_diagnostics_surface_status(
 
 #[async_trait]
 pub trait ProductSurface: Send + Sync {
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn submit_turn(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiSendMessageRequest,
+    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn cancel_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// Invoke one descriptor-declared product capability through the generic
     /// mutation conduit targeted by architecture simplification §5.2.
     ///
@@ -4949,6 +4976,30 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        RebornServices::create_thread(self, caller, request).await
+    }
+
+    async fn submit_turn(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiSendMessageRequest,
+    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        RebornServices::submit_turn(self, caller, request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        RebornServices::cancel_run(self, caller, request).await
+    }
+
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -6540,7 +6591,7 @@ fn thread_operation_key(scope: &TurnScope) -> String {
     )
 }
 
-/// Default page size for [`ProductSurface::get_timeline`] when the
+/// Default page size for [`TIMELINE_VIEW`] when the
 /// caller does not supply one. Sized to cover a typical chat history
 /// without forcing a multi-megabyte JSON response on first load.
 pub(crate) const TIMELINE_DEFAULT_PAGE_SIZE: u32 = 100;

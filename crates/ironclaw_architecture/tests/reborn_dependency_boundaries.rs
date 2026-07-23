@@ -2114,7 +2114,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
         },
         ForbiddenUse {
             pattern: "IncomingMessage",
-            reason: "OpenAI-compatible Reborn routes must enter through ProductWorkflow, not legacy channel ingress",
+            reason: "OpenAI-compatible Reborn routes must enter through ProductSurface, not legacy channel ingress",
             exempt: None,
         },
         ForbiddenUse {
@@ -2136,7 +2136,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
 
     assert!(
         violations.is_empty(),
-        "Reborn OpenAI-compatible routes must stay ProductWorkflow/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
+        "Reborn OpenAI-compatible routes must stay ProductSurface/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
         violations.join("\n")
     );
 }
@@ -2582,9 +2582,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // rule's forbidden list.
         BoundaryRule {
             // OpenAI-compatible route surface is a Reborn product/API facade.
-            // It may depend on host ingress vocabulary and ProductWorkflow
-            // adapter contracts, but it must not revive v1 gateway/LLM proxy
-            // paths or reach into runtime/composition services directly.
+            // It may depend on host ingress vocabulary, product adapter
+            // contracts, and the ProductSurface facade, but it must not revive
+            // v1 gateway/LLM proxy paths or reach into runtime/composition
+            // services directly.
             crate_name: "ironclaw_reborn_openai_compat",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -2609,7 +2610,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
