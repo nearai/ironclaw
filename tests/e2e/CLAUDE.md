@@ -107,6 +107,13 @@ Emulate provider-contract tests are also excluded from the Reborn coverage gate
 because they primarily validate the fixture provider, while current hosted
 full-path Emulate tests still start the legacy gateway binary.
 
+The retained Python product scenarios that must survive legacy-fixture removal
+are listed separately in `ironclaw_serve_e2e_tests.txt`. Every selected test
+must use a `reborn_v2_*` fixture backed by the shipping `ironclaw serve`
+binary. Keep the auth/OAuth, conversation/thread, and engine/tool/extension
+category markers complete; CI validates the inventory with
+`scripts/ci/check-ironclaw-serve-e2e-manifest.py` before executing it.
+
 **Provider-contract / full-path (Emulate-backed):**
 
 | File | What it tests |

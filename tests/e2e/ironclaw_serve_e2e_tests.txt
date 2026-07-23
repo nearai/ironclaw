@@ -1,0 +1,22 @@
+# Retained Python E2E scenarios for the shipping `ironclaw serve` harness.
+#
+# Category markers are validated by
+# scripts/ci/check-ironclaw-serve-e2e-manifest.py. Keep the selectors focused
+# on product contracts that survive removal of the legacy gateway fixtures.
+
+# category: auth-oauth
+# replaces: test_v2_auth_oauth_matrix.py and legacy hosted auth fixtures
+tests/e2e/scenarios/test_reborn_webui_v2_product_auth_api.py
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py
+
+# category: conversation-thread
+# replaces: legacy conversation, history, and gateway SSE scenarios
+tests/e2e/scenarios/test_reborn_webui_v2_session_api.py
+tests/e2e/scenarios/test_reborn_webui_v2_streaming_run_control_api.py
+
+# category: engine-tool-extension
+# replaces: legacy engine-v2, tool lifecycle, and extension lifecycle scenarios
+tests/e2e/scenarios/test_reborn_webui_v2_extensions_api.py::test_reborn_v2_extension_routes_require_auth_served
+tests/e2e/scenarios/test_reborn_webui_v2_extensions_api.py::test_reborn_v2_extension_routes_reject_invalid_input_served
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_execution.py
+tests/e2e/scenarios/test_reborn_private_tool_installs.py

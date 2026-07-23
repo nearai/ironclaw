@@ -244,6 +244,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "IronClaw serve E2E manifest" \
+  "tests/e2e/ironclaw_serve_e2e_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "shared reborn tests workflow" \
   ".github/workflows/reborn-tests.yml" \
   "docs_only=false

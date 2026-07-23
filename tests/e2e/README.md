@@ -72,6 +72,15 @@ in the E2E suite, but they are not part of the Reborn coverage gate. Manifest
 entries may be pytest node IDs when only part of a broader scenario file belongs
 in this gate.
 
+The narrower `tests/e2e/ironclaw_serve_e2e_tests.txt` inventory owns retained
+Python product coverage while the deleted-binary fixtures are removed. It
+groups served scenarios by auth/OAuth, conversation/thread, and
+engine/tool/extension behavior. Validate it with:
+
+```bash
+python3 scripts/ci/check-ironclaw-serve-e2e-manifest.py
+```
+
 ## Adding new scenarios
 
 1. Create `tests/e2e/scenarios/test_<name>.py`
