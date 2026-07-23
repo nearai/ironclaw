@@ -46,7 +46,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -281,24 +281,6 @@ fn fast_delivery_settings() -> RunDeliverySettings {
         poll_interval: Duration::from_millis(20),
         max_wait: Duration::from_secs(30),
         ..RunDeliverySettings::default()
-    }
-}
-
-/// Keep the two container-backed matrix cases from competing for Docker,
-/// migrations, and PostgreSQL connections on coverage runners. The lock is
-/// local to this test binary; libSQL cases and other binaries remain parallel.
-async fn serialize_postgres_case(
-    storage: StorageMode,
-) -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    static POSTGRES_CASE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    match storage {
-        StorageMode::Postgres => Some(
-            POSTGRES_CASE_LOCK
-                .get_or_init(|| tokio::sync::Mutex::new(()))
-                .lock()
-                .await,
-        ),
-        StorageMode::InMemory | StorageMode::LibSql => None,
     }
 }
 
@@ -954,7 +936,6 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
 async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     #[case] storage: StorageMode,
 ) {
-    let _postgres_case_guard = serialize_postgres_case(storage).await;
     let group = RebornIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()
@@ -1103,7 +1084,6 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 #[case::postgres(StorageMode::Postgres)]
 #[tokio::test]
 async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage: StorageMode) {
-    let _postgres_case_guard = serialize_postgres_case(storage).await;
     let group = RebornIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()
