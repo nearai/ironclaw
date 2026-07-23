@@ -26,6 +26,15 @@ const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/
 /// disclosure is off (no bridges exist on that surface).
 const TOOL_DISCLOSURE_PROTOCOL_EMBEDDED: &str =
     include_str!("../../assets/prompts/tool-disclosure-protocol.md");
+/// Appended only when benchmarking mode is active (see
+/// `DefaultSystemPromptIdentitySource::benchmarking_mode_active`). Tells the
+/// model there is no human to ask, overriding the "ask the user...a product
+/// decision" escape valve in the base prompt's Tool Continuation section —
+/// that escape valve is correct for real product usage but causes an agent
+/// running unattended dataset evaluation to stall a turn on a clarifying
+/// question no one will ever answer.
+const BENCHMARKING_MODE_PROTOCOL_EMBEDDED: &str =
+    include_str!("../../assets/prompts/benchmarking-mode.md");
 const MAX_DEFAULT_SYSTEM_PROMPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +62,11 @@ pub(crate) struct DefaultSystemPromptIdentitySource {
     /// `tool_search`. Set from the resolved tool-disclosure mode at build time;
     /// off ⇒ the prompt content is byte-identical to the seeded file.
     disclosure_protocol_active: bool,
+    /// When true, the benchmarking-mode protocol is appended, telling the
+    /// model no human is available to answer clarifying questions. Set from
+    /// the `BENCHMARKING_MODE` env var at build time (see `runtime.rs`); off
+    /// by default, so normal product usage is unaffected.
+    benchmarking_mode_active: bool,
     loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
 }
 
@@ -61,30 +75,41 @@ impl DefaultSystemPromptIdentitySource {
         storage_root: PathBuf,
         prompt_path: PathBuf,
         disclosure_protocol_active: bool,
+        benchmarking_mode_active: bool,
     ) -> Result<Self, DefaultSystemPromptError> {
         read_default_system_prompt(&storage_root, &prompt_path)?;
         Ok(Self {
             storage_root,
             prompt_path,
             disclosure_protocol_active,
+            benchmarking_mode_active,
             loaded_identity_content: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     fn prompt_content(&self) -> Result<String, DefaultSystemPromptError> {
         let base = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
-        if !self.disclosure_protocol_active {
+        if !self.disclosure_protocol_active && !self.benchmarking_mode_active {
             return Ok(base);
         }
-        // Append in memory (not to the seeded, user-editable file) so the
-        // disclosure protocol is a system invariant whenever disclosure is on,
-        // independent of user edits to SYSTEM.md.
+        // Append in memory (not to the seeded, user-editable file) so these
+        // protocols are system invariants whenever active, independent of
+        // user edits to SYSTEM.md.
         let mut content = base;
-        if !content.ends_with('\n') {
+        if self.disclosure_protocol_active {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
             content.push('\n');
+            content.push_str(TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
         }
-        content.push('\n');
-        content.push_str(TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
+        if self.benchmarking_mode_active {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push('\n');
+            content.push_str(BENCHMARKING_MODE_PROTOCOL_EMBEDDED);
+        }
         Ok(content)
     }
 
@@ -334,9 +359,13 @@ mod tests {
         let storage_root = root.path().canonicalize().expect("canonical root");
         let prompt_path = storage_root.join("system/prompts/default-system.md");
         seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-        let source =
-            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path.clone(), false)
-                .expect("prompt loads");
+        let source = DefaultSystemPromptIdentitySource::try_new(
+            storage_root,
+            prompt_path.clone(),
+            false,
+            false,
+        )
+        .expect("prompt loads");
         let context = test_run_context().await;
 
         let candidates = source
@@ -385,10 +414,12 @@ mod tests {
             storage_root.clone(),
             prompt_path.clone(),
             false,
+            false,
         )
         .expect("off source loads");
-        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true)
-            .expect("on source loads");
+        let on =
+            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true, false)
+                .expect("on source loads");
         let context = test_run_context().await;
 
         async fn resolve_content(
@@ -428,6 +459,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmarking_mode_active_appends_no_human_protocol_to_system_prompt() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
+
+        let off = DefaultSystemPromptIdentitySource::try_new(
+            storage_root.clone(),
+            prompt_path.clone(),
+            false,
+            false,
+        )
+        .expect("off source loads");
+        let on =
+            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, true)
+                .expect("on source loads");
+        let context = test_run_context().await;
+
+        async fn resolve_content(
+            source: &DefaultSystemPromptIdentitySource,
+            context: &LoopRunContext,
+        ) -> String {
+            let candidates = source
+                .load_identity_candidates(context, PromptMode::TextOnly)
+                .await
+                .expect("candidates load");
+            source
+                .resolve_identity_message_content(
+                    context,
+                    candidates[0]
+                        .message_ref
+                        .as_ref()
+                        .expect("trusted identity has ref"),
+                )
+                .await
+                .expect("resolve content")
+                .expect("content exists")
+                .content
+        }
+
+        let off_content = resolve_content(&off, &context).await;
+        let on_content = resolve_content(&on, &context).await;
+
+        // The base prompt is preserved verbatim, and only the active source
+        // adds the no-human protocol — real product usage (mode off) is
+        // byte-identical to today's prompt.
+        assert!(on_content.starts_with(off_content.trim_end()));
+        assert!(!off_content.contains("Automated Evaluation Mode"));
+        assert!(on_content.contains("Automated Evaluation Mode"));
+        assert!(on_content.contains("no one to answer a clarifying question"));
+    }
+
+    #[tokio::test]
     async fn default_system_prompt_reloads_edited_prompt_for_new_candidates() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().canonicalize().expect("canonical root");
@@ -436,6 +520,7 @@ mod tests {
         let source = DefaultSystemPromptIdentitySource::try_new(
             storage_root.clone(),
             prompt_path.clone(),
+            false,
             false,
         )
         .expect("prompt loads");

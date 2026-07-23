@@ -3893,6 +3893,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
                         local_dev_storage_root,
                         default_system_prompt_path,
                         resolved_tool_disclosure.is_bridged(),
+                        bool_env_flag("BENCHMARKING_MODE"),
                     )
                     .map_err(|error| RebornRuntimeError::InvalidArgument {
                         reason: error.to_string(),
@@ -4558,6 +4559,18 @@ struct ComposedSkillContextSource {
 }
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+/// Reads a boolean feature flag from the environment. Absent or unrecognized
+/// values are treated as off — this gates an opt-in prompt addendum for
+/// unattended dataset evaluation (see `default_system_prompt.rs`), not a
+/// required config value, so we default closed rather than erroring on a
+/// typo'd value.
+fn bool_env_flag(key: &'static str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        Err(_) => false,
+    }
+}
 
 fn optional_nonzero_u32_env(
     key: &'static str,
