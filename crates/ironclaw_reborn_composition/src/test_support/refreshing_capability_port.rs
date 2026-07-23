@@ -47,7 +47,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// production factory.
     pub skill_activation_source:
         Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
-    pub project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    pub project_service: std::sync::Arc<dyn ironclaw_product::ProjectService>,
     /// Backs the `result_read` synthetic capability's durable tool-result
     /// reads; production wires the runtime's session thread service
     /// (`local_dev.rs` `create_capability_port`).
@@ -70,7 +70,7 @@ pub struct RefreshingCapabilityPortTestParts {
     pub extension_management: Option<ExtensionManagementTestHandle>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_facade:
-        Option<std::sync::Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>>,
+        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>>,
     pub outbound_delivery_target_set_requires_approval: bool,
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`local_dev.rs:1002`).

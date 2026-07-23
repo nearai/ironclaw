@@ -10,12 +10,11 @@ use axum::extract::DefaultBodyLimit;
 use base64::Engine as _;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
+use ironclaw_product::{
     AuthRequirement, ProductCommandResultPayload, ProductInboundAck, ProductInboundPayload,
     ProductRejection, ProductRejectionKind, ProtocolAuthEvidence, ProtocolAuthFailure,
 };
-use ironclaw_product_workflow::ProductSurface;
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiChatFinishReason,

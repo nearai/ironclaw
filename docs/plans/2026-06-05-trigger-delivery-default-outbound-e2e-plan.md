@@ -371,7 +371,7 @@ Not defaultable in the first E2E:
     contract described below.
 - `crates/ironclaw_outbound/src/resolution_engine.rs`
   - triggered notification preference lookup and fail-closed behavior.
-- `crates/ironclaw_product_workflow/src/outbound_delivery.rs`
+- `crates/ironclaw_product/src/outbound_delivery.rs`
   - `prepare_and_render_product_outbound` validation-before-render path.
 - `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
   - Slack final-reply observer and observed reply-target authority.

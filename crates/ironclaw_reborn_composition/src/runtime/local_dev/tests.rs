@@ -35,7 +35,7 @@ mod tests {
         CommunicationPreferenceKey, DeliveryTargetCapabilities, OutboundDeliveryTargetId,
         OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
     };
-    use ironclaw_product_workflow::{
+    use ironclaw_product::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
         LifecycleProductFacade, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
         RebornOutboundDeliveryTargetId,
@@ -2696,11 +2696,11 @@ mod tests {
         let listed = runtime_surfaces
             .project_service
             .list_projects(
-                ironclaw_product_workflow::ProjectCaller {
+                ironclaw_product::ProjectCaller {
                     tenant_id: tenant_id.clone(),
                     user_id: owner_user_id.clone(),
                 },
-                ironclaw_product_workflow::RebornListProjectsRequest { limit: None },
+                ironclaw_product::RebornListProjectsRequest { limit: None },
             )
             .await
             .expect("list projects for owner");
@@ -3955,7 +3955,7 @@ mod tests {
         let missing_approval_request_id = {
             let routing_ref = ironclaw_turns::GateRef::new(missing_gate_origin.as_str())
                 .expect("routing gate ref is valid");
-            ironclaw_product_workflow::approval_request_id_from_gate_ref(&routing_ref)
+            ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
         };
         let mut missing_approval_scope = run_context.scope.to_resource_scope();
@@ -4101,7 +4101,7 @@ mod tests {
         let approval_request_id = {
             let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
-            ironclaw_product_workflow::approval_request_id_from_gate_ref(&routing_ref)
+            ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
         };
         let set_invocation_id = InvocationId::parse(set_resume_token.as_str())
@@ -4133,7 +4133,7 @@ mod tests {
         // re-derives from the routing `gate:approval-{id}` ref — so a
         // host-persisted approval gate resolves through the read model.
         {
-            use ironclaw_product_workflow::approval_request_id_from_gate_ref;
+            use ironclaw_product::approval_request_id_from_gate_ref;
             // The routing ref the loop carries is `gate:approval-{id}`; the product
             // read model recovers the approval id from it, agreeing with the id the
             // gate was raised under.

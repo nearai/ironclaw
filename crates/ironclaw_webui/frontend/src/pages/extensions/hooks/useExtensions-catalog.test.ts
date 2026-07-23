@@ -24,7 +24,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, useOauthSetup };`;
+  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, useOauthSetup, useSetupSubmit };`;
 }
 
 function useExtensionsForTest({ extensions, registry }) {
@@ -219,6 +219,87 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
   );
   await result.refetch();
   assert.deepEqual(refetched, ["extensions", "extension-registry"]);
+});
+
+test("extension mutations preserve stable client action ids through hook payloads", async () => {
+  const calls = [];
+  let generated = 0;
+  const context = {
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    activateExtension: (packageRef, options) => {
+      calls.push(["activate", packageRef, options]);
+      return Promise.resolve({ success: true });
+    },
+    approvePairingCode: () => {},
+    clientActionId: () => `generated-action-${++generated}`,
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    hasChannelSurface,
+    installExtension: (packageRef, options) => {
+      calls.push(["install", packageRef, options]);
+      return Promise.resolve({ success: true });
+    },
+    removeExtension: (packageRef, options) => {
+      calls.push(["remove", packageRef, options]);
+      return Promise.resolve({ success: true });
+    },
+    startExtensionOauth: () => {},
+    submitExtensionSetup: (packageRef, secrets, fields, options) => {
+      calls.push(["setup", packageRef, secrets, fields, options]);
+      return Promise.resolve({ success: true });
+    },
+    useMutation: (config) => ({
+      isPending: false,
+      mutate: (payload, options) => config.mutationFn(payload, options),
+      mutateAsync: (payload, options) => config.mutationFn(payload, options),
+    }),
+    useQuery: (config) => ({
+      data:
+        config.queryKey[0] === "extensions"
+          ? { extensions: [] }
+          : config.queryKey[0] === "extension-registry"
+            ? { entries: [] }
+            : {},
+      isLoading: false,
+      error: null,
+      isRefetching: false,
+      refetch: () => Promise.resolve(),
+    }),
+    useQueryClient: () => ({
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: { clearInterval: () => {}, setInterval: () => 1 },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+
+  const packageRef = { kind: "extension", id: "github" };
+  const extensions = context.globalThis.__testExports.useExtensions();
+  await extensions.install({ packageRef });
+  await extensions.activate({
+    packageRef,
+    clientActionId: "caller-activate-action",
+  });
+  await extensions.remove({ packageRef });
+
+  const setup = context.globalThis.__testExports.useSetupSubmit(packageRef);
+  await setup.mutate({ secrets: {}, fields: {} });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ["install", packageRef, { clientActionId: "generated-action-1" }],
+    ["activate", packageRef, { clientActionId: "caller-activate-action" }],
+    ["remove", packageRef, { clientActionId: "generated-action-2" }],
+    ["setup", packageRef, {}, {}, { clientActionId: "generated-action-3" }],
+  ]);
 });
 
 test("install/activate auth popups: noopener null is not an error; insecure URLs are", () => {

@@ -1,4 +1,4 @@
-import { apiFetch } from "../../../lib/api";
+import { apiFetch, clientActionId } from "../../../lib/api";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
@@ -164,9 +164,14 @@ export function fetchLlmProviders() {
   return apiFetch("/api/webchat/v2/llm/providers");
 }
 export function upsertLlmProvider(payload) {
+  const { clientActionId: callerClientActionId, ...request } = payload;
   return apiFetch("/api/webchat/v2/llm/providers", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...request,
+      client_action_id:
+        request.client_action_id || callerClientActionId || clientActionId(),
+    }),
   });
 }
 export function deleteLlmProvider(providerId) {

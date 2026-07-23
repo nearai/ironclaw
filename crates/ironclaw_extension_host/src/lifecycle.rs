@@ -233,7 +233,7 @@ impl ExtensionHost {
                             .map(|channel| channel.egress.as_slice())
                             .unwrap_or(&[]),
                     );
-                    let ctx = ironclaw_product_adapters::ChannelContext {
+                    let ctx = ironclaw_product::ChannelContext {
                         extension_id: &record.extension_id,
                         installation_id: &record.installation_id,
                         config: &record.config,

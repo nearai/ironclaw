@@ -18,7 +18,7 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::ScopedPath;
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat,
 };

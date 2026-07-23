@@ -32,12 +32,11 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
-    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
-    WebUiCreateThreadRequest,
+use ironclaw_host_api::{
+    AgentId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProjectId, TenantId,
+    ThreadId, UserId,
 };
+use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
@@ -64,20 +63,24 @@ const PROJECT: &str = "project-default";
 /// scope.
 #[derive(Default)]
 struct StubServices {
-    create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    create_thread_callers: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
-impl StubServices {
-    async fn create_thread(
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        if request.operation_id.as_str() != "thread.create" {
+            return Err(ProductSurfaceError::service_unavailable(false));
+        }
         self.create_thread_callers
             .lock()
             .expect("lock")
             .push(caller);
-        Ok(RebornCreateThreadResponse {
+        let output = serde_json::to_value(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
                 thread_id: ThreadId::new("thread.fake").expect("thread"),
                 scope: ThreadScope {
@@ -95,28 +98,24 @@ impl StubServices {
                 updated_at: None,
             },
         })
+        .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
     }
-}
 
-#[async_trait]
-impl ProductSurface for StubServices {
-    async fn execute_command(
+    async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
-        match operation_id {
-            ProductOperationId::CreateThread => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
-                ProductOperationResponse::json(self.create_thread(caller, request).await?)
-            }
-            _ => Err(RebornServicesError::internal_from(
-                "unsupported product operation",
-            )),
-        }
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
+    }
+
+    async fn stream_events(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
     }
 }
 
@@ -208,7 +207,7 @@ fn build_app() -> (
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
-        api: services.clone(),
+        product_surface: services.clone(),
         product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
@@ -309,7 +308,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     //    route". The stub `create_thread` records the caller so we
     //    can also assert the `UserId` resolved through
     //    `EmailUserDirectory` made it onto the
-    //    `WebUiAuthenticatedCaller` stamped by the bearer
+    //    `ProductSurfaceCaller` stamped by the bearer
     //    middleware.
     let create = app
         .clone()

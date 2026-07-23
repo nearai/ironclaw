@@ -18,18 +18,19 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    InstallationState, NetworkTargetPattern, PermissionMode, ResourceScope,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    InstallationState, NetworkTargetPattern, PermissionMode, ProductSurfaceCaller,
+    ProductSurfaceError, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
+    VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
-use ironclaw_product_workflow::{
+use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
+use ironclaw_product::{
     ChannelConnectionFacade, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
-    RebornChannelConnectStrategy, RebornServicesError, WebUiAuthenticatedCaller,
+    RebornChannelConnectStrategy,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -50,7 +51,7 @@ pub(crate) trait ExtensionCredentialCleanup: Send + Sync {
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError>;
+    ) -> Result<SecretCleanupReport, ProductSurfaceError>;
 }
 
 #[async_trait]
@@ -58,11 +59,11 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError> {
+    ) -> Result<SecretCleanupReport, ProductSurfaceError> {
         RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
             .await
             .map_err(|error| {
-                RebornServicesError::internal_from(format!(
+                ProductSurfaceError::internal_from(format!(
                     "extension credential cleanup failed: {:?}",
                     error.code
                 ))
@@ -1733,7 +1734,7 @@ impl RebornLocalExtensionManagementPort {
                 };
                 channel_connection
                     .disconnect_channel_for_caller(
-                        WebUiAuthenticatedCaller::new(
+                        ProductSurfaceCaller::new(
                             removal_scope.tenant_id.clone(),
                             actor_user_id.clone(),
                             removal_scope.agent_id.clone(),
@@ -2144,6 +2145,15 @@ impl RebornLocalExtensionManagementPort {
         }
         let previous_state = installation.activation_state();
         let lifecycle_package = self.lifecycle_package(&extension_id).await?;
+        // Hosted-MCP discovery can republish a package that differs from the
+        // lifecycle-registered package; unpublish the active-registry package
+        // and fall back only when nothing is currently active.
+        let active_package_for_unpublish = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .cloned()
+            .unwrap_or_else(|| lifecycle_package.clone());
         if let Err(error) = self
             .installation_store
             .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
@@ -2166,7 +2176,10 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
         self.unpublish_from_generic_host(&extension_id).await;
-        if let Err(error) = self.active_extensions.unpublish(&lifecycle_package) {
+        if let Err(error) = self
+            .active_extensions
+            .unpublish(&active_package_for_unpublish)
+        {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
@@ -2208,7 +2221,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(&active_package_for_unpublish, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete installation and active publication restore failed",
@@ -2245,7 +2258,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(&active_package_for_unpublish, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete files and active publication restore failed",
@@ -3321,7 +3334,7 @@ mod tests {
         TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
-    use ironclaw_product_workflow::{
+    use ironclaw_product::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleProductAction,
         LifecycleProductContext, LifecycleProductFacade, LifecycleProductSurfaceContext,
         LifecycleReadinessBlocker,
@@ -3900,7 +3913,7 @@ mod tests {
             &self,
             context: &ExtensionRemovalCleanupContext,
             binding: &ExtensionRemovalCleanupBinding,
-        ) -> Result<(), RebornServicesError> {
+        ) -> Result<(), ProductSurfaceError> {
             let probe = self.probe.lock().expect("cleanup probe lock").clone();
             let (package_files_present, manifest_present, installation_present) =
                 if let Some(probe) = probe {
@@ -3935,7 +3948,7 @@ mod tests {
                     installation_present,
                 });
             if let Some(detail) = self.failure_detail {
-                return Err(RebornServicesError::internal_from(detail));
+                return Err(ProductSurfaceError::internal_from(detail));
             }
             Ok(())
         }
@@ -4229,7 +4242,7 @@ supports_threads = true
     /// the next `n` disconnects to fail so retry convergence can be pinned.
     #[derive(Default)]
     struct RecordingChannelConnectionFacade {
-        disconnects: StdMutex<Vec<(WebUiAuthenticatedCaller, String)>>,
+        disconnects: StdMutex<Vec<(ProductSurfaceCaller, String)>>,
         failures_remaining: AtomicUsize,
     }
 
@@ -4238,7 +4251,7 @@ supports_threads = true
             self.failures_remaining.store(count, Ordering::SeqCst);
         }
 
-        fn disconnects(&self) -> Vec<(WebUiAuthenticatedCaller, String)> {
+        fn disconnects(&self) -> Vec<(ProductSurfaceCaller, String)> {
             self.disconnects.lock().expect("disconnect lock").clone()
         }
     }
@@ -4247,16 +4260,16 @@ supports_threads = true
     impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
         async fn caller_channel_connections(
             &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+            _caller: ProductSurfaceCaller,
+        ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
             Ok(std::collections::HashMap::new())
         }
 
         async fn disconnect_channel_for_caller(
             &self,
-            caller: WebUiAuthenticatedCaller,
+            caller: ProductSurfaceCaller,
             channel: &str,
-        ) -> Result<(), RebornServicesError> {
+        ) -> Result<(), ProductSurfaceError> {
             self.disconnects
                 .lock()
                 .expect("disconnect lock")
@@ -4268,7 +4281,7 @@ supports_threads = true
                 })
                 .is_ok()
             {
-                return Err(RebornServicesError::internal_from("disconnect unavailable"));
+                return Err(ProductSurfaceError::internal_from("disconnect unavailable"));
             }
             Ok(())
         }
@@ -5341,6 +5354,126 @@ supports_threads = true
             ]
         );
         assert_eq!(egress.credential_counts(), vec![1, 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_remove_unpublishes_discovered_active_package_after_absent_cleanup() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
+
+        let absent_remove = port
+            .remove(
+                package_ref.clone(),
+                &removal_scope,
+                Some(&removal_scope.user_id),
+            )
+            .await
+            .expect("already-absent remove is idempotent");
+        assert!(matches!(
+            absent_remove.payload.as_ref(),
+            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+        ));
+
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install Notion MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-remove-discovered"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+            },
+        )
+        .await
+        .expect("activate with discovery");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_some(),
+            "discovered active package must publish before removal"
+        );
+
+        let removed = port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("remove unpublishes the discovered active package");
+        assert_eq!(removed.phase, InstallationState::Removed);
+        let extension_id = ExtensionId::new("notion").expect("valid extension id");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none(),
+            "active registry entry must be removed"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none(),
+            "successful finalization removes the cleanup tombstone"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_party_extension_remove_succeeds_after_absent_cleanup_reinstall_and_activate() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
+            .expect("valid ref");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
+
+        port.remove(
+            package_ref.clone(),
+            &removal_scope,
+            Some(&removal_scope.user_id),
+        )
+        .await
+        .expect("already-absent remove is idempotent");
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install Web Access");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate Web Access");
+
+        port.remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("remove Web Access after reinstall");
+        let extension_id = ExtensionId::new("web-access").expect("valid extension id");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none(),
+            "active registry entry must be removed"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none(),
+            "successful finalization removes the cleanup tombstone"
+        );
     }
 
     #[tokio::test]
@@ -7624,7 +7757,7 @@ output_schema_ref = "schemas/search.output.json"
         async fn cleanup_for_lifecycle(
             &self,
             request: SecretCleanupRequest,
-        ) -> Result<SecretCleanupReport, RebornServicesError> {
+        ) -> Result<SecretCleanupReport, ProductSurfaceError> {
             self.requests.lock().expect("cleanup lock").push(request);
             Ok(SecretCleanupReport::default())
         }
@@ -7640,9 +7773,9 @@ output_schema_ref = "schemas/search.output.json"
         async fn cleanup_for_lifecycle(
             &self,
             _request: SecretCleanupRequest,
-        ) -> Result<SecretCleanupReport, RebornServicesError> {
+        ) -> Result<SecretCleanupReport, ProductSurfaceError> {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
-                0 => Err(RebornServicesError::internal_from(
+                0 => Err(ProductSurfaceError::internal_from(
                     "credential cleanup backend unavailable",
                 )),
                 1 => Ok(SecretCleanupReport {
@@ -9788,7 +9921,7 @@ output_schema_ref = "schemas/search.output.json"
         let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
         contracts
             .register(Arc::new(
-                ironclaw_product_adapter_registry::ProductAdapterHostApiContract::new()
+                ironclaw_product::adapter_registry::ProductAdapterHostApiContract::new()
                     .expect("product adapter host API contract"),
             ))
             .expect("register product adapter host API contract");

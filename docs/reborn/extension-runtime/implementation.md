@@ -28,7 +28,7 @@ Already generic on this branch: one manifest per extension parsed through
 (`crates/ironclaw_extensions/src/v2.rs`); surface kinds in
 `crates/ironclaw_host_api/src/surface.rs`; channel surfaces on the extensions
 wire with directions and connection affordance
-(`crates/ironclaw_product_workflow/src/reborn_services/{types,extensions}.rs`);
+(`crates/ironclaw_product/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait
 (`crates/ironclaw_product_adapters/src/adapter.rs`) implemented by
 `crates/ironclaw_slack_extension`; retired-taxonomy architecture gate.
@@ -45,7 +45,7 @@ Not generic yet — the work:
 | Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, composition `product_auth/**` |
 | Installed records persist raw TOML and reproject from it | `crates/ironclaw_extensions/src/installations.rs` |
 | Hosted MCP mutates capabilities from live `tools/list` | `crates/ironclaw_extensions/src/hosted_mcp_discovery.rs` |
-| Lifecycle emits Slack-specific connection copy; workflow has Slack cleanup literals | `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`, `crates/ironclaw_product_workflow/src/reborn_services/extensions.rs` |
+| Lifecycle emits Slack-specific connection copy; workflow has Slack cleanup literals | `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
 | Slack-only frontend components and branches | `crates/ironclaw_webui_v2/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
@@ -71,7 +71,7 @@ Not generic yet — the work:
 | `ironclaw_product_adapters` | `ChannelAdapter` (replaces `ProductAdapter`; metadata getters deleted), normalized inbound/outbound DTOs, exported conformance suite |
 | `ironclaw_auth` | `AuthEngine` (oauth2_code + api_key), auth account state machine, recipe execution, flow/grant stores kept |
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
-| `ironclaw_product_workflow` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
+| `ironclaw_product` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
 | `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
 | `ironclaw_first_party_extensions` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
@@ -352,7 +352,7 @@ signed vendor POST → verified → normalized → turn admitted.
 
 ## 9. Workstream F — Outbound delivery cutover
 
-**Changes** (`crates/ironclaw_product_workflow`, extension crates):
+**Changes** (`crates/ironclaw_product`, extension crates):
 
 - One `DeliveryCoordinator` (evolve `outbound_delivery.rs` and the generic
   halves of `slack_delivery.rs`): intents `FinalReply | Progress | GatePrompt |

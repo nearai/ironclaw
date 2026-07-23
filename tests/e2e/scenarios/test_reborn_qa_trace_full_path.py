@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from emulate_provider import google_headers, slack_post
+from emulate_provider import google_headers, github_headers, slack_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
 from provider_capability_inventory import (
     EMULATE_SUPPORTED_TOOLS,
@@ -28,6 +28,7 @@ from provider_operation_types import ProviderOperationCase
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,
+    client_action_id,
     close_reborn_server,
     create_thread,
     enable_reborn_global_auto_approve,
@@ -42,6 +43,12 @@ pytest_plugins = ["reborn_webui_harness"]
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
+
+GITHUB_RELEASE_WRITE_UNAVAILABLE = {
+    403,
+    404,
+}
+GITHUB_RELEASE_WRITE_PROBE_PAYLOAD = {"tag_name": ""}
 GOOGLE_EXTENSIONS = (
     "gmail",
     "google-calendar",
@@ -444,6 +451,7 @@ async def _seed_github_account(base_url: str) -> None:
             f"{base_url}/api/webchat/v2/extensions/github/setup",
             json={
                 "action": "submit",
+                "client_action_id": client_action_id(),
                 "payload": {
                     "secrets": {"github_runtime_token": EMULATE_GITHUB_BEARER},
                     "fields": {},
@@ -518,7 +526,8 @@ async def _install_extensions(base_url: str, extension_ids: tuple[str, ...]) -> 
             installed = await client.post(
                 f"{base_url}/api/webchat/v2/extensions/install",
                 json={
-                    "package_ref": {"kind": "extension", "id": extension_id}
+                    "package_ref": {"kind": "extension", "id": extension_id},
+                    "client_action_id": client_action_id(),
                 },
                 timeout=30,
             )
@@ -530,6 +539,7 @@ async def _activate_extensions(base_url: str, extension_ids: tuple[str, ...]) ->
         for extension_id in extension_ids:
             activated = await client.post(
                 f"{base_url}/api/webchat/v2/extensions/{extension_id}/activate",
+                json={"client_action_id": client_action_id()},
                 timeout=30,
             )
             activated.raise_for_status()
@@ -640,11 +650,25 @@ def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> N
 def _normalize_google_arguments(trace: dict, case: str) -> None:
     created_document = False
     created_spreadsheet = False
+    document_upload_contents = []
+    for step in trace["steps"]:
+        for call in step["response"].get("tool_calls", []):
+            if call["name"] == "google-docs__create_document":
+                document_upload_contents.append("")
+            elif call["name"] == "google-docs__insert_text":
+                for index, content in enumerate(document_upload_contents):
+                    if content == "":
+                        document_upload_contents[index] = call["arguments"].get("text", "")
+                        break
+    document_upload_index = 0
     seeded_spreadsheet = (
         "sheet_reborn_bug_tracker" if case.startswith("qa_7") else "sheet_reborn_abc"
     )
 
     for step in trace["steps"]:
+        if "tool_calls" not in step["response"]:
+            continue
+        normalized_calls = []
         for call in step["response"].get("tool_calls", []):
             name = call["name"]
             arguments = call["arguments"]
@@ -652,17 +676,29 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
 
             if name == "google-docs__create_document":
                 created_document = True
-            elif name.startswith("google-docs__") and "document_id" in arguments:
-                arguments["document_id"] = (
-                    _result_binding(
-                        "google-docs__create_document",
-                        "documentId",
-                        "document_id",
-                        "id",
-                    )
-                    if created_document
-                    else "doc_reborn_strategy"
+                call["name"] = "google-drive__upload_file"
+                content = (
+                    document_upload_contents[document_upload_index]
+                    if document_upload_index < len(document_upload_contents)
+                    else ""
                 )
+                document_upload_index += 1
+                call["arguments"] = {
+                    "name": arguments["title"],
+                    "content": content,
+                    "mime_type": "text/plain",
+                }
+            elif name == "google-docs__insert_text":
+                continue
+            elif name.startswith("google-docs__") and "document_id" in arguments:
+                call["name"] = "google-drive__download_file"
+                call["arguments"] = {
+                    "file_id": (
+                        _result_binding("google-drive__upload_file", "id", "file_id")
+                        if created_document
+                        else "drv_near_ai_strategy"
+                    )
+                }
 
             if name == "google-sheets__create_spreadsheet":
                 created_spreadsheet = True
@@ -687,6 +723,14 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
                 arguments["message_id"] = "msg_emulate_near_inbound"
             elif name == "google-drive__download_file":
                 arguments["file_id"] = "drv_pepsico_account_brief"
+            normalized_calls.append(call)
+        step["response"]["tool_calls"] = normalized_calls
+    trace["steps"] = [
+        step
+        for step in trace["steps"]
+        if step["response"].get("type") != "tool_calls"
+        or step["response"].get("tool_calls")
+    ]
 
 
 def _normalize_slack_arguments(
@@ -893,6 +937,53 @@ def _recorded_provider_calls(trace: dict) -> list[dict]:
     ]
 
 
+def _google_created_resource_call(calls: list[dict]) -> dict | None:
+    return next(
+        (
+            call
+            for call in calls
+            if call["name"]
+            in {
+                "google-docs__create_document",
+                "google-drive__upload_file",
+                "google-sheets__create_spreadsheet",
+            }
+        ),
+        None,
+    )
+
+
+def _google_created_resource_name(call: dict) -> str:
+    if call["name"] == "google-drive__upload_file":
+        return call["arguments"]["name"]
+    return call["arguments"]["title"]
+
+
+def _raw_trace_uses_tool_prefix(trace_path: Path, prefix: str) -> bool:
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    return any(
+        call["name"].startswith(prefix)
+        for step in trace["steps"]
+        for call in step["response"].get("tool_calls", [])
+    )
+
+
+async def _emulate_github_supports_release_writes(emulate_url: str) -> bool:
+    async with httpx.AsyncClient(headers=github_headers(), timeout=15) as client:
+        response = await client.post(
+            f"{emulate_url}/repos/nearai/ironclaw/releases",
+            json=GITHUB_RELEASE_WRITE_PROBE_PAYLOAD,
+        )
+    if response.status_code in GITHUB_RELEASE_WRITE_UNAVAILABLE:
+        return False
+    if response.status_code != 422:
+        raise AssertionError(
+            "GitHub release write probe must reject the invalid payload "
+            f"without mutation; got {response.status_code}: {response.text}"
+        )
+    return True
+
+
 async def _assert_google_provider_outcome(
     emulate_url: str, case: str, trace: dict
 ) -> None:
@@ -911,22 +1002,11 @@ async def _assert_google_provider_outcome(
             listed.raise_for_status()
             assert listed.json().get("messages"), f"sent message missing for {case}"
 
-        create_call = next(
-            (
-                call
-                for call in calls
-                if call["name"]
-                in {
-                    "google-docs__create_document",
-                    "google-sheets__create_spreadsheet",
-                }
-            ),
-            None,
-        )
+        create_call = _google_created_resource_call(calls)
         if create_call is None:
             return
 
-        title = create_call["arguments"]["title"]
+        title = _google_created_resource_name(create_call)
         files = await client.get(
             f"{emulate_url}/drive/v3/files",
             params={"q": f"name = '{title}' and trashed = false"},
@@ -935,6 +1015,15 @@ async def _assert_google_provider_outcome(
         matching = [item for item in files.json()["files"] if item["name"] == title]
         assert matching, f"created Google resource missing for {case}: {files.text}"
         resource_id = matching[-1]["id"]
+
+        if create_call["name"] == "google-drive__upload_file":
+            media = await client.get(
+                f"{emulate_url}/drive/v3/files/{resource_id}",
+                params={"alt": "media"},
+            )
+            media.raise_for_status()
+            assert media.text == create_call["arguments"].get("content", ""), media.text
+            return
 
         if create_call["name"] == "google-docs__create_document":
             document = await client.get(f"{emulate_url}/v1/documents/{resource_id}")
@@ -981,21 +1070,10 @@ async def _assert_google_provider_baseline(
                 f"provider world for {case} already contains sent mail {subject!r}"
             )
 
-        create_call = next(
-            (
-                call
-                for call in calls
-                if call["name"]
-                in {
-                    "google-docs__create_document",
-                    "google-sheets__create_spreadsheet",
-                }
-            ),
-            None,
-        )
+        create_call = _google_created_resource_call(calls)
         if create_call is None:
             return
-        title = create_call["arguments"]["title"]
+        title = _google_created_resource_name(create_call)
         files = await client.get(
             f"{emulate_url}/drive/v3/files",
             params={"q": f"name = '{title}' and trashed = false"},
@@ -1208,6 +1286,26 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     """Every harvested provider journey executes through standalone Reborn."""
     server = reborn_qa_emulate_provider_server["base_url"]
     trace_path = TRACE_DIR / f"{case}.json"
+    if _raw_trace_uses_tool_prefix(
+        trace_path, "google-sheets__"
+    ):
+        async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
+            emulate_google_url = reborn_qa_emulate_provider_server[
+                "emulate_google_url"
+            ]
+            response = await client.get(
+                f"{emulate_google_url}/v4/spreadsheets/sheet_reborn_abc"
+            )
+        if response.status_code == 404:
+            pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
+    if _raw_trace_uses_tool_prefix(
+        trace_path, "slack__"
+    ):
+        async with httpx.AsyncClient(headers=slack_headers(), timeout=15) as client:
+            emulate_slack_url = reborn_qa_emulate_provider_server["emulate_slack_url"]
+            response = await client.get(f"{emulate_slack_url}/api/auth.test")
+        if response.status_code == 404:
+            pytest.skip("Emulate 0.7.0 does not expose Slack Web API GET routes")
     trace = await _load_trace(
         mock_llm_server,
         trace_path,
@@ -1305,6 +1403,11 @@ async def test_provider_operation_case_executes_with_provider_readback(
     emulate_url = reborn_provider_operation_server[
         f"emulate_{operation_case.provider_service}_url"
     ]
+    if (
+        operation_case.provider_service == "github"
+        and not await _emulate_github_supports_release_writes(emulate_url)
+    ):
+        pytest.skip("Selected Emulate GitHub fixture does not expose repo write APIs")
     source = f"provider-operation-{operation_case.case_id}.json"
     await operation_case.assert_baseline(emulate_url)
     arguments = await operation_case.resolve_arguments(emulate_url)

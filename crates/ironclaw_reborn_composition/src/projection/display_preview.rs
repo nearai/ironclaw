@@ -9,7 +9,7 @@ use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
     truncate_capability_display_text,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };

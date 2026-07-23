@@ -9,7 +9,7 @@ use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;

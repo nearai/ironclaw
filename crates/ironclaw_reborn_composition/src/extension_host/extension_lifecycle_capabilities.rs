@@ -14,7 +14,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
     ProductWorkflowError,
 };
@@ -409,7 +409,7 @@ mod tests {
     use crate::OAuthClientConfig;
     use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use ironclaw_host_api::InstallationState;
-    use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
+    use ironclaw_product::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
     /// Dummy but well-formed Google OAuth boot fallback for tests below that
     /// exercise per-account credential gating and refresh behavior.
@@ -678,6 +678,15 @@ mod tests {
             .expect("local runtime substrate")
             .extension_management
             .clone();
+        let absent_remove = invoke_json(
+            &services,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "web-access"}),
+        )
+        .await
+        .expect("already-absent remove succeeds");
+        assert_eq!(absent_remove["payload"]["removed"], false);
+
         let search = invoke_json(
             &services,
             EXTENSION_SEARCH_CAPABILITY_ID,

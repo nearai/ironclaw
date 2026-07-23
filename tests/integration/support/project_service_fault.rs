@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,

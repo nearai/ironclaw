@@ -48,7 +48,7 @@ fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
 // cursor components; otherwise all new interim text is silently filtered until
 // a full page refresh clears the browser cache.
 #[tokio::test]
-async fn webui_event_stream_rebases_live_cursor_from_prior_process_epoch() {
+async fn product_event_stream_rebases_live_cursor_from_prior_process_epoch() {
     let tenant_id = TenantId::new("webui-live-restart-tenant").unwrap();
     let user_id = UserId::new("webui-live-restart-user").unwrap();
     let agent_id = AgentId::new("webui-live-restart-agent").unwrap();
@@ -82,7 +82,7 @@ async fn webui_event_stream_rebases_live_cursor_from_prior_process_epoch() {
         .await
         .unwrap();
     let before_restart = services_before_restart
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: actor.clone(),
             scope: scope.clone(),
@@ -124,7 +124,7 @@ async fn webui_event_stream_rebases_live_cursor_from_prior_process_epoch() {
         .unwrap();
 
     let resumed = services_after_restart
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -149,7 +149,7 @@ async fn webui_event_stream_rebases_live_cursor_from_prior_process_epoch() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_drains_live_reasoning_projection_from_update_source() {
+async fn product_event_stream_drains_live_reasoning_projection_from_update_source() {
     let fixture = live_projection_fixture("webui-thinking");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -179,7 +179,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -202,7 +202,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
 }
 
 #[tokio::test]
-async fn fresh_webui_event_stream_compacts_buffered_assistant_text_to_latest_state() {
+async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_state() {
     let fixture = live_projection_fixture("webui-text");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -245,7 +245,7 @@ async fn fresh_webui_event_stream_compacts_buffered_assistant_text_to_latest_sta
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -291,7 +291,7 @@ async fn live_assistant_text_coalescer_flushes_latest_update_on_timer() {
     let run_id = TurnRunId::new();
     let mut subscription = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .subscribe(ProjectionSubscriptionRequest {
             actor: TurnActor::new(fixture.user_id.clone()),
             scope: scope.clone(),
@@ -351,7 +351,7 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
     let activity_id = CapabilityActivityId::new();
     let mut subscription = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .subscribe(ProjectionSubscriptionRequest {
             actor: TurnActor::new(fixture.user_id.clone()),
             scope: scope.clone(),
@@ -448,7 +448,7 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
 // `SkillActivation` envelope was silently dropped before reaching the SSE
 // drain, so users never saw "learned a skill" feedback).
 #[tokio::test]
-async fn webui_event_stream_drains_skill_learned_projection_from_update_source() {
+async fn product_event_stream_drains_skill_learned_projection_from_update_source() {
     let fixture = live_projection_fixture("webui-skill-learned");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -465,7 +465,7 @@ async fn webui_event_stream_drains_skill_learned_projection_from_update_source()
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -526,7 +526,7 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
     //    the runtime cursor — exactly what the SSE handler does while the run
     //    is executing.
     let initial = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: actor.clone(),
             scope: scope.clone(),
@@ -563,7 +563,7 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
     // 3. The still-open SSE stream resumes from the advanced durable cursor and
     //    receives the prior live reasoning item, advancing the live cursor.
     let live_progress = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: actor.clone(),
             scope: scope.clone(),
@@ -604,7 +604,7 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
     );
 
     let resumed = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -648,7 +648,7 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
     let run_id = TurnRunId::new();
     let mut subscription = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .subscribe(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id.clone()),
             scope: scope.clone(),
@@ -725,7 +725,7 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
+async fn product_event_stream_preserves_live_reasoning_and_tool_start_order() {
     let fixture = live_projection_fixture("webui-live-order");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -778,7 +778,7 @@ async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -820,7 +820,7 @@ async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_live_tool_failure() {
+async fn product_event_stream_projects_live_tool_failure() {
     let fixture = live_projection_fixture("webui-live-tool-failed");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -854,7 +854,7 @@ async fn webui_event_stream_projects_live_tool_failure() {
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -895,7 +895,7 @@ async fn webui_event_stream_projects_live_tool_failure() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_redacts_live_tool_failure_filename_detail() {
+async fn product_event_stream_redacts_live_tool_failure_filename_detail() {
     let fixture = live_projection_fixture("webui-live-tool-failed-redacted");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -928,7 +928,7 @@ async fn webui_event_stream_redacts_live_tool_failure_filename_detail() {
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -965,7 +965,7 @@ async fn webui_event_stream_redacts_live_tool_failure_filename_detail() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_preserves_redacted_loop_safe_failure_detail() {
+async fn product_event_stream_preserves_redacted_loop_safe_failure_detail() {
     let fixture = live_projection_fixture("webui-live-tool-failed-redacted-safe-summary");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -998,7 +998,7 @@ async fn webui_event_stream_preserves_redacted_loop_safe_failure_detail() {
 
     let events = fixture
         .services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,

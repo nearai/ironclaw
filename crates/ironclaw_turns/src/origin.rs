@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{AgentId, ProjectId, UserId};
+use ironclaw_host_api::TurnOwner;
 
 /// How this turn run was initiated. Generic — no product/channel specifics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,23 +90,10 @@ impl From<RunOriginAdapter> for String {
     }
 }
 
-/// Who owns this turn, for delivery-preference scoping and slice rendering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum TurnOwner {
-    Personal {
-        user: UserId,
-    },
-    SharedAgent {
-        agent: AgentId,
-        project: Option<ProjectId>,
-    },
-}
-
 /// Generic, persisted product context for one turn. Resolved once at ingress by
-/// `ironclaw_product_context`; rendered into the model-visible runtime context.
+/// `ironclaw_turns::product_context`; rendered into the model-visible runtime context.
 ///
-/// **Intended mint points** are the resolver functions in `ironclaw_product_context`:
+/// **Intended mint points** are the resolver functions in `ironclaw_turns::product_context`:
 /// `resolve_inbound` (for all inbound/trigger paths), `resolve_web_ui` (for the
 /// WebUI gateway), and `resolve_cli` (for local CLI chat). Those resolvers call
 /// `ProductTurnContext::new` or `ProductTurnContext::new_with_source_channel`
@@ -120,7 +107,7 @@ pub enum TurnOwner {
 /// origin is only produced when ingress enters through the trusted-trigger submit seam,
 /// which carries trigger-ness as a typed value rather than re-deriving it from the
 /// adapter-kind string (see `ironclaw_conversations` `TrustedInboundKind` and
-/// `ironclaw_product_context::resolve_inbound`).
+/// `ironclaw_turns::product_context::resolve_inbound`).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductTurnContext {

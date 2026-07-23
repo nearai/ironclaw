@@ -3,7 +3,7 @@
 //! Assembly only: this module constructs the [`ExtensionIngressRouter`] over
 //! the generic host's snapshot watch, provides the per-extension
 //! registration surface concrete channel graphs plug into (secrets + inbound
-//! sink), the generic inbound sink over the ProductSurface channel admission
+//! sink), the generic inbound sink over typed product channel admission
 //! (idempotency ledger → identity/conversation binding → turn submission),
 //! and — behind the serve feature — the one `PublicRouteMount` that serves
 //! `/webhooks/extensions/{extension_id}/{route_suffix}` for every active
@@ -21,16 +21,15 @@ use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
+use ironclaw_product::{
     AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
     NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductSourceChannel, ProtocolAuthEvidence,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
-    ChannelInboundSurfaceRequest, ProductOperationRequest, ProductSurface,
-    WebUiAuthenticatedCaller,
+    ChannelInboundSurfaceRequest,
 };
 use tokio::task::JoinSet;
 
@@ -62,7 +61,7 @@ pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
-        _error: ironclaw_product_adapters::ProductAdapterError,
+        _error: ironclaw_product::ProductAdapterError,
     ) {
     }
 }
@@ -93,16 +92,13 @@ impl VerifiedEvidenceMint {
             Self::RequestSignature {
                 signature_header,
                 timestamp_header,
-            } => ironclaw_product_adapters::auth::mark_request_signature_verified(
+            } => ironclaw_product::auth::mark_request_signature_verified(
                 signature_header.clone(),
                 timestamp_header.clone(),
                 subject,
             ),
             Self::SharedSecretHeader { header } => {
-                ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
-                    header.clone(),
-                    subject,
-                )
+                ironclaw_product::auth::mark_shared_secret_header_verified(header.clone(), subject)
             }
         }
     }
@@ -326,9 +322,9 @@ pub struct ChannelInboundSinkConfig {
     pub evidence: VerifiedEvidenceMint,
     /// Optional protocol-specific payload reclassification (gate replies).
     pub classifier: Option<Arc<InboundPayloadClassifier>>,
-    /// The ProductSurface channel admission door: durable idempotency ledger →
+    /// The typed channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
-    pub surface: Arc<dyn ProductSurface>,
+    pub surface: Arc<dyn ChannelInboundProductSurface>,
     /// Optional post-admission follow-up (e.g. final-reply delivery).
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
@@ -399,15 +395,6 @@ impl GenericChannelInboundSink {
             retryable: false,
             reason: reason.to_string(),
         }
-    }
-
-    fn channel_caller() -> Result<WebUiAuthenticatedCaller, InboundSinkError> {
-        Ok(WebUiAuthenticatedCaller::new(
-            TenantId::new("channel-ingress").map_err(Self::permanent)?,
-            UserId::new("channel-ingress").map_err(Self::permanent)?,
-            None,
-            None,
-        ))
     }
 
     async fn spawn_observer<F>(&self, run: F)
@@ -502,14 +489,7 @@ impl InboundSink for GenericChannelInboundSink {
                 .and_then(|classify| classify(&message)),
             message,
         };
-        let response = Box::pin(self.config.surface.execute_command(
-            Self::channel_caller()?,
-            ProductOperationRequest::channel_inbound(request),
-        ))
-        .await
-        .map_err(Self::permanent)?
-        .into_channel_inbound()
-        .map_err(Self::permanent)?;
+        let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
         match response {
             ChannelInboundSurfaceOutcome::Admitted(admission) => {
                 let admission = *admission;
@@ -801,14 +781,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_host_api::UserId;
-    use ironclaw_product_adapters::{
+    use ironclaw_product::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
+    use ironclaw_product::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
         ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
-    };
-    use ironclaw_product_workflow::{
-        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
-        ProductOperationResponse, ProductOperationTypedInput, ProductSurface, RebornServicesError,
-        RebornServicesErrorCode, RebornServicesErrorKind,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -832,23 +808,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl ProductSurface for CountingSurface {
-        async fn execute_command(
+    impl ChannelInboundProductSurface for CountingSurface {
+        async fn admit_channel_inbound(
             &self,
-            _caller: WebUiAuthenticatedCaller,
-            request: ProductOperationRequest,
-        ) -> Result<ProductOperationResponse, RebornServicesError> {
-            let operation_id =
-                ProductOperationId::parse(request.operation_id.as_str()).ok_or_else(unavailable)?;
-            if operation_id != ProductOperationId::ChannelInboundAdmit {
-                return Err(unavailable());
-            }
-            let Some(ProductOperationTypedInput::ChannelInbound(request)) = request.typed_input
-            else {
-                return Ok(ProductOperationResponse::channel_inbound(
-                    ChannelInboundSurfaceOutcome::unavailable(),
-                ));
-            };
+            request: ChannelInboundSurfaceRequest,
+        ) -> ChannelInboundSurfaceOutcome {
             self.submissions.fetch_add(1, Ordering::SeqCst);
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
@@ -880,23 +844,10 @@ mod tests {
                 .expect("parsed inbound"),
             )
             .expect("trusted envelope");
-            Ok(ProductOperationResponse::channel_inbound(
-                ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
-                    envelope,
-                    ack,
-                })),
-            ))
-        }
-    }
-
-    fn unavailable() -> RebornServicesError {
-        RebornServicesError {
-            code: RebornServicesErrorCode::Unavailable,
-            kind: RebornServicesErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: false,
-            field: None,
-            validation_code: None,
+            ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
+                envelope,
+                ack,
+            }))
         }
     }
 
@@ -947,7 +898,7 @@ mod tests {
                 header: "X-Vendor-Secret".to_string(),
             },
             classifier: None,
-            surface: Arc::clone(&workflow) as Arc<dyn ProductSurface>,
+            surface: Arc::clone(&workflow) as Arc<dyn ChannelInboundProductSurface>,
             observer: None,
         })
         .with_pairing(

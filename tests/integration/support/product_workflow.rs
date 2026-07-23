@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     AgentId, HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
     ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
     IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductWorkflowError,
     ResolveBindingRequest, ResolvedBinding,

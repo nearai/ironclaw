@@ -171,7 +171,11 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
         raise
 
 async def _stop_process(
-    proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
+    proc: asyncio.subprocess.Process,
+    *,
+    sig: int | None = None,
+    timeout: float,
+    process_group: bool = False,
 ) -> None:
     """Signal a subprocess and wait briefly without masking exit races."""
     async def _drain_pipes() -> None:
@@ -180,12 +184,11 @@ async def _stop_process(
         except (asyncio.TimeoutError, ValueError):
             pass
 
-    if proc.returncode is not None:
-        await _drain_pipes()
-        return
-
+    signal_to_send = signal.SIGKILL if sig is None else sig
     try:
-        if sig is None:
+        if process_group:
+            os.killpg(proc.pid, signal_to_send)
+        elif sig is None:
             proc.kill()
         else:
             proc.send_signal(sig)
@@ -196,10 +199,11 @@ async def _stop_process(
             pass
         return
 
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+    if proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
     await _drain_pipes()
 
 
@@ -572,6 +576,7 @@ async def _run_emulate_server(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
 
     try:
@@ -610,9 +615,10 @@ async def _run_emulate_server(
         )
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=5)
-            if proc.returncode is None:
-                await _stop_process(proc, timeout=2)
+            await _stop_process(
+                proc, sig=signal.SIGINT, timeout=5, process_group=True
+            )
+        await _stop_process(proc, timeout=2, process_group=True)
 
 
 async def _bootstrap_emulate_github_access(
@@ -772,14 +778,29 @@ class ResettableEmulateProviderWorld:
             if stack is not None:
                 await stack.aclose()
             if reserve:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(("127.0.0.1", self._ports[service]))
-                self._reservations[service] = sock
+                self._reservations[service] = await self._reserve_service_port(
+                    service
+                )
         if services is None:
             reservations, self._reservations = self._reservations, {}
             for sock in reservations.values():
                 sock.close()
+
+    async def _reserve_service_port(self, service: str) -> socket.socket:
+        last_error: OSError | None = None
+        for _ in range(20):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", self._ports[service]))
+                return sock
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+                await asyncio.sleep(0.1)
+        raise last_error or OSError(
+            f"could not reserve Emulate {service} port {self._ports[service]}"
+        )
 
 
 @pytest.fixture(scope="module")

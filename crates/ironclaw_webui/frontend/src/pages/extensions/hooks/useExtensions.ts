@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { gatewayStatus } from "../../../lib/api";
+import { clientActionId, gatewayStatus } from "../../../lib/api";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
@@ -95,6 +95,14 @@ function catalogSort(a, b) {
   );
 }
 
+function withClientActionId(payload = {}) {
+  const source = payload || {};
+  return {
+    ...source,
+    clientActionId: source.clientActionId || clientActionId(),
+  };
+}
+
 export function useExtensions() {
   const t = useT();
   const queryClient = useQueryClient();
@@ -138,7 +146,8 @@ export function useExtensions() {
   const clearResult = React.useCallback(() => setActionResult(null), []);
 
   const installMutation = useMutation({
-    mutationFn: ({ packageRef }) => installExtension(packageRef),
+    mutationFn: ({ packageRef, clientActionId: actionId }) =>
+      installExtension(packageRef, { clientActionId: actionId }),
     onSuccess: (res, { displayName, surfaces, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         const message = hasChannelSurface({ surfaces })
@@ -195,7 +204,8 @@ export function useExtensions() {
   });
 
   const activateMutation = useMutation({
-    mutationFn: ({ packageRef }) => activateExtension(packageRef),
+    mutationFn: ({ packageRef, clientActionId: actionId }) =>
+      activateExtension(packageRef, { clientActionId: actionId }),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
         setActionResult({
@@ -239,7 +249,8 @@ export function useExtensions() {
   });
 
   const removeMutation = useMutation({
-    mutationFn: ({ packageRef }) => removeExtension(packageRef),
+    mutationFn: ({ packageRef, clientActionId: actionId }) =>
+      removeExtension(packageRef, { clientActionId: actionId }),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
         setActionResult({
@@ -341,9 +352,12 @@ export function useExtensions() {
     isBusy,
     actionResult,
     clearResult,
-    install: installMutation.mutate,
-    activate: activateMutation.mutate,
-    remove: removeMutation.mutate,
+    install: (payload, options = undefined) =>
+      installMutation.mutate(withClientActionId(payload), options),
+    activate: (payload, options = undefined) =>
+      activateMutation.mutate(withClientActionId(payload), options),
+    remove: (payload, options = undefined) =>
+      removeMutation.mutate(withClientActionId(payload), options),
     isRemoving: removeMutation.isPending,
     importTool: (payload) => importMutation.mutate(payload),
     isImporting: importMutation.isPending,
@@ -372,9 +386,11 @@ export function useSetupSubmit(packageRef, onSuccess) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
 
-  return useMutation({
-    mutationFn: ({ secrets, fields }) =>
-      submitExtensionSetup(packageRef, secrets, fields).then((res) => {
+  const mutation = useMutation({
+    mutationFn: ({ secrets, fields, clientActionId: actionId }) =>
+      submitExtensionSetup(packageRef, secrets, fields, {
+        clientActionId: actionId,
+      }).then((res) => {
         if (res.success === false) {
           throw new Error(res.message || t("extensions.setupFailed"));
         }
@@ -386,6 +402,14 @@ export function useSetupSubmit(packageRef, onSuccess) {
       if (onSuccess) onSuccess(res);
     },
   });
+
+  return {
+    ...mutation,
+    mutate: (payload, options = undefined) =>
+      mutation.mutate(withClientActionId(payload), options),
+    mutateAsync: (payload, options = undefined) =>
+      mutation.mutateAsync(withClientActionId(payload), options),
+  };
 }
 
 export function useOauthSetup(packageRef, { onConfigured } = {}) {

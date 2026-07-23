@@ -27,13 +27,13 @@ use ironclaw_loop_host::{
     JsonSpawnSubagentInputCodec,
 };
 use ironclaw_network::NetworkHttpRequest;
-use ironclaw_product_adapters::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
+};
+use ironclaw_product::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
 };
 use ironclaw_runner::subagent::{
     await_edge::{

@@ -13,11 +13,11 @@ mod tests {
         CredentialOwnership, EngineCallbackBase, NewCredentialAccount, ProviderScope,
         ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
+    use ironclaw_host_api::ProductSurfaceCaller;
     use ironclaw_host_api::{
         MissionId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId, VendorAuthRecipe,
     };
-    use ironclaw_product_workflow::WebUiAuthenticatedCaller;
     use ironclaw_secrets::FilesystemSecretStore;
     use serde_json::json;
     use std::sync::Arc;
@@ -57,8 +57,8 @@ mod tests {
         }
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
             None,

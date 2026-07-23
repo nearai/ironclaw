@@ -50,12 +50,11 @@ use ironclaw_host_api::ingress::{
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, BoundProductSurface, ExtensionId, InvocationId, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
+    UserId,
 };
-use ironclaw_product_workflow::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface, RebornExtensionListResponse,
-    RebornServicesError, RebornViewQuery, WebUiAuthenticatedCaller,
-};
+use ironclaw_product::{EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionListResponse};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -183,35 +182,38 @@ pub struct ProductAuthRouteState {
 trait InstalledExtensionLookup: Send + Sync {
     async fn is_installed(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError>;
+    ) -> Result<bool, ProductSurfaceError>;
 }
 
 struct RebornServicesInstalledExtensionLookup {
-    api: Arc<dyn ProductSurface>,
+    product_surface: Arc<dyn ProductSurface>,
 }
 
 #[async_trait::async_trait]
 impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
     async fn is_installed(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
-        let page = self
-            .api
-            .query(
-                caller.clone(),
-                RebornViewQuery {
-                    view_id: EXTENSIONS_VIEW.id.to_string(),
-                    params: json!({}),
-                    cursor: None,
-                },
-            )
+    ) -> Result<bool, ProductSurfaceError> {
+        let surface = BoundProductSurface::new(Arc::clone(&self.product_surface), caller.clone());
+        let page = surface
+            .query(ProductSurfaceQueryRequest {
+                view_id: EXTENSIONS_VIEW.id.to_string(),
+                input: json!({}),
+                cursor: None,
+                limit: None,
+            })
             .await?;
+        let payload = page
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(ProductSurfaceError::internal)?;
         let inventory: RebornExtensionListResponse =
-            serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+            serde_json::from_value(payload).map_err(ProductSurfaceError::internal_from)?;
         Ok(inventory.extensions.iter().any(|extension| {
             extension.package_ref.kind == LifecyclePackageKind::Extension
                 && extension.package_ref.id.as_str() == extension_id.as_str()
@@ -227,9 +229,9 @@ struct TestInstalledExtensionLookup;
 impl InstalledExtensionLookup for TestInstalledExtensionLookup {
     async fn is_installed(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
+        _caller: &ProductSurfaceCaller,
         _extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, ProductSurfaceError> {
         Ok(true)
     }
 }
@@ -255,11 +257,11 @@ impl ProductAuthRouteState {
         }
     }
 
-    /// Wire the WebUI facade as the installed-extension inventory source for
+    /// Wire the product surface as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub fn with_webui_api(mut self, webui_api: Arc<dyn ProductSurface>) -> Self {
+    pub fn with_product_surface(mut self, product_surface: Arc<dyn ProductSurface>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
-            api: webui_api,
+            product_surface,
         }));
         self
     }
@@ -276,7 +278,7 @@ impl ProductAuthRouteState {
     /// with the terminal not-installed conflict.
     pub(super) async fn require_installed_extension(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         requester_extension: &ExtensionId,
     ) -> Result<(), ProductAuthRouteFailure> {
         let Some(lookup) = self.installed_extension_lookup.as_ref() else {
@@ -995,7 +997,7 @@ pub(super) fn route_failure_from_callback_error(
 }
 
 pub(super) fn scope_from_authenticated_caller(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     request: &OAuthStartRequest,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     scope_from_authenticated_caller_parts(
@@ -1017,7 +1019,7 @@ pub(super) fn scope_from_authenticated_caller(
 /// host owns the canonical id and the browser carries it forward across
 /// follow-up calls.
 pub(super) fn scope_from_authenticated_caller_parts(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     let thread_id = fields
@@ -1065,7 +1067,7 @@ pub(super) fn scope_from_authenticated_caller_parts(
 /// MUST carry back the id minted by a prior setup/start response so the host
 /// can re-derive the matching scope without minting a fresh, unmatched one.
 pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     if fields.invocation_id.is_none() {
@@ -1563,7 +1565,7 @@ mod tests {
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
-    use ironclaw_product_workflow::AuthChallengeProvider;
+    use ironclaw_product::AuthChallengeProvider;
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Mutex;
@@ -1681,8 +1683,8 @@ mod tests {
         }
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
             None,
@@ -2210,9 +2212,9 @@ mod tests {
     impl InstalledExtensionLookup for SequencedInstalledExtensionLookup {
         async fn is_installed(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
+            _caller: &ProductSurfaceCaller,
             _extension_id: &ExtensionId,
-        ) -> Result<bool, RebornServicesError> {
+        ) -> Result<bool, ProductSurfaceError> {
             Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
         }
     }

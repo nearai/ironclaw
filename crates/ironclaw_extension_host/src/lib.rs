@@ -9,7 +9,7 @@
 //!
 //! It contains no concrete product name, protocol type, route, or behavior
 //! branch: concrete extensions implement the [`ironclaw_host_api::ToolAdapter`]
-//! and [`ironclaw_product_adapters::ChannelAdapter`] traits and are assembled
+//! and [`ironclaw_product::ChannelAdapter`] traits and are assembled
 //! by the binary, never linked here.
 
 pub mod active;

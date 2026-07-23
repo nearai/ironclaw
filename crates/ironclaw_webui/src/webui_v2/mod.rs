@@ -1,7 +1,7 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_product_workflow::ProductSurface`] facade. It is compiled into
+//! [`ironclaw_host_api::ProductSurface`] facade. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
@@ -10,7 +10,7 @@
 //!   extension, and automation reads. They never reach into the dispatcher,
 //!   `HostRuntime`, run-state, DB stores, or any runtime lane.
 //! - Auth and CORS are **not** enforced here. Host composition runs the
-//!   bearer-token middleware that builds a [`WebUiAuthenticatedCaller`] and
+//!   bearer-token middleware that builds a [`ProductSurfaceCaller`] and
 //!   injects it as an `Extension` before traffic reaches these handlers.
 //! - The [`IngressRouteDescriptor`] set returned by [`webui_v2_routes`] is
 //!   the canonical contract the host composes against: mount path, method,
@@ -34,9 +34,9 @@
 //! maximum lifetime so leaked guards or stuck pollers cannot wedge a
 //! caller's slot indefinitely.
 //!
-//! [`ProductSurface`]: ironclaw_product_workflow::ProductSurface
+//! [`ProductSurface`]: ironclaw_host_api::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
-//! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
+//! [`ProductSurfaceCaller`]: ironclaw_host_api::ProductSurfaceCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
 mod descriptors;

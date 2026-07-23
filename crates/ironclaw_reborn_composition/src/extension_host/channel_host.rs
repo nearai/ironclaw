@@ -31,6 +31,7 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
     AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
@@ -39,19 +40,19 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurface, ProductWorkflowError, RebornFilesystemIdempotencyLedger,
-    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
 use ironclaw_threads::SessionThreadService;
@@ -686,7 +687,7 @@ impl GenericChannelHostAssembly {
                 service
                     as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
             });
-        let surface = Arc::new(workflow) as Arc<dyn ProductSurface>;
+        let surface = Arc::new(workflow) as Arc<dyn ChannelInboundProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,
@@ -846,10 +847,8 @@ impl GenericChannelHostAssembly {
         let conversations: Arc<dyn ironclaw_conversations::ConversationBindingService> =
             Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationBindingService>;
-        let binding = ironclaw_product_workflow::ProductConversationBindingService::new(
-            conversations,
-            resolver,
-        );
+        let binding =
+            ironclaw_product::ProductConversationBindingService::new(conversations, resolver);
         Ok((
             Arc::new(binding) as Arc<dyn ConversationBindingService>,
             workflow_state,
@@ -973,8 +972,8 @@ struct TriggeredNoopConversationBindingService;
 impl ConversationBindingService for TriggeredNoopConversationBindingService {
     async fn resolve_binding(
         &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        _request: ironclaw_product::ResolveBindingRequest,
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -982,8 +981,8 @@ impl ConversationBindingService for TriggeredNoopConversationBindingService {
 
     async fn lookup_binding(
         &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        _request: ironclaw_product::ResolveBindingRequest,
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -1064,7 +1063,7 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
+        error: ironclaw_product::ProductAdapterError,
     ) {
         self.observer.observe_error(envelope, error).await;
     }

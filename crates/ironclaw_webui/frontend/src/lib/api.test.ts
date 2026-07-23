@@ -14,6 +14,8 @@ import {
   pauseAutomation,
   renameAutomation,
   resumeAutomation,
+  setupExtension,
+  setOutboundPreferences,
 } from "./api";
 
 function withCryptoGlobal(replacement, run) {
@@ -177,6 +179,132 @@ test("automation mutations use encoded v2 automation routes", async () => {
   );
   assert.equal(calls[3].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
+});
+
+test("setupExtension includes a client action id", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await setupExtension("web-access", {
+    clientActionId: "setup-action-1",
+    action: "submit",
+    payload: { fields: {} },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/extensions/web-access/setup");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    client_action_id: "setup-action-1",
+    action: "submit",
+    payload: { fields: {} },
+  });
+});
+
+test("setupExtension serializes a generated client action id", async () => {
+  const calls = [];
+  const priorCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    value: { randomUUID: () => "generated-setup-action" },
+    configurable: true,
+    writable: true,
+  });
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    await setupExtension("web-access", {
+      action: "submit",
+      payload: { fields: {} },
+    });
+  } finally {
+    if (priorCrypto) {
+      Object.defineProperty(globalThis, "crypto", priorCrypto);
+    } else {
+      delete globalThis.crypto;
+    }
+  }
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    client_action_id: "generated-setup-action",
+    action: "submit",
+    payload: { fields: {} },
+  });
+});
+
+test("setOutboundPreferences includes a client action id", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ final_reply_target: null }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await setOutboundPreferences({
+    finalReplyTargetId: "slack-dm-alpha",
+    clientActionId: "outbound-save-1",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/outbound/preferences");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    client_action_id: "outbound-save-1",
+    final_reply_target_id: "slack-dm-alpha",
+  });
+});
+
+test("setOutboundPreferences serializes a generated client action id", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ final_reply_target: null }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await withCryptoGlobal({ randomUUID: () => "generated-outbound-action" }, async () => {
+    await setOutboundPreferences();
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    client_action_id: "generated-outbound-action",
+    final_reply_target_id: null,
+  });
 });
 
 test("automation state mutations reject before fetch when automation id is missing", async () => {

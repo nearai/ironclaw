@@ -62,7 +62,7 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 | ironclaw_reborn_event_store | 25 | 3.0k | KEEP |
 | ironclaw_host_runtime | 24 | 35.2k | KEEP boundary; internal OK (21 mods, biggest 2.9k) |
 | ironclaw_loop_host | 24 | 29.6k | KEEP; **INTERNAL:** `capability_port.rs` (8.2k) is a god-file — split by capability family when next touched (JIT) |
-| ironclaw_product_workflow | 24 | 23.8k | KEEP; **INTERNAL/JIT:** `reborn_services.rs` (6.0k) holds the 70-method `RebornServicesApi` god interface — split by domain (threads/turns/gates/extensions/llm/…) as features demand slices; storage fold-in from tail (below) |
+| ironclaw_product | 24 | 23.8k | KEEP; **INTERNAL/JIT:** `reborn_services.rs` (6.0k) holds the 70-method `RebornServicesApi` god interface — split by domain (threads/turns/gates/extensions/llm/…) as features demand slices; storage fold-in from tail (below) |
 | ironclaw_reborn_traces | 24 | 17.7k | KEEP; **INTERNAL:** `contribution.rs` = **14.5k lines in one file** — worst god-file in the workspace after composition; dissect into submodules |
 | ironclaw_approvals | 24 | 3.2k | KEEP |
 | ironclaw_memory | 24 | 1.7k | KEEP |
@@ -98,8 +98,8 @@ Optional; schedule when loop work next opens both crates anyway.
 | ironclaw_skill_learning | 356 | ironclaw_skills (or consumer) |
 | ironclaw_wasm_sandbox_core | 357 | ironclaw_wasm |
 | ironclaw_reborn_openai_compat_storage | 673 | ironclaw_reborn_openai_compat |
-| ironclaw_projects | 842 | **KEEP in W2**; substrate entity/repository. If revisited later, the only acceptable consumer-side target is `ironclaw_product_workflow`, never composition. |
-| ironclaw_product_workflow_storage | 946 | ironclaw_product_workflow |
+| ironclaw_projects | 842 | **KEEP in W2**; substrate entity/repository. If revisited later, the only acceptable consumer-side target is `ironclaw_product`, never composition. |
+| ironclaw_product_storage | 946 | ironclaw_product |
 
 ### 2.5 Zero fan-in — KEEP all (correction: none are dead)
 

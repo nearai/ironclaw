@@ -11,8 +11,9 @@ use ironclaw_host_api::{
 use std::sync::Arc;
 
 use super::super::super::extension_surface::{
-    BUNDLED_EXTENSION_CAPABILITY_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
+    EXTENSION_LIFECYCLE_CAPABILITY_IDS, bundled_extension_manifest_capability_ids,
 };
+use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
@@ -38,7 +39,8 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     user_id: &str,
 ) -> HarnessResult<ToolsProfile> {
     let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
-    capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+    capability_ids.extend(github::capability_ids()?);
+    capability_ids.extend(bundled_extension_manifest_capability_ids()?);
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
     // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
     // bundled extension capability post-activation, which crosses HTTP. The
@@ -78,6 +80,7 @@ fn hosted_mcp_discovery_fixture_response(
 ) -> Option<(u16, Vec<u8>)> {
     let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
     let method = body.get("method")?.as_str()?;
+    let is_nearai = request.url.contains(".near.ai/");
     let result = match method {
         "initialize" => serde_json::json!({
             "protocolVersion": "2025-06-18",
@@ -87,7 +90,7 @@ fn hosted_mcp_discovery_fixture_response(
         "notifications/initialized" => serde_json::json!({}),
         "tools/list" => serde_json::json!({
             "tools": [{
-                "name": "live-search",
+                "name": if is_nearai { "web_search" } else { "live-search" },
                 "description": "Hermetic hosted MCP search tool",
                 "inputSchema": {
                     "type": "object",
@@ -95,6 +98,12 @@ fn hosted_mcp_discovery_fixture_response(
                     "required": ["query"]
                 },
                 "annotations": {"readOnlyHint": true}
+            }]
+        }),
+        "tools/call" if is_nearai => serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": "REBORN_NEARAI_WEB_SEARCH_RESULT"
             }]
         }),
         _ => return None,
@@ -431,13 +440,12 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
 pub(crate) struct AcmeFixtureChannelAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
+impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
-        request: ironclaw_product_adapters::VerifiedInbound<'_>,
-    ) -> Result<ironclaw_product_adapters::InboundOutcome, ironclaw_product_adapters::ChannelError>
-    {
-        use ironclaw_product_adapters::{
+        request: ironclaw_product::VerifiedInbound<'_>,
+    ) -> Result<ironclaw_product::InboundOutcome, ironclaw_product::ChannelError> {
+        use ironclaw_product::{
             ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
             ImmediateResponse, InboundOutcome, NormalizedInboundMessage, ProductTriggerReason,
         };
@@ -492,11 +500,10 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
     /// fixture.
     async fn deliver(
         &self,
-        envelope: ironclaw_product_adapters::OutboundEnvelope,
+        envelope: ironclaw_product::OutboundEnvelope,
         egress: &dyn ironclaw_host_api::RestrictedEgress,
-    ) -> Result<ironclaw_product_adapters::DeliveryReport, ironclaw_product_adapters::ChannelError>
-    {
-        use ironclaw_product_adapters::{ChannelError, OutboundPart, PartDeliveryOutcome};
+    ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
+        use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -547,7 +554,7 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
                 break;
             }
         }
-        Ok(ironclaw_product_adapters::DeliveryReport { parts })
+        Ok(ironclaw_product::DeliveryReport { parts })
     }
 }
 
@@ -785,22 +792,21 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
 /// (`ironclaw_reborn_cli::runtime::account_setups`) the same way
 /// [`TelegramFixtureFactory`] mirrors the native factory: the harness
 /// composes its own runtime and cannot depend on the CLI crate.
-fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAccountSetupDescriptor
-{
+fn telegram_account_setup_descriptor() -> ironclaw_product::ExtensionAccountSetupDescriptor {
     let extension_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
-    let connection_requirement = ironclaw_product_workflow::ChannelConnectionRequirement {
+    let connection_requirement = ironclaw_product::ChannelConnectionRequirement {
         channel: "telegram".to_string(),
         display_name: "Telegram".to_string(),
-        strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+        strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
         instructions: "Pair your Telegram account from the pairing panel.".to_string(),
         input_placeholder: String::new(),
         submit_label: "Open pairing".to_string(),
         error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
     };
-    let connection_notices = ironclaw_product_workflow::ChannelConnectionNoticePolicy::generic(
+    let connection_notices = ironclaw_product::ChannelConnectionNoticePolicy::generic(
         &connection_requirement.display_name,
     );
-    ironclaw_product_workflow::ExtensionAccountSetupDescriptor {
+    ironclaw_product::ExtensionAccountSetupDescriptor {
         extension_id: extension_id.clone(),
         auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
             provider: ironclaw_host_api::VendorId::new("telegram").expect("provider id"),
