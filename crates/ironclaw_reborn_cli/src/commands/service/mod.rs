@@ -883,10 +883,14 @@ mod tests {
         let mut runner = SuccessfulServiceCommandRunner::default();
         let fresh_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
             .expect("install must succeed");
-        let unit_path = tmp
-            .path()
-            .join(".config/systemd/user/ironclaw-reborn.service");
+        let systemd_user_dir = tmp.path().join(".config/systemd/user");
+        let unit_path = systemd_user_dir.join(SYSTEMD_UNIT);
+        let legacy_unit_path = systemd_user_dir.join(LEGACY_SYSTEMD_UNIT);
         assert!(unit_path.exists(), "unit file must be written");
+        assert!(
+            !legacy_unit_path.exists(),
+            "fresh install must not create the legacy unit identity"
+        );
         let contents = std::fs::read_to_string(&unit_path).expect("read unit file");
         assert!(contents.contains("ExecStart="));
         assert!(contents.contains("IRONCLAW_HOME="));
