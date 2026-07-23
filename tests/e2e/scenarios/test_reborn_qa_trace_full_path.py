@@ -48,6 +48,7 @@ GITHUB_RELEASE_WRITE_UNAVAILABLE = {
     403,
     404,
 }
+GITHUB_RELEASE_WRITE_PROBE_PAYLOAD = {"tag_name": ""}
 GOOGLE_EXTENSIONS = (
     "gmail",
     "google-calendar",
@@ -926,6 +927,28 @@ def _recorded_provider_calls(trace: dict) -> list[dict]:
     ]
 
 
+def _google_created_resource_call(calls: list[dict]) -> dict | None:
+    return next(
+        (
+            call
+            for call in calls
+            if call["name"]
+            in {
+                "google-docs__create_document",
+                "google-drive__upload_file",
+                "google-sheets__create_spreadsheet",
+            }
+        ),
+        None,
+    )
+
+
+def _google_created_resource_name(call: dict) -> str:
+    if call["name"] == "google-drive__upload_file":
+        return call["arguments"]["name"]
+    return call["arguments"]["title"]
+
+
 def _raw_trace_uses_tool_prefix(trace_path: Path, prefix: str) -> bool:
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     return any(
@@ -939,12 +962,15 @@ async def _emulate_github_supports_release_writes(emulate_url: str) -> bool:
     async with httpx.AsyncClient(headers=github_headers(), timeout=15) as client:
         response = await client.post(
             f"{emulate_url}/repos/nearai/ironclaw/releases",
-            json={},
+            json=GITHUB_RELEASE_WRITE_PROBE_PAYLOAD,
         )
     if response.status_code in GITHUB_RELEASE_WRITE_UNAVAILABLE:
         return False
-    if response.status_code not in {201, 422}:
-        response.raise_for_status()
+    if response.status_code != 422:
+        raise AssertionError(
+            "GitHub release write probe must reject the invalid payload "
+            f"without mutation; got {response.status_code}: {response.text}"
+        )
     return True
 
 
@@ -966,22 +992,11 @@ async def _assert_google_provider_outcome(
             listed.raise_for_status()
             assert listed.json().get("messages"), f"sent message missing for {case}"
 
-        create_call = next(
-            (
-                call
-                for call in calls
-                if call["name"]
-                in {
-                    "google-docs__create_document",
-                    "google-sheets__create_spreadsheet",
-                }
-            ),
-            None,
-        )
+        create_call = _google_created_resource_call(calls)
         if create_call is None:
             return
 
-        title = create_call["arguments"]["title"]
+        title = _google_created_resource_name(create_call)
         files = await client.get(
             f"{emulate_url}/drive/v3/files",
             params={"q": f"name = '{title}' and trashed = false"},
@@ -990,6 +1005,15 @@ async def _assert_google_provider_outcome(
         matching = [item for item in files.json()["files"] if item["name"] == title]
         assert matching, f"created Google resource missing for {case}: {files.text}"
         resource_id = matching[-1]["id"]
+
+        if create_call["name"] == "google-drive__upload_file":
+            media = await client.get(
+                f"{emulate_url}/drive/v3/files/{resource_id}",
+                params={"alt": "media"},
+            )
+            media.raise_for_status()
+            assert media.text == create_call["arguments"].get("content", ""), media.text
+            return
 
         if create_call["name"] == "google-docs__create_document":
             document = await client.get(f"{emulate_url}/v1/documents/{resource_id}")
@@ -1036,21 +1060,10 @@ async def _assert_google_provider_baseline(
                 f"provider world for {case} already contains sent mail {subject!r}"
             )
 
-        create_call = next(
-            (
-                call
-                for call in calls
-                if call["name"]
-                in {
-                    "google-docs__create_document",
-                    "google-sheets__create_spreadsheet",
-                }
-            ),
-            None,
-        )
+        create_call = _google_created_resource_call(calls)
         if create_call is None:
             return
-        title = create_call["arguments"]["title"]
+        title = _google_created_resource_name(create_call)
         files = await client.get(
             f"{emulate_url}/drive/v3/files",
             params={"q": f"name = '{title}' and trashed = false"},

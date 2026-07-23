@@ -3257,7 +3257,9 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3273,7 +3275,9 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3293,7 +3297,10 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
         invoke_calls[1].1,
         serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
     );
-    assert_eq!(invoke_calls[0].2, invoke_calls[1].2);
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "identical outbound preference retries should reuse ProductSurface activity ids"
+    );
     drop(invoke_calls);
     let view_ids: Vec<String> = services
         .view_queries
@@ -5035,13 +5042,13 @@ async fn skill_content_and_mutations_use_product_surface() {
             ),
         ]
     );
-    assert_eq!(
+    assert_ne!(
         invoke_calls[0].2, invoke_calls[1].2,
-        "identical generic product capability requests should reuse ProductSurface activity ids"
+        "generic ProductSurface requests without client action ids must not reuse durable replay keys"
     );
     assert_ne!(
         invoke_calls[0].2, invoke_calls[2].2,
-        "changed generic capability input should derive a distinct ProductSurface activity id"
+        "changed generic ProductSurface requests should also receive fresh activity ids"
     );
 }
 

@@ -8,6 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
     time::Duration,
@@ -2427,6 +2428,20 @@ pub trait ProductCapabilityInvoker: Send + Sync {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError>;
+
+    async fn invoke_product_operation<Fut>(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        activity_id: ActivityId,
+        summary: &'static str,
+        operation: Fut,
+    ) -> Result<Resolution, RebornServicesError>
+    where
+        Fut: Future<Output = Result<(), RebornServicesError>> + Send,
+    {
+        operation.await?;
+        api_capability_success_resolution(activity_id, summary)
+    }
 }
 
 /// Fail-closed default for compositions that have not attached the product
@@ -2445,6 +2460,26 @@ impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
     ) -> Result<Resolution, RebornServicesError> {
         Err(RebornServicesError::service_unavailable(false))
     }
+}
+
+fn api_capability_success_resolution(
+    activity_id: ActivityId,
+    summary: &'static str,
+) -> Result<Resolution, RebornServicesError> {
+    Ok(Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: ResultRef::from_uuid(activity_id.as_uuid()),
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: SafeSummary::new(summary).map_err(RebornServicesError::internal_from)?,
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    }))
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -2712,27 +2747,6 @@ where
             .await
     }
 
-    fn api_capability_success(
-        &self,
-        activity_id: ActivityId,
-        summary: &'static str,
-    ) -> Result<Resolution, RebornServicesError> {
-        Ok(Resolution::Done(Outcome {
-            refs: OutcomeRefs {
-                result: ResultRef::from_uuid(activity_id.as_uuid()),
-                byte_len: 0,
-                preview: None,
-                preview_meta: ResultPreviewMeta::default(),
-                origin: None,
-                output_digest: None,
-            },
-            verdict: ToolVerdict::Success,
-            summary: SafeSummary::new(summary).map_err(RebornServicesError::internal_from)?,
-            progress: ResultProgress::MadeProgress,
-            terminate_hint: TerminateHint::Continue,
-        }))
-    }
-
     async fn invoke_operator_setup_run(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2787,6 +2801,7 @@ where
                     caller.clone(),
                     UpsertLlmProviderRequest {
                         id: provider_id,
+                        client_action_id: None,
                         name: None,
                         adapter,
                         base_url: request.base_url,
@@ -3298,8 +3313,15 @@ where
     ) -> Result<Resolution, RebornServicesError> {
         if let Some(operation) = product_operations::ProductOperationHandler::parse(&capability) {
             let summary = operation.success_summary();
-            operation.invoke(self, caller, input).await?;
-            return self.api_capability_success(activity_id, summary);
+            let invoker = self.product_capability_invoker.clone();
+            return invoker
+                .invoke_product_operation(
+                    caller.clone(),
+                    activity_id,
+                    summary,
+                    operation.invoke(self, caller, input),
+                )
+                .await;
         }
         self.product_capability_invoker
             .invoke(caller, capability, input.into_json()?, activity_id)

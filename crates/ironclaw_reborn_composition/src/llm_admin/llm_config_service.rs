@@ -1497,6 +1497,7 @@ mod tests {
     ) -> UpsertLlmProviderRequest {
         UpsertLlmProviderRequest {
             id: id.to_string(),
+            client_action_id: None,
             name: Some("Acme".to_string()),
             adapter: "open_ai_completions".to_string(),
             base_url: Some("https://api.acme.test/v1".to_string()),
@@ -2253,6 +2254,7 @@ mod tests {
 
         let nearai_request = || UpsertLlmProviderRequest {
             id: "nearai".to_string(),
+            client_action_id: None,
             name: Some("NEAR AI".to_string()),
             adapter: "near_ai".to_string(),
             base_url: Some("https://cloud-api.near.ai".to_string()),

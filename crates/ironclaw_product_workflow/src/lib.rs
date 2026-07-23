@@ -131,6 +131,7 @@ pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use ironclaw_turns::IdempotencyKey;
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,

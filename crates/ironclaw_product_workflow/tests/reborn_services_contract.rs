@@ -11901,6 +11901,7 @@ async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
             CapabilityId::new(LLM_PROVIDER_UPSERT_CAPABILITY_ID).expect("capability id"),
             ProductCapabilityInput::llm_provider_upsert(UpsertLlmProviderRequest {
                 id: "ollama".to_string(),
+                client_action_id: None,
                 name: None,
                 adapter: "ollama".to_string(),
                 base_url: Some("http://127.0.0.1:11434/v1".to_string()),

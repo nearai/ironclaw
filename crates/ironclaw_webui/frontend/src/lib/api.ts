@@ -382,10 +382,11 @@ export function listOutboundDeliveryTargets() {
   return apiFetch(`${V2_BASE}/outbound/targets`);
 }
 
-export function setOutboundPreferences({ finalReplyTargetId } = {}) {
+export function setOutboundPreferences({ finalReplyTargetId, clientActionId: clientId } = {}) {
   return apiFetch(`${V2_BASE}/outbound/preferences`, {
     method: "POST",
     body: JSON.stringify({
+      client_action_id: clientId || clientActionId(),
       final_reply_target_id: finalReplyTargetId ?? null,
     }),
   });

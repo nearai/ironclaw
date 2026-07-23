@@ -1,6 +1,6 @@
 //! Generic product command adapter into the canonical host-runtime pipeline.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionRegistry;
@@ -82,6 +82,7 @@ impl RuntimeProductCapabilityInvoker {
         if locks
             .get(&activity_id)
             .is_some_and(|current| Arc::ptr_eq(current, lock))
+            && Arc::strong_count(lock) <= 2
         {
             locks.remove(&activity_id);
         }
@@ -149,6 +150,40 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
             .await;
         result
     }
+
+    async fn invoke_product_operation<Fut>(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        activity_id: ActivityId,
+        _summary: &'static str,
+        operation: Fut,
+    ) -> Result<Resolution, RebornServicesError>
+    where
+        Fut: Future<Output = Result<(), RebornServicesError>> + Send,
+    {
+        let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+        let scope = product_resource_scope(&caller, invocation_id);
+        let Self { results, .. } = self;
+        if let Some(replayed) = results.replay(&scope, invocation_id).await? {
+            return Ok(replayed);
+        }
+        let activity_lock = self.lock_for_activity(activity_id).await;
+        let activity_guard = activity_lock.lock().await;
+        if let Some(replayed) = results.replay(&scope, invocation_id).await? {
+            drop(activity_guard);
+            self.release_activity_lock(activity_id, &activity_lock)
+                .await;
+            return Ok(replayed);
+        }
+        let result = match operation.await {
+            Ok(()) => product_operation_resolution(results, &scope, invocation_id).await,
+            Err(error) => Err(error),
+        };
+        drop(activity_guard);
+        self.release_activity_lock(activity_id, &activity_lock)
+            .await;
+        result
+    }
 }
 
 fn product_execution_context(
@@ -159,15 +194,7 @@ fn product_execution_context(
     system_extensions_lifecycle_mounts: &MountView,
 ) -> Result<ExecutionContext, RebornServicesError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
-    let scope = ResourceScope {
-        tenant_id: caller.tenant_id.clone(),
-        user_id: caller.user_id.clone(),
-        agent_id: caller.agent_id.clone(),
-        project_id: caller.project_id.clone(),
-        mission_id: None,
-        thread_id: None,
-        invocation_id,
-    };
+    let scope = product_resource_scope(caller, invocation_id);
     let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
         .map_err(RebornServicesError::internal_from)?;
     let invocation_mounts = product_invocation_mounts(
@@ -214,6 +241,21 @@ fn product_execution_context(
         .validate()
         .map_err(RebornServicesError::internal_from)?;
     Ok(context)
+}
+
+fn product_resource_scope(
+    caller: &WebUiAuthenticatedCaller,
+    invocation_id: InvocationId,
+) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    }
 }
 
 fn product_gesture_grant(
@@ -391,6 +433,29 @@ async fn product_resolution(
                 .unwrap_or_else(SafeSummary::placeholder),
         )),
     }
+}
+
+async fn product_operation_resolution(
+    results: &ProductResultFilesystem,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+) -> Result<Resolution, RebornServicesError> {
+    let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+    results.persist(scope, result_ref, Vec::new()).await?;
+    Ok(Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: result_ref,
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: fixed_summary("capability completed"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    }))
 }
 
 fn recoverable_failure(
@@ -743,6 +808,29 @@ mod tests {
         assert_eq!(outcome.refs.result, result_ref);
         assert_eq!(outcome.refs.byte_len, body.len() as u64);
         assert_eq!(outcome.verdict, ToolVerdict::Success);
+    }
+
+    #[tokio::test]
+    async fn product_operation_resolution_persists_replayable_success() {
+        let filesystem = scoped_product_results_filesystem();
+        let scope = resource_scope();
+        let invocation_id = InvocationId::new();
+        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+
+        persist_product_result(&filesystem, &scope, result_ref, Vec::new())
+            .await
+            .expect("operation success persists");
+        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+            .await
+            .expect("operation success replays")
+            .expect("persisted operation result");
+
+        let Resolution::Done(replayed) = replayed else {
+            panic!("operation replay should be done");
+        };
+        assert_eq!(replayed.refs.result, result_ref);
+        assert_eq!(replayed.refs.byte_len, 0);
+        assert_eq!(replayed.verdict, ToolVerdict::Success);
     }
 
     fn descriptor_with_id(id: &str) -> CapabilityDescriptor {

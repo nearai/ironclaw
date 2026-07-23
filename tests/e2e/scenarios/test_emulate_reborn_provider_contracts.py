@@ -30,6 +30,7 @@ GITHUB_RELEASE_WRITE_UNAVAILABLE = {
     403,
     404,
 }
+GITHUB_RELEASE_WRITE_PROBE_PAYLOAD = {"tag_name": ""}
 
 
 async def _skip_if_github_release_writes_unavailable(
@@ -38,12 +39,15 @@ async def _skip_if_github_release_writes_unavailable(
     probe = await client.post(
         f"{base_url}/repos/nearai/ironclaw/releases",
         headers=github_headers(),
-        json={},
+        json=GITHUB_RELEASE_WRITE_PROBE_PAYLOAD,
     )
     if probe.status_code in GITHUB_RELEASE_WRITE_UNAVAILABLE:
         pytest.skip("Selected Emulate GitHub fixture does not expose repo write APIs")
-    if probe.status_code not in {201, 422}:
-        probe.raise_for_status()
+    if probe.status_code != 422:
+        raise AssertionError(
+            "GitHub release write probe must reject the invalid payload "
+            f"without mutation; got {probe.status_code}: {probe.text}"
+        )
 
 
 async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_server):
