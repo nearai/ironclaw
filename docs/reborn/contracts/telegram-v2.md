@@ -1,8 +1,9 @@
 # Telegram Channel (Reborn host)
 
-**Status:** Shipped host wiring, compiled into every build. The CLI requires
-runtime Telegram enablement — `[telegram].enabled = true` /
-`IRONCLAW_REBORN_TELEGRAM_ENABLED=true` — before the routes are mounted.
+**Status:** Shipped host wiring, compiled into every build. Telegram is
+enabled by default — `ironclaw serve` mounts the routes unless an operator
+opts out with `[telegram].enabled = false` /
+`IRONCLAW_REBORN_TELEGRAM_ENABLED=false`.
 Supersedes the issue #3285 webhook-only
 tracer bullet this document previously described (see "What changed from the
 tracer-bullet contract" below).

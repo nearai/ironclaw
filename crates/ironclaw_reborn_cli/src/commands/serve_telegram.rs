@@ -30,7 +30,7 @@ fn telegram_enabled(
         Ok(value) => {
             crate::commands::parse_channel_enabled_bool(TELEGRAM_ENABLED_ENV, value.as_str())
         }
-        Err(std::env::VarError::NotPresent) => Ok(section.and_then(|s| s.enabled).unwrap_or(false)),
+        Err(std::env::VarError::NotPresent) => Ok(section.and_then(|s| s.enabled).unwrap_or(true)),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("{TELEGRAM_ENABLED_ENV} must be valid UTF-8 when set")
         }
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn telegram_host_config_is_absent_without_section() {
+    fn telegram_host_config_is_present_without_section_default_enabled() {
         let resolved = resolve_telegram_config_for_serve(
             None,
             &tenant_id("tenant"),
@@ -97,6 +97,26 @@ mod tests {
             None,
         )
         .expect("Telegram config resolves without section");
+
+        assert!(
+            resolved.is_some(),
+            "Telegram must be enabled by default when no [telegram] section is configured"
+        );
+    }
+
+    #[test]
+    fn telegram_host_config_is_absent_when_explicitly_disabled() {
+        let section = ironclaw_reborn_config::TelegramSection::default().set_enabled(false);
+
+        let resolved = resolve_telegram_config_for_serve(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            None,
+        )
+        .expect("Telegram config resolves with explicit disable");
 
         assert!(resolved.is_none());
     }
