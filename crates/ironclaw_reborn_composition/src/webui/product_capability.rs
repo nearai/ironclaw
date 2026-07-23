@@ -24,14 +24,21 @@ use ironclaw_product_workflow::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::RebornRuntime;
 use crate::extension_host::lifecycle::SkillManagementMountResolver;
 use tokio::sync::Mutex as AsyncMutex;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PRODUCT_RESULT_SUMMARY_MAX_BYTES: usize = 16 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
 const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProductResultSummaryRecord {
+    summary: String,
+}
 
 #[derive(Clone)]
 pub(crate) struct RuntimeProductCapabilityInvoker {
@@ -155,7 +162,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         &self,
         caller: WebUiAuthenticatedCaller,
         activity_id: ActivityId,
-        _summary: &'static str,
+        summary: &'static str,
         operation: Fut,
     ) -> Result<Resolution, RebornServicesError>
     where
@@ -176,7 +183,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
             return Ok(replayed);
         }
         let result = match operation.await {
-            Ok(()) => product_operation_resolution(results, &scope, invocation_id).await,
+            Ok(()) => product_operation_resolution(results, &scope, invocation_id, summary).await,
             Err(error) => Err(error),
         };
         drop(activity_guard);
@@ -439,9 +446,11 @@ async fn product_operation_resolution(
     results: &ProductResultFilesystem,
     scope: &ResourceScope,
     invocation_id: InvocationId,
+    summary: &'static str,
 ) -> Result<Resolution, RebornServicesError> {
     let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
     results.persist(scope, result_ref, Vec::new()).await?;
+    results.persist_summary(scope, result_ref, summary).await?;
     Ok(Resolution::Done(Outcome {
         refs: OutcomeRefs {
             result: result_ref,
@@ -452,7 +461,7 @@ async fn product_operation_resolution(
             output_digest: None,
         },
         verdict: ToolVerdict::Success,
-        summary: fixed_summary("capability completed"),
+        summary: fixed_summary(summary),
         progress: ResultProgress::MadeProgress,
         terminate_hint: TerminateHint::Continue,
     }))
@@ -538,6 +547,19 @@ impl ProductResultFilesystem {
             }
         }
     }
+
+    async fn persist_summary(
+        &self,
+        scope: &ResourceScope,
+        result_ref: ResultRef,
+        summary: &'static str,
+    ) -> Result<(), RebornServicesError> {
+        match self {
+            Self::Composite(filesystem) => {
+                persist_product_result_summary(filesystem, scope, result_ref, summary).await
+            }
+        }
+    }
 }
 
 async fn persist_product_result<F>(
@@ -595,6 +617,9 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(RebornServicesError::internal_from(error)),
     };
+    let summary = replay_product_result_summary(filesystem, scope, result_ref)
+        .await?
+        .unwrap_or_else(|| fixed_summary("capability completed"));
     Ok(Some(Resolution::Done(Outcome {
         refs: OutcomeRefs {
             result: result_ref,
@@ -605,7 +630,7 @@ where
             output_digest: None,
         },
         verdict: ToolVerdict::Success,
-        summary: fixed_summary("capability completed"),
+        summary,
         progress: ResultProgress::MadeProgress,
         terminate_hint: TerminateHint::Continue,
     })))
@@ -616,9 +641,81 @@ fn product_result_path(result_ref: ResultRef) -> Result<ScopedPath, RebornServic
         .map_err(RebornServicesError::internal_from)
 }
 
+async fn persist_product_result_summary<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    result_ref: ResultRef,
+    summary: &'static str,
+) -> Result<(), RebornServicesError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let path = product_result_summary_path(result_ref)?;
+    let record = ProductResultSummaryRecord {
+        summary: summary.to_string(),
+    };
+    let write_body = serde_json::to_vec(&record).map_err(RebornServicesError::internal_from)?;
+    cas_update(
+        filesystem,
+        scope,
+        &path,
+        |stored| Ok::<_, String>(stored.to_vec()),
+        |stored| {
+            Ok::<_, String>(Entry::bytes(stored.clone()).with_content_type(ContentType::json()))
+        },
+        move |existing| {
+            let write_body = write_body.clone();
+            async move {
+                match existing {
+                    None => Ok(CasApply::new(write_body, ())),
+                    Some(existing) if existing == write_body => Ok(CasApply::no_op(existing, ())),
+                    Some(_) => Err(
+                        "product result replay produced different summary for one activity"
+                            .to_string(),
+                    ),
+                }
+            }
+        },
+    )
+    .await
+    .map_err(RebornServicesError::internal_from)
+}
+
+async fn replay_product_result_summary<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    result_ref: ResultRef,
+) -> Result<Option<SafeSummary>, RebornServicesError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let path = product_result_summary_path(result_ref)?;
+    let body = match filesystem
+        .read_bytes_bounded(scope, &path, PRODUCT_RESULT_SUMMARY_MAX_BYTES)
+        .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(RebornServicesError::internal_from(error)),
+    };
+    let record: ProductResultSummaryRecord =
+        serde_json::from_slice(&body).map_err(RebornServicesError::internal_from)?;
+    SafeSummary::new(record.summary)
+        .map(Some)
+        .map_err(RebornServicesError::internal_from)
+}
+
+fn product_result_summary_path(result_ref: ResultRef) -> Result<ScopedPath, RebornServicesError> {
+    ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.summary.json"))
+        .map_err(RebornServicesError::internal_from)
+}
+
 #[cfg(test)]
 mod tests {
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{
+        BackendId, BackendKind, ContentKind, InMemoryBackend, IndexPolicy, MountDescriptor,
+        StorageClass,
+    };
     use ironclaw_host_api::{
         EffectKind, MountAlias, MountGrant, MountPermissions, NetworkScheme, NetworkTargetPattern,
         PermissionMode, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
@@ -812,15 +909,24 @@ mod tests {
 
     #[tokio::test]
     async fn product_operation_resolution_persists_replayable_success() {
-        let filesystem = scoped_product_results_filesystem();
+        let filesystem = ProductResultFilesystem::Composite(Arc::new(
+            scoped_composite_product_results_filesystem(),
+        ));
         let scope = resource_scope();
         let invocation_id = InvocationId::new();
         let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+        let summary = "extension setup submitted";
 
-        persist_product_result(&filesystem, &scope, result_ref, Vec::new())
+        let resolved = product_operation_resolution(&filesystem, &scope, invocation_id, summary)
             .await
-            .expect("operation success persists");
-        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+            .expect("operation success resolves");
+        let Resolution::Done(resolved) = resolved else {
+            panic!("operation should resolve as done");
+        };
+        assert_eq!(resolved.summary.as_str(), summary);
+
+        let replayed = filesystem
+            .replay(&scope, invocation_id)
             .await
             .expect("operation success replays")
             .expect("persisted operation result");
@@ -831,6 +937,7 @@ mod tests {
         assert_eq!(replayed.refs.result, result_ref);
         assert_eq!(replayed.refs.byte_len, 0);
         assert_eq!(replayed.verdict, ToolVerdict::Success);
+        assert_eq!(replayed.summary.as_str(), summary);
     }
 
     fn descriptor_with_id(id: &str) -> CapabilityDescriptor {
@@ -875,6 +982,33 @@ mod tests {
     fn scoped_product_results_filesystem() -> ScopedFilesystem<InMemoryBackend> {
         ScopedFilesystem::with_fixed_view(
             Arc::new(InMemoryBackend::new()),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new(PRODUCT_RESULT_ROOT).unwrap(),
+                VirtualPath::new(PRODUCT_RESULT_ROOT).unwrap(),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("product results mount view"),
+        )
+    }
+
+    fn scoped_composite_product_results_filesystem() -> ScopedFilesystem<CompositeRootFilesystem> {
+        let backend = Arc::new(InMemoryBackend::new());
+        let mut root = CompositeRootFilesystem::new();
+        root.mount(
+            MountDescriptor {
+                virtual_root: VirtualPath::new(PRODUCT_RESULT_ROOT).unwrap(),
+                backend_id: BackendId::new("product-results").unwrap(),
+                backend_kind: BackendKind::MemoryDocuments,
+                storage_class: StorageClass::StructuredRecords,
+                content_kind: ContentKind::StructuredRecord,
+                index_policy: IndexPolicy::NotIndexed,
+                capabilities: backend.capabilities(),
+            },
+            Arc::clone(&backend),
+        )
+        .expect("product results backend mounts");
+        ScopedFilesystem::with_fixed_view(
+            Arc::new(root),
             MountView::new(vec![MountGrant::new(
                 MountAlias::new(PRODUCT_RESULT_ROOT).unwrap(),
                 VirtualPath::new(PRODUCT_RESULT_ROOT).unwrap(),

@@ -5371,6 +5371,7 @@ async fn setup_extension_invokes_product_surface_capability() {
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -5397,18 +5398,42 @@ async fn setup_extension_invokes_product_surface_capability() {
         "setup_extension must not expose legacy status aliases: {body}"
     );
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/telegram/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"setup-telegram","action":"begin"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let retry_body = read_json(retry_response).await;
+    assert_eq!(retry_body["package_ref"]["id"], "telegram");
+    assert_eq!(retry_body["package_ref"]["kind"], "extension");
+    assert_eq!(retry_body["phase"], "unsupported");
+
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0].0,
-        CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id")
-    );
-    assert_eq!(
-        invoke_calls[0].1,
-        serde_json::json!({
+    assert_eq!(invoke_calls.len(), 2);
+    let expected_capability =
+        CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id");
+    let expected_input = serde_json::json!({
             "extension_id": "telegram",
             "action": "begin"
-        })
+    });
+    assert_eq!(invoke_calls[0].0, expected_capability);
+    assert_eq!(invoke_calls[1].0, expected_capability);
+    assert_eq!(invoke_calls[0].1, expected_input);
+    assert_eq!(invoke_calls[1].1, expected_input);
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "the setup client action id must survive response-lost retries as the ProductSurface activity id"
     );
     let queries = services.view_queries.lock().expect("lock");
     assert!(
