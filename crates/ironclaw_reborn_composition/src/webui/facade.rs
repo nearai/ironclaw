@@ -259,6 +259,19 @@ pub(crate) fn build_webui_services_with_channel_connection(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+
+    // Attested-signing continuation port (PR11): wire the WebUI `resolve_gate`
+    // attested path to the runtime's signer-continuation driver + shared gate
+    // binding store. The facade stays crypto-free; this port (composition layer,
+    // over `ironclaw_attested_runtime`) does the decode + driver dispatch, and
+    // reuses the SAME driver/binding/ledger the resume port reads. Absent an
+    // attested composition (production until the durable stores land) the port
+    // stays unset and attested resolutions fail closed.
+    if let Some(attested) = runtime.attested_signing() {
+        api = api.with_attested_continuation(Arc::new(
+            crate::RebornAttestedContinuation::new(attested),
+        ));
+    }
     // Admin user-management surface: wired only when the identity directory,
     // the admin secret provisioner, and a token minter are all available.
     // Otherwise the fail-closed RejectingAdminUserService default stands and

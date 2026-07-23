@@ -39,7 +39,7 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    AcceptedMessageRef, AttestationClaimRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
     SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
@@ -49,6 +49,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
+    AttestedProofClaim,
+    AttestedGateContinuationPort,
+    AttestedContinuationRejection,
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
     LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
@@ -2802,6 +2805,10 @@ pub struct RebornServices<
 > {
     product_capability_invoker: I,
     view_provider: V,
+    /// Injected, crypto-free attested-signing continuation port (PR11). When
+    /// wired, an `attested` gate resolution verifies + claims BEFORE the turn
+    /// resumes, then drives the deterministic sign + broadcast continuation.
+    attested_continuation: Option<Arc<dyn AttestedGateContinuationPort>>,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
@@ -2876,6 +2883,7 @@ where
         view_provider: V,
     ) -> Self {
         Self {
+            attested_continuation: None,
             product_capability_invoker,
             view_provider,
             thread_service,
@@ -3083,6 +3091,16 @@ where
         approval_interactions: Arc<dyn ApprovalInteractionService>,
     ) -> Self {
         self.approval_interactions = approval_interactions;
+        self
+    }
+
+    /// Wire the attested-signing continuation port (PR11). Without it, an
+    /// `attested` gate resolution fails closed.
+    pub fn with_attested_continuation(
+        mut self,
+        continuation: Arc<dyn AttestedGateContinuationPort>,
+    ) -> Self {
+        self.attested_continuation = Some(continuation);
         self
     }
 
@@ -6324,6 +6342,12 @@ where
             WebUiGateResolution::CredentialProvided { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
+            // An attested proof on a non-attested gate is a routing error, not a
+            // resolvable decision: the gate-family resolver sends `BlockedAttested`
+            // to `resolve_attested_gate`. Reject rather than coerce.
+            WebUiGateResolution::Attested { .. } => {
+                return Err(attested_invalid_field("resolution"));
+            }
         };
         let response = self
             .approval_interactions
@@ -6402,6 +6426,12 @@ where
             WebUiGateResolution::Approved { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
+            // An attested proof on a non-attested gate is a routing error, not a
+            // resolvable decision: the gate-family resolver sends `BlockedAttested`
+            // to `resolve_attested_gate`. Reject rather than coerce.
+            WebUiGateResolution::Attested { .. } => {
+                return Err(attested_invalid_field("resolution"));
+            }
         };
         let response = self
             .auth_interactions
@@ -6471,6 +6501,10 @@ where
             WebUiGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
             }
+            // An attested proof on a non-attested gate is a routing error: the
+            // gate-family resolver sends `BlockedAttested` to
+            // `resolve_attested_gate`. Reject rather than coerce.
+            WebUiGateResolution::Attested { .. } => Err(attested_invalid_field("resolution")),
             WebUiGateResolution::Declined => {
                 assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
@@ -7554,4 +7588,46 @@ mod tests {
             "false-arg sentinel is non-retryable"
         );
     }
+}
+
+/// A malformed attested-resolution field, mapped to the standard validation
+/// error shape (400) so the client sees which field was rejected.
+fn attested_invalid_field(field: &str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    })
+}
+
+/// Map a sanitized attested-continuation rejection to the WebUI error surface.
+/// The continuation runs after the resume guard already consumed the one-shot,
+/// so every category here is non-retryable from the client's perspective.
+fn map_attested_continuation_rejection(
+    rejection: AttestedContinuationRejection,
+) -> RebornServicesError {
+    let (code, kind, status) = match rejection {
+        AttestedContinuationRejection::MissingBinding => (
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+        ),
+        AttestedContinuationRejection::ProviderMismatch
+        | AttestedContinuationRejection::ProofRejected
+        | AttestedContinuationRejection::MalformedProof => (
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+        ),
+        AttestedContinuationRejection::LedgerGuard => (
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+        ),
+        AttestedContinuationRejection::Unavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+        ),
+    };
+    RebornServicesError::from_status_kind(code, kind, status, false)
 }

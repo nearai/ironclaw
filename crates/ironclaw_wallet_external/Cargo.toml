@@ -1,6 +1,10 @@
 [package]
 name = "ironclaw_wallet_external"
 version = "0.1.0"
+# Internal workspace crate (path-deps on sibling substrate crates) — not
+# published; satisfies cargo-deny wildcards=deny (allow-wildcard-paths only
+# exempts publish=false crates).
+publish = false
 edition = "2024"
 rust-version = "1.92"
 description = "External-wallet signing providers (browser injected window.ethereum / window.solana) for the IronClaw attested-signing substrate"
@@ -8,10 +12,6 @@ authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
-# Internal workspace crate — not published to crates.io. cargo-deny's
-# allow-wildcard-paths exemption is skipped for publishable crates (crates.io
-# disallows path deps), so this crate's path deps would otherwise be flagged.
-publish = false
 
 [package.metadata.dist]
 dist = false
@@ -43,10 +43,12 @@ sha2 = "0.10"
 base64 = "0.22"
 
 # WalletConnect v2 relay transport (PR9). The fork at
-# tracecommons/walletconnect-rs @ c6b528e defaults to rustls (openssl-free); we
+# tracecommons/walletconnect-rs @ 7078fd3 defaults to rustls (openssl-free); we
 # take DEFAULT features for relay_client and DO NOT enable relay_rpc's `cacao`
 # feature (it pulls alloy 0.3.6 -> reqwest default-tls -> openssl). The
 # architecture boundary test `workspace_graph_is_openssl_free` enforces this.
+# Rev 7078fd3 moves relay_rpc to jsonwebtoken 9 (ring 0.17), dropping the yanked
+# ring 0.16.20 that cargo-deny rejects as unlicensed — matches the clean stack tip.
 relay_client = { git = "https://github.com/tracecommons/walletconnect-rs", rev = "7078fd303cc521cceeed919e3d452f45eeb115e8", package = "relay_client" }
 relay_rpc = { git = "https://github.com/tracecommons/walletconnect-rs", rev = "7078fd303cc521cceeed919e3d452f45eeb115e8", package = "relay_rpc" }
 
