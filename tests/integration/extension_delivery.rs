@@ -76,7 +76,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ChannelConnectionNoticePolicy, ConversationBindingService, ProductSurface,
     ResolveBindingRequest, ResolveStoredProductReplyTargetRequest, RunDeliveryEventHandler,
-    RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices,
     StoredProductReplyTargetAccess, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::{
@@ -435,7 +435,6 @@ impl VendorIngress {
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
-            classifier: None,
             surface,
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
         }));

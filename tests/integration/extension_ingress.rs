@@ -126,7 +126,6 @@ impl AcmeIngress {
                 signature_header: "X-Acme-Signature".to_string(),
                 timestamp_header: Some("X-Acme-Request-Timestamp".to_string()),
             },
-            classifier: None,
             surface,
             observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
         }));

@@ -771,12 +771,6 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
     ironclaw_reborn_composition::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: Some(Arc::new(|message| {
-            ironclaw_slack_extension::classify_channel_interaction_resolution(
-                &message.text,
-                message.trigger,
-            )
-        })),
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),

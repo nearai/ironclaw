@@ -635,7 +635,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
 }
 
 impl InMemoryTriggerRepository {
-    fn lock_state(
+    pub(crate) fn lock_state(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, InMemoryTriggerRepositoryState>, TriggerError> {
         self.state.lock().map_err(|_| TriggerError::Backend {
@@ -662,7 +662,7 @@ impl InMemoryTriggerRepository {
         Ok(Some(record.clone()))
     }
 
-    fn upsert_running_run_history(
+    pub(crate) fn upsert_running_run_history(
         &self,
         tenant_id: &TenantId,
         trigger_id: TriggerId,
@@ -694,7 +694,7 @@ impl InMemoryTriggerRepository {
         Ok(())
     }
 
-    fn complete_run_history(
+    pub(crate) fn complete_run_history(
         &self,
         tenant_id: &TenantId,
         trigger_id: TriggerId,
