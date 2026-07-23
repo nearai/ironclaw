@@ -34,7 +34,7 @@ const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
 
 /// Composition-time OAuth client metadata.
 ///
-/// `RebornBuildInput` owns this seam for product/bootstrap-provided values
+/// `RebornHostBindings` owns this seam for product/bootstrap-provided values
 /// until a settings-backed source exists.
 #[derive(Clone)]
 pub struct OAuthClientConfig {
@@ -159,7 +159,7 @@ impl RebornRuntimeProcessBinding {
     }
 }
 
-pub struct RebornBuildInput {
+pub struct RebornHostBindings {
     /// The deployment this build assembles, as data (§4.4/§5.6). Carries the
     /// substrate, traffic, readiness, and storage-shape axes every consumer
     /// reads instead of re-deriving them from a profile name.
@@ -168,19 +168,13 @@ pub struct RebornBuildInput {
     /// `new` builds the config without a yolo host-access disclosure (it is not
     /// known at construction), so callers that hold the operator's confirmation
     /// install the accurate config through
-    /// [`RebornBuildInput::with_deployment`] — `local_runtime_build_input_with_options`
+    /// [`RebornHostBindings::with_deployment`] — `local_runtime_build_input_with_options`
     /// is the one that does.
     pub(crate) deployment: DeploymentConfig,
-    pub(crate) owner_id: String,
-    pub(crate) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
-    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
-    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
-    pub(crate) require_runtime_http_egress: bool,
-    pub(crate) require_wasm_credentials: bool,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
@@ -191,10 +185,6 @@ pub struct RebornBuildInput {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) trust_fixture_extensions_for_test: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
-    pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
-    pub(crate) oauth_dcr_callback: Option<OAuthDcrCallbackConfig>,
-    pub(crate) nearai_mcp_bootstrap_config:
-        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// `first_party`-runtime extension factories the binary assembles
     /// (extension-runtime P2). Empty until concrete extension crates extract
     /// in P6; integration tests register the invented-vendor fixture factory
@@ -207,21 +197,25 @@ pub struct RebornBuildInput {
     /// channel host assembly consumes the extras. Composition never names a
     /// concrete extension crate.
     pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
-    /// Concurrency limits applied to the in-memory turn-state store.
-    /// Defaults to no limits (all caps `None` / unlimited).
-    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
-    /// Binary-assembled account-setup declarations (extension-runtime §5.5):
-    /// per-extension activation gates and connect-strategy presentation.
-    /// `WebGeneratedCode` declarations additionally get a generic pairing
-    /// service composed over the durable identity/pairing stores.
-    pub(crate) account_setup_descriptors:
-        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    /// Binary-assembled first-party capability handler registrars (GSuite,
+    /// web tooling): composition runs each once against the shared registry so
+    /// the concrete executors live in the binary, not composition.
+    pub(crate) first_party_registrars:
+        Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+    /// Injected credential-account visibility policy (extension-family-aware,
+    /// e.g. the GSuite account visibility policy). `None` falls back to the safe
+    /// fail-closed default in the product-auth services.
+    pub(crate) credential_account_visibility_policy: Option<
+        Arc<
+            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
+        >,
+    >,
 }
 
 /// One channel extension's binary-assembled vendor binding
 /// (extension-runtime DEL-7): the adapter linked into this deployment plus
 /// the composition extras the generic channel host consumes.
-/// Supplied through [`RebornBuildInput::with_channel_extension_bindings`] by
+/// Supplied through [`RebornHostBindings::with_channel_extension_bindings`] by
 /// the assembling binary — composition itself never names a concrete
 /// extension crate.
 #[derive(Clone)]
@@ -246,6 +240,40 @@ pub(crate) struct RebornLocalRuntimeIdentity {
     pub(crate) agent_id: AgentId,
 }
 
+/// Declarative PostgreSQL connection config (Phase B): the pure-data inputs
+/// needed to open a pool at *build* time. Deliberately carries no live
+/// `deadpool_postgres::Pool` handle — production resolves these values at
+/// `RebornHostBindings` construction (reading env), but the pool is opened later
+/// inside `build_production_shaped`.
+#[derive(Clone)]
+pub(crate) struct PostgresConnectionConfig {
+    pub(crate) url: ironclaw_secrets::SecretMaterial,
+    pub(crate) pool_max_size: usize,
+    pub(crate) tls_options: PostgresPoolTlsOptions,
+}
+
+/// How the PostgreSQL pool is obtained at build time.
+pub(crate) enum PostgresPoolSource {
+    /// Production path: open the pool at build time from declarative config.
+    Config(PostgresConnectionConfig),
+    /// Test escape hatch: a caller-supplied, already-opened pool the build
+    /// prefers over opening from config. Only the caller-supplied-handle
+    /// constructors (`postgres`, `postgres_with_resolved_secret_master_key`,
+    /// `hosted_single_tenant_postgres`) produce this; the
+    /// `*_from_config_and_env` production constructors always use `Config`.
+    Prebuilt(deadpool_postgres::Pool),
+}
+
+/// Declarative libSQL connection config (Phase B). `path_or_url` / `auth_token`
+/// flow to the durable event-store config regardless of whether the database
+/// handle is opened at build time or supplied pre-opened, so they live here
+/// rather than inside [`RebornStorageInput::Libsql`]'s handle.
+#[derive(Clone)]
+pub(crate) struct LibsqlConnectionConfig {
+    pub(crate) path_or_url: String,
+    pub(crate) auth_token: Option<ironclaw_secrets::SecretMaterial>,
+}
+
 pub(crate) enum RebornStorageInput {
     Disabled,
     LocalDev {
@@ -257,29 +285,29 @@ pub(crate) enum RebornStorageInput {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
-        pool: deadpool_postgres::Pool,
+        pool_source: PostgresPoolSource,
         secret_master_key: ironclaw_secrets::SecretMaterial,
         process_local_resource_governor_singleton: bool,
     },
     Libsql {
-        db: Arc<libsql::Database>,
-        path_or_url: String,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+        connection: LibsqlConnectionConfig,
+        /// Test escape hatch: a caller-supplied, already-opened database the
+        /// build prefers over opening from `connection`. When `None` the build
+        /// opens the handle from `connection` at build time.
+        prebuilt_db: Option<Arc<libsql::Database>>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
     Postgres {
-        pool: deadpool_postgres::Pool,
-        url: ironclaw_secrets::SecretMaterial,
-        tls_options: PostgresPoolTlsOptions,
+        pool_source: PostgresPoolSource,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
 }
 
-impl RebornBuildInput {
+impl RebornHostBindings {
     /// Selected composition profile — a display/telemetry label. Behaviour
-    /// comes from [`RebornBuildInput::deployment`].
+    /// comes from [`RebornHostBindings::deployment`].
     pub fn profile(&self) -> RebornCompositionProfile {
         self.deployment.profile()
     }
@@ -289,14 +317,24 @@ impl RebornBuildInput {
         &self.deployment
     }
 
+    /// Install an accurately-resolved deployment config (Phase A). Used by
+    /// [`RebornRuntimeInput::with_config`](crate::RebornRuntimeInput::with_config)
+    /// to swap in a config built with the operator's yolo host-access disclosure
+    /// after the bindings were constructed, preserving the declarative DATA the
+    /// config now owns.
+    pub fn with_deployment_config(mut self, deployment: DeploymentConfig) -> Self {
+        self.deployment = deployment;
+        self
+    }
+
     /// Replace the deployment this input was constructed with.
     ///
     /// Test-only: production builds the deployment at construction
-    /// (`RebornBuildInput::new` takes it, and `local_runtime_build_input_with_options`
+    /// (`RebornHostBindings::new` takes it, and `local_runtime_build_input_with_options`
     /// supplies one built where the operator's yolo disclosure is known). This
     /// exists so tests can construct a deliberately mismatched
     /// deployment/storage pairing and drive the fail-closed guard in
-    /// `build_reborn_services` — production behaviour, reached through a
+    /// `build_runtime_substrate` — production behaviour, reached through a
     /// pairing production rejects.
     #[cfg(test)]
     pub(crate) fn with_deployment(mut self, deployment: DeploymentConfig) -> Self {
@@ -307,11 +345,11 @@ impl RebornBuildInput {
     /// Owner id (string form). Used by the assembled runtime to mint the
     /// `UserId` actor for inbound CLI messages.
     pub fn owner_id(&self) -> &str {
-        &self.owner_id
+        &self.deployment.owner_id
     }
 
     pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
-        self.nearai_mcp_bootstrap_config.is_some()
+        self.deployment.nearai_mcp_bootstrap_config.is_some()
     }
 
     /// Override the owner id after construction.
@@ -322,14 +360,14 @@ impl RebornBuildInput {
     /// thread context from the same `owners/<user>` subtree the v2 facade
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.owner_id = owner_id.into();
+        self.deployment.owner_id = owner_id.into();
         self
     }
 
     /// Override the local runtime tenant/agent identity used by command-style
     /// facades that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
-        self.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+        self.deployment.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
             tenant_id,
             agent_id,
         });
@@ -344,22 +382,6 @@ impl RebornBuildInput {
         )
     }
 
-    pub fn local_dev(owner_id: impl Into<String>, root: PathBuf) -> Self {
-        Self::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root)
-    }
-
-    pub(crate) fn local_dev_with_profile(
-        profile: RebornCompositionProfile,
-        owner_id: impl Into<String>,
-        root: PathBuf,
-    ) -> Self {
-        Self::local_dev_from_deployment(
-            DeploymentConfig::for_profile(profile, false),
-            owner_id,
-            root,
-        )
-    }
-
     /// Build a local-dev-storage-shaped input from an already-resolved
     /// deployment. The `debug_assert` is on the storage-shape **axis**, not on
     /// a list of profile names (§4.4).
@@ -369,7 +391,17 @@ impl RebornBuildInput {
         root: PathBuf,
     ) -> Self {
         debug_assert!(deployment.uses_local_dev_storage_input());
-        Self::new(
+        // Resolve the deployment's runtime policy from its policy request up
+        // front, so a local-dev input is buildable without the caller
+        // separately calling `.with_runtime_policy(...)`. This is what the
+        // `local_runtime_build_input*` bridge did explicitly; folding it in here
+        // removes the bare, unresolved-policy local-dev constructor that left
+        // `runtime_policy` unset (and the build failing `MissingRuntimePolicy`).
+        // Resolution is infallible for the non-yolo local-dev shapes; a yolo
+        // shape without an acknowledged disclosure resolves to no policy, which
+        // the caller can still override via `with_runtime_policy`.
+        let resolved_policy = deployment.resolve().ok().flatten();
+        let bindings = Self::new(
             deployment,
             owner_id,
             RebornStorageInput::LocalDev {
@@ -377,7 +409,11 @@ impl RebornBuildInput {
                 workspace_root: None,
                 host_home_root: None,
             },
-        )
+        );
+        match resolved_policy {
+            Some(policy) => bindings.with_runtime_policy(policy),
+            None => bindings,
+        }
     }
 
     pub fn hosted_single_tenant_postgres(
@@ -407,7 +443,7 @@ impl RebornBuildInput {
                 root,
                 workspace_root: None,
                 host_home_root: None,
-                pool,
+                pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key,
                 process_local_resource_governor_singleton: true,
             },
@@ -434,10 +470,9 @@ impl RebornBuildInput {
             });
         }
         let ResolvedPostgresStorage {
-            pool,
+            connection,
             secret_master_key,
             process_local_resource_governor_singleton,
-            ..
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         Ok(Self::new(
             DeploymentConfig::for_profile(profile, false),
@@ -446,7 +481,7 @@ impl RebornBuildInput {
                 root,
                 workspace_root: None,
                 host_home_root: None,
-                pool,
+                pool_source: PostgresPoolSource::Config(connection),
                 secret_master_key,
                 process_local_resource_governor_singleton,
             },
@@ -500,9 +535,12 @@ impl RebornBuildInput {
     }
 
     pub fn requires_local_runtime_confirmed_host_home_root(&self) -> bool {
-        self.runtime_policy.as_ref().is_some_and(|policy| {
-            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
-        })
+        self.deployment
+            .runtime_policy
+            .as_ref()
+            .is_some_and(|policy| {
+                policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+            })
     }
 
     pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
@@ -510,11 +548,14 @@ impl RebornBuildInput {
     }
 
     pub fn grants_trusted_laptop_access(&self) -> bool {
-        self.runtime_policy.as_ref().is_some_and(|policy| {
-            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
-                || policy.network_mode == NetworkMode::Direct
-                || policy.secret_mode == SecretMode::InheritedEnv
-        })
+        self.deployment
+            .runtime_policy
+            .as_ref()
+            .is_some_and(|policy| {
+                policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+                    || policy.network_mode == NetworkMode::Direct
+                    || policy.secret_mode == SecretMode::InheritedEnv
+            })
     }
 
     pub fn libsql(
@@ -529,9 +570,11 @@ impl RebornBuildInput {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
-                db,
-                path_or_url: path_or_url.into(),
-                auth_token,
+                connection: LibsqlConnectionConfig {
+                    path_or_url: path_or_url.into(),
+                    auth_token,
+                },
+                prebuilt_db: Some(db),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton: true,
             },
@@ -549,9 +592,11 @@ impl RebornBuildInput {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
-                db,
-                path_or_url: path_or_url.into(),
-                auth_token,
+                connection: LibsqlConnectionConfig {
+                    path_or_url: path_or_url.into(),
+                    auth_token,
+                },
+                prebuilt_db: Some(db),
                 secret_master_key: None,
                 process_local_resource_governor_singleton: true,
             },
@@ -562,16 +607,16 @@ impl RebornBuildInput {
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
         pool: deadpool_postgres::Pool,
-        url: ironclaw_secrets::SecretMaterial,
+        // Retained for API stability with the caller-supplied-handle test
+        // escape hatch. The prebuilt pool is used verbatim, so no URL is opened.
+        _url: ironclaw_secrets::SecretMaterial,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
-                pool,
-                url,
-                tls_options: PostgresPoolTlsOptions::default(),
+                pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton: true,
             },
@@ -582,15 +627,15 @@ impl RebornBuildInput {
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
         pool: deadpool_postgres::Pool,
-        url: ironclaw_secrets::SecretMaterial,
+        // Retained for API stability with the caller-supplied-handle test
+        // escape hatch. The prebuilt pool is used verbatim, so no URL is opened.
+        _url: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
-                pool,
-                url,
-                tls_options: PostgresPoolTlsOptions::default(),
+                pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key: None,
                 process_local_resource_governor_singleton: true,
             },
@@ -603,27 +648,26 @@ impl RebornBuildInput {
         config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
         let ResolvedPostgresStorage {
-            pool,
-            url,
-            tls_options,
+            connection,
             secret_master_key,
             process_local_resource_governor_singleton,
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
-        let trust_policy = crate::builtin_first_party_trust_policy()?;
 
+        // The built-in first-party trust policy is composed at BUILD time from
+        // the binary-injected `first_party_bundles` (extension-runtime DEL-7),
+        // not here — construction predates bundle injection. Leaving
+        // `production_trust_policy` unset lets `build_production_shaped` source
+        // the per-package effect grants from the injected bundle set.
         Ok(Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
-                pool,
-                url,
-                tls_options,
+                pool_source: PostgresPoolSource::Config(connection),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton,
             },
         )
-        .with_production_trust_policy(Arc::new(trust_policy))
         .with_runtime_policy(runtime_policy)
         .with_runtime_process_binding(RebornRuntimeProcessBinding::none()))
     }
@@ -632,7 +676,7 @@ impl RebornBuildInput {
         mut self,
         backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
     ) -> Self {
-        self.required_runtime_backends = backends.into_iter().collect();
+        self.deployment.required_runtime_backends = backends.into_iter().collect();
         self
     }
 
@@ -642,12 +686,12 @@ impl RebornBuildInput {
     }
 
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
-        self.runtime_policy = Some(policy);
+        self.deployment.runtime_policy = Some(policy);
         self
     }
 
     pub fn runtime_policy(&self) -> Option<&EffectiveRuntimePolicy> {
-        self.runtime_policy.as_ref()
+        self.deployment.runtime_policy.as_ref()
     }
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
@@ -672,12 +716,12 @@ impl RebornBuildInput {
     }
 
     pub fn require_runtime_http_egress(mut self) -> Self {
-        self.require_runtime_http_egress = true;
+        self.deployment.require_runtime_http_egress = true;
         self
     }
 
     pub fn require_wasm_credentials(mut self) -> Self {
-        self.require_wasm_credentials = true;
+        self.deployment.require_wasm_credentials = true;
         self
     }
 
@@ -707,7 +751,7 @@ impl RebornBuildInput {
         mut self,
         descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
     ) -> Self {
-        self.account_setup_descriptors = descriptors;
+        self.deployment.account_setup_descriptors = descriptors;
         self
     }
 
@@ -715,7 +759,7 @@ impl RebornBuildInput {
         mut self,
         config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
-        self.nearai_mcp_bootstrap_config = Some(config);
+        self.deployment.nearai_mcp_bootstrap_config = Some(config);
         self
     }
 
@@ -723,7 +767,7 @@ impl RebornBuildInput {
         mut self,
         config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
-        self.nearai_mcp_bootstrap_config = config;
+        self.deployment.nearai_mcp_bootstrap_config = config;
         self
     }
 
@@ -760,7 +804,7 @@ impl RebornBuildInput {
     /// Record deployment OAuth client material for one vendor id. The vendor's
     /// manifest recipe names the client-credential handles these values fill.
     ///
-    /// `RebornBuildInput` owns this composition seam until a settings-backed
+    /// `RebornHostBindings` owns this composition seam until a settings-backed
     /// source exists.
     pub fn with_vendor_oauth_client(
         mut self,
@@ -782,7 +826,7 @@ impl RebornBuildInput {
     ) -> Result<Self, ironclaw_auth::AuthProductError> {
         let callback_origin = callback_origin.into();
         validate_dcr_callback_origin(&callback_origin)?;
-        self.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
+        self.deployment.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
         Ok(self)
     }
 
@@ -792,12 +836,13 @@ impl RebornBuildInput {
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
     pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
-        self.turn_state_store_limits = limits;
+        self.deployment.turn_state_store_limits = limits;
         self
     }
 
     fn push_oauth_provider_config(&mut self, vendor: String, client: OAuthClientConfig) {
         if let Some(existing) = self
+            .deployment
             .oauth_provider_configs
             .iter_mut()
             .find(|existing| existing.vendor == vendor)
@@ -805,7 +850,8 @@ impl RebornBuildInput {
             existing.client = client;
             return;
         }
-        self.oauth_provider_configs
+        self.deployment
+            .oauth_provider_configs
             .push(OAuthProviderBackendConfig { vendor, client });
     }
 
@@ -814,38 +860,86 @@ impl RebornBuildInput {
         owner_id: impl Into<String>,
         storage: RebornStorageInput,
     ) -> Self {
+        // Owner id is declarative DATA (Phase A) — carry it on the deployment,
+        // not the bindings. Every other DATA field defaults on the deployment
+        // preset and is overridden through the delegating builders below.
+        let mut deployment = deployment;
+        deployment.owner_id = owner_id.into();
         Self {
             deployment,
-            owner_id: owner_id.into(),
-            local_runtime_identity: None,
             storage,
             production_trust_policy: None,
-            runtime_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
-            required_runtime_backends: Vec::new(),
-            require_runtime_http_egress: false,
-            require_wasm_credentials: false,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
             trust_fixture_extensions_for_test: false,
             product_auth_ports: None,
-            oauth_provider_configs: Vec::new(),
-            oauth_dcr_callback: None,
-            nearai_mcp_bootstrap_config: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
-            turn_state_store_limits: TurnStateStoreLimits::default(),
-            account_setup_descriptors: Vec::new(),
+            first_party_registrars: Vec::new(),
+            credential_account_visibility_policy: None,
         }
+    }
+
+    /// Inject the binary-assembled neutral first-party package inventory.
+    pub fn with_first_party_bundles(
+        mut self,
+        bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+    ) -> Self {
+        self.deployment.first_party_bundles = bundles;
+        self
+    }
+
+    /// Inject the binary-assembled first-party capability handler registrars.
+    pub fn with_first_party_registrars(
+        mut self,
+        registrars: Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+    ) -> Self {
+        self.first_party_registrars = registrars;
+        self
+    }
+
+    /// Inject the credential-account visibility policy (see the field doc).
+    pub fn with_credential_account_visibility_policy(
+        mut self,
+        policy: Arc<
+            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
+        >,
+    ) -> Self {
+        self.credential_account_visibility_policy = Some(policy);
+        self
+    }
+
+    /// Test-support: inject the full first-party extension surface (catalog
+    /// bundles, capability-handler registrars, and the provider-account
+    /// visibility policy) exactly as the `ironclaw_reborn_cli` binary does in
+    /// production.
+    ///
+    /// Composition names no concrete first-party extension in production
+    /// (extension-runtime DEL-7); the binary supplies these on the build input.
+    /// Composition's own unit tests need the same surface to install / activate /
+    /// dispatch first-party extensions through the production seam, so this
+    /// mirrors the binary's assembly from the dev-dependency inventory. Gated
+    /// `test-support` because integration harnesses compile composition as a
+    /// dependency, not under composition's own `cfg(test)`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_bundled_first_party_for_test(self) -> Self {
+        self.with_first_party_bundles(
+            crate::extension_host::first_party::first_party_bundles_from_inventory(),
+        )
+        .with_first_party_registrars(
+            crate::extension_host::first_party::test_support::bundled_first_party_registrars(),
+        )
+        .with_credential_account_visibility_policy(
+            crate::extension_host::first_party::test_support::bundled_credential_account_visibility_policy(),
+        )
     }
 }
 
 struct ResolvedPostgresStorage {
-    pool: deadpool_postgres::Pool,
-    url: ironclaw_secrets::SecretMaterial,
-    tls_options: PostgresPoolTlsOptions,
+    connection: PostgresConnectionConfig,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 }
@@ -903,16 +997,17 @@ fn resolve_postgres_storage_from_config_and_env(
         "resolved Reborn PostgreSQL pool size"
     );
     let tls_options = postgres_pool_tls_options_from_env()?;
-    let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
-        database_url.clone(),
-        pool_max_size,
-        tls_options,
-    )?;
+    ironclaw_reborn_event_store::validate_postgres_pool_tls_options(&database_url, tls_options)?;
 
+    // Phase B: resolve the declarative connection config only. The live pool is
+    // opened later, at build time, inside `build_production_shaped` — construction
+    // no longer performs I/O against the database.
     Ok(ResolvedPostgresStorage {
-        pool,
-        url: database_url,
-        tls_options,
+        connection: PostgresConnectionConfig {
+            url: database_url,
+            pool_max_size,
+            tls_options,
+        },
         secret_master_key,
         process_local_resource_governor_singleton,
     })
@@ -1141,8 +1236,8 @@ mod tests {
             InMemoryAuthProductServices::new(),
         ));
 
-        let input =
-            RebornBuildInput::disabled("test-owner").with_product_auth_ports(product_auth.clone());
+        let input = RebornHostBindings::disabled("test-owner")
+            .with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
     }

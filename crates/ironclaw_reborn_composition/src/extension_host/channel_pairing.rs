@@ -993,6 +993,7 @@ impl ChannelPairingService {
     /// this composed service, unlike production where both use one store.
     /// Test-only: zero production bytes.
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     pub(crate) async fn dispatch_pairing_completion_with_for_test(
         &self,
         user_id: &UserId,

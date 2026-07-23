@@ -3,10 +3,11 @@ use ironclaw_product_workflow::{
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::extension_host::lifecycle::RebornLocalLifecycleFacade;
-use crate::factory::RebornServices;
+use crate::runtime::RebornRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {
@@ -25,27 +26,21 @@ pub enum RebornExtensionLifecycleCommandError {
 }
 
 pub async fn execute_reborn_extension_lifecycle_command(
-    services: &RebornServices,
+    runtime: &RebornRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let local_runtime = services
-        .local_runtime
-        .as_ref()
-        .ok_or(RebornExtensionLifecycleCommandError::LocalRuntimeUnavailable)?;
-    let mut facade = RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
-    if let Some(extension_management) = &local_runtime.extension_management {
-        facade = facade.with_extension_management(extension_management.clone());
-    }
-    if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+    let mut facade = RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
+    facade = facade.with_extension_management(runtime.extension_management.clone());
+    if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
         facade = facade.with_runtime_http_egress(runtime_http_egress.clone());
     }
-    if let Some(product_auth) = &services.product_auth {
-        facade = facade.with_runtime_credential_accounts(
-            product_auth.runtime_credential_account_selection_service(),
-        );
-    }
+    facade = facade.with_runtime_credential_accounts(
+        runtime
+            .product_auth
+            .runtime_credential_account_selection_service(),
+    );
     let context =
-        LifecycleProductContext::Surface(local_runtime.extension_lifecycle_surface_context.clone());
+        LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context.clone());
     Ok(facade.execute(context, command.into_action()?).await?)
 }
 
@@ -185,26 +180,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-        RebornServices, build_reborn_services,
+        RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornRuntimeInput,
+        build_reborn_runtime,
     };
-
-    #[tokio::test]
-    async fn extension_lifecycle_command_rejects_services_without_local_runtime() {
-        let error = execute_reborn_extension_lifecycle_command(
-            &RebornServices::disabled(),
-            RebornExtensionLifecycleCommand::Search {
-                query: String::new(),
-            },
-        )
-        .await
-        .expect_err("disabled services should not expose local extension lifecycle");
-
-        assert!(matches!(
-            error,
-            RebornExtensionLifecycleCommandError::LocalRuntimeUnavailable
-        ));
-    }
 
     #[tokio::test]
     async fn extension_lifecycle_command_activates_credentialed_extension_with_product_auth() {
@@ -212,19 +190,23 @@ mod tests {
         let owner = "extension-lifecycle-command-owner";
         let tenant = "extension-lifecycle-command-tenant";
         let agent = "extension-lifecycle-command-agent";
-        let services = build_reborn_services(
-            RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
-                .with_local_runtime_identity(
-                    TenantId::new(tenant).expect("tenant"),
-                    AgentId::new(agent).expect("agent"),
-                ),
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_build_input(
+                crate::deployment::local_dev_build_input(owner, dir.path().join("local-dev"))
+                    .with_runtime_policy(
+                        crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                    ),
+            )
+            .with_identity(crate::RebornRuntimeIdentity {
+                tenant_id: tenant.to_string(),
+                agent_id: agent.to_string(),
+                source_binding_id: "extension-lifecycle-command-source".to_string(),
+                reply_target_binding_id: "extension-lifecycle-command-reply".to_string(),
+            }),
         )
         .await
-        .expect("local-dev services build");
-        let product_auth = services
-            .product_auth
-            .as_ref()
-            .expect("local-dev composes product auth");
+        .expect("local-dev runtime builds");
+        let product_auth = &runtime.product_auth;
         let scope = AuthProductScope::new(
             ResourceScope {
                 tenant_id: TenantId::new(tenant).expect("tenant"),
@@ -259,7 +241,7 @@ mod tests {
             .expect("manual-token submit");
 
         execute_reborn_extension_lifecycle_command(
-            &services,
+            &runtime,
             RebornExtensionLifecycleCommand::Install {
                 id: "github".to_string(),
             },
@@ -267,7 +249,7 @@ mod tests {
         .await
         .expect("install credentialed extension");
         let activate = execute_reborn_extension_lifecycle_command(
-            &services,
+            &runtime,
             RebornExtensionLifecycleCommand::Activate {
                 id: "github".to_string(),
             },

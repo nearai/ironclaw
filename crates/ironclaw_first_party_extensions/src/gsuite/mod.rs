@@ -20,6 +20,11 @@ pub use handlers::{
     GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
     GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor,
 };
+/// The Google credential-authority provider id, re-exported so the assembling
+/// binary can build the GSuite runtime-credential requirements and the
+/// Google-account visibility policy without depending on `ironclaw_auth`
+/// directly (extension-runtime DEL-7).
+pub use ironclaw_auth::GOOGLE_PROVIDER_ID;
 pub use manifest::{
     CALENDAR_EXTENSION_ID, GMAIL_EXTENSION_ID, GOOGLE_DOCS_EXTENSION_ID, GOOGLE_DRIVE_EXTENSION_ID,
     GOOGLE_SHEETS_EXTENSION_ID, GOOGLE_SLIDES_EXTENSION_ID, GSUITE_EXTENSION_IDS,

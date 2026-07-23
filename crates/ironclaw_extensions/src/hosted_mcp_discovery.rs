@@ -64,6 +64,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             default_permission: capability.default_permission,
             runtime_credentials: capability.runtime_credentials.clone(),
             network_targets: capability.network_targets.clone(),
+            max_egress_bytes: capability.max_egress_bytes,
             resource_profile: capability.resource_profile.clone(),
             origin_gate_matrix: capability.origin_gate_matrix.clone(),
         })
@@ -203,6 +204,9 @@ fn discovered_capability_manifest(
         // MCP discovered tools derive egress from their credential audiences,
         // not a manifest-declared allowlist.
         network_targets: Vec::new(),
+        // MCP discovered tools take no manifest egress cap; their egress is
+        // bounded by credential audiences and the runtime resource profile.
+        max_egress_bytes: None,
         resource_profile: template.resource_profile.clone(),
         origin_gate_matrix: template.origin_gate_matrix.clone(),
     })

@@ -5,11 +5,13 @@
 //! capabilities, not MCP-extension capabilities — this module does NOT reuse
 //! `harness_mcp.rs`'s `McpRuntime` scaffolding. The real dispatch logic
 //! (`WebAccessExecutor::dispatch`, three sequential `RuntimeHttpEgress` calls
-//! to the Exa MCP endpoint) lives in production; this harness wires the real
-//! production handler registration
-//! (`register_bundled_web_access_first_party_handlers`) instead of
-//! duplicating the dispatch/error-mapping glue. Only manifest/schema loading
-//! and the trust/network policy below are harness-local test-support concerns.
+//! to the Exa MCP endpoint) lives in the `ironclaw_first_party_extensions`
+//! executor; extension-runtime DEL-7 moved the thin `FirstPartyCapabilityHandler`
+//! wrapper out of composition into the assembling binary, so this harness — like
+//! the binary — builds that wrapper directly over the executor
+//! (`register_web_access_first_party_handlers` below). Only manifest/schema
+//! loading and the trust/network policy below are harness-local test-support
+//! concerns.
 //!
 //! `web_access_extension_package()` mirrors `github.rs`'s
 //! `extension_registry()`: reads the REAL production manifest off disk via
@@ -30,16 +32,20 @@ use std::{
 
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_first_party_extensions::{EXA_MCP_HOST, NETWORK_EGRESS_LIMIT};
+use ironclaw_first_party_extensions::{
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
+    WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
+};
 use ironclaw_host_api::{
-    EffectKind, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, VirtualPath,
+    CapabilityId, EffectKind, HostApiError, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    PackageId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityRegistry,
-    HostRuntime, HostRuntimeServices, default_host_api_contract_registry,
-    default_host_port_catalog,
+    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityError,
+    FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest,
+    FirstPartyCapabilityResult, HostRuntime, HostRuntimeServices,
+    default_host_api_contract_registry, default_host_port_catalog,
 };
-use ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
@@ -129,7 +135,7 @@ pub(super) fn local_dev_host_runtime_with_web_access(
     http_egress: Arc<RecordingRuntimeHttpEgress>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut handlers = FirstPartyCapabilityRegistry::new();
-    register_bundled_web_access_first_party_handlers(&mut handlers)?;
+    register_web_access_first_party_handlers(&mut handlers)?;
 
     let services = HostRuntimeServices::new(
         Arc::new(package_registry),
@@ -145,4 +151,59 @@ pub(super) fn local_dev_host_runtime_with_web_access(
     .with_trust_policy(Arc::new(web_access_first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Register the web-access first-party capability handlers — the same thin
+/// wrapper over `WebAccessExecutor` the production binary supplies through its
+/// `FirstPartyHandlerRegistrar` (extension-runtime DEL-7). Mirrored here because
+/// composition no longer owns this wrapper and the binary is not importable from
+/// an integration test.
+fn register_web_access_first_party_handlers(
+    registry: &mut FirstPartyCapabilityRegistry,
+) -> Result<(), HostApiError> {
+    let handler = Arc::new(WebAccessFirstPartyHandler {
+        executor: WebAccessExecutor::default(),
+    });
+    registry.insert_handler(
+        CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
+        Arc::clone(&handler),
+    );
+    registry.insert_handler(
+        CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
+        Arc::clone(&handler),
+    );
+    Ok(())
+}
+
+struct WebAccessFirstPartyHandler {
+    executor: WebAccessExecutor,
+}
+
+#[async_trait::async_trait]
+impl FirstPartyCapabilityHandler for WebAccessFirstPartyHandler {
+    async fn dispatch(
+        &self,
+        request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let result = self
+            .executor
+            .dispatch(WebAccessDispatchRequest {
+                capability_id: &request.capability_id,
+                scope: &request.scope,
+                input: &request.input,
+                runtime_http_egress: request.services.runtime_http_egress.clone(),
+            })
+            .await
+            .map_err(web_access_error)?;
+        Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
+    }
+}
+
+fn web_access_error(error: WebAccessDispatchError) -> FirstPartyCapabilityError {
+    let mapped = FirstPartyCapabilityError::new(error.kind());
+    if let Some(usage) = error.usage().cloned() {
+        mapped.with_usage(usage)
+    } else {
+        mapped
+    }
 }

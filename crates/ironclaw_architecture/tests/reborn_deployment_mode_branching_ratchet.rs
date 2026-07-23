@@ -55,19 +55,11 @@ use std::path::{Path, PathBuf};
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
 ///
 /// Sorted; entries are `src/`-relative with `/` separators.
-const ALLOWLIST: &[(&str, &str)] = &[
-    (
-        "deployment.rs",
-        "TARGET STATE — `DeploymentConfig::for_profile` is the one place a \
+const ALLOWLIST: &[(&str, &str)] = &[(
+    "deployment.rs",
+    "TARGET STATE — `DeploymentConfig::for_profile` is the one place a \
          profile name becomes deployment data (§4.4). This entry stays.",
-    ),
-    (
-        "readiness.rs",
-        "Readiness diagnostics carry a profile as an operator-facing **label** \
-         on the wire (`RebornReadinessDiagnostic::profile`), not a branch. \
-         Retires only if that wire field is reshaped.",
-    ),
-];
+)];
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

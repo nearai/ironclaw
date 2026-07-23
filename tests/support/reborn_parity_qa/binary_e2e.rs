@@ -794,6 +794,7 @@ impl RebornBinaryE2EHarness {
             milestone_sink.clone(),
             thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             Arc::clone(&turn_store),
+            None,
         )?;
         // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
         // mount) — the await-edge tree lives at

@@ -31,21 +31,21 @@ use ironclaw_auth::{
     CredentialRefreshRequest,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{RebornBuildInput, build_reborn_services};
+use ironclaw_reborn_composition::{RebornRuntimeInput, build_reborn_runtime};
 
 #[tokio::test]
 async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
     let dir = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        "refresh-composition-owner",
-        dir.path().to_path_buf(),
+    let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_dev_build_input(
+            "refresh-composition-owner",
+            dir.path().to_path_buf(),
+        ),
     ))
     .await
     .expect("local-dev runtime should build");
 
-    let product_auth = services
-        .product_auth
-        .expect("local-dev composition must expose product-auth services");
+    let product_auth = runtime.product_auth_for_test();
     let account_service = product_auth.credential_account_service();
 
     let scope = AuthProductScope::new(
@@ -78,4 +78,5 @@ async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
          account service was not wrapped in ProviderBackedCredentialAccountService. \
          Regression: issue #5378."
     );
+    runtime.shutdown().await.expect("runtime shutdown");
 }

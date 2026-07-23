@@ -1,3 +1,4 @@
+// arch-exempt: large_file, adds Postgres TLS preflight helper in existing backend module, plan #8
 //! Reborn-owned durable event and audit store backends.
 //!
 //! This crate is the production-composition side of the Reborn event
@@ -103,6 +104,14 @@ pub fn open_postgres_pool_with_tls_options(
     tls_options: PostgresPoolTlsOptions,
 ) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
     postgres_backed::build_pool(url, max_size, tls_options)
+}
+
+/// Validate PostgreSQL TLS policy without opening a network connection.
+pub fn validate_postgres_pool_tls_options(
+    url: &SecretString,
+    tls_options: PostgresPoolTlsOptions,
+) -> Result<(), RebornEventStoreError> {
+    postgres_backed::validate_tls_options(url, tls_options)
 }
 
 /// Backend configuration for Reborn durable event/audit stores.
@@ -570,6 +579,7 @@ mod postgres_backed {
         if let Some(ssl_mode) = tls_options.ssl_mode_override {
             pg_config.ssl_mode(ssl_mode.into());
         }
+        validate_remote_tls_policy(&mut pg_config, tls_options)?;
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -617,6 +627,38 @@ mod postgres_backed {
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))
+    }
+
+    pub(super) fn validate_tls_options(
+        url: &SecretString,
+        tls_options: PostgresPoolTlsOptions,
+    ) -> Result<(), RebornEventStoreError> {
+        let raw_url = url.expose_secret();
+        let mut pg_config: Config = raw_url.parse().map_err(|source| {
+            RebornEventStoreError::backend("postgres", "parse connection string", source)
+        })?;
+        if let Some(ssl_mode) = tls_options.ssl_mode_override {
+            pg_config.ssl_mode(ssl_mode.into());
+        }
+        validate_remote_tls_policy(&mut pg_config, tls_options)
+    }
+
+    fn validate_remote_tls_policy(
+        pg_config: &mut Config,
+        tls_options: PostgresPoolTlsOptions,
+    ) -> Result<(), RebornEventStoreError> {
+        let local = is_local_postgres_config(pg_config);
+        let remote_cleartext = !local && matches!(pg_config.get_ssl_mode(), SslMode::Disable);
+        if remote_cleartext {
+            if !tls_options.allow_remote_cleartext {
+                return Err(RebornEventStoreError::RemotePostgresClearTextDisabled);
+            }
+            return Ok(());
+        }
+        if !local {
+            enforce_remote_ssl_mode(pg_config)?;
+        }
+        Ok(())
     }
 
     /// Returns true if the parsed Postgres `Config` targets only loopback

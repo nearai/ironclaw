@@ -5,8 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    CasApply, CompositeRootFilesystem, ContentType, Entry, LibSqlRootFilesystem,
-    PostgresRootFilesystem, RootFilesystem, ScopedFilesystem, cas_update,
+    CasApply, CompositeRootFilesystem, ContentType, Entry, RootFilesystem, ScopedFilesystem,
+    cas_update,
 };
 use ironclaw_host_api::{
     ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
@@ -19,77 +19,46 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, RebornServicesError, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    WebUiAuthenticatedCaller,
 };
 
-use crate::factory::{
-    RebornProductionRuntimeServices, RebornServices, production_skill_management_mount_view,
-};
+use crate::RebornRuntime;
+use crate::extension_host::lifecycle::SkillManagementMountResolver;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
 const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
 
 #[derive(Clone)]
-pub(crate) enum RuntimeProductCapabilityInvoker {
-    Available {
-        host_runtime: Arc<dyn HostRuntime>,
-        registry: Arc<ExtensionRegistry>,
-        results: ProductResultFilesystem,
-        mounts: ProductCapabilityMounts,
-    },
-    Unavailable,
+pub(crate) struct RuntimeProductCapabilityInvoker {
+    host_runtime: Arc<dyn HostRuntime>,
+    registry: Arc<ExtensionRegistry>,
+    results: ProductResultFilesystem,
+    // The scope→mount-view resolver the runtime's skill-management port was
+    // composed with. Reused here (rather than re-deriving a local-dev vs
+    // production branch) so product-surface skill gestures resolve exactly the
+    // mounts the agent loop's skill tools do; the unified runtime graph exposes
+    // a single composite filesystem, so which resolver is live is the only
+    // deployment-shape distinction the invoker still needs.
+    skill_mount_resolver: Arc<SkillManagementMountResolver>,
 }
 
 #[derive(Clone)]
 pub(crate) enum ProductResultFilesystem {
     Composite(Arc<ScopedFilesystem<CompositeRootFilesystem>>),
-    LibSql(Arc<ScopedFilesystem<LibSqlRootFilesystem>>),
-    Postgres(Arc<ScopedFilesystem<PostgresRootFilesystem>>),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ProductCapabilityMounts {
-    LocalDev,
-    Production,
 }
 
 impl RuntimeProductCapabilityInvoker {
-    pub(crate) fn from_services(services: &RebornServices) -> Self {
-        let Some(host_runtime) = services.host_runtime.as_ref().map(Arc::clone) else {
-            return Self::Unavailable;
-        };
-        let (results, registry, mounts) = if let Some(local) = &services.local_runtime {
-            (
-                ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
-                    &local.extension_filesystem,
-                ))),
-                Arc::clone(&local.extension_registry),
-                ProductCapabilityMounts::LocalDev,
-            )
-        } else if let Some(production) = &services.production_runtime {
-            match production {
-                RebornProductionRuntimeServices::LibSql(graph) => (
-                    ProductResultFilesystem::LibSql(Arc::clone(&graph.scoped_filesystem)),
-                    Arc::clone(&graph.extension_registry),
-                    ProductCapabilityMounts::Production,
-                ),
-                RebornProductionRuntimeServices::Postgres(graph) => (
-                    ProductResultFilesystem::Postgres(Arc::clone(&graph.scoped_filesystem)),
-                    Arc::clone(&graph.extension_registry),
-                    ProductCapabilityMounts::Production,
-                ),
-            }
-        } else {
-            return Self::Unavailable;
-        };
-        Self::Available {
-            host_runtime,
-            registry,
-            results,
-            mounts,
+    pub(crate) fn from_runtime(runtime: &RebornRuntime) -> Self {
+        Self {
+            host_runtime: Arc::clone(&runtime.host_runtime),
+            registry: Arc::clone(&runtime.extension_registry),
+            results: ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
+                &runtime.extension_filesystem,
+            ))),
+            skill_mount_resolver: runtime.skill_management.mount_resolver(),
         }
     }
 }
@@ -103,22 +72,20 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
-        let Self::Available {
+        let Self {
             host_runtime,
             registry,
             results,
-            mounts,
-        } = self
-        else {
-            return Err(product_runtime_unavailable());
-        };
+            skill_mount_resolver,
+        } = self;
         // The origin-to-gate matrix is still provisional in today's kernel.
         // Encode the direct user gesture as one exact, host-issued grant. The
         // runtime independently re-resolves the descriptor and authorizes it,
         // so a concurrent stronger replacement no longer fits this attenuated
         // grant and fails closed.
         let descriptor = registry.get_capability(&capability);
-        let context = product_execution_context(&caller, activity_id, descriptor, *mounts)?;
+        let context =
+            product_execution_context(&caller, activity_id, descriptor, &**skill_mount_resolver)?;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let requested_capability = capability.clone();
@@ -135,7 +102,7 @@ fn product_execution_context(
     caller: &WebUiAuthenticatedCaller,
     activity_id: ActivityId,
     descriptor: Option<&CapabilityDescriptor>,
-    mounts: ProductCapabilityMounts,
+    skill_mount_resolver: &SkillManagementMountResolver,
 ) -> Result<ExecutionContext, RebornServicesError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     let scope = ResourceScope {
@@ -149,7 +116,7 @@ fn product_execution_context(
     };
     let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
         .map_err(RebornServicesError::internal_from)?;
-    let invocation_mounts = product_invocation_mounts(&scope, descriptor, mounts)?;
+    let invocation_mounts = product_invocation_mounts(&scope, descriptor, skill_mount_resolver)?;
     let grants = descriptor
         .map(|descriptor| CapabilitySet {
             grants: vec![product_gesture_grant(
@@ -242,7 +209,7 @@ fn product_gesture_grant(
 fn product_invocation_mounts(
     scope: &ResourceScope,
     descriptor: Option<&CapabilityDescriptor>,
-    mounts: ProductCapabilityMounts,
+    skill_mount_resolver: &SkillManagementMountResolver,
 ) -> Result<MountView, RebornServicesError> {
     let Some(descriptor) = descriptor else {
         return Ok(MountView::default());
@@ -250,14 +217,7 @@ fn product_invocation_mounts(
     if !is_skill_management_capability(&descriptor.id) {
         return Ok(MountView::default());
     }
-    match mounts {
-        ProductCapabilityMounts::LocalDev => {
-            crate::local_dev_mounts::scoped_skill_management_mount_view(scope)
-                .map_err(RebornServicesError::internal_from)
-        }
-        ProductCapabilityMounts::Production => production_skill_management_mount_view(scope)
-            .map_err(RebornServicesError::internal_from),
-    }
+    skill_mount_resolver(scope).map_err(RebornServicesError::internal_from)
 }
 
 fn is_skill_management_capability(capability: &CapabilityId) -> bool {
@@ -427,12 +387,6 @@ impl ProductResultFilesystem {
             Self::Composite(filesystem) => {
                 persist_product_result(filesystem, scope, result_ref, body).await
             }
-            Self::LibSql(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body).await
-            }
-            Self::Postgres(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body).await
-            }
         }
     }
 }
@@ -473,17 +427,6 @@ where
     )
     .await
     .map_err(RebornServicesError::internal_from)
-}
-
-fn product_runtime_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }
 }
 
 #[cfg(test)]
@@ -595,6 +538,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials,
             network_targets,
+            max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
         }

@@ -69,6 +69,7 @@ use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
+use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
@@ -426,6 +427,7 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
@@ -646,6 +648,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional observer wired into the group's ONE production
+    /// capability-port factory. Default `None`.
+    trajectory_observer: Option<Arc<dyn RebornTrajectoryObserver>>,
     /// Lease-wedge coverage: overrides the turn-state store's
     /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
     /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
@@ -778,6 +783,7 @@ impl RebornIntegrationGroupBuilder {
             milestone_sink.clone(),
             group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             Arc::clone(&turn_store),
+            self.trajectory_observer.clone(),
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
