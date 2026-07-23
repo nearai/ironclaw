@@ -10028,6 +10028,7 @@ async fn setup_extension_rejects_blank_or_omitted_required_secret_for_nonconfigu
                 caller(),
                 "github",
                 WebUiSetupExtensionRequest {
+                    client_action_id: None,
                     action: Some("submit".to_string()),
                     payload: Some(json!({ "secrets": secrets })),
                 },
@@ -10060,6 +10061,7 @@ async fn setup_extension_allows_configured_required_secret_to_be_left_unchanged(
             caller(),
             "github",
             WebUiSetupExtensionRequest {
+                client_action_id: None,
                 action: Some("submit".to_string()),
                 payload: Some(json!({ "secrets": secrets })),
             },

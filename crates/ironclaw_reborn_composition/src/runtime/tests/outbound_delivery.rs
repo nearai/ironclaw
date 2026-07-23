@@ -8,9 +8,8 @@ use ironclaw_loop_host::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_outbound::{
-    DeliveryTargetCapabilities, OutboundDeliveryTargetId,
-    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetScope,
-    OutboundDeliveryTargetSummary, OutboundError,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetRegistrationOutcome,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
 };
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};

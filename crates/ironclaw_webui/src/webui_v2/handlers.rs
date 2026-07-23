@@ -40,9 +40,9 @@ use ironclaw_product_workflow::{
     EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW,
     EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_OPERATION, FS_STAT_VIEW, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, IdempotencyKey, LLM_ACTIVE_SET_CAPABILITY,
-    LLM_CODEX_LOGIN_OPERATION, LLM_CONFIG_VIEW, LLM_LIST_MODELS_OPERATION,
-    LLM_NEARAI_LOGIN_OPERATION, LLM_NEARAI_WALLET_LOGIN_OPERATION, LLM_PROVIDER_DELETE_CAPABILITY,
+    GLOBAL_AUTO_APPROVE_VIEW, IdempotencyKey, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_OPERATION,
+    LLM_CONFIG_VIEW, LLM_LIST_MODELS_OPERATION, LLM_NEARAI_LOGIN_OPERATION,
+    LLM_NEARAI_WALLET_LOGIN_OPERATION, LLM_PROVIDER_DELETE_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_OPERATION, LOGS_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
@@ -2659,24 +2659,6 @@ where
 
 fn generic_product_capability_activity_id() -> ActivityId {
     ActivityId::new()
-}
-
-fn product_capability_activity_id_with_idempotency_key(
-    caller: &WebUiAuthenticatedCaller,
-    capability: ProductCapabilityDescriptor,
-    input: &serde_json::Value,
-    idempotency_key: &str,
-) -> Result<ActivityId, RebornServicesError> {
-    validate_idempotency_key(idempotency_key)?;
-    let base = product_capability_activity_id(caller, capability, input)?;
-    let mut seed = Vec::new();
-    seed.extend_from_slice(base.as_uuid().as_bytes());
-    seed.extend_from_slice(&(idempotency_key.len() as u64).to_be_bytes());
-    seed.extend_from_slice(idempotency_key.as_bytes());
-    Ok(ActivityId::from_uuid(Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        &seed,
-    )))
 }
 
 fn llm_provider_upsert_activity_id(

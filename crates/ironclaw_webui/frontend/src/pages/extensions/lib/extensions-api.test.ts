@@ -34,8 +34,8 @@ test("installExtension assigns a fresh client idempotency key to each gesture", 
   await context.globalThis.__testExports.installExtension(packageRef);
 
   assert.equal(apiCalls.length, 2);
-  assert.equal(JSON.parse(apiCalls[0].options.body).idempotency_key, "install-gesture-one");
-  assert.equal(JSON.parse(apiCalls[1].options.body).idempotency_key, "install-gesture-two");
+  assert.equal(JSON.parse(apiCalls[0].options.body).client_action_id, "install-gesture-one");
+  assert.equal(JSON.parse(apiCalls[1].options.body).client_action_id, "install-gesture-two");
   assert.deepEqual(JSON.parse(apiCalls[0].options.body).package_ref, packageRef);
 });
 
@@ -126,33 +126,24 @@ test("extension lifecycle mutations include a client action id", async () => {
   await context.globalThis.__testExports.installExtension(packageRef, {
     clientActionId: "stable-install-action",
   });
-  await context.globalThis.__testExports.activateExtension(packageRef, {
-    clientActionId: "stable-activate-action",
-  });
   await context.globalThis.__testExports.removeExtension(packageRef, {
     clientActionId: "stable-remove-action",
   });
-  await context.globalThis.__testExports.submitExtensionSetup(
-    packageRef,
-    {},
-    {},
-    { clientActionId: "stable-setup-action" },
-  );
+  await context.globalThis.__testExports.submitExtensionSetup(packageRef, {}, {
+    clientActionId: "stable-setup-action",
+  });
 
   assert.deepEqual(JSON.parse(apiCalls[0].options.body), {
     package_ref: packageRef,
     client_action_id: "stable-install-action",
   });
   assert.deepEqual(JSON.parse(apiCalls[1].options.body), {
-    client_action_id: "stable-activate-action",
-  });
-  assert.deepEqual(JSON.parse(apiCalls[2].options.body), {
     client_action_id: "stable-remove-action",
   });
   assert.equal(setupCalls[0].extensionName, "web-access");
   assert.deepEqual(JSON.parse(JSON.stringify(setupCalls[0].options)), {
     action: "submit",
-    payload: { secrets: {}, fields: {} },
+    payload: { secrets: {} },
     clientActionId: "stable-setup-action",
   });
 });

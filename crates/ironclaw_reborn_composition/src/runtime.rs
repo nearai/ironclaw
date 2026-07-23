@@ -94,9 +94,9 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
-use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundError;
 #[cfg(any(test, feature = "test-support"))]

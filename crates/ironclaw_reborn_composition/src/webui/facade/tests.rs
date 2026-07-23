@@ -23,7 +23,7 @@ use ironclaw_host_api::{
     MountView, Resolution, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
-    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
     OPERATOR_SERVICE_LIFECYCLE_OPERATION, ProductCapabilityDescriptor, RebornOperatorToolCatalog,
     RebornOperatorToolInfo,
 };
@@ -418,16 +418,8 @@ async fn product_surface_extension_lifecycle_remove_succeeds_after_activation() 
     .expect("install resolves");
     assert_success(install, "install");
 
-    let activate = invoke_lifecycle_product_capability(
-        &bundle,
-        caller.clone(),
-        EXTENSION_ACTIVATE_CAPABILITY,
-        serde_json::json!({"extension_id": "web-access"}),
-    )
-    .await
-    .expect("activate resolves");
-    assert_success(activate, "activate");
-
+    // #6520: install drives readiness — there is no separate activate
+    // capability to invoke between install and remove.
     let remove = invoke_lifecycle_product_capability(
         &bundle,
         caller,

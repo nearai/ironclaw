@@ -5286,6 +5286,7 @@ supports_threads = true
                 scope: hosted_mcp_scope("hosted-mcp-remove-discovered"),
                 runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
             },
+            &lifecycle_owner(),
         )
         .await
         .expect("activate with discovery");
@@ -5301,7 +5302,7 @@ supports_threads = true
             .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
             .expect("remove unpublishes the discovered active package");
-        assert_eq!(removed.phase, InstallationState::Removed);
+        assert_eq!(removed.phase, LifecyclePublicState::Uninstalled);
         let extension_id = ExtensionId::new("notion").expect("valid extension id");
         assert!(
             active_registry
@@ -5346,6 +5347,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate Web Access");

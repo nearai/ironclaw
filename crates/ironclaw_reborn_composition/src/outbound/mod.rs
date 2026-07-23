@@ -1,7 +1,5 @@
 pub(crate) mod outbound_preferences_capability;
 
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
 pub(crate) use ironclaw_outbound::{
     DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
