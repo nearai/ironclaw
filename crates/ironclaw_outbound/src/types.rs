@@ -334,3 +334,12 @@ pub struct UpdateDeliveryStatusRequest {
     pub updated_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
 }
+
+/// Atomic ownership claim for the sole vendor-egress writer of a prepared
+/// delivery. Stores transition `Prepared -> Sending` exactly once and return
+/// `false` for replays or already-terminal attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimDeliveryAttemptForSendRequest {
+    pub delivery_id: OutboundDeliveryId,
+    pub scope: TurnScope,
+}

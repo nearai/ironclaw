@@ -140,6 +140,14 @@ impl HarnessCapabilityMode {
                 if harness.durable_capability_io_requested {
                     harness.install_durable_capability_io(turn_thread_service);
                 }
+                if harness
+                    .capability_ids
+                    .iter()
+                    .any(|id| id.as_str() == ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID)
+                    && harness.reborn_services_for_test().is_some()
+                {
+                    harness.install_trigger_source_turn_state_for_test(Arc::clone(&turn_store))?;
+                }
                 if harness.trigger_active_run_lookup_requested {
                     harness.install_trigger_active_run_lookup_for_test(turn_store)?;
                 }
@@ -272,10 +280,9 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// the same concrete reader implements both. `Some` only for
     /// `new_with_options`-built harnesses.
     inbound_attachment_reader: Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>>,
-    /// Backing handles for the synthetic `outbound_delivery_*` capabilities
-    /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`;
-    /// `create_capability_port` wraps the port with the two capabilities via
-    /// `apply_synthetic_capability_wrappers` when this is `Some`.
+    /// Backing handles for the synthetic outbound target list/set test seam.
+    /// `Some` only for `outbound_target_tools()`; route-current stays on the
+    /// normal first-party lane and uses the composed product service/store.
     outbound_target_tools: Option<OutboundTargetToolsParts>,
     /// C-MULTIUSER seam: when `true`, [`create_capability_port`] resolves the
     /// capability-execution user from the RUN's owner/actor (mirroring
@@ -626,7 +633,6 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
-            account_setup_descriptors,
             recording_network_egress,
             google_oauth_backend_for_test,
         } = options;
@@ -675,9 +681,6 @@ impl HostRuntimeCapabilityHarness {
             // and lifecycle installs fail with "available extension was not
             // found".
             input = input.with_trusted_fixture_extensions_for_test();
-        }
-        if !account_setup_descriptors.is_empty() {
-            input = input.with_account_setup_descriptors(account_setup_descriptors);
         }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
@@ -1000,6 +1003,25 @@ impl HostRuntimeCapabilityHarness {
             trigger_runtime,
             CapabilityId::new(ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID)?,
         ));
+        Ok(())
+    }
+
+    /// Route source-delivery lookup through the same turn-state store the
+    /// group coordinator writes. The production binary already uses one store
+    /// for both paths; only the integration group composes its coordinator
+    /// after the capability harness exists, so it must fill this late-bound
+    /// test seam before the first run.
+    fn install_trigger_source_turn_state_for_test(
+        &self,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    ) -> HarnessResult<()> {
+        let services = self
+            .reborn_services_for_test()
+            .ok_or("trigger source delivery wiring requires composed Reborn services")?;
+        ironclaw_reborn_composition::test_support::set_local_dev_trigger_source_turn_state_for_test(
+            services,
+            turn_store,
+        )?;
         Ok(())
     }
 
@@ -1707,9 +1729,9 @@ impl HostRuntimeCapabilityHarness {
         );
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
-        // builtin/extension grant otherwise). Excludes the synthetic-capability
-        // ids, which are surfaced by wrapping the port directly. See
-        // `additional_capability_grants` doc for the invariant.
+        // builtin/extension grant otherwise). Excludes only capabilities still
+        // surfaced by wrapping the port directly; route-current deliberately
+        // remains a normal first-party capability and receives a real grant.
         let synthetic_capability_ids: std::collections::HashSet<&str> = [
             ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
             ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
@@ -1949,11 +1971,11 @@ impl HostRuntimeCapabilityHarness {
     /// installation, so such a provider has NO production trust decision at
     /// all and this entry is the ONLY thing that ever trusts it (see
     /// `file_and_github_auth_tools_profile` / `extension_visibility_probe_tools_profile`,
-    /// neither of which runs a real install→activate handshake). A provider
+    /// neither of which runs the real install/readiness path). A provider
     /// IS activation-backed (must be excluded here) only once
     /// `local_dev_active_extension_authority_for_test` actually reports a
     /// trust entry for it -- e.g. `extension_lifecycle_tools_profile`'s real
-    /// credentialed install+activate flow. See `harness_trust_tests` below
+    /// credentialed install flow. See `harness_trust_tests` below
     /// for the regression pin covering both shapes.
     fn build_additional_provider_trust(
         provider_id: &ExtensionId,
@@ -2090,7 +2112,7 @@ fn turn_state_root_filesystem(
 /// that decision (`additional_provider_trust` extends the base map AFTER
 /// `extension_surface.provider_trust()`, last-writer-wins). Pure unit tests
 /// against the extracted helper, independent of the full async harness/tokio
-/// runtime, so the invariant is pinned even without a live extension-activation
+/// runtime, so the invariant is pinned even without a live extension-install
 /// scenario.
 #[cfg(test)]
 mod harness_trust_tests {
@@ -2099,7 +2121,7 @@ mod harness_trust_tests {
     /// The exact shape `extension_lifecycle_tools_profile_for_user` builds:
     /// a blanket `bundled_extension_provider_trust()`-style entry for
     /// `gmail` (the provider CodeRabbit's finding named), where `gmail` IS in
-    /// `activation_backed_providers` (its real credentialed install+activate
+    /// `activation_backed_providers` (its real credentialed install
     /// handshake already produced a production trust decision). Before the
     /// fix this test would have observed an unbounded `gmail` entry here; the
     /// fix must make it absent so the activation-backed production decision
@@ -2185,7 +2207,7 @@ mod harness_trust_tests {
         let additional = vec![(visprobe_provider.clone(), effects.clone())];
         // reborn_services is wired for this harness shape (`new_with_options`)
         // but `visprobe` was only ever `publish_bundled_extension_for_test`'d,
-        // never installed+activated -- so it must be ABSENT from
+        // never installed to active -- so it must be ABSENT from
         // `activation_backed_providers`, not folded in via a blanket
         // `reborn_services.is_some()` check.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
@@ -2203,7 +2225,7 @@ mod harness_trust_tests {
                 .get(&visprobe_provider)
                 .map(|decision| &decision.authority_ceiling.allowed_effects),
             Some(&effects),
-            "a publish-only (never installed+activated) provider must still get its \
+            "a publish-only (never installed to active) provider must still get its \
              synthetic trust entry even when the harness has `reborn_services` wired, \
              or its capabilities become invisible: {result:?}"
         );

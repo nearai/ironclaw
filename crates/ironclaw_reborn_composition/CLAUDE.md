@@ -171,6 +171,12 @@ Reborn-native product-auth surface:
   to the gateway-wide fallback cap. The browser cannot choose `AuthFlowKind` or
   `AuthContinuationRef`; this first route creates integration-credential
   setup flows with `AuthContinuationRef::SetupOnly`.
+- `POST /api/webchat/v2/extensions/{package_id}/setup/oauth/start` accepts only
+  the installed manifest credential requirement name plus expiry/invocation
+  context. Production resolves provider, account label, and OAuth scopes from
+  the lifecycle setup projection; raw browser provider/scope fields are not
+  accepted, and the global recipe registry is not extension authority. The
+  route emits a server-owned `LifecycleActivation` continuation.
 - `GET /api/reborn/product-auth/oauth/callback/{flow_id}` is a hosted
   callback route and is intentionally not behind WebUI bearer auth. It
   bounds the raw query string, reconstructs the scoped callback owner from
@@ -311,7 +317,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
+| Extensions registry/list/install/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{remove,setup}` | Mapped to lifecycle package refs and registry projections. Install establishes membership and host-owned reconciliation derives `setup_needed` or `active`; there is no public activation endpoint. Setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface. |
 | Extension import from zip (#5459) | (none — v2-only surface) | `POST /api/webchat/v2/extensions/import` | Admin-only (`operator_webui_config` capability on the matched bearer): uploads a standalone WASM tool bundle (zip with `manifest.toml` + `wasm/` + `schemas/` + `prompts/`). Validated as `ManifestSource::InstalledLocal` (never first-party/system trust or runtime, wasm runtime only, all manifest-declared assets required, duplicate zip entries rejected), then materialized under `/system/extensions/<id>/` and added to the catalog under the catalog-write + operation locks; duplicate installed/catalog ids are rejected. Restart-safe: startup filesystem discovery stamps everything it finds `InstalledLocal` (`HostBundled` is reserved for binary-compiled extensions), so a restart cannot relabel an upload into the first-party trust tier. 8 MiB body cap, mutation rate limit |
 | LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product facade; left unmounted with other operator routes for multi-user authenticators |

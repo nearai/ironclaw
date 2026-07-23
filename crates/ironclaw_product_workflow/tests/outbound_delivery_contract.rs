@@ -501,6 +501,80 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
 }
 
 #[tokio::test]
+async fn coordinator_suppresses_the_same_projection_after_reopen() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-reopen")],
+        })],
+    ));
+    let delivery = delivery_request(scope.clone());
+
+    let first = coordinator_over(&store, &adapter);
+    let first_outcome = first
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery: delivery.clone(),
+                parts: vec![ironclaw_product_adapters::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+            },
+        )
+        .await
+        .expect("first delivery succeeds");
+    assert!(matches!(
+        first_outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+
+    // A new coordinator models a reopened process over the same durable
+    // store. The stable projection identity resolves to the same attempt, and
+    // the atomic Prepared -> Sending claim cannot be acquired twice.
+    let reopened = coordinator_over(&store, &adapter);
+    let replay_outcome = reopened
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product_adapters::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+            },
+        )
+        .await
+        .expect("replay is safely suppressed");
+
+    assert!(matches!(
+        replay_outcome,
+        CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1);
+    assert_eq!(store.list_delivery_attempts(scope).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress() {
     // Ported from the retired `prepare_and_render_product_outbound` DM tests
     // (`require_direct_message_true_propagates_to_resolver_and_maps_to_rejected`

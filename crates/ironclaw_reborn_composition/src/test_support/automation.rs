@@ -5,12 +5,21 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_product_workflow::AutomationProductFacade;
+use ironclaw_product_workflow::{
+    AutomationProductFacade, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetSummary, RebornServicesError,
+    WebUiAuthenticatedCaller,
+};
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
-use ironclaw_turns::FilesystemTurnStateRowStore;
+use ironclaw_turns::{FilesystemTurnStateRowStore, ReplyTargetBindingRef, TurnStateStore};
 
+use crate::RebornServices;
 use crate::automation::trigger_poller::SnapshotActiveRunLookup;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+};
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Build the production `RebornAutomationProductFacade` over
@@ -55,4 +64,90 @@ where
     Arc::new(SnapshotActiveRunLookup::new(
         turn_state as Arc<dyn TurnRunSnapshotSource>,
     ))
+}
+
+/// Point the production local trigger-create hook at the turn-state store a
+/// group integration runtime actually writes. The outbound registry,
+/// conversation pairing service, and trigger lifecycle behavior remain the
+/// same objects the composed [`RebornServices`] owns.
+#[cfg(feature = "test-support")]
+pub fn set_local_dev_trigger_source_turn_state_for_test<F>(
+    services: &RebornServices,
+    turn_state: Arc<FilesystemTurnStateRowStore<F>>,
+) -> Result<(), String>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let runtime = services
+        .local_runtime
+        .as_ref()
+        .ok_or_else(|| "local runtime unavailable".to_string())?;
+    let mut source = runtime
+        .trigger_source_turn_state
+        .write()
+        .map_err(|error| format!("trigger source turn-state lock unavailable: {error}"))?;
+    *source = turn_state as Arc<dyn TurnStateStore>;
+    Ok(())
+}
+
+struct StaticSourceDeliveryTargetProvider {
+    summary: RebornOutboundDeliveryTargetSummary,
+    reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
+#[async_trait]
+impl OutboundDeliveryTargetProvider for StaticSourceDeliveryTargetProvider {
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: RebornOutboundDeliveryTargetCapabilities {
+                final_replies: true,
+                gate_prompts: false,
+                auth_prompts: false,
+            },
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            },
+            current_target: None,
+            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+        }])
+    }
+}
+
+/// Register one hermetic caller-owned outbound target on the exact mutable
+/// registry the production trigger-create hook and triggered-delivery path
+/// share. This is test data only; resolution and ownership filtering are the
+/// production implementations.
+#[cfg(feature = "test-support")]
+pub fn register_static_source_delivery_target_for_test(
+    services: &RebornServices,
+    provider_key: impl Into<String>,
+    target_id: RebornOutboundDeliveryTargetId,
+    reply_target_binding_ref: ReplyTargetBindingRef,
+) -> Result<(), String> {
+    let runtime = services
+        .local_runtime
+        .as_ref()
+        .ok_or_else(|| "local runtime unavailable".to_string())?;
+    let summary = RebornOutboundDeliveryTargetSummary::new(
+        target_id,
+        "test-channel",
+        "Source conversation",
+        Some("Hermetic source conversation target".to_string()),
+    )
+    .map_err(|error| format!("invalid test delivery target: {error}"))?;
+    runtime
+        .outbound_delivery_targets
+        .register_provider(
+            provider_key,
+            Arc::new(StaticSourceDeliveryTargetProvider {
+                summary,
+                reply_target_binding_ref,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|error| format!("test delivery target registration failed: {error}"))
 }

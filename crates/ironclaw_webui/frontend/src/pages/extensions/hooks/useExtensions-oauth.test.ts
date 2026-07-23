@@ -14,6 +14,10 @@ function flushAsyncWork() {
 }
 
 function useExtensionsOauthSourceForTest() {
+  const extensionActions = readFileSync(
+    new URL("../lib/extension-actions.ts", import.meta.url),
+    "utf8",
+  ).replaceAll("export function ", "function ");
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
@@ -28,8 +32,25 @@ function useExtensionsOauthSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup, useSetupSubmit };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { extensionListItemIsConfigured, useOauthSetup, useSetupSubmit };`;
 }
+
+test("OAuth completion uses the canonical three-state lifecycle predicate", () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  const { extensionListItemIsConfigured } = context.globalThis.__testExports;
+
+  assert.equal(extensionListItemIsConfigured({ installation_state: "active" }), true);
+  assert.equal(extensionListItemIsConfigured({ onboarding_state: "ready" }), false);
+  assert.equal(
+    extensionListItemIsConfigured({
+      installation_state: "setup_needed",
+      onboarding_state: "active",
+    }),
+    false,
+    "stale onboarding metadata must not complete OAuth while setup is still needed",
+  );
+});
 
 function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
   const mutationConfigs = [];
@@ -330,7 +351,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     active: true,
     authenticated: false,
     needs_setup: true,
-    installation_state: "active",
+    installation_state: "setup_needed",
     onboarding_state: "setup_required",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
@@ -463,7 +484,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     active: true,
     authenticated: false,
     needs_setup: true,
-    installation_state: "active",
+    installation_state: "setup_needed",
     onboarding_state: "setup_required",
   };
   const popup = { closed: false, location: { href: "about:blank" } };

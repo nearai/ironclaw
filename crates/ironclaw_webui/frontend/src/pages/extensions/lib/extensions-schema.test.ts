@@ -131,27 +131,11 @@ test("RUNTIME_LABELS covers exactly the honest runtime wire values", () => {
   ]);
 });
 
-test("STATE_TONES/STATE_LABELS contain exactly the honest wire states (§6.1 installation + §6.2 onboarding) — G5", () => {
-  // The installation-state axis (§6.1, `ironclaw_host_api::InstallationState`)
-  // has six resting states on a *listed* extension — `removed` is an
-  // action-response signal only and never appears there. The onboarding-state
-  // axis (§6.2, `RebornExtensionOnboardingState`) layers `auth_required` /
-  // `setup_required` on top (its `installed` / `failed` values are shared with
-  // the installation axis). The old transient installation states
-  // (`activating` / `deactivating` / `removing` / `removal_pending`) no longer
-  // exist on the wire — the host persists only `installed` / `active` /
-  // `failed` and derives the rest at projection time — so they must not be
-  // known states here.
-  const expectedKeys = [
-    "active",
-    "auth_required",
-    "configured",
-    "disabled",
-    "failed",
-    "installed",
-    "setup_required",
-    "unsupported",
-  ];
+test("STATE_TONES/STATE_LABELS expose only the two listed public lifecycle states", () => {
+  // Absence from the installed response is `uninstalled`; a present extension
+  // is either waiting on manifest-declared setup or active. Internal
+  // install/discovery/publication checkpoints never become card states.
+  const expectedKeys = ["active", "setup_needed"];
   assert.deepEqual(Object.keys(STATE_LABELS).sort(), expectedKeys);
   assert.deepEqual(Object.keys(STATE_TONES).sort(), expectedKeys);
 
@@ -159,10 +143,27 @@ test("STATE_TONES/STATE_LABELS contain exactly the honest wire states (§6.1 ins
     assert.ok(STATE_LABELS[state], `${state} must have a label (known-state check)`);
     assert.ok(STATE_TONES[state], `${state} must have a tone, not the muted default`);
   }
-  assert.equal(STATE_TONES.failed, "danger", "a terminal activation failure must read as danger");
   assert.equal(STATE_TONES.active, "success");
+  assert.equal(
+    STATE_TONES.setup_needed,
+    "warning",
+    "setup-needed extensions must use the yellow warning pill",
+  );
 
-  for (const dead of ["activating", "deactivating", "removing", "removal_pending", "removed"]) {
+  for (const dead of [
+    "auth_required",
+    "configured",
+    "disabled",
+    "failed",
+    "installed",
+    "setup_required",
+    "unsupported",
+    "activating",
+    "deactivating",
+    "removing",
+    "removal_pending",
+    "removed",
+  ]) {
     assert.equal(STATE_LABELS[dead], undefined, `${dead} is retired and must not be a known state`);
     assert.equal(STATE_TONES[dead], undefined, `${dead} is retired and must not be a known state`);
   }

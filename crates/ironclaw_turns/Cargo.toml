@@ -54,6 +54,10 @@ libsql = { version = "0.9", default-features = false, features = [
     "remote",
     "tls",
 ] }
+# Optional live-Postgres durable replay contract (skips when no test database
+# URL is configured). Versions match the workspace integration harness.
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 rand = "0.10"
 static_assertions = "1"
 tempfile = "3"

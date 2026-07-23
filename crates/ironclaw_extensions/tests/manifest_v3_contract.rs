@@ -154,21 +154,8 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
 
 #[test]
 fn admin_configuration_is_manifest_declared_and_resolved_without_installation_state() {
-    let toml = ACME_MANIFEST.replace(
-        "[runtime]",
-        r#"[admin_configuration]
-group_id = "vendor.acme"
-display_name = "Acme deployment credentials"
-description = "Shared OAuth client credentials."
-fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
-  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]
-
-[runtime]"#,
-    );
-
-    let record = parse_v3(&toml).expect("manifest-declared admin configuration should parse");
+    let record = parse_v3(ACME_MANIFEST)
+        .expect("manifest-declared admin configuration should parse without installation state");
     let [descriptor] = record.resolved().admin_configuration.as_slice() else {
         panic!("expected one resolved admin configuration descriptor");
     };
@@ -181,17 +168,14 @@ fields = [
 #[test]
 fn duplicate_admin_configuration_handles_fail_closed() {
     let toml = ACME_MANIFEST.replace(
-        "[runtime]",
-        r#"[admin_configuration]
-group_id = "vendor.acme"
-display_name = "Acme deployment credentials"
-description = "Shared OAuth client credentials."
-fields = [
+        r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
+]"#,
+        r#"fields = [
   { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
   { handle = "acme_client_id", label = "Duplicate", secret = true, required = true },
-]
-
-[runtime]"#,
+]"#,
     );
 
     let error = parse_v3(&toml).expect_err("duplicate handles must fail closed");
@@ -202,22 +186,41 @@ fields = [
 }
 
 #[test]
-fn channel_admin_configuration_cannot_drift_from_channel_config() {
-    let toml = ACME_MANIFEST.replace(
-        "[runtime]",
-        r#"[admin_configuration]
-group_id = "vendor.acme"
-display_name = "Acme deployment credentials"
-fields = [
-  { handle = "wrong_handle", label = "Wrong", secret = true, required = true },
-]
+fn channel_runtime_configuration_comes_from_admin_configuration_alone() {
+    let record = parse_v3(ACME_MANIFEST)
+        .expect("one manifest-owned admin schema should configure the channel runtime");
+    let [descriptor] = record.resolved().admin_configuration.as_slice() else {
+        panic!("expected one resolved admin configuration descriptor");
+    };
+    assert_eq!(descriptor.group_id.as_str(), "vendor.acme");
+    assert_eq!(
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.handle.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acme_bot_token", "acme_signing_secret"]
+    );
+    assert!(record.resolved().channel.is_some());
+}
 
-[runtime]"#,
+#[test]
+fn channel_runtime_secret_references_must_be_declared_by_admin_configuration() {
+    let toml = ACME_MANIFEST.replace(
+        r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
+]"#,
+        r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+]"#,
     );
 
-    let error = parse_v3(&toml).expect_err("parallel channel declarations must not drift");
+    let error = parse_v3(&toml).expect_err("undeclared channel secrets must fail closed");
     assert!(
-        error.contains("exactly match") && error.contains("channel.config"),
+        error.contains("channel ingress verification")
+            && error.contains("acme_signing_secret")
+            && error.contains("admin_configuration"),
         "{error}"
     );
 }

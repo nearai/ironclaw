@@ -1,3 +1,4 @@
+// arch-exempt: large_file, lifecycle handler regressions reuse the existing WebUI contract harness, plan #6175
 //! Caller-level contract tests for the WebChat v2 axum handlers.
 //!
 //! Per `.claude/rules/testing.md` "Test Through the Caller", these tests

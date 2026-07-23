@@ -1,31 +1,26 @@
 //! Generic run-delivery orchestration for channel extensions (§5.4).
 //!
 //! After the workflow accepts an inbound channel message (immediate-ACK
-//! webhooks), something must watch the submitted run and deliver its
-//! user-visible outputs — the final reply, approval/auth prompts, working
-//! indicators, busy hints, failure notices — back to the channel. That
-//! watching-and-emitting logic is pure delivery *semantics*: it is identical
-//! for every channel, so it lives here, once, and speaks only in
+//! webhooks), durable lifecycle events deliver its user-visible outputs — the
+//! final reply, approval/auth prompts, working indicators, busy hints, and
+//! failure notices — back to the channel. Those semantics are identical for
+//! every channel, so they live here once and speak only in
 //! [`DeliveryIntent`]s through the [`DeliveryCoordinator`]. Vendor mechanics
 //! (rendering, splitting, API selection) stay behind each extension's
 //! `ChannelAdapter::deliver`.
 //!
-//! Two components:
-//! - [`RunDeliveryObserver`] — the live source-route path: watches the run an
-//!   inbound message submitted and replies on the originating conversation.
-//! - [`TriggeredRunDeliveryDriver`] — the proactive path: watches a
-//!   trigger-submitted run and delivers to the creator's preference target.
+//! Three components:
+//! - [`RunDeliveryObserver`] — admission-time feedback without a run event.
+//! - [`RunDeliveryEventRouter`] — live source-route and triggered-run delivery
+//!   from committed lifecycle facts.
+//! - [`TriggeredRunDeliveryDriver`] — registers proactive routing context.
 //!
 //! Vendor-specific residue enters ONLY through the small ports below
 //! (approval/auth prompt enrichment, preference-target decoding); their
 //! implementations live with the vendor integration, not here.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
@@ -36,9 +31,7 @@ use ironclaw_product_adapters::{
     ApprovalPromptContextView, AuthPromptView, ExternalConversationRef, ExternalEventId,
     OutboundPart, ProductAdapterError,
 };
-use ironclaw_turns::{
-    GateRef, GetRunStateRequest, TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
-};
+use ironclaw_turns::{GateRef, TurnCoordinator, TurnRunId, TurnScope};
 
 use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
 
@@ -49,19 +42,18 @@ use crate::delivery_coordinator::{
 use crate::{ConversationBindingService, ProductWorkflowError, ResolvedBinding};
 
 mod gate_routes;
+mod lifecycle_events;
 mod observer;
 pub(crate) mod prompts;
 mod triggered;
 
+pub use lifecycle_events::{RunDeliveryEventHandler, RunDeliveryEventRouter};
 pub use observer::RunDeliveryObserver;
 pub use triggered::{
-    PreferenceTargetCodec, PreferenceTargetEncodeRequest, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest,
+    CurrentDeliveryTarget, CurrentDeliveryTargetResolver, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    TriggeredRunExternalDeliveryTarget,
 };
-
-const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const DEFAULT_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
-const RUN_POLL_JITTER_BUCKETS: u32 = 5;
 
 /// Maximum number of (conversation, external_event_id) pairs remembered for
 /// hint dedup. FIFO eviction beyond this cap keeps memory O(1); a
@@ -75,37 +67,6 @@ const HINT_SEEN_CAP: usize = 256;
 /// a distinct event id and gets a fresh hint.
 pub(crate) type HintSeenKey = (String, ExternalEventId);
 pub(crate) type HintSeenSet = Mutex<(VecDeque<HintSeenKey>, HashSet<HintSeenKey>)>;
-
-/// Delivery pacing and admission bounds for run watchers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunDeliverySettings {
-    pub poll_interval: Duration,
-    pub max_wait: Duration,
-    pub max_concurrent_deliveries: NonZeroUsize,
-    /// Bounds the total number of spawned delivery tasks (active + waiting
-    /// for a delivery permit). When this limit is reached, new trigger fires
-    /// are recorded as `Skipped` rather than spawning an unbounded waiting
-    /// task.
-    pub max_pending_deliveries: NonZeroUsize,
-}
-
-impl Default for RunDeliverySettings {
-    fn default() -> Self {
-        Self {
-            poll_interval: Duration::from_millis(250),
-            max_wait: DEFAULT_RUN_DELIVERY_MAX_WAIT,
-            max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
-            max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
-        }
-    }
-}
-
-/// Compatibility constructor for the triggered path. Live and proactive runs
-/// share the same long-running watcher budget because either may legitimately
-/// exceed the former two-minute cutoff before parking or completing.
-pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
-    RunDeliverySettings::default()
-}
 
 /// Approval-gate context enrichment: resolves WHAT is being approved
 /// (tool/action/reason) for a gate ref — the same source the WebUI gate
@@ -164,6 +125,7 @@ pub struct RunDeliveryServices {
 /// [`CoordinatedDeliveryOutcome::Delivered`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveredChannelMessage {
+    pub reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef,
     pub conversation: ExternalConversationRef,
     pub vendor_message_ref: String,
 }
@@ -173,12 +135,13 @@ pub(crate) fn delivered_messages_from_outcome(
 ) -> Vec<DeliveredChannelMessage> {
     match outcome {
         CoordinatedDeliveryOutcome::Delivered {
+            attempt,
             conversation,
             vendor_message_refs,
-            ..
         } => vendor_message_refs
             .iter()
             .map(|reference| DeliveredChannelMessage {
+                reply_target_binding_ref: attempt.candidate.target.clone(),
                 conversation: conversation.clone(),
                 vendor_message_ref: reference.clone(),
             })
@@ -187,7 +150,7 @@ pub(crate) fn delivered_messages_from_outcome(
     }
 }
 
-/// Failures raised while watching a run and delivering its outputs.
+/// Failures raised while reacting to a run lifecycle event and delivering its outputs.
 #[derive(Debug, thiserror::Error)]
 pub enum RunDeliveryError {
     #[error("workflow binding failed: {0}")]
@@ -206,88 +169,14 @@ pub enum RunDeliveryError {
     DeliveryFailed {
         failure_kind: ironclaw_outbound::DeliveryFailureKind,
     },
-    #[error("run {run_id} did not finish before the delivery timeout")]
-    RunWaitTimedOut { run_id: TurnRunId },
-    /// Timeout after at least one blocked-state notification (approval/auth
-    /// prompt) was already delivered. The user is not in silence, so no
-    /// additional feedback message is needed.
-    #[error("run {run_id} did not reach a terminal state after delivering a blocked notification")]
-    RunWaitTimedOutAfterNotification { run_id: TurnRunId },
     #[error("invalid projection ref: {reason}")]
     InvalidProjectionRef { reason: String },
 }
 
-/// The last blocked state a watcher already notified about; a run returning
-/// to the same (status, gate) pair is not re-announced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BlockedActionableMarker {
-    pub(crate) status: TurnStatus,
-    pub(crate) gate_ref: Option<String>,
-}
-
-pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
-    match state.status {
-        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
-            status: state.status,
-            gate_ref: state
-                .gate_ref
-                .as_ref()
-                .map(|gate| gate.as_str().to_string()),
-        }),
-        _ => None,
-    }
-}
-
-pub(crate) fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
-    if base.is_zero() {
-        return base;
-    }
-    let mut hasher = DefaultHasher::new();
-    run_id.to_string().hash(&mut hasher);
-    let bucket = hasher.finish() as u32 % RUN_POLL_JITTER_BUCKETS;
-    (base + base / RUN_POLL_JITTER_BUCKETS * bucket).min(MAX_RUN_POLL_INTERVAL)
-}
-
-/// Poll a run until it reaches a terminal state or a blocked state the
-/// caller has not yet announced. (The live observer carries its own copy of
-/// this loop to raise the working indicator between polls; keep the two in
-/// sync.)
-pub(crate) async fn wait_for_actionable_state(
-    turn_coordinator: &dyn TurnCoordinator,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    settings: &RunDeliverySettings,
-    delivered_blocked_marker: Option<&BlockedActionableMarker>,
-) -> Result<TurnRunState, RunDeliveryError> {
-    let start = tokio::time::Instant::now();
-    let mut poll_interval = settings.poll_interval;
-    loop {
-        let state = turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: scope.clone(),
-                run_id,
-            })
-            .await?;
-        if state.status.is_terminal() {
-            return Ok(state);
-        }
-        if let Some(marker) = blocked_actionable_marker(&state)
-            && Some(&marker) != delivered_blocked_marker
-        {
-            return Ok(state);
-        }
-        if start.elapsed() >= settings.max_wait {
-            return Err(RunDeliveryError::RunWaitTimedOut { run_id });
-        }
-        tokio::time::sleep(jittered_poll_interval(poll_interval, &run_id)).await;
-        poll_interval = poll_interval.saturating_mul(2).min(MAX_RUN_POLL_INTERVAL);
-    }
-}
-
 /// Cancel a run parked on an interactive-auth gate with a `Policy` reason —
 /// the same `cancel_run` the auth-deny resolution uses. Idempotent per run
-/// (`channel-auth-block:{run_id}`) so repeated watcher passes are safe.
-/// Shared by the live observer and the triggered path so the cancellation
+/// (`channel-auth-block:{run_id}`) so replayed lifecycle events are safe.
+/// Shared by the live and triggered paths so the cancellation
 /// contract cannot drift between them. After a successful run cancel the
 /// durable auth-flow record is cancelled alongside it (best-effort).
 pub(crate) async fn cancel_auth_blocked_run(

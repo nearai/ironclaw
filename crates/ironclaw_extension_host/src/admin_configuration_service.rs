@@ -6,6 +6,7 @@
 //! redacted value references through the durable configuration store.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::Arc;
 
 use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor};
@@ -76,6 +77,10 @@ pub enum AdminConfigurationServiceError {
     IdempotencyConflict,
     #[error("admin-configuration revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict { expected: u64, actual: u64 },
+    #[error("admin-configuration runtime reconciliation failed")]
+    RuntimeReconciliationFailed,
+    #[error("admin-configuration runtime rollback failed")]
+    RuntimeRollbackFailed,
     #[error("admin-configuration service is unavailable")]
     Unavailable,
 }
@@ -258,6 +263,41 @@ where
         expected_revision: u64,
         submitted: Vec<AdminConfigurationSubmittedValue>,
     ) -> Result<AdminConfigurationGroupState, AdminConfigurationServiceError> {
+        self.replace_with_reconcile(
+            scope,
+            group_id,
+            idempotency_key,
+            expected_revision,
+            submitted,
+            || std::future::ready(Ok(())),
+        )
+        .await
+    }
+
+    /// Replace one group and reconcile every runtime consumer as one bounded
+    /// saga owned by the configuration service.
+    ///
+    /// The candidate revision is published before `reconcile` so existing
+    /// runtime resolvers observe one authoritative configuration. Reconcile
+    /// failure rolls back that exact revision with CAS, preserving a later
+    /// concurrent writer. Old secret material is retained until reconcile
+    /// succeeds; on rollback the candidate's newly staged secrets are
+    /// removed and `reconcile` runs again against the restored record. An
+    /// exact idempotent replay still calls `reconcile`, healing interruption
+    /// after durable publication but before runtime refresh.
+    pub async fn replace_with_reconcile<R, Fut>(
+        &self,
+        scope: &ResourceScope,
+        group_id: &AdminConfigurationGroupId,
+        idempotency_key: &AdminConfigurationIdempotencyKey,
+        expected_revision: u64,
+        submitted: Vec<AdminConfigurationSubmittedValue>,
+        reconcile: R,
+    ) -> Result<AdminConfigurationGroupState, AdminConfigurationServiceError>
+    where
+        R: Fn() -> Fut,
+        Fut: Future<Output = Result<(), AdminConfigurationServiceError>>,
+    {
         let descriptor = self
             .descriptors
             .get(group_id)
@@ -282,6 +322,7 @@ where
             .map_err(map_store_error)?;
         let reservation = match reservation {
             AdminConfigurationReserveOutcome::Replay(commit) => {
+                reconcile().await?;
                 return Ok(render_group(descriptor, Some(&commit)));
             }
             AdminConfigurationReserveOutcome::Reserved(reservation) => reservation,
@@ -348,6 +389,30 @@ where
                 return Err(map_store_error(error));
             }
         };
+        if let Err(reconcile_error) = reconcile().await {
+            if let Err(rollback_error) = self
+                .store
+                .rollback_commit(scope, &reservation, previous.as_ref())
+                .await
+            {
+                tracing::warn!(
+                    error = ?rollback_error,
+                    failed_revision = reservation.revision,
+                    "admin-configuration runtime reconciliation failed and the durable revision could not be rolled back"
+                );
+                return Err(AdminConfigurationServiceError::RuntimeRollbackFailed);
+            }
+            self.cleanup_staged(&shared_scope, &staged_handles).await;
+            if let Err(restore_error) = reconcile().await {
+                tracing::warn!(
+                    error = ?restore_error,
+                    restored_revision = reservation.expected_revision,
+                    "admin-configuration durable rollback succeeded but runtime restoration failed"
+                );
+                return Err(AdminConfigurationServiceError::RuntimeRollbackFailed);
+            }
+            return Err(reconcile_error);
+        }
         self.cleanup_replaced_secrets(&shared_scope, previous.as_ref(), &committed)
             .await;
         Ok(render_group(descriptor, Some(&committed)))

@@ -11,6 +11,10 @@ const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
 const toolSurfaces = [{ kind: "tool" }];
 
 function useExtensionsSourceForTest() {
+  const extensionActions = readFileSync(
+    new URL("../lib/extension-actions.ts", import.meta.url),
+    "utf8",
+  ).replaceAll("export function ", "function ");
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
@@ -25,7 +29,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
 }
 
 function contextFor(mutationState, queryCalls) {
@@ -93,7 +97,7 @@ test("useExtensions points channel install success at the setup panel", () => {
 
   context.globalThis.__testExports.useExtensions();
   mutationConfigs[0].onSuccess(
-    { success: true, message: "Slack is installed. Activate it to make its tools available." },
+    { success: true, message: "Slack installed. Complete setup to publish its tools." },
     { displayName: "Slack", surfaces: channelSurfaces }
   );
 

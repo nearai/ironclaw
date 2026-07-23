@@ -260,7 +260,7 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
             .as_value()
             .get("phase")
             .and_then(serde_json::Value::as_str),
-        Some("installed")
+        Some("setup_needed")
     );
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(
@@ -321,7 +321,7 @@ async fn lifecycle_command_admission_rejects_before_facade_executes() {
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope =
-        sample_command_envelope("command-extension-denied", "extension_activate", "github");
+        sample_command_envelope("command-extension-denied", "extension_install", "github");
 
     let ack = workflow.submit_inbound(envelope).await.expect("accept");
 

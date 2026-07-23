@@ -65,17 +65,17 @@ ACTIVE_TOOL = {
     "surfaces": TOOL_SURFACES,
 }
 
-INACTIVE_MCP = {
-    "package_ref": _package_ref("inactive-mcp"),
-    "display_name": "Inactive MCP",
+INSTALLED_MCP = {
+    "package_ref": _package_ref("installed-mcp"),
+    "display_name": "Installed MCP",
     "runtime": "mcp",
-    "description": "An inactive MCP server",
-    "active": False,
-    "authenticated": False,
+    "description": "A setup-free installed MCP server",
+    "active": True,
+    "authenticated": True,
     "has_auth": False,
     "needs_setup": False,
     "tools": ["lookup"],
-    "installation_state": "installed",
+    "installation_state": "active",
     "surfaces": TOOL_SURFACES,
 }
 
@@ -103,7 +103,7 @@ TELEGRAM_CHANNEL_SETUP = {
     "has_auth": True,
     "needs_setup": True,
     "tools": [],
-    "installation_state": "installed",
+    "installation_state": "setup_needed",
     "onboarding_state": "setup_required",
     "surfaces": _channel_surfaces(),
 }
@@ -141,7 +141,7 @@ CONFIG_TOOL = {
     "has_auth": True,
     "needs_setup": True,
     "tools": [],
-    "installation_state": "installed",
+    "installation_state": "setup_needed",
     "onboarding_state": "setup_required",
     "surfaces": TOOL_SURFACES,
 }
@@ -156,7 +156,7 @@ OAUTH_TOOL = {
     "has_auth": True,
     "needs_setup": True,
     "tools": [],
-    "installation_state": "installed",
+    "installation_state": "setup_needed",
     "onboarding_state": "setup_required",
     "surfaces": TOOL_SURFACES,
 }
@@ -186,7 +186,6 @@ async def _open_mocked_extensions_page(
     setup_submit_responses=None,
     install_responses=None,
     oauth_start_responses=None,
-    activate_responses=None,
     remove_responses=None,
     defer_extension_list=False,
 ):
@@ -199,10 +198,8 @@ async def _open_mocked_extensions_page(
     setup_submit_responses_by_id = dict(setup_submit_responses or {})
     install_responses_by_id = dict(install_responses or {})
     oauth_start_responses_by_id = dict(oauth_start_responses or {})
-    activate_responses_by_id = dict(activate_responses or {})
     remove_responses_by_id = dict(remove_responses or {})
     install_requests: list[dict] = []
-    activate_requests: list[str] = []
     remove_requests: list[str] = []
     setup_submit_requests: list[dict] = []
     oauth_start_requests: list[dict] = []
@@ -311,7 +308,8 @@ async def _open_mocked_extensions_page(
                     if extension.get("package_ref", {}).get("id") == package_id:
                         extension["authenticated"] = True
                         extension["needs_setup"] = False
-                        extension["installation_state"] = "configured"
+                        extension["active"] = True
+                        extension["installation_state"] = "active"
                         extension.pop("onboarding_state", None)
             await fulfill_json(route, response)
             return
@@ -344,13 +342,13 @@ async def _open_mocked_extensions_page(
                 installed = dict(entry)
                 installed.update(
                     {
-                        "active": False,
-                        "authenticated": False,
+                        "active": not requires_setup,
+                        "authenticated": not requires_setup,
                         "has_auth": bool(entry.get("has_auth") or requires_setup),
                         "needs_setup": requires_setup,
-                        # §6.1 installation state is `installed` after install;
-                        # the onboarding axis (§6.2) carries setup_required.
-                        "installation_state": "installed",
+                        "installation_state": (
+                            "setup_needed" if requires_setup else "active"
+                        ),
                         "tools": entry.get("tools") or [],
                     }
                 )
@@ -361,31 +359,6 @@ async def _open_mocked_extensions_page(
             if response.get("success") is not False and entry:
                 entry["installed"] = True
             await fulfill_json(route, response)
-            return
-
-        if (
-            path.startswith("/api/webchat/v2/extensions/")
-            and path.endswith("/activate")
-            and request.method == "POST"
-        ):
-            package_id = unquote(
-                path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/activate")
-            )
-            activate_requests.append(package_id)
-            response = activate_responses_by_id.get(
-                package_id,
-                {"success": True, "message": f"{package_id} activated"},
-            )
-            if response.get("success") is not False:
-                for extension in installed_extensions:
-                    if extension.get("package_ref", {}).get("id") == package_id:
-                        extension["active"] = True
-                        extension["installation_state"] = "active"
-                        extension.pop("onboarding_state", None)
-            await fulfill_json(
-                route,
-                response,
-            )
             return
 
         if (
@@ -425,7 +398,6 @@ async def _open_mocked_extensions_page(
         "context": context,
         "page": page,
         "install_requests": install_requests,
-        "activate_requests": activate_requests,
         "remove_requests": remove_requests,
         "setup_submit_requests": setup_submit_requests,
         "oauth_start_requests": oauth_start_requests,
@@ -1080,7 +1052,7 @@ async def test_reborn_legacy_extensions_installed_actions(
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
-        installed=[ACTIVE_TOOL, INACTIVE_MCP],
+        installed=[ACTIVE_TOOL],
         registry=[REGISTRY_TOOL, REGISTRY_MCP],
     )
     try:
@@ -1092,44 +1064,11 @@ async def test_reborn_legacy_extensions_installed_actions(
         await expect(active_card.get_by_text("search")).to_be_visible()
         await expect(active_card.get_by_text("fetch")).to_be_visible()
 
-        inactive_card = _card_by_title(page, "Inactive MCP")
-        await expect(inactive_card).to_be_visible(timeout=5000)
-        await inactive_card.get_by_role("button", name="Activate").click()
-        await expect(page.get_by_text("inactive-mcp activated")).to_be_visible(timeout=5000)
-        assert harness["activate_requests"] == ["inactive-mcp"]
-
         await active_card.get_by_label("More actions").click()
         await page.get_by_role("menuitem", name="Remove").click()
         await _resolve_remove_confirmation(page, "Active Tool", accept=True)
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_activate_success_marks_extension_active_with_capabilities(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("installed", exact=True)).to_be_visible()
-
-        await card.get_by_role("button", name="Activate").click()
-        await expect(page.get_by_text("inactive-mcp activated")).to_be_visible(timeout=5000)
-        assert harness["activate_requests"] == ["inactive-mcp"]
-
-        await expect(card.get_by_text("active", exact=True)).to_be_visible(timeout=5000)
-        await expect(card.get_by_role("button", name="Activate")).to_have_count(0)
-        await card.get_by_role("button", name="1 capability").click()
-        await expect(card.get_by_text("lookup", exact=True)).to_be_visible()
     finally:
         await harness["context"].close()
 
@@ -1341,128 +1280,6 @@ async def test_reborn_legacy_extensions_null_tools_render_no_capabilities(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_activate_failure_keeps_extension_inactive(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        activate_responses={
-            "inactive-mcp": {
-                "success": False,
-                "message": "Configure credentials before activation.",
-            }
-        },
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("installed", exact=True)).to_be_visible()
-        await card.get_by_role("button", name="Activate").click()
-
-        await expect(
-            page.get_by_text("Configure credentials before activation.")
-        ).to_be_visible(timeout=5000)
-        assert harness["activate_requests"] == ["inactive-mcp"]
-
-        await expect(card.get_by_text("installed", exact=True)).to_be_visible(timeout=5000)
-        await expect(card.get_by_role("button", name="Activate")).to_have_count(1)
-        await expect(card.get_by_text("active", exact=True)).to_have_count(0)
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_activate_auth_url_requires_https(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        activate_responses={
-            "inactive-mcp": {
-                "success": True,
-                "message": "Inactive MCP activated",
-                "auth_url": "javascript:alert('xss')",
-            }
-        },
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        await page.evaluate(
-            """
-            () => {
-              window.__openedUrls = [];
-              window.open = (url) => {
-                window.__openedUrls.push(url);
-                return null;
-              };
-            }
-            """
-        )
-
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Activate").click()
-
-        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
-            timeout=5000
-        )
-        assert await page.evaluate("() => window.__openedUrls") == []
-        assert harness["activate_requests"] == ["inactive-mcp"]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_activate_auth_url_accepts_uppercase_https(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        activate_responses={
-            "inactive-mcp": {
-                "success": True,
-                "message": "Inactive MCP activated",
-                "auth_url": "HTTPS://example.com/oauth?state=abc",
-            }
-        },
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        await page.evaluate(
-            """
-            () => {
-              window.__openedUrls = [];
-              window.open = (url) => {
-                window.__openedUrls.push(url);
-                return null;
-              };
-            }
-            """
-        )
-
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Activate").click()
-
-        await page.wait_for_function(
-            "() => window.__openedUrls.some((url) => /^https:\\/\\//i.test(url))",
-            timeout=5000,
-        )
-        opened = await page.evaluate("() => window.__openedUrls")
-        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
-        assert harness["activate_requests"] == ["inactive-mcp"]
-    finally:
-        await harness["context"].close()
-
-
 async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -1470,16 +1287,13 @@ async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
         reborn_v2_server,
         reborn_v2_browser,
         installed=[
-            # `configured` is the honest §6.1 resting state for a channel whose
-            # operator setup is saved but which is not active yet — the old
-            # transient `activation_in_progress` never appears on the wire.
-            # `has_auth` (the channel binds a caller account) is what keeps the
-            # Connect/Reconnect affordance in the overflow menu.
+            # Operator setup and per-user connection remain separate. Public
+            # lifecycle is derived only as setup_needed or active.
             _label_channel(
                 authenticated=False,
                 has_auth=True,
                 needs_setup=False,
-                installation_state="configured",
+                installation_state="setup_needed",
             ),
             _label_channel(
                 package_ref=_package_ref("label-channel-authenticated"),
@@ -1487,7 +1301,7 @@ async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
                 authenticated=True,
                 has_auth=True,
                 needs_setup=False,
-                installation_state="configured",
+                installation_state="active",
             ),
         ],
         tab="channels",
@@ -1497,15 +1311,13 @@ async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
 
         unauthenticated = _card_by_title(page, "Label Channel")
         await expect(unauthenticated).to_be_visible(timeout=5000)
-        await _open_card_menu(unauthenticated)
         await expect(
-            page.get_by_role("menuitem", name="Connect", exact=True)
+            unauthenticated.get_by_role("button", name="Connect", exact=True)
         ).to_have_count(1)
         await expect(
-            page.get_by_role("menuitem", name="Reconnect", exact=True)
+            unauthenticated.get_by_role("button", name="Reconnect", exact=True)
         ).to_have_count(0)
 
-        await page.mouse.click(8, 8)
         authenticated = _card_by_title(page, "Authenticated Label Channel")
         await expect(authenticated).to_be_visible(timeout=5000)
         await _open_card_menu(authenticated)
@@ -1528,7 +1340,7 @@ async def test_reborn_legacy_channel_setup_required_has_single_connect_action(
         installed=[
             _label_channel(
                 authenticated=False,
-                installation_state="installed",
+                installation_state="setup_needed",
                 onboarding_state="setup_required",
             )
         ],
@@ -1606,7 +1418,6 @@ async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activat
         await expect(modal.get_by_text("Extension is active.")).to_be_visible()
         await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
         await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
-        assert harness["activate_requests"] == []
     finally:
         await harness["context"].close()
 
@@ -1615,14 +1426,14 @@ async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
     reborn_v2_server, reborn_v2_browser
 ):
     # Pairing is a connect affordance on the channel surface (strategy
-    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
-    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
+    # `inbound_proof_code`): an unpaired member is `setup_needed`, and the
+    # caller finishes setup by redeeming a proof code.
     pairing_channel = {
         **TELEGRAM_CHANNEL_SETUP,
         "active": False,
         "authenticated": True,
         "needs_setup": False,
-        "installation_state": "configured",
+        "installation_state": "setup_needed",
         "surfaces": _channel_surfaces(
             channel="telegram",
             strategy="inbound_proof_code",
@@ -1656,7 +1467,7 @@ async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
 
         card = _card_by_title(page, "Telegram")
         await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("configured", exact=True)).to_be_visible()
+        await expect(card.get_by_text("setup needed", exact=True)).to_be_visible()
         await expect(card.get_by_role("button", name="Activate")).to_have_count(0)
 
         section = page.locator("[data-testid='pairing-section']").first
@@ -1678,14 +1489,14 @@ async def test_reborn_legacy_channel_pairing_enter_key_submits_code(
     reborn_v2_server, reborn_v2_browser
 ):
     # Pairing is a connect affordance on the channel surface (strategy
-    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
-    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
+    # `inbound_proof_code`): an unpaired member is `setup_needed`, and the
+    # caller finishes setup by redeeming a proof code.
     pairing_channel = {
         **TELEGRAM_CHANNEL_SETUP,
         "active": False,
         "authenticated": True,
         "needs_setup": False,
-        "installation_state": "configured",
+        "installation_state": "setup_needed",
         "surfaces": _channel_surfaces(
             channel="telegram",
             strategy="inbound_proof_code",
@@ -1736,14 +1547,14 @@ async def test_reborn_legacy_channel_pairing_failure_keeps_code_for_retry(
     reborn_v2_server, reborn_v2_browser
 ):
     # Pairing is a connect affordance on the channel surface (strategy
-    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
-    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
+    # `inbound_proof_code`): an unpaired member is `setup_needed`, and the
+    # caller finishes setup by redeeming a proof code.
     pairing_channel = {
         **TELEGRAM_CHANNEL_SETUP,
         "active": False,
         "authenticated": True,
         "needs_setup": False,
-        "installation_state": "configured",
+        "installation_state": "setup_needed",
         "surfaces": _channel_surfaces(
             channel="telegram",
             strategy="inbound_proof_code",
@@ -2689,7 +2500,7 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
-        installed=[CHANNEL_READY, INACTIVE_MCP],
+        installed=[CHANNEL_READY, INSTALLED_MCP],
         registry=[AVAILABLE_CHANNEL, REGISTRY_MCP],
         tab="channels",
     )
@@ -2709,7 +2520,7 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
             "() => location.pathname.endsWith('/extensions/tools')",
             timeout=5000,
         )
-        await expect(page.get_by_text("Inactive MCP", exact=True)).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Installed MCP", exact=True)).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Registry MCP Server", exact=True)).to_be_visible()
     finally:
         await harness["context"].close()

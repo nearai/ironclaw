@@ -26,6 +26,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
+    installer
+        .seed_capability_credential_account("notion", "itest notion ready path", &[])
+        .await?;
     installer.submit_turn("install notion").await?;
     installer
         .assert_tool_invoked("builtin.extension_install")
@@ -100,12 +103,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // `assert_tool_result_contains` returns `Ok` when present, `Err` when
     // absent — invert to assert absence.
     if viewer
-        .assert_tool_result_contains(r#""installation_phase":"installed""#)
+        .assert_tool_result_contains(r#""installation_phase":"setup_needed""#)
         .await
         .is_ok()
     {
         return Err(
-            "removed extension still shows installation_phase:installed in cross-thread search; \
+            "removed extension still shows installation_phase:setup_needed in cross-thread search; \
              builtin.extension_remove did not propagate through the shared store"
                 .into(),
         );

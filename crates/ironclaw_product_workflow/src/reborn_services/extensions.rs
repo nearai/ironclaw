@@ -12,7 +12,8 @@ use crate::{
     ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
+    LifecycleProductSurfaceContext, LifecyclePublicState, ProductView, RebornAccountBindingSource,
+    RebornAuthAccount,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
     RebornServicesError, RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
@@ -302,6 +303,10 @@ fn extension_info(
     let activation_error = activation_errors
         .get(summary.package_ref.id.as_str())
         .cloned();
+    let user_active = phase == InstallationState::Active
+        && readiness != ExtensionCredentialReadiness::MissingRequired
+        && !channel_unconnected
+        && activation_error.is_none();
     let auth_accounts = vendor_auth_accounts(&summary, connected, account_state);
     let resolved_account_id = auth_accounts
         .first()
@@ -314,18 +319,15 @@ fn extension_info(
         runtime,
         description: summary.description,
         authenticated: authenticated && !channel_unconnected,
-        active: phase == InstallationState::Active,
+        active: user_active,
         tools: summary.visible_capability_ids,
-        needs_setup: channel_unconnected
-            || readiness == ExtensionCredentialReadiness::MissingRequired
-            || matches!(
-                phase,
-                InstallationState::Installed
-                    | InstallationState::Configured
-                    | InstallationState::Failed
-            ),
+        needs_setup: !user_active,
         has_auth,
-        installation_state: wire_installation_state(phase, readiness),
+        installation_state: if user_active {
+            LifecyclePublicState::Active
+        } else {
+            LifecyclePublicState::SetupNeeded
+        },
         activation_error,
         version: Some(summary.version),
         onboarding_state,
@@ -376,25 +378,6 @@ fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
     summary
         .surface_kinds
         .contains(&CapabilitySurfaceKind::Channel)
-}
-
-/// The wire installation state (§6.1): the composition-projected state,
-/// refined to `Configured` when the caller's required credentials are present
-/// but the extension is only `Installed` (not yet active). The composition
-/// projection already yields `Active` / `Disabled` / `Failed`; this adds the
-/// derived `Configured` distinction the product layer can prove from
-/// credential readiness.
-fn wire_installation_state(
-    projected: InstallationState,
-    readiness: ExtensionCredentialReadiness,
-) -> InstallationState {
-    if projected == InstallationState::Installed
-        && readiness == ExtensionCredentialReadiness::Configured
-    {
-        InstallationState::Configured
-    } else {
-        projected
-    }
 }
 
 /// The credential-authority vendor a channel/auth surface binds. Prefers the
@@ -523,7 +506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_marks_active_credentialed_extension_unauthenticated_without_caller_account() {
+    async fn list_projects_setup_needed_when_caller_lacks_required_account() {
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
@@ -545,12 +528,19 @@ mod tests {
         .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
-        assert!(extension.active, "lifecycle activation remains visible");
+        assert!(
+            !extension.active,
+            "shared runtime readiness must not make this caller active"
+        );
         assert!(
             !extension.authenticated,
             "credential readiness must be evaluated for the current caller"
         );
         assert!(extension.needs_setup);
+        assert_eq!(
+            extension.installation_state,
+            LifecyclePublicState::SetupNeeded
+        );
         assert_eq!(
             extension.onboarding_state,
             Some(RebornExtensionOnboardingState::SetupRequired)
@@ -1106,7 +1096,7 @@ mod tests {
                 credential_instructions: Some("Paste the fixture token.".to_string()),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After saving the token, activate Fixture to publish its tools.".to_string(),
+                    "After saving the token, IronClaw finishes Fixture installation automatically and publishes its tools.".to_string(),
                 ),
             }),
         }
@@ -1137,7 +1127,7 @@ mod tests {
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                    "After NEAR AI is configured for the assistant, IronClaw finishes installation automatically and publishes its tools."
                         .to_string(),
                 ),
             }),

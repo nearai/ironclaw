@@ -1,5 +1,5 @@
 //! Scenario 9 (bucket-3 arms of issue #6105; the #5878 and #6043 failure
-//! shapes): ACTIVATION-TIME auth surface. `extension_activate` when the
+//! shapes): install-time readiness surface. `extension_install` when the
 //! caller's only credential account for the provider is REVOKED (external
 //! revocation — the user pulled the grant on the provider side) must open a
 //! REAL re-auth gate:
@@ -9,17 +9,17 @@
 //!   discriminator);
 //! - NO error-shaped tool result is persisted (#5878's misleading "the
 //!   tool input could not be encoded" / "provider unavailable" regression);
-//! - a RETRIED activation with the credential still revoked parks at a
+//! - a RETRIED install with the credential still revoked parks at a
 //!   fresh re-auth gate — denied once is not satisfied, and the gate is not
 //!   one-shot (the lifecycle.md "reconnect must not resume without updated
 //!   credentials" arm);
 //! - after a reconfigure (fresh credential through the production
-//!   manual-token flow) activation completes — the revoked state does not
+//!   manual-token flow) installation completes — the revoked state does not
 //!   wedge the machine (#5878's "requires multiple retry attempts" arm).
 //!
 //! Complements the DISPATCH-TIME 401 → re-auth pin in
 //! `tests/integration/auth/auth_gate.rs` (issue #5878 reported the
-//! `extension_activate` surface specifically, which that test does not
+//! install/readiness-reconciliation surface specifically, which that test does not
 //! drive). Uses "notion" (installed+removed by scenario 2, so the install
 //! here is fresh; no other scenario touches its credential accounts).
 
@@ -31,14 +31,10 @@ use serde_json::json;
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 1: activation with only a revoked credential opens the gate ───
     let activator = g
-        .thread("notion-reauth-activate")
+        .thread("notion-reauth-install")
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
-                json!({"extension_id": "notion"}),
-            ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
                 json!({"extension_id": "notion"}),
             ),
             // Consumed by the post-deny resume model call.
@@ -104,6 +100,24 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .wait_for_status(run_id, TurnStatus::Completed)
         .await?;
 
+    // Removal is the sole disable/reset action. It clears the setup-needed
+    // membership so a later install is a real fresh lifecycle attempt.
+    let first_remove = g
+        .thread("notion-reauth-remove-before-retry")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_remove",
+                json!({"extension_id": "notion"}),
+            ),
+            RebornScriptedReply::text("notion removed"),
+        ])
+        .build()
+        .await?;
+    first_remove.submit_turn("remove notion").await?;
+    first_remove
+        .assert_tool_result_contains("\"removed\":true")
+        .await?;
+
     // ── Phase 2: retry over the STILL-revoked credential gates AGAIN ────────
     // The lifecycle.md authentication-failure arm: a denied re-auth gate must
     // not mark the requirement satisfied, and activation must not resume
@@ -116,7 +130,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("notion-reauth-retry")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "notion"}),
             ),
             RebornScriptedReply::text("notion still needs reauthorization"),
@@ -149,12 +163,28 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .wait_for_status(retry_run_id, TurnStatus::Completed)
         .await?;
 
+    let second_remove = g
+        .thread("notion-reauth-remove-before-restore")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_remove",
+                json!({"extension_id": "notion"}),
+            ),
+            RebornScriptedReply::text("notion removed again"),
+        ])
+        .build()
+        .await?;
+    second_remove.submit_turn("remove notion again").await?;
+    second_remove
+        .assert_tool_result_contains("\"removed\":true")
+        .await?;
+
     // ── Phase 3: reconfigure (fresh credential) unwedges activation ─────────
     let restorer = g
         .thread("notion-reauth-restore")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "notion"}),
             ),
             RebornScriptedReply::text("notion reauthorized"),
@@ -164,15 +194,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     restorer
         .seed_capability_credential_account("notion", "itest notion reconfigure", &[])
         .await?;
-    restorer.submit_turn("activate notion again").await?;
+    restorer.submit_turn("install notion again").await?;
     restorer
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     restorer
         .assert_tool_result_contains("\"notion.live-search\"")
         .await?;
     restorer
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
     Ok(())

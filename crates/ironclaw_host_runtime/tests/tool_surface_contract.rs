@@ -745,6 +745,13 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         ),
         "delivery_target_id schema should forbid duplicate prompt delivery"
     );
+    assert!(
+        trigger_delivery_target_description
+            .contains("inherits the current source run's authorized delivery route")
+            && trigger_delivery_target_description.contains("trusted run state")
+            && trigger_delivery_target_description.contains("never prompt parsing"),
+        "delivery_target_id schema should explain trusted source-route inheritance"
+    );
 
     let http_schema = &surface
         .capabilities

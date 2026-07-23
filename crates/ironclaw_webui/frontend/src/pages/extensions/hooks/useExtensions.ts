@@ -12,11 +12,11 @@ import {
 } from "../../../lib/product-auth-oauth-events";
 import { useT } from "../../../lib/i18n";
 import { hasChannelSurface } from "../lib/extensions-schema";
+import { extensionIsActive } from "../lib/extension-actions";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
   installExtension,
-  activateExtension,
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
@@ -60,20 +60,7 @@ function oauthResponseInvocationId(response) {
 }
 
 function extensionListItemIsConfigured(extension) {
-  if (!extension) return false;
-  if (extension.needs_setup === false && (extension.authenticated || extension.active)) {
-    return true;
-  }
-  // Same snake/camel fallback chain as `extensionLifecycleState`
-  // (lib/extension-actions.ts) so a camelCase snapshot cannot read as
-  // "not configured" here while the rest of the page treats it as active.
-  const state =
-    extension.onboarding_state ||
-    extension.onboardingState ||
-    extension.installation_state ||
-    extension.installationState ||
-    (extension.active ? "active" : null);
-  return (state === "active" || state === "ready") && extension.needs_setup !== true;
+  return extensionIsActive(extension);
 }
 
 function packageId(item) {
@@ -179,7 +166,7 @@ export function useExtensions() {
             // Freshly installed: the caller has not connected/paired yet.
             authenticated: false,
             active: false,
-            installationState: "installed",
+            installationState: "setup_needed",
             onboardingState: "setup_required",
           });
         }
@@ -191,50 +178,6 @@ export function useExtensions() {
     onError: (err) => {
       setActionResult({ type: "error", message: err.message });
       invalidate();
-    },
-  });
-
-  const activateMutation = useMutation({
-    mutationFn: ({ packageRef }) => activateExtension(packageRef),
-    onSuccess: (res, { displayName }) => {
-      if (res.success) {
-        setActionResult({
-          type: "success",
-          message:
-            res.message ||
-            res.instructions ||
-            t("extensions.activatedSuccess", {
-              name: displayName || t("extensions.defaultName"),
-            }),
-        });
-        if (res.auth_url) {
-          const opened = openAuthPopup(res.auth_url);
-          if (!opened.ok) {
-            setActionResult({
-              type: "error",
-              message: authPopupFailureMessage(opened.reason, t),
-            });
-          }
-        }
-      } else if (res.auth_url) {
-        const opened = openAuthPopup(res.auth_url);
-        if (opened.ok) {
-          setActionResult({ type: "info", message: t("extensions.openingAuth") });
-        } else {
-          setActionResult({
-            type: "error",
-            message: authPopupFailureMessage(opened.reason, t),
-          });
-        }
-      } else if (res.awaiting_token) {
-        setActionResult({ type: "info", message: t("extensions.configurationRequired") });
-      } else {
-        setActionResult({ type: "error", message: res.message || t("extensions.activationFailed") });
-      }
-      invalidate();
-    },
-    onError: (err) => {
-      setActionResult({ type: "error", message: err.message });
     },
   });
 
@@ -319,7 +262,7 @@ export function useExtensions() {
   });
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
-  const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
+  const isBusy = installMutation.isPending || removeMutation.isPending || importMutation.isPending;
 
   return {
     status,
@@ -342,7 +285,6 @@ export function useExtensions() {
     actionResult,
     clearResult,
     install: installMutation.mutate,
-    activate: activateMutation.mutate,
     remove: removeMutation.mutate,
     isRemoving: removeMutation.isPending,
     importTool: (payload) => importMutation.mutate(payload),
@@ -360,7 +302,6 @@ export function useExtensionSetup(packageRef) {
 
   return {
     secrets: query.data?.secrets || [],
-    fields: query.data?.fields || [],
     onboarding: query.data?.onboarding || null,
     isLoading: query.isLoading,
     error: query.error,
@@ -373,8 +314,8 @@ export function useSetupSubmit(packageRef, onSuccess) {
   const packageKey = packageRef?.id || packageRef;
 
   return useMutation({
-    mutationFn: ({ secrets, fields }) =>
-      submitExtensionSetup(packageRef, secrets, fields).then((res) => {
+    mutationFn: ({ secrets }) =>
+      submitExtensionSetup(packageRef, secrets).then((res) => {
         if (res.success === false) {
           throw new Error(res.message || t("extensions.setupFailed"));
         }

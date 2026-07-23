@@ -150,8 +150,9 @@ pub trait McpClient: Send + Sync {
     async fn discover_tools(
         &self,
         request: McpClientRequest,
+        max_tools: u32,
     ) -> Result<McpToolDiscoveryOutput, McpClientError> {
-        let _ = request;
+        let _ = (request, max_tools);
         Err(McpClientError::client(request_denied(
             McpRequestDeniedCause::UnsupportedTransport,
         )))
@@ -161,7 +162,15 @@ pub trait McpClient: Send + Sync {
 /// Stable, sanitized MCP client-side failure categories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpClientError {
-    Client { reason: String },
+    Client {
+        reason: String,
+    },
+    /// The server completed `tools/list`, but the advertised catalog violated
+    /// the host's provider-neutral shape or safety contract. Repeating OAuth
+    /// or the same request cannot repair this generation.
+    InvalidToolCatalog {
+        reason: String,
+    },
     AuthRequired,
 }
 
@@ -172,9 +181,15 @@ impl McpClientError {
         }
     }
 
+    pub fn invalid_tool_catalog(reason: impl Into<String>) -> Self {
+        Self::InvalidToolCatalog {
+            reason: reason.into(),
+        }
+    }
+
     pub fn stable_reason(&self) -> &str {
         match self {
-            Self::Client { reason } => reason,
+            Self::Client { reason } | Self::InvalidToolCatalog { reason } => reason,
             Self::AuthRequired => "auth_required",
         }
     }
@@ -738,6 +753,7 @@ where
     async fn discover_tools(
         &self,
         request: McpClientRequest,
+        max_tools: u32,
     ) -> Result<McpToolDiscoveryOutput, McpClientError> {
         if !requires_host_http_egress(&request.transport) {
             return Err(McpClientError::client(request_denied(
@@ -780,7 +796,8 @@ where
             McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
         })?;
         Ok(McpToolDiscoveryOutput {
-            tools: parse_tools_list_result(&result).map_err(McpClientError::client)?,
+            tools: parse_tools_list_result(&result, max_tools)
+                .map_err(McpClientError::invalid_tool_catalog)?,
             usage,
         })
     }
@@ -1037,24 +1054,34 @@ fn parse_json_rpc_error_info(error: Option<&Value>) -> Option<JsonRpcErrorInfo> 
     Some(JsonRpcErrorInfo { code, message })
 }
 
-fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
-    const MAX_DISCOVERED_TOOLS: usize = 128;
+fn parse_tools_list_result(
+    value: &Value,
+    manifest_max_tools: u32,
+) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
+    const HOST_MAX_DISCOVERED_TOOLS: usize = 1024;
     const MAX_TOOL_NAME_BYTES: usize = 128;
     const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
-    const MAX_SCHEMA_DEPTH: u8 = 8;
-    const MAX_SCHEMA_NODES: usize = 512;
-    const MAX_SCHEMA_STRING_BYTES: usize = 1024;
-
-    let invalid_tool_list = || response_error(McpResponseErrorCause::InvalidToolList);
+    const MAX_SCHEMA_DEPTH: u8 = 32;
+    const MAX_SCHEMA_NODES: usize = 8192;
+    const MAX_SCHEMA_STRING_BYTES: usize = 16 * 1024;
 
     let tools = value
         .get("tools")
         .and_then(Value::as_array)
-        .ok_or_else(invalid_tool_list)?;
-    if tools.len() > MAX_DISCOVERED_TOOLS {
-        return Err(invalid_tool_list());
+        .ok_or_else(|| invalid_tool_list(McpInvalidToolListCause::MissingToolsArray))?;
+    let manifest_max_tools = usize::try_from(manifest_max_tools)
+        .unwrap_or(HOST_MAX_DISCOVERED_TOOLS)
+        .min(HOST_MAX_DISCOVERED_TOOLS);
+    if manifest_max_tools == 0 || tools.len() > manifest_max_tools {
+        return Err(invalid_tool_list(McpInvalidToolListCause::TooManyTools));
     }
 
+    // Catalog acceptance is intentionally atomic. Publishing only the valid
+    // subset would make the host silently disagree with the provider's
+    // advertised surface (and can hide name-collision or policy-relevant
+    // entries). One malformed tool therefore rejects this generation with a
+    // stable safe subcause; the previous published generation, if any, remains
+    // authoritative until a complete bounded catalog is discovered.
     tools
         .iter()
         .map(|tool| {
@@ -1065,25 +1092,29 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>
                 // discovery rejects unsupported names instead of normalizing
                 // them into potentially colliding capability IDs.
                 .filter(|name| is_supported_mcp_tool_name(name, MAX_TOOL_NAME_BYTES))
-                .ok_or_else(invalid_tool_list)?;
+                .ok_or_else(|| invalid_tool_list(McpInvalidToolListCause::InvalidToolName))?;
             let description = tool
                 .get("description")
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let description = bound_mcp_tool_description(description, MAX_TOOL_DESCRIPTION_BYTES)
-                .ok_or_else(invalid_tool_list)?;
+                .ok_or_else(|| {
+                invalid_tool_list(McpInvalidToolListCause::InvalidDescription)
+            })?;
             let input_schema = tool
                 .get("inputSchema")
                 .filter(|schema| schema.is_object())
                 .cloned()
-                .ok_or_else(invalid_tool_list)?;
+                .ok_or_else(|| invalid_tool_list(McpInvalidToolListCause::MissingInputSchema))?;
             if !is_supported_mcp_input_schema(
                 &input_schema,
                 MAX_SCHEMA_DEPTH,
                 MAX_SCHEMA_NODES,
                 MAX_SCHEMA_STRING_BYTES,
             ) {
-                return Err(invalid_tool_list());
+                return Err(invalid_tool_list(
+                    McpInvalidToolListCause::UnsafeInputSchema,
+                ));
             }
             let annotations = parse_tool_annotations(tool.get("annotations"))?;
             Ok(HostedMcpDiscoveredTool {
@@ -1196,7 +1227,7 @@ fn parse_tool_annotations(
     };
     let object = value
         .as_object()
-        .ok_or_else(|| response_error(McpResponseErrorCause::InvalidToolList))?;
+        .ok_or_else(|| invalid_tool_list(McpInvalidToolListCause::InvalidAnnotations))?;
     Ok(HostedMcpDiscoveredToolAnnotations {
         destructive_hint: object
             .get("destructiveHint")
@@ -1357,7 +1388,32 @@ enum McpResponseErrorCause {
     /// matching data frame).
     NoPayload,
     /// Discovered `tools/list` result was malformed (shape/limits violation).
-    InvalidToolList,
+    InvalidToolList(McpInvalidToolListCause),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpInvalidToolListCause {
+    MissingToolsArray,
+    TooManyTools,
+    InvalidToolName,
+    InvalidDescription,
+    MissingInputSchema,
+    UnsafeInputSchema,
+    InvalidAnnotations,
+}
+
+impl McpInvalidToolListCause {
+    const fn stable_token(self) -> &'static str {
+        match self {
+            Self::MissingToolsArray => "missing_tools_array",
+            Self::TooManyTools => "too_many_tools",
+            Self::InvalidToolName => "invalid_tool_name",
+            Self::InvalidDescription => "invalid_description",
+            Self::MissingInputSchema => "missing_input_schema",
+            Self::UnsafeInputSchema => "unsafe_input_schema",
+            Self::InvalidAnnotations => "invalid_annotations",
+        }
+    }
 }
 
 impl McpResponseErrorCause {
@@ -1383,7 +1439,9 @@ impl McpResponseErrorCause {
             Self::InvalidProtocolVersion => "mcp_invalid_protocol_version".to_string(),
             Self::IdMismatch => "mcp_jsonrpc_id_mismatch".to_string(),
             Self::NoPayload => "mcp_no_payload".to_string(),
-            Self::InvalidToolList => "mcp_invalid_tool_list".to_string(),
+            Self::InvalidToolList(cause) => {
+                format!("mcp_invalid_tool_list: {}", cause.stable_token())
+            }
         }
     }
 }
@@ -1396,6 +1454,10 @@ fn response_error(cause: McpResponseErrorCause) -> String {
     cause.into_reason()
 }
 
+fn invalid_tool_list(cause: McpInvalidToolListCause) -> String {
+    response_error(McpResponseErrorCause::InvalidToolList(cause))
+}
+
 /// MCP runtime failures.
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -1403,6 +1465,8 @@ pub enum McpError {
     Resource(Box<ResourceError>),
     #[error("MCP client error: {reason}")]
     Client { reason: String },
+    #[error("MCP server advertised an invalid tool catalog: {reason}")]
+    InvalidToolCatalog { reason: String },
     #[error("MCP capability requires authentication")]
     AuthRequired {
         required_secrets: Vec<SecretHandle>,
@@ -1610,6 +1674,7 @@ where
 fn mcp_error_from_client_error(error: McpClientError, auth_context: McpAuthContext) -> McpError {
     match error {
         McpClientError::Client { reason } => McpError::Client { reason },
+        McpClientError::InvalidToolCatalog { reason } => McpError::InvalidToolCatalog { reason },
         McpClientError::AuthRequired => McpError::AuthRequired {
             required_secrets: auth_context.required_secrets,
             credential_requirements: auth_context.credential_requirements,
@@ -1752,10 +1817,34 @@ mod tests {
             .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
             .collect::<Vec<_>>();
 
-        let error = parse_tools_list_result(&json!({ "tools": tools }))
+        let error = parse_tools_list_result(&json!({ "tools": tools }), 128)
             .expect_err("tool discovery must cap returned tools");
 
-        assert_eq!(error, "mcp_invalid_tool_list");
+        assert_eq!(error, "mcp_invalid_tool_list: too_many_tools");
+    }
+
+    #[test]
+    fn parse_tools_list_result_honors_manifest_budget_under_host_cap() {
+        let tools = (0..129)
+            .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
+            .collect::<Vec<_>>();
+
+        let discovered = parse_tools_list_result(&json!({ "tools": tools }), 256)
+            .expect("the manifest may declare a catalog larger than the old hidden limit");
+
+        assert_eq!(discovered.len(), 129);
+    }
+
+    #[test]
+    fn parse_tools_list_result_caps_manifest_budget_at_host_maximum() {
+        let tools = (0..1025)
+            .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
+            .collect::<Vec<_>>();
+
+        let error = parse_tools_list_result(&json!({ "tools": tools }), u32::MAX)
+            .expect_err("provider-declared budgets cannot exceed the host ceiling");
+
+        assert_eq!(error, "mcp_invalid_tool_list: too_many_tools");
     }
 
     #[test]
@@ -1763,10 +1852,10 @@ mod tests {
         let mut tool = valid_tool("search", json!({"type": "object"}));
         tool["description"] = json!("bad\u{0000}description");
 
-        let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+        let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
             .expect_err("unsupported description control characters must fail");
 
-        assert_eq!(error, "mcp_invalid_tool_list");
+        assert_eq!(error, "mcp_invalid_tool_list: invalid_description");
     }
 
     #[test]
@@ -1774,13 +1863,36 @@ mod tests {
         let mut tool = valid_tool("search", json!({"type": "object"}));
         tool["description"] = json!("🔧".repeat(600));
 
-        let tools = parse_tools_list_result(&json!({ "tools": [tool] }))
+        let tools = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
             .expect("descriptive prose must not invalidate the catalog");
         let description = &tools[0].description;
 
         assert!(description.len() <= 2_048);
         assert!(description.ends_with("..."));
         assert!(description.is_char_boundary(description.len()));
+    }
+
+    #[test]
+    fn parse_tools_list_result_accepts_bounded_real_world_openapi_schema_shape() {
+        // OpenAPI-derived MCP catalogs legitimately exceed the old depth-8 /
+        // 512-node parser constants. The response body remains independently
+        // bounded by the host egress plan, so a safe, finite schema within the
+        // catalog budget must not make the whole extension unactivatable.
+        let tool = valid_tool(
+            "update-resource",
+            json!({
+                "type": "object",
+                "properties": {
+                    "nested": nested_schema(5),
+                    "wide": wide_schema(600)
+                }
+            }),
+        );
+
+        let tools = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
+            .expect("bounded OpenAPI-derived schemas must remain discoverable");
+
+        assert_eq!(tools.len(), 1);
     }
 
     #[test]
@@ -1793,10 +1905,10 @@ mod tests {
         let non_object_schema = valid_tool("bad-schema", json!("object please"));
 
         for tool in [missing_schema, non_object_schema] {
-            let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+            let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
                 .expect_err("schema must be present and object-shaped");
 
-            assert_eq!(error, "mcp_invalid_tool_list");
+            assert_eq!(error, "mcp_invalid_tool_list: missing_input_schema");
         }
     }
 
@@ -1809,17 +1921,17 @@ mod tests {
             ),
             valid_tool(
                 "long-string",
-                json!({"type": "object", "description": "a".repeat(1025)}),
+                json!({"type": "object", "description": "a".repeat(16 * 1024 + 1)}),
             ),
-            valid_tool("too-deep", nested_schema(9)),
-            valid_tool("too-many-nodes", wide_schema(513)),
+            valid_tool("too-deep", nested_schema(17)),
+            valid_tool("too-many-nodes", wide_schema(8193)),
         ];
 
         for tool in cases {
-            let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+            let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
                 .expect_err("unsafe schema strings and shape must fail");
 
-            assert_eq!(error, "mcp_invalid_tool_list");
+            assert_eq!(error, "mcp_invalid_tool_list: unsafe_input_schema");
         }
     }
 

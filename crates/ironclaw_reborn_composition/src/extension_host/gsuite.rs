@@ -61,7 +61,7 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
     }
 }
 
-/// Build GSuite handlers for a surface that can install and activate GSuite packages.
+/// Build GSuite handlers for a surface that can install and run GSuite packages.
 ///
 /// Handler registration is allowed before lifecycle activation because runtime
 /// dispatch still requires active package descriptors.

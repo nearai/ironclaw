@@ -147,6 +147,32 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
             rebase_required: None,
         })
     }
+
+    async fn read_turn_event_log_after(
+        &self,
+        after: Option<TurnEventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        let after = after.unwrap_or_default();
+        let mut events = self
+            .events
+            .iter()
+            .filter(|event| event.cursor > after)
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.cursor);
+        let truncated = events.len() > limit;
+        if truncated {
+            events.truncate(limit);
+        }
+        let next_cursor = events.last().map_or(after, |event| event.cursor);
+        Ok(TurnEventPage {
+            entries: events,
+            next_cursor,
+            truncated,
+            rebase_required: None,
+        })
+    }
 }
 
 struct RebaseTurnEventSource {
@@ -213,6 +239,19 @@ impl TurnEventProjectionSource for RebaseTurnEventSource {
         &self,
         _scope: &TurnScope,
         _owner_user_id: Option<&UserId>,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Ok(TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: self.cursor,
+            truncated: false,
+            rebase_required: Some(self.cursor),
+        })
+    }
+
+    async fn read_turn_event_log_after(
+        &self,
         _after: Option<TurnEventCursor>,
         _limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -367,6 +406,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                     .unwrap(),
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+            pairing: None,
         }))
     }
 }

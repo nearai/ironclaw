@@ -7,14 +7,17 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, VendorId, VirtualPath,
+    CapabilityId, CapabilitySurfaceKind, ChannelConnectionDescriptor, ChannelConnectionStrategy,
+    ExtensionId, HostPortCatalog, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    VendorId, VirtualPath,
 };
 use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+    ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use std::sync::Arc;
 use toml::Value;
@@ -119,12 +122,6 @@ pub(crate) struct AvailableExtensionPackage {
     /// as each package migrates, its copy moves here and its match arm is
     /// deleted. See overview §3 (package self-containment).
     pub(crate) onboarding_override: Option<LifecycleExtensionOnboarding>,
-    /// Bespoke OAuth-setup credential requirement carried down from a migrated
-    /// inventory bundle, replacing the manifest-derived requirement. `None` for
-    /// packages whose derived requirement is correct. Used by a package whose
-    /// connect flow authorizes a shared account with setup scopes distinct from
-    /// its per-tool runtime scopes.
-    pub(crate) oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,16 +170,97 @@ fn channel_connection_for_package(
     if !directions.inbound {
         return None;
     }
-    let strategy = super::extension_lifecycle::channel_connect_strategy(&package.package);
-    // Catalog projection: descriptor-owned connect copy applies at
-    // activation/status time; the pre-install listing renders the derived
-    // fallback.
-    Some(super::extension_lifecycle::channel_connection_requirement(
-        package_ref.id.as_str(),
+    let connection = package
+        .resolved_manifest
+        .channel
+        .as_ref()
+        .and_then(|channel| channel.connection.as_ref())?;
+    Some(channel_connection_requirement_from_manifest(
+        package_ref,
         &package.package.manifest.name,
-        strategy,
-        None,
+        connection,
     ))
+}
+
+fn channel_connection_requirement_from_manifest(
+    package_ref: &LifecyclePackageRef,
+    display_name: &str,
+    connection: &ChannelConnectionDescriptor,
+) -> ChannelConnectionRequirement {
+    ChannelConnectionRequirement {
+        channel: package_ref.id.to_string(),
+        display_name: display_name.to_string(),
+        strategy: product_connection_strategy(connection.strategy),
+        instructions: connection.instructions.clone(),
+        input_placeholder: connection.input_placeholder.clone(),
+        submit_label: connection.submit_label.clone(),
+        error_message: connection.error_message.clone(),
+    }
+}
+
+fn product_connection_strategy(
+    strategy: ChannelConnectionStrategy,
+) -> RebornChannelConnectStrategy {
+    match strategy {
+        ChannelConnectionStrategy::InboundProofCode => {
+            RebornChannelConnectStrategy::InboundProofCode
+        }
+        ChannelConnectionStrategy::AdminManagedChannels => {
+            RebornChannelConnectStrategy::AdminManagedChannels
+        }
+        ChannelConnectionStrategy::WebGeneratedCode => {
+            RebornChannelConnectStrategy::WebGeneratedCode
+        }
+        ChannelConnectionStrategy::QrCode => RebornChannelConnectStrategy::QrCode,
+        ChannelConnectionStrategy::OAuth => RebornChannelConnectStrategy::OAuth,
+    }
+}
+
+fn account_setup_descriptor_from_manifest(
+    package: &AvailableExtensionPackage,
+) -> Option<ExtensionAccountSetupDescriptor> {
+    let connection = package
+        .resolved_manifest
+        .channel
+        .as_ref()?
+        .connection
+        .as_ref()?;
+    if !matches!(
+        connection.strategy,
+        ChannelConnectionStrategy::InboundProofCode
+            | ChannelConnectionStrategy::WebGeneratedCode
+            | ChannelConnectionStrategy::QrCode
+    ) {
+        // OAuth is already declared by the manifest credential/auth recipe;
+        // admin-managed channels have no caller pairing gate. This registry
+        // owns proof-code status only and must not recast every strategy as a
+        // synthetic Pairing credential requirement.
+        return None;
+    }
+    Some(ExtensionAccountSetupDescriptor {
+        extension_id: package.resolved_manifest.id.clone(),
+        auth_requirement: RuntimeCredentialAuthRequirement {
+            provider: connection.provider.clone(),
+            setup: RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: package.resolved_manifest.id.clone(),
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: channel_connection_requirement_from_manifest(
+            &package.package_ref,
+            &package.package.manifest.name,
+            connection,
+        ),
+        connection_notices: ChannelConnectionNoticePolicy {
+            connect_required: connection.notices.connect_required.clone(),
+            paired: connection.notices.paired.clone(),
+            already_paired_same_user: connection.notices.already_paired_same_user.clone(),
+            already_bound_to_other_user: connection.notices.already_bound_to_other_user.clone(),
+            expired_or_unknown: connection.notices.expired_or_unknown.clone(),
+        },
+        connection_success_message: connection.connection_success_message.clone(),
+        pairing_deep_link_template: connection.deep_link_template.clone(),
+        pairing_inbound_code_prefixes: connection.inbound_code_prefixes.clone(),
+    })
 }
 
 fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionOnboarding> {
@@ -196,12 +274,12 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
     // MCP credential (config-assembled at runtime; bucket 1 of the DEL-8 debt).
     if is_host_managed_credential_extension(&package.package_ref) {
         return Some(onboarding_message(
-            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
+            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings; installation finishes automatically once setup is ready.",
             Some(
                 "Configure NEAR AI for the assistant with an API key; MCP reuses that credential.",
             ),
             None,
-            "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools.",
+            "After NEAR AI is configured for the assistant, IronClaw finishes installation automatically and publishes its tools.",
         ));
     }
 
@@ -242,16 +320,6 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
-    // A migrated package may carry a bespoke OAuth-setup connect requirement
-    // (a personal-OAuth connect whose setup scopes differ from the per-tool
-    // runtime scopes) that replaces the manifest-derived one. Composition never
-    // names the package — the override rides down from its inventory bundle.
-    if package.package_ref.kind == LifecyclePackageKind::Extension
-        && let Some(oauth_setup) = &package.oauth_setup_override
-    {
-        return vec![oauth_setup.clone()];
-    }
-
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
@@ -480,6 +548,16 @@ impl AvailableExtensionCatalog {
         uses
     }
 
+    /// Account-setup behavior is compiled from the same resolved manifests as
+    /// the rest of the catalog. The assembling binary does not maintain a
+    /// second provider-specific registry.
+    pub(crate) fn account_setup_descriptors(&self) -> Vec<ExtensionAccountSetupDescriptor> {
+        self.packages
+            .iter()
+            .filter_map(|package| account_setup_descriptor_from_manifest(package))
+            .collect()
+    }
+
     /// Resolved deployment manifests for host-owned surfaces. This is a
     /// read-only projection of the available catalog; it does not install or
     /// activate any package.
@@ -617,20 +695,6 @@ fn package_from_bundle(
             &copy.credential_next_step,
         )
     });
-    // A bespoke OAuth-setup credential requirement (a personal-OAuth connect)
-    // replaces the manifest-derived one; map the plain bundle data to the host
-    // lifecycle type here.
-    let oauth_setup_override =
-        bundle
-            .oauth_setup
-            .map(|setup| LifecycleExtensionCredentialRequirement {
-                name: setup.requirement_name,
-                provider: setup.provider,
-                required: true,
-                setup: LifecycleExtensionCredentialSetup::OAuth {
-                    scopes: setup.scopes,
-                },
-            });
     let mut package = bundled_extension_package(
         bundle.id,
         bundle.display_name,
@@ -638,7 +702,6 @@ fn package_from_bundle(
         assets,
     )?;
     package.onboarding_override = onboarding_override;
-    package.oauth_setup_override = oauth_setup_override;
     Ok(package)
 }
 
@@ -696,7 +759,6 @@ fn bundled_extension_package(
         channel_presentation,
         assets,
         onboarding_override: None,
-        oauth_setup_override: None,
     })
 }
 
@@ -1011,7 +1073,6 @@ where
         channel_presentation,
         assets,
         onboarding_override: None,
-        oauth_setup_override: None,
     }))
 }
 
@@ -1357,6 +1418,18 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     }
 
     #[test]
+    fn telegram_account_setup_projects_manifest_declared_code_prefixes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let telegram = catalog
+            .account_setup_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.extension_id.as_str() == "telegram")
+            .expect("Telegram account-setup descriptor");
+
+        assert_eq!(telegram.pairing_inbound_code_prefixes, ["/start"]);
+    }
+
+    #[test]
     fn bundled_google_sheet_queries_discover_drive_lookup_tool() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
@@ -1517,10 +1590,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                         .as_deref()
                         .is_some_and(|step| {
                             step.starts_with("After authorization completes")
-                                && step.contains("activate")
+                                && step.contains("automatically")
                                 && !step.contains("Install")
+                                && !step.contains("activate")
                         }),
-                    "{extension_id} configure next step should describe post-authorization activation"
+                    "{extension_id} configure next step should describe automatic post-authorization readiness"
                 );
             } else if extension_id == "slack" {
                 assert!(
@@ -1565,10 +1639,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                         .as_deref()
                         .is_some_and(|step| {
                             step.starts_with("After saving")
-                                && step.contains("activate")
+                                && step.contains("automatically")
                                 && !step.contains("Install")
+                                && !step.contains("activate")
                         }),
-                    "{extension_id} configure next step should describe activation after saving credentials"
+                    "{extension_id} configure next step should describe automatic readiness after saving credentials"
                 );
             } else if extension_id == NEARAI_EXTENSION_ID {
                 assert_eq!(
@@ -1580,22 +1655,24 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
                     Some(
-                        "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                        "After NEAR AI is configured for the assistant, IronClaw finishes installation automatically and publishes its tools."
                     )
                 );
             } else if extension_id == "web-access" {
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
-                    Some("Activate Web Access to publish its tools."),
-                    "web-access configure next step should not repeat install-first copy"
+                    Some("IronClaw publishes Web Access tools automatically during installation."),
+                    "web-access copy should describe automatic readiness"
                 );
             } else {
                 assert!(
                     onboarding
                         .credential_next_step
                         .as_deref()
-                        .is_some_and(|step| step.contains("Install") && step.contains("activate")),
-                    "{extension_id} onboarding should preserve install-then-activate ordering"
+                        .is_some_and(
+                            |step| step.contains("automatically") && !step.contains("activate")
+                        ),
+                    "{extension_id} onboarding should describe automatic readiness"
                 );
             }
         }
@@ -1687,17 +1764,18 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     }
 
     #[test]
-    fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
+    fn bundled_slack_tools_extension_projects_manifest_declared_personal_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
-        // Model B: the user-installable tools extension (`slack`) surfaces the
-        // slack_personal OAuth connect requirement, not the hidden bot channel.
+        // The user-installable Slack extension derives its personal OAuth
+        // requirement from the same manifest credential handle used by its
+        // runtime tools. There is no package-specific projection override.
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let summary = catalog.resolve(&package_ref).unwrap().summary();
 
         assert_eq!(summary.credential_requirements.len(), 1);
         let requirement = &summary.credential_requirements[0];
-        assert_eq!(requirement.name, "slack_personal_oauth");
+        assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
         assert!(matches!(
@@ -2526,7 +2604,6 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
             onboarding_override: None,
-            oauth_setup_override: None,
         }
     }
 }

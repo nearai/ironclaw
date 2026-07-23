@@ -78,7 +78,6 @@ pub struct ExecutionContext {
     /// an ingress either knows its true origin or leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<InvocationOrigin>,
-
     pub extension_id: ExtensionId,
     pub runtime: RuntimeKind,
     pub trust: TrustClass,

@@ -49,8 +49,9 @@ fn descriptor_with_display_name(
         },
         connection_requirement,
         connection_notices,
-        activation_success_message: "Account setup is ready.".to_string(),
+        connection_success_message: "Account setup is ready.".to_string(),
         pairing_deep_link_template: None,
+        pairing_inbound_code_prefixes: Vec::new(),
     }
 }
 
@@ -157,7 +158,7 @@ fn extension_account_setup_declaration_is_immutable_and_unique() {
     let extension_id = extension_id("paired-channel");
     let original = descriptor(extension_id.as_str());
     let mut replacement = original.clone();
-    replacement.activation_success_message = "replacement".to_string();
+    replacement.connection_success_message = "replacement".to_string();
 
     assert!(registry.declare(original.clone()));
     assert!(!registry.declare(replacement));

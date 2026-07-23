@@ -202,6 +202,8 @@ impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
 struct RuntimeStoreParts<'a> {
     local_runtime: Option<&'a crate::factory::RebornRuntimeSubstrate>,
     turn_state_store: Arc<dyn RuntimeTurnStateStore>,
+    turn_event_projection_source: Arc<dyn ironclaw_turns::TurnEventProjectionSource>,
+    outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStore>,
     checkpoint_state_store: Arc<dyn ironclaw_turns::CheckpointStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     thread_service: Arc<dyn SessionThreadService>,
@@ -264,6 +266,9 @@ fn local_runtime_parts(
     RuntimeStoreParts {
         local_runtime: Some(local_runtime),
         turn_state_store: Arc::clone(&local_runtime.turn_state) as Arc<dyn RuntimeTurnStateStore>,
+        turn_event_projection_source: Arc::clone(&local_runtime.turn_state)
+            as Arc<dyn ironclaw_turns::TurnEventProjectionSource>,
+        outbound_state: Arc::clone(&local_runtime.outbound_state),
         checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
         thread_service: Arc::clone(&local_runtime.thread_service),
@@ -309,6 +314,9 @@ where
     RuntimeStoreParts {
         local_runtime: None,
         turn_state_store: Arc::clone(&graph.turn_state) as Arc<dyn RuntimeTurnStateStore>,
+        turn_event_projection_source: Arc::clone(&graph.turn_state)
+            as Arc<dyn ironclaw_turns::TurnEventProjectionSource>,
+        outbound_state: Arc::clone(&graph.outbound_state),
         checkpoint_state_store: Arc::clone(&graph.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&graph.turn_state)
             as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
@@ -1649,7 +1657,7 @@ impl RebornRuntime {
             crate::extension_host::channel_identity::ChannelIdentityBindingConfig {
                 tenant_id: self.thread_scope.tenant_id.clone(),
                 installation_store,
-                channel_config: local_runtime.channel_config.clone(),
+                admin_configuration_resolver: local_runtime.admin_configuration_resolver.clone(),
                 binding_store: Arc::clone(&identity_store)
                     as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
                 rollback_store: identity_store
@@ -3147,6 +3155,8 @@ pub async fn build_reborn_runtime(
     let RuntimeStoreParts {
         local_runtime,
         turn_state_store,
+        turn_event_projection_source,
+        outbound_state,
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -3383,11 +3393,17 @@ pub async fn build_reborn_runtime(
             )
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
     }
-    // The registry is created with the local-runtime services (one instance
-    // per runtime) so the trigger-create hook validates per-trigger delivery
-    // targets against the same registry product hosts register into.
-    let outbound_delivery_target_registry =
-        local_runtime.map(|local_runtime| Arc::clone(&local_runtime.outbound_delivery_targets));
+    // Each substrate owns one registry instance, so the trigger-create hook
+    // validates per-trigger delivery targets against the same registry product
+    // hosts register into in both local and production assemblies.
+    let outbound_delivery_target_registry = local_runtime
+        .map(|local_runtime| Arc::clone(&local_runtime.outbound_delivery_targets))
+        .or_else(|| {
+            services
+                .production_runtime
+                .as_ref()
+                .map(crate::factory::RebornProductionRuntimeServices::outbound_delivery_targets)
+        });
     let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
         match (local_runtime, &outbound_delivery_target_registry) {
             (Some(local_runtime), Some(registry)) => {
@@ -3538,12 +3554,20 @@ pub async fn build_reborn_runtime(
         ),
     );
     let projection_turn_event_wake_sink = projection_services.turn_event_wake_sink();
+    let channel_run_delivery_events =
+        Arc::new(ironclaw_product_workflow::RunDeliveryEventRouter::new(
+            turn_event_projection_source,
+            outbound_state,
+        ));
     // Skill learning shares the turn-end seam with trace capture (composed
     // additively, so the trace-capture path is unchanged). It is active only
     // when a learning model is configured (a stronger model than the run's, via
     // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
-    let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
-        vec![trace_capture_sink, projection_turn_event_wake_sink];
+    let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> = vec![
+        trace_capture_sink,
+        projection_turn_event_wake_sink,
+        Arc::clone(&channel_run_delivery_events) as Arc<dyn ironclaw_turns::TurnEventSink>,
+    ];
     let mut skill_learning_extraction_tasks: Option<
         Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
@@ -3830,14 +3854,19 @@ pub async fn build_reborn_runtime(
     if let Some(display_previews) = display_previews {
         projection_services = projection_services.with_display_previews(display_previews);
     }
-    // Wire auth-challenge enrichment when the product-auth bundle exposes a
-    // flow record source (local-dev / test mode). Production deployments without
-    // a wired flow_record_source fall back to the plain 4-field AuthPromptView.
-    let projection_services = if let Some(provider) = services
-        .product_auth
-        .as_ref()
-        .and_then(|pa| pa.as_auth_challenge_provider())
-    {
+    // One recipe-driven challenge provider feeds both WebUI projections and
+    // external-channel delivery. OAuth/manual challenges delegate to
+    // product-auth; host-issued pairing delegates to the canonical pairing
+    // service and reuses its live code/deep-link/expiry presentation.
+    let auth_challenges =
+        crate::extension_host::run_delivery_ports::RecipeAuthChallengeProvider::new(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider()),
+            services.channel_pairing.clone(),
+        );
+    let projection_services = if let Some(provider) = auth_challenges.clone() {
         projection_services.with_auth_challenges(provider)
     } else {
         projection_services
@@ -3860,10 +3889,7 @@ pub async fn build_reborn_runtime(
         });
         let blocked_auth_prompts = Some(Arc::new(
             crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
-                services
-                    .product_auth
-                    .as_ref()
-                    .and_then(|product_auth| product_auth.as_auth_challenge_provider()),
+                auth_challenges.clone(),
             ),
         )
             as Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>);
@@ -3885,7 +3911,7 @@ pub async fn build_reborn_runtime(
             approval_context,
             blocked_auth_prompts,
             auth_flow_cancel,
-            run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings::default(),
+            run_delivery_events: Arc::clone(&channel_run_delivery_events),
         })
     };
 
@@ -3909,15 +3935,15 @@ pub async fn build_reborn_runtime(
     }
 
     // Generic outbound-delivery targets (extension-runtime P6): one provider
-    // over the assembly's vendor codecs, the `[channel.config]` routing
+    // over the assembly's vendor codecs, the administrator-configured routing
     // values, and the generic DM-target store serves every active channel
     // extension.
     if let (Some(registry), Some(assembly), Some(local_runtime)) = (
         outbound_delivery_target_registry.as_ref(),
         channel_host_assembly.as_ref(),
         local_runtime,
-    ) && let (Some(channel_config), Some(dm_targets)) = (
-        local_runtime.channel_config.clone(),
+    ) && let (Some(admin_configuration_resolver), Some(dm_targets)) = (
+        local_runtime.admin_configuration_resolver.clone(),
         local_runtime.channel_dm_target_store.clone(),
     ) {
         crate::extension_host::channel_outbound_targets::register_generic_channel_outbound_targets(
@@ -3925,7 +3951,7 @@ pub async fn build_reborn_runtime(
             crate::extension_host::channel_outbound_targets::GenericChannelOutboundTargetDeps {
                 watch: assembly.snapshot_watch(),
                 assembly: Arc::clone(assembly),
-                channel_config,
+                admin_configuration_resolver,
                 dm_targets,
                 identity:
                     crate::extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
@@ -4113,6 +4139,7 @@ pub async fn build_reborn_runtime(
                 Arc::clone(&local_runtime.triggered_run_delivery),
                 Arc::clone(&local_runtime.outbound_preferences),
                 Arc::clone(&local_runtime.outbound_delivery_targets),
+                Arc::clone(&channel_run_delivery_events),
             ),
         );
         if slot.set(generic_trigger_hook).is_err() {

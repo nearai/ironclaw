@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
+    ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
     InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -85,11 +85,10 @@ handle = "{required_credential}"
     .unwrap()
 }
 
-fn installation(state: ExtensionActivationState) -> ExtensionInstallation {
+fn installation() -> ExtensionInstallation {
     ExtensionInstallation::new(
         installation_id(),
         extension_id(),
-        state,
         ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
         vec![ExtensionCredentialBinding::new(
             credential("telegram_bot_token"),
@@ -102,35 +101,27 @@ fn installation(state: ExtensionActivationState) -> ExtensionInstallation {
 }
 
 #[tokio::test]
-async fn default_store_has_no_enabled_installations() {
+async fn default_store_has_no_installations() {
     let store = filesystem_store().await;
 
     assert!(store.list_manifests().await.unwrap().is_empty());
-    assert!(store.list_enabled_installations().await.unwrap().is_empty());
+    assert!(store.list_installations().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn explicit_activation_surfaces_in_product_adapter_runtime_entries() {
+async fn installed_membership_surfaces_product_adapter_runtime_entries() {
     let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
         .unwrap();
-    store
-        .upsert_installation(installation(ExtensionActivationState::Installed))
-        .await
-        .unwrap();
+    store.upsert_installation(installation()).await.unwrap();
 
-    store
-        .set_activation_state(&installation_id(), ExtensionActivationState::Enabled)
-        .await
-        .unwrap();
-
-    let enabled = store.list_enabled_installations().await.unwrap();
-    assert_eq!(enabled.len(), 1);
+    let installations = store.list_installations().await.unwrap();
+    assert_eq!(installations.len(), 1);
 
     let manifest = store
-        .get_manifest(enabled[0].extension_id())
+        .get_manifest(installations[0].extension_id())
         .await
         .unwrap()
         .expect("manifest for enabled installation");
@@ -189,7 +180,6 @@ prompt_doc_ref = "prompts/do.md"
     let plain_install = ExtensionInstallation::new(
         ExtensionInstallationId::new("plain-install").unwrap(),
         plain_id.clone(),
-        ExtensionActivationState::Enabled,
         ExtensionManifestRef::new(plain_id, Some(manifest_hash("sha256:plain"))),
         vec![],
         Utc::now(),
@@ -216,10 +206,7 @@ async fn manifest_hash_mismatch_is_rejected() {
         .await
         .unwrap();
 
-    let err = store
-        .upsert_installation(installation(ExtensionActivationState::Installed))
-        .await
-        .unwrap_err();
+    let err = store.upsert_installation(installation()).await.unwrap_err();
     assert!(matches!(
         err,
         ExtensionInstallationError::ManifestHashMismatch { .. }
@@ -232,7 +219,6 @@ fn installation_deserialize_rejects_duplicate_bindings() {
 {
   "installation_id": "acme-telegram-prod",
   "extension_id": "telegram-v2",
-  "activation_state": "installed",
   "manifest_ref": { "extension_id": "telegram-v2", "manifest_hash": "sha256:abc123" },
   "credential_bindings": [
     { "credential_handle": "telegram_bot_token", "secret_handle": "secret_a" },
@@ -251,7 +237,6 @@ fn duplicate_credential_bindings_rejected_at_construction() {
     let err = ExtensionInstallation::new(
         installation_id(),
         extension_id(),
-        ExtensionActivationState::Installed,
         ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
         vec![
             ExtensionCredentialBinding::new(
@@ -273,62 +258,6 @@ fn duplicate_credential_bindings_rejected_at_construction() {
             ExtensionInstallationError::DuplicateCredentialBinding { .. }
         ),
         "expected DuplicateCredentialBinding, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn no_op_activation_transition_does_not_update_timestamp() {
-    let store = filesystem_store().await;
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
-        .await
-        .unwrap();
-    store
-        .upsert_installation(installation(ExtensionActivationState::Enabled))
-        .await
-        .unwrap();
-
-    let before = store
-        .get_installation(&installation_id())
-        .await
-        .unwrap()
-        .unwrap();
-    let before_ts = before.updated_at();
-
-    // Set the same state again — should be a no-op.
-    store
-        .set_activation_state(&installation_id(), ExtensionActivationState::Enabled)
-        .await
-        .unwrap();
-
-    let after = store
-        .get_installation(&installation_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        before_ts,
-        after.updated_at(),
-        "no-op activation transition should not update timestamp"
-    );
-}
-
-#[tokio::test]
-async fn installed_state_does_not_surface_in_enabled_installations() {
-    let store = filesystem_store().await;
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
-        .await
-        .unwrap();
-    store
-        .upsert_installation(installation(ExtensionActivationState::Installed))
-        .await
-        .unwrap();
-
-    let enabled = store.list_enabled_installations().await.unwrap();
-    assert!(
-        enabled.is_empty(),
-        "installed (not enabled) installation should not appear in list_enabled_installations"
     );
 }
 
@@ -398,7 +327,6 @@ handle = "outbound_token"
     let multi_install = ExtensionInstallation::new(
         ExtensionInstallationId::new("multi-install").unwrap(),
         multi_id.clone(),
-        ExtensionActivationState::Enabled,
         ExtensionManifestRef::new(multi_id, Some(manifest_hash("sha256:multi"))),
         vec![
             ExtensionCredentialBinding::new(
@@ -437,13 +365,10 @@ async fn arc_store_delegation_works() {
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
         .unwrap();
-    arc_store
-        .upsert_installation(installation(ExtensionActivationState::Enabled))
-        .await
-        .unwrap();
+    arc_store.upsert_installation(installation()).await.unwrap();
 
-    let enabled = arc_store.list_enabled_installations().await.unwrap();
-    assert_eq!(enabled.len(), 1);
+    let installations = arc_store.list_installations().await.unwrap();
+    assert_eq!(installations.len(), 1);
 }
 
 #[tokio::test]
@@ -453,10 +378,7 @@ async fn update_health_uses_redacted_string() {
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
         .unwrap();
-    store
-        .upsert_installation(installation(ExtensionActivationState::Enabled))
-        .await
-        .unwrap();
+    store.upsert_installation(installation()).await.unwrap();
 
     let health = ExtensionHealthSnapshot::new(
         ExtensionHealthStatus::Degraded,

@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
-    PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
+    InvocationOrigin, PermissionMode, ResourceScope, ResourceUsage, RunId,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
@@ -36,7 +37,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. Without delivery_target_id, the user's default outbound target applies at fire time; builtin__outbound_delivery_target_set changes that user-wide default.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. When delivery_target_id is omitted, the host first inherits the current source run's authorized delivery route; only when no source route exists does it fall back to the user's default outbound target at fire time. This inheritance uses trusted run state, never prompt parsing or model-authored conversation ids. builtin__outbound_delivery_target_set changes the user-wide fallback default.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -164,6 +165,41 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Resolve the delivery target that should be sealed into a new trigger.
+    ///
+    /// `requested` is untrusted model input. The default implementation only
+    /// accepts it after [`Self::validate_delivery_target`] succeeds. Hosts may
+    /// additionally derive a target from the authoritative source run when
+    /// `requested` is absent; that derivation must use `run_id` plus trusted
+    /// host state, never prompt text or a model-authored conversation id.
+    async fn resolve_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        run_id: Option<RunId>,
+        requested: Option<ironclaw_triggers::TriggerDeliveryTargetId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        if let Some(target) = requested {
+            self.validate_delivery_target(scope, &target).await?;
+            Ok(Some(target))
+        } else {
+            self.resolve_implicit_delivery_target(scope, run_id).await
+        }
+    }
+
+    /// Resolve an omitted delivery target from trusted host state.
+    ///
+    /// The trigger tool owns the precedence rule: a caller-supplied target is
+    /// always validated and wins. Hosts only adapt the authoritative source
+    /// run into an implicit target through this narrower seam.
+    async fn resolve_implicit_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        run_id: Option<RunId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        let _ = (scope, run_id);
+        Ok(None)
+    }
+
     /// Validate a model-supplied per-trigger delivery target id before the
     /// record is persisted (ownership, existence, product availability).
     ///
@@ -218,6 +254,14 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        if matches!(request.origin, Some(InvocationOrigin::ScheduledLoopRun(_)))
+            && is_trigger_mutation(request.capability_id.as_str())
+        {
+            return Err(FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::PolicyDenied,
+                "scheduled automation cannot mutate routines",
+            ));
+        }
         bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let started = Instant::now();
         let output = match request.capability_id.as_str() {
@@ -226,6 +270,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                     &*self.repository,
                     &*self.create_hook,
                     &request.scope,
+                    request.run_id,
                     request.input,
                     self.clock.now(),
                 )
@@ -274,6 +319,16 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             elapsed_usage_with_bytes(started, output_bytes),
         ))
     }
+}
+
+fn is_trigger_mutation(capability_id: &str) -> bool {
+    matches!(
+        capability_id,
+        TRIGGER_CREATE_CAPABILITY_ID
+            | TRIGGER_REMOVE_CAPABILITY_ID
+            | TRIGGER_PAUSE_CAPABILITY_ID
+            | TRIGGER_RESUME_CAPABILITY_ID
+    )
 }
 
 #[derive(Deserialize)]
@@ -346,6 +401,7 @@ async fn create_trigger(
     repository: &dyn TriggerRepository,
     create_hook: &dyn TriggerCreateHook,
     scope: &ResourceScope,
+    run_id: Option<RunId>,
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
@@ -358,18 +414,15 @@ async fn create_trigger(
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
-    let delivery_target = match input.delivery_target_id {
-        Some(raw) => {
-            let target = ironclaw_triggers::TriggerDeliveryTargetId::new(raw)
-                .map_err(trigger_record_error)?;
-            create_hook
-                .validate_delivery_target(scope, &target)
-                .await
-                .map_err(trigger_record_error)?;
-            Some(target)
-        }
-        None => None,
-    };
+    let requested_delivery_target = input
+        .delivery_target_id
+        .map(ironclaw_triggers::parse_trigger_delivery_target_id)
+        .transpose()
+        .map_err(trigger_record_error)?;
+    let delivery_target = create_hook
+        .resolve_delivery_target(scope, run_id, requested_delivery_target)
+        .await
+        .map_err(trigger_record_error)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),

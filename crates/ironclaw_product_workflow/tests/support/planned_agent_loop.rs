@@ -236,6 +236,12 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
             actor_user_id: user_id.clone(),
             subject_user_id: Some(user_id),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:live-harness")
+                .expect("valid harness source binding ref"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:live-harness",
+            )
+            .expect("valid harness reply target binding ref"),
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,

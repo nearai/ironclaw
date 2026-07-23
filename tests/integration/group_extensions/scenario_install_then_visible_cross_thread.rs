@@ -1,8 +1,9 @@
 //! Scenario 1 (HEADLINE): install an extension in thread A; thread B (a
-//! DIFFERENT conversation) sees it installed over the shared store.
+//! DIFFERENT conversation) sees it active over the shared store.
 //!
-//! `extension_search` renders `installation_phase: "installed"` only for an
-//! already-installed extension. Different conversation IDs but the same
+//! A no-setup/credential-ready install auto-publishes the extension and
+//! `extension_search` renders `installation_phase: "active"`. Different
+//! conversation IDs but the same
 //! `Arc<HostRuntimeCapabilityHarness>` prove cross-thread persistence.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -22,12 +23,18 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
+    installer
+        .seed_capability_credential_account("github", "itest github ready path", &[])
+        .await?;
     installer.submit_turn("install github").await?;
     installer
         .assert_tool_invoked("builtin.extension_install")
         .await?;
     installer
         .assert_tool_result_contains("\"installed\":true")
+        .await?;
+    installer
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     installer
         .assert_model_message_content_contains(r#"\"installed\":true"#)
@@ -49,13 +56,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Assert the VALUE, not just the key — a `pending`/`failed` phase must not
     // satisfy this — so this proves thread B observes thread A's success.
     viewer
-        .assert_tool_result_contains(r#""installation_phase":"installed""#)
+        .assert_tool_result_contains(r#""installation_phase":"active""#)
         .await?;
     viewer
         .assert_model_message_content_contains(r#"\"id\":\"github\""#)
         .await?;
     viewer
-        .assert_model_message_content_contains(r#"\"installation_phase\":\"installed\""#)
+        .assert_model_message_content_contains(r#"\"installation_phase\":\"active\""#)
         .await?;
 
     // Non-vacuity guard: a never-installed marker must be absent, proving

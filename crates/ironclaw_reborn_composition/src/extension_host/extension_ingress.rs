@@ -32,9 +32,10 @@ use ironclaw_product_workflow::{
     ChannelInboundSurfaceRequest, ProductOperationRequest, ProductSurface,
     WebUiAuthenticatedCaller,
 };
+use ironclaw_product_workflow::{
+    ChannelPairingConsumeOutcome, ChannelPairingInterception, ChannelPairingInterceptor,
+};
 use tokio::task::JoinSet;
-
-use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
 /// Fixed host route paths inside the extension ingress namespace
 /// (`/webhooks/extensions/…`). An extension whose canonical route collides
@@ -298,26 +299,6 @@ impl InboundSink for ExtensionIngressRegistry {
 
 // ── The generic inbound sink over ProductSurface admission ──────────────────
 
-/// Pre-admission pairing interception for `WebGeneratedCode` channels: a
-/// direct message from an actor with no identity binding is offered to the
-/// pairing seam BEFORE ProductSurface admission, so a pairing code is consumed
-/// instead of becoming (or failing as) a turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ChannelPairingInterception {
-    NotHandled,
-    Consumed(ChannelPairingConsumeOutcome),
-    Failed,
-}
-
-#[async_trait]
-pub(crate) trait ChannelPairingInterceptor: Send + Sync {
-    async fn intercept(
-        &self,
-        installation_id: &AdapterInstallationId,
-        message: &NormalizedInboundMessage,
-    ) -> ChannelPairingInterception;
-}
-
 /// Configuration for [`GenericChannelInboundSink`].
 pub struct ChannelInboundSinkConfig {
     /// The adapter identity stamped on inbound envelopes.
@@ -410,6 +391,13 @@ impl GenericChannelInboundSink {
         ))
     }
 
+    fn retryable(reason: impl std::fmt::Display) -> InboundSinkError {
+        InboundSinkError {
+            retryable: true,
+            reason: reason.to_string(),
+        }
+    }
+
     async fn spawn_observer<F>(&self, run: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -457,7 +445,9 @@ impl InboundSink for GenericChannelInboundSink {
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
         // Pairing pre-admission gate: a serviced pairing interaction is
         // durably reflected in the pairing/identity stores, not the turn
-        // ledger — the vendor still gets its 2xx.
+        // ledger. The vendor gets 2xx only after the generic lifecycle/fan-out
+        // dispatcher accepts and settles that intent; transient failures ask
+        // the provider to redeliver.
         if let Some(pairing) = &self.pairing {
             // Boxed: the consume path (CAS claim → identity bind → completion
             // fan-out) is a deep async subtree nested inside the admission
@@ -465,18 +455,19 @@ impl InboundSink for GenericChannelInboundSink {
             match Box::pin(pairing.intercept(&installation, &message)).await {
                 ChannelPairingInterception::NotHandled => {}
                 ChannelPairingInterception::Consumed(outcome) => {
-                    if let Some(observer) = self.pairing_outcome_observer.clone() {
-                        let conversation = message.conversation.clone();
-                        let event_id = message.event_id.clone();
-                        self.spawn_observer(async move {
+                    let observer = self.pairing_outcome_observer.clone();
+                    let conversation = message.conversation.clone();
+                    let event_id = message.event_id.clone();
+                    self.spawn_observer(async move {
+                        if let Some(observer) = observer {
                             observer.observe(conversation, event_id, outcome).await;
-                        })
-                        .await;
-                    }
+                        }
+                    })
+                    .await;
                     return Ok(InboundAdmissionAck::Accepted);
                 }
-                ChannelPairingInterception::Failed => {
-                    return Ok(InboundAdmissionAck::Accepted);
+                ChannelPairingInterception::RetryableFailure => {
+                    return Err(Self::retryable("pairing admission failed retryably"));
                 }
             }
         }
@@ -811,9 +802,9 @@ mod tests {
         RebornServicesErrorCode, RebornServicesErrorKind,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+    use tokio::sync::Notify;
 
     use super::*;
-    use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
     struct CountingSurface {
         submissions: AtomicUsize,
@@ -912,6 +903,47 @@ mod tests {
             _message: &NormalizedInboundMessage,
         ) -> ChannelPairingInterception {
             self.interception.clone()
+        }
+    }
+
+    struct BlockingPairingCompletion {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ChannelPairingInterceptor for BlockingPairingCompletion {
+        async fn intercept(
+            &self,
+            _installation_id: &AdapterInstallationId,
+            _message: &NormalizedInboundMessage,
+        ) -> ChannelPairingInterception {
+            self.started.notify_one();
+            self.release.notified().await;
+            ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
+                user_id: UserId::new("paired-user").expect("user id"),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RetryOncePairingCompletion {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChannelPairingInterceptor for RetryOncePairingCompletion {
+        async fn intercept(
+            &self,
+            _installation_id: &AdapterInstallationId,
+            _message: &NormalizedInboundMessage,
+        ) -> ChannelPairingInterception {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return ChannelPairingInterception::RetryableFailure;
+            }
+            ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
+                user_id: UserId::new("paired-user").expect("user id"),
+            })
         }
     }
 
@@ -1083,6 +1115,85 @@ mod tests {
             assert_eq!(workflow.submit_count(), 0);
             assert_eq!(observer.lock().expect("outcomes lock").pop(), Some(outcome));
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_webhook_ack_waits_for_continuation_acceptance() {
+        let surface = Arc::new(CountingSurface::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let sink = Arc::new(
+            GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+                adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+                evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                    header: "X-Vendor-Secret".to_string(),
+                },
+                classifier: None,
+                surface: surface as Arc<dyn ProductSurface>,
+                observer: None,
+            })
+            .with_pairing(
+                Arc::new(BlockingPairingCompletion {
+                    started: Arc::clone(&started),
+                    release: Arc::clone(&release),
+                }),
+                None,
+            ),
+        );
+
+        let mut admission = tokio::spawn({
+            let sink = Arc::clone(&sink);
+            async move { sink.admit(admission_for("ABCDEFGH")).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(250), started.notified())
+            .await
+            .expect("continuation dispatch must start before acknowledgement");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut admission)
+                .await
+                .is_err(),
+            "provider acknowledgement must wait for continuation acceptance"
+        );
+        release.notify_one();
+        let ack = admission
+            .await
+            .expect("admission task")
+            .expect("pairing admission");
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        sink.drain().await;
+    }
+
+    #[tokio::test]
+    async fn pairing_transient_failure_requests_redelivery_before_ack() {
+        let surface = Arc::new(CountingSurface::new());
+        let pairing = Arc::new(RetryOncePairingCompletion::default());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            classifier: None,
+            surface: Arc::clone(&surface) as Arc<dyn ProductSurface>,
+            observer: None,
+        })
+        .with_pairing(
+            Arc::clone(&pairing) as Arc<dyn ChannelPairingInterceptor>,
+            None,
+        );
+
+        let first = sink
+            .admit(admission_for("ABCDEFGH"))
+            .await
+            .expect_err("failed continuation must not acknowledge provider ingress");
+        assert!(first.retryable);
+
+        let second = sink
+            .admit(admission_for("ABCDEFGH"))
+            .await
+            .expect("provider redelivery must re-drive pairing completion");
+        assert_eq!(second, InboundAdmissionAck::Accepted);
+        assert_eq!(pairing.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(surface.submit_count(), 0);
     }
 
     #[tokio::test]

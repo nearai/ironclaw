@@ -242,6 +242,7 @@ test("locale packs include automation action failure copy", () => {
 
 test("locale packs include extension setup and OAuth failure copy", () => {
   const requiredKeys = [
+    "extensions.state.setup_needed",
     "extensions.setupFailed",
     "extensions.oauthSetupFailed",
     "extensions.oauthInvalidAuthorizationUrl",

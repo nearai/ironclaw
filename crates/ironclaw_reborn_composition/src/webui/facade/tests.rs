@@ -12,9 +12,9 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
+    ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
     FilesystemExtensionInstallationStore, ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
@@ -131,7 +131,6 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new(ext).expect("installation id"),
                     ext_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(ext_id, None),
                     Vec::new(),
                     Utc::now(),
@@ -305,12 +304,6 @@ impl ExtensionInstallationStore for OwnerReadFailingStore {
         self.inner.list_installations().await
     }
 
-    async fn list_enabled_installations(
-        &self,
-    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        self.inner.list_enabled_installations().await
-    }
-
     async fn get_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -323,16 +316,6 @@ impl ExtensionInstallationStore for OwnerReadFailingStore {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         self.inner.upsert_installation(installation).await
-    }
-
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
-    ) -> Result<(), ExtensionInstallationError> {
-        self.inner
-            .set_activation_state(installation_id, state)
-            .await
     }
 
     async fn delete_installation(

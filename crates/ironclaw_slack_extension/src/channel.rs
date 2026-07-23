@@ -17,7 +17,7 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::{
     AdapterInstallationId, ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef,
     ImmediateResponse, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    TargetCandidate, TargetQuery, VerifiedInbound,
+    TargetCandidate, TargetQuery, VerifiedInbound, render_channel_auth_prompt,
 };
 use serde::Deserialize;
 
@@ -27,7 +27,7 @@ use crate::payload::{
     SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError, normalize_slack_event,
 };
 
-/// The `[channel.config]` handle carrying the bot token (manifest data; the
+/// The administrator-configuration handle carrying the bot token (manifest data; the
 /// host injects the secret at egress time).
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 
@@ -101,6 +101,28 @@ impl ChannelAdapter for SlackChannelAdapter {
                             // The report describes exactly what the vendor
                             // accepted; the coordinator owns retry semantics
                             // (a partial multipart is terminal there).
+                            break 'parts;
+                        }
+                    }
+                }
+                OutboundPart::AuthPrompt {
+                    view,
+                    direct_message,
+                } => {
+                    let markdown = render_channel_auth_prompt(view, *direct_message);
+                    let rendered = render_slack_mrkdwn(&markdown);
+                    for chunk in slack_text_chunks(&rendered) {
+                        let outcome = post_slack_chunk(
+                            egress,
+                            &credential,
+                            &channel,
+                            thread_ts.as_deref(),
+                            &chunk,
+                        )
+                        .await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
                             break 'parts;
                         }
                     }

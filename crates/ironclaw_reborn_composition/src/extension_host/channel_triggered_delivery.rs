@@ -6,8 +6,8 @@
 //! creator-owned target id, otherwise reads the creator's personal
 //! communication preference, routes that reply-target binding ref to the
 //! extension whose registered [`PreferenceTargetCodec`] decodes it, and drives
-//! that extension's generic [`TriggeredRunDeliveryDriver`]. The single poller
-//! hook slot stays — multiplexing happens inside this hook, by extension id.
+//! that extension's generic [`TriggeredRunDeliveryDriver`]. Lifecycle events,
+//! rather than a per-run polling task, own delayed gate and completion delivery.
 //!
 //! Fail-closed routing: with no stored preference the fire routes to the
 //! only active codec-bearing channel extension when exactly one exists (its
@@ -24,8 +24,8 @@ use ironclaw_outbound::{
     TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 use ironclaw_product_workflow::{
-    PreferenceTargetCodec, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    triggered_run_delivery_settings,
+    CurrentDeliveryTargetResolver, PreferenceTargetCodec, RunDeliveryEventRouter,
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, TriggeredRunExternalDeliveryTarget,
 };
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
@@ -41,6 +41,7 @@ pub(crate) struct GenericTriggeredRunDeliveryHook {
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     preferences: Arc<dyn CommunicationPreferenceRepository>,
     delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
+    event_router: Arc<RunDeliveryEventRouter>,
     drivers: tokio::sync::Mutex<HashMap<String, Arc<TriggeredRunDeliveryDriver>>>,
 }
 
@@ -50,12 +51,14 @@ impl GenericTriggeredRunDeliveryHook {
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
         preferences: Arc<dyn CommunicationPreferenceRepository>,
         delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
+        event_router: Arc<RunDeliveryEventRouter>,
     ) -> Self {
         Self {
             assembly,
             delivery_store,
             preferences,
             delivery_targets,
+            event_router,
             drivers: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -109,7 +112,7 @@ impl GenericTriggeredRunDeliveryHook {
         &self,
         fire: &TriggerFire,
         scope: &TurnScope,
-    ) -> Result<Option<ReplyTargetBindingRef>, String> {
+    ) -> Result<Option<ironclaw_outbound::RunFinalReplyDestination>, String> {
         let Some(target) = fire.delivery_target.as_ref() else {
             return Ok(None);
         };
@@ -125,7 +128,7 @@ impl GenericTriggeredRunDeliveryHook {
             .ok_or_else(|| {
                 "per-trigger delivery target is no longer available to its creator".to_string()
             })?;
-        Ok(Some(entry.reply_target_binding_ref))
+        Ok(Some(entry.destination))
     }
 
     /// The creator's first configured personal preference target, in
@@ -156,7 +159,6 @@ impl GenericTriggeredRunDeliveryHook {
     async fn driver_for_extension(
         &self,
         extension_id: &str,
-        codec: Arc<dyn PreferenceTargetCodec>,
     ) -> Result<Arc<TriggeredRunDeliveryDriver>, String> {
         let mut drivers = self.drivers.lock().await;
         if let Some(driver) = drivers.get(extension_id) {
@@ -169,12 +171,14 @@ impl GenericTriggeredRunDeliveryHook {
                 "composed runtime has no delivery coordinator; triggered delivery unavailable"
                     .to_string()
             })?;
-        let driver = Arc::new(TriggeredRunDeliveryDriver::with_settings(
+        let current_target_resolver =
+            Arc::clone(&self.delivery_targets) as Arc<dyn CurrentDeliveryTargetResolver>;
+        let driver = Arc::new(TriggeredRunDeliveryDriver::with_event_router(
             services,
-            triggered_run_delivery_settings(),
             Arc::clone(&self.delivery_store),
-            codec,
+            current_target_resolver,
             self.assembly.identity().agent_id.clone(),
+            Arc::clone(&self.event_router),
         ));
         drivers.insert(extension_id.to_string(), Arc::clone(&driver));
         Ok(driver)
@@ -217,8 +221,8 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 return;
             }
         };
-        let delivery_target = match self.resolve_per_trigger_target(&fire, &scope).await {
-            Ok(target) => target,
+        let resolved_destination = match self.resolve_per_trigger_target(&fire, &scope).await {
+            Ok(destination) => destination,
             Err(reason) => {
                 tracing::warn!(
                     target = "ironclaw::reborn::channel_triggered_delivery",
@@ -230,7 +234,18 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 return;
             }
         };
-        let (extension_id, codec) = match self
+        let Some(external_target) =
+            TriggeredRunExternalDeliveryTarget::from_destination(resolved_destination)
+        else {
+            return;
+        };
+        let delivery_target = match external_target {
+            TriggeredRunExternalDeliveryTarget::UseCommunicationPreference => None,
+            TriggeredRunExternalDeliveryTarget::Explicit {
+                reply_target_binding_ref,
+            } => Some(reply_target_binding_ref),
+        };
+        let (extension_id, _codec) = match self
             .route_extension(&scope, &fire.creator_user_id, delivery_target.as_ref())
             .await
         {
@@ -246,7 +261,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 return;
             }
         };
-        let driver = match self.driver_for_extension(&extension_id, codec).await {
+        let driver = match self.driver_for_extension(&extension_id).await {
             Ok(driver) => driver,
             Err(reason) => {
                 tracing::warn!(

@@ -49,8 +49,8 @@ use crate::provider_identity::RebornUserIdentityLookup;
 /// validated at construction. Unlike the retired per-vendor bundle, no
 /// installation/team/app identifiers are carried here: the installation id
 /// is owned by the production install path, and the scoping claim values are
-/// configured through the production `[channel.config]` configure surface
-/// (`ChannelConfigService`) — the generic scope source reads both back from
+/// configured through the production administrator-configuration surface
+/// (the manifest-indexed administrator resolver) — the generic scope source reads both back from
 /// the durable installation store.
 pub struct ChannelConnectionTestConfig {
     /// Tenant of the harness's dispatch-time callers (the group's
@@ -165,7 +165,7 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
-        channel_config: local_runtime.channel_config.clone(),
+        admin_configuration_resolver: local_runtime.admin_configuration_resolver.clone(),
         binding_store: Arc::clone(&identity_store)
             as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
@@ -196,7 +196,7 @@ impl ChannelConnectionTestBundle {
     /// configured connection scope and persisted as an installation-scoped
     /// binding through [`bind_channel_identities_for_callback`] — the exact
     /// hook body the production callback runs. Fail-closed like production:
-    /// the extension must be installed and its `[channel.config]` scoping
+    /// the extension must be installed and its administrator scoping
     /// values configured, and this bundle additionally errors when the
     /// provider maps onto no installed channel extension (production
     /// completes such callbacks untouched; a test calling connect wants the

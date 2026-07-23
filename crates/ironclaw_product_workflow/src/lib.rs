@@ -33,6 +33,7 @@ mod auth_prompt;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
+mod channel_pairing;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -49,10 +50,12 @@ mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
 mod lifecycle;
+mod lifecycle_auth_continuation;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
 mod run_delivery;
+mod trigger_final_reply_target;
 mod webui_inbound;
 mod workflow;
 
@@ -77,7 +80,9 @@ pub use approval_prompt::{
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
-pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_continuation::{
+    ProductAuthContinuationDispatcher, ProductAuthTurnGateResumeDispatcher,
+};
 pub use auth_interaction::{
     AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
     AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,
@@ -88,7 +93,7 @@ pub use auth_interaction::{
 };
 pub use auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
-    auth_prompt_view_for_blocked_auth,
+    PairingAuthChallengeView, auth_prompt_view_for_blocked_auth,
 };
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
@@ -96,7 +101,15 @@ pub use automation_thread_metadata::{
 };
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding, route_kind_for_inbound_payload,
+    ResolveStoredProductReplyTargetRequest, ResolvedBinding, ResolvedStoredProductReplyTarget,
+    StoredProductReplyTargetAccess, route_kind_for_inbound_payload,
+};
+pub use channel_pairing::{
+    ChannelPairingConsumeOutcome, ChannelPairingDirectTargetStore, ChannelPairingError,
+    ChannelPairingIdentityBindOutcome, ChannelPairingIdentityStore,
+    ChannelPairingInstallationSource, ChannelPairingInterception, ChannelPairingInterceptor,
+    ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceParts,
+    ChannelPairingStatus, ChannelPairingTemplateValues, FilesystemChannelPairingStore,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
@@ -115,8 +128,10 @@ pub use conversation_binding::{
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 pub use extension_account_setup::{
-    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
+    AccountConnectionStatusError, AccountConnectionStatusSource, CHANNEL_PAIRING_CODE_ALPHABET,
+    CHANNEL_PAIRING_CODE_LEN, ChannelConnectionNoticePolicy, ChannelPairingCode,
+    ChannelPairingCodeError, ChannelPairingIssue, ExtensionAccountSetupDescriptor,
+    ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
@@ -140,9 +155,10 @@ pub use lifecycle::{
     LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecyclePublicState, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
+pub use lifecycle_auth_continuation::LifecycleAuthContinuationSlot;
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
@@ -153,16 +169,19 @@ pub use delivery_coordinator::{
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
 // the coordinator; vendor residue enters only through the ports.
+pub use ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID;
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
 pub use run_delivery::{
-    ApprovalPromptContextSource, BlockedAuthPromptSource, DeliveredChannelMessage,
-    PreferenceTargetCodec, PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryObserver,
-    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+    ApprovalPromptContextSource, BlockedAuthPromptSource, CurrentDeliveryTarget,
+    CurrentDeliveryTargetResolver, DeliveredChannelMessage, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryEventHandler,
+    RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, TriggeredRunExternalDeliveryTarget,
 };
+pub use trigger_final_reply_target::{RunFinalReplyRoutingService, TriggerFinalReplyTargetService};
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
 // so `ironclaw_webui` consumes them via the facade crate and does not need
@@ -193,10 +212,10 @@ pub use reborn_services::{
     AUTOMATIONS_VIEW, ActiveModelReader, AdminCreateUserFields, AdminCreatedUser, AdminUserError,
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
     AutomationListRequest, AutomationProductFacade, CANCEL_RUN_OPERATION, CREATE_THREAD_OPERATION,
-    ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    ChannelAuthAccountState, ChannelConnectionFacade,
     ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
-    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
@@ -253,12 +272,12 @@ pub use reborn_services::{
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionRegistryResponse, RebornExtensionSetupSecret,
     RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
@@ -316,6 +335,7 @@ pub use reborn_services::{
     outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,
     outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
     parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+    web_app_outbound_delivery_target_option,
 };
 
 pub use webui_inbound::{

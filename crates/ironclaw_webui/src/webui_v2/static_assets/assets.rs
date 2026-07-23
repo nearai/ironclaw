@@ -345,9 +345,10 @@ mod tests {
             "pairing-vs-OAuth routing derives from the wire connect strategy / secrets"
         );
         assert!(
-            configure_modal.contains("!extensionIsActive(extension)"),
-            "post-OAuth auto-activate is generic: any not-yet-active extension"
+            configure_modal.contains("queryClient.invalidateQueries({ queryKey })"),
+            "OAuth completion must refresh the server-owned lifecycle projection"
         );
+        assert!(!configure_modal.contains("activateExtension"));
         assert!(!configure_modal.to_ascii_lowercase().contains("slack"));
 
         let regression = source_text("pages/chat/lib/useChat-send.test.ts");
@@ -771,7 +772,7 @@ mod tests {
         let extension_card = source_text("pages/extensions/components/extension-card.tsx");
 
         assert!(
-            extension_card.contains("state === \"setup_required\" || state === \"auth_required\""),
+            extension_card.contains("const setupState = state === \"setup_needed\";"),
             "setup/auth states must prefer credential setup instructions"
         );
         assert!(
@@ -793,18 +794,15 @@ mod tests {
     }
 
     #[test]
-    fn extension_config_modal_hides_activate_for_active_extensions() {
+    fn extension_configuration_uses_only_the_public_lifecycle_states() {
         let extension_actions = source_text("pages/extensions/lib/extension-actions.ts");
         assert!(extension_actions.contains("export function extensionIsActive"));
-        assert!(extension_actions.contains("state === \"active\" || state === \"ready\""));
         assert!(
-            extension_actions.contains("setupReadyForActivation({ extension"),
-            "setup readiness must receive lifecycle state, not only setup fields"
+            extension_actions.contains("return state === \"active\";"),
+            "active readiness must derive from the public lifecycle state"
         );
-        assert!(
-            extension_actions.contains("extensionIsActive(extension)"),
-            "active extensions must not be considered ready for another activation"
-        );
+        assert!(!extension_actions.contains("setupReadyForActivation"));
+        assert!(!extension_actions.contains("state === \"ready\""));
 
         let extension_card = source_text("pages/extensions/components/extension-card.tsx");
         assert!(extension_card.contains("installationState: ext.installation_state"));
@@ -812,16 +810,9 @@ mod tests {
 
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
         assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
-        assert!(
-            configure_modal.contains("const canActivate =")
-                && configure_modal
-                    .contains("setupReadyForActivation({ extension, secrets, fields })"),
-            "the modal Activate button must be gated by lifecycle-aware setup readiness"
-        );
-        assert!(
-            configure_modal.contains("!hasChannelSurface(extension)"),
-            "channel-surface extensions activate via OAuth/pairing, not the generic Activate button"
-        );
+        assert!(!configure_modal.contains("const canActivate ="));
+        assert!(!configure_modal.contains("setupReadyForActivation"));
+        assert!(!configure_modal.contains("extensions.activate"));
         assert!(configure_modal.contains("extensions.activeConfigured"));
 
         let regression = source_text("pages/extensions/lib/extension-actions.test.ts");
@@ -829,7 +820,7 @@ mod tests {
             regression.contains("extensionIsActive accepts card payload lifecycle fields"),
             "caller-visible card payload lifecycle fields need JS regression coverage"
         );
-        assert!(regression.contains("extension: { active: true }"));
+        assert!(regression.contains("extensionIsActive({ active: true })"));
     }
 
     #[test]

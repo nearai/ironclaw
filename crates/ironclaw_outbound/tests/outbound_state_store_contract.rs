@@ -1,5 +1,6 @@
 // Contract tests construct the store directly under test.
 #![allow(clippy::disallowed_methods)]
+// arch-exempt: large_file, cross-instance claim regressions share the existing outbound persistence harness, plan #6175
 
 use std::sync::Arc;
 
@@ -74,6 +75,53 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     coordinator_delivery_lifecycle_round_trips(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
+}
+
+#[tokio::test]
+async fn delivery_send_claim_is_atomic_across_store_instances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
+    let second = Arc::new(build_outbound_store_for_backend(backend));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    first
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(TurnRunId::new()),
+                target: reply_ref("reply-cross-instance-claim"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:cross-instance-claim")
+                    .unwrap(),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let first_request = ClaimDeliveryAttemptForSendRequest {
+        delivery_id,
+        scope: scope.clone(),
+    };
+    let second_request = first_request.clone();
+    let (first_claim, second_claim) = tokio::join!(
+        first.claim_delivery_attempt_for_send(first_request),
+        second.claim_delivery_attempt_for_send(second_request),
+    );
+    let claims = [first_claim.unwrap(), second_claim.unwrap()];
+    assert_eq!(claims.into_iter().filter(|claimed| *claimed).count(), 1);
+
+    let attempts = first.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
@@ -803,7 +851,7 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
 #[tokio::test]
 async fn filesystem_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
     let inner = Arc::new(InMemoryBackend::new());
-    let backend = Arc::new(UnsupportedPreferenceCasBackend::new(Arc::clone(&inner)));
+    let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
     let store = FilesystemOutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         TEST_OUTBOUND_ROOT,
@@ -832,6 +880,50 @@ async fn filesystem_store_rejects_communication_preference_write_on_unsupported_
     assert!(matches!(result, Err(OutboundError::Backend)));
     assert_eq!(backend.unsupported_count().await, 1);
     assert_eq!(load_preference_record(&store, key).await, None);
+}
+
+#[tokio::test]
+async fn delivery_send_claim_fails_closed_on_unsupported_cas_mount() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
+    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    ));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(TurnRunId::new()),
+                target: reply_ref("reply-unsupported-claim"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:unsupported-claim").unwrap(),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let claim = store
+        .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+            delivery_id,
+            scope: scope.clone(),
+        })
+        .await;
+    assert!(matches!(claim, Err(OutboundError::Backend)));
+    assert_eq!(backend.unsupported_count().await, 1);
+    let attempt = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempt[0].status, OutboundDeliveryStatus::Prepared);
 }
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
@@ -1272,16 +1364,36 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .await
         .unwrap();
 
-    store
-        .update_delivery_status(UpdateDeliveryStatusRequest {
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "the first caller atomically owns vendor egress"
+    );
+    assert!(
+        !store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "a replay cannot claim the same durable attempt"
+    );
+    let wrong_scope_claim = store
+        .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
             delivery_id,
-            scope: scope.clone(),
-            status: OutboundDeliveryStatus::Sending,
-            updated_at: now(),
-            failure_kind: None,
+            scope: sibling_turn_scope(),
         })
-        .await
-        .unwrap();
+        .await;
+    assert!(matches!(
+        wrong_scope_claim,
+        Err(OutboundError::DeliveryNotFound | OutboundError::SubscriptionScopeMismatch)
+    ));
     let in_flight = store.list_delivery_attempts(scope.clone()).await.unwrap();
     let attempt = in_flight
         .iter()
@@ -1684,16 +1796,16 @@ impl RootFilesystem for VersionRacingBackend {
     }
 }
 
-/// Test backend that mimics a mount that cannot honor CAS writes for
-/// communication-preference records. An accidental byte fallback would retry
-/// as `CasExpectation::Any` and succeed through the inner backend, so the
-/// test above proves preference writes fail closed instead.
-struct UnsupportedPreferenceCasBackend {
+/// Test backend that mimics a mount that cannot honor CAS writes for critical
+/// preference updates or delivery ownership claims. An accidental byte
+/// fallback would retry as `CasExpectation::Any` and succeed through the inner
+/// backend, so the tests above prove both operations fail closed instead.
+struct UnsupportedCriticalCasBackend {
     inner: Arc<InMemoryBackend>,
     unsupported: Mutex<u32>,
 }
 
-impl UnsupportedPreferenceCasBackend {
+impl UnsupportedCriticalCasBackend {
     fn new(inner: Arc<InMemoryBackend>) -> Self {
         Self {
             inner,
@@ -1707,7 +1819,7 @@ impl UnsupportedPreferenceCasBackend {
 }
 
 #[async_trait]
-impl RootFilesystem for UnsupportedPreferenceCasBackend {
+impl RootFilesystem for UnsupportedCriticalCasBackend {
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities()
     }
@@ -1718,11 +1830,15 @@ impl RootFilesystem for UnsupportedPreferenceCasBackend {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        if path
+        let preference_requires_cas = path
             .as_str()
             .starts_with(&format!("{TEST_OUTBOUND_ROOT}/communication-preferences/"))
-            && !matches!(cas, CasExpectation::Any)
-        {
+            && !matches!(cas, CasExpectation::Any);
+        let delivery_claim_requires_cas = path
+            .as_str()
+            .starts_with(&format!("{TEST_OUTBOUND_ROOT}/deliveries/"))
+            && matches!(cas, CasExpectation::Version(_));
+        if preference_requires_cas || delivery_claim_requires_cas {
             *self.unsupported.lock().await += 1;
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
@@ -2134,5 +2250,150 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         miss.is_empty(),
         "tenant_id projection must NOT surface tenant-outbound's delivery under tenant-b query; got {} rows",
         miss.len(),
+    );
+}
+
+#[tokio::test]
+async fn run_final_reply_target_is_durable_and_exactly_scoped() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = build_outbound_store_for_backend(Arc::clone(&backend));
+    let second = build_outbound_store_for_backend(backend);
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let actor = TurnActor::new(UserId::new("user-run-route").unwrap());
+    let record = RunFinalReplyTargetRecord {
+        run_id,
+        scope: scope.clone(),
+        actor: actor.clone(),
+        destination: RunFinalReplyDestination::External {
+            reply_target_binding_ref: reply_ref("reply:run-scoped-slack-dm"),
+        },
+    };
+
+    first
+        .put_run_final_reply_target(record.clone())
+        .await
+        .expect("persist run final-reply target");
+
+    let loaded = second
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope: scope.clone(),
+            actor: actor.clone(),
+        })
+        .await
+        .expect("load through an independent store instance");
+    assert_eq!(loaded, Some(record));
+
+    let foreign_actor = second
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope: scope.clone(),
+            actor: TurnActor::new(UserId::new("user-foreign").unwrap()),
+        })
+        .await
+        .expect("foreign lookup must not reveal whether the route exists");
+    assert!(foreign_actor.is_none());
+
+    let foreign_scope = TurnScope::new_with_owner(
+        TenantId::new("tenant-foreign").unwrap(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+        scope.thread_id.clone(),
+        scope.explicit_owner_user_id().cloned(),
+    );
+    let foreign_scope = second
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope: foreign_scope,
+            actor,
+        })
+        .await
+        .expect("foreign scope lookup must not reveal whether the route exists");
+    assert!(foreign_scope.is_none());
+}
+
+#[tokio::test]
+async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = build_outbound_store_for_backend(Arc::clone(&backend));
+    let reopened = build_outbound_store_for_backend(backend);
+    let handoff = RunFinalReplyHandoffRecord {
+        event_cursor: ironclaw_turns::EventCursor(41),
+        scope: turn_scope(),
+        run_id: TurnRunId::new(),
+    };
+
+    first
+        .put_run_final_reply_handoff(handoff.clone())
+        .await
+        .expect("persist handoff before process death");
+    first
+        .advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(41))
+        .await
+        .expect("persist materialization cursor");
+
+    assert_eq!(
+        reopened
+            .list_pending_run_final_reply_handoffs(10)
+            .await
+            .expect("reopened store lists pending handoff"),
+        vec![handoff.clone()]
+    );
+    assert_eq!(
+        reopened
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("reopened store loads cursor"),
+        ironclaw_turns::EventCursor(41)
+    );
+
+    reopened
+        .advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(12))
+        .await
+        .expect("stale replay is idempotent");
+    assert_eq!(
+        reopened
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("cursor never regresses"),
+        ironclaw_turns::EventCursor(41)
+    );
+
+    reopened
+        .complete_run_final_reply_handoff(&handoff)
+        .await
+        .expect("settle handoff");
+    reopened
+        .complete_run_final_reply_handoff(&handoff)
+        .await
+        .expect("settlement replay is idempotent");
+    assert!(
+        reopened
+            .list_pending_run_final_reply_handoffs(10)
+            .await
+            .expect("settled handoff is absent")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn final_reply_handoff_cursor_converges_across_concurrent_store_instances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
+    let second = Arc::new(build_outbound_store_for_backend(backend));
+
+    let (low, high) = tokio::join!(
+        first.advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(17)),
+        second.advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(29)),
+    );
+    low.expect("lower cursor writer");
+    high.expect("higher cursor writer");
+    assert_eq!(
+        first
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("load converged cursor"),
+        ironclaw_turns::EventCursor(29)
     );
 }

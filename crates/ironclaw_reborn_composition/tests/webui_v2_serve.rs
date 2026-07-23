@@ -510,6 +510,70 @@ mod openai_compat_mount_tests {
             "hello through responses"
         );
         assert_eq!(workflow.submit_count(), 1);
+        assert_eq!(workflow.read_count(), 1);
+    }
+
+    #[derive(Clone)]
+    struct AdmissionTestBindingService;
+
+    #[async_trait]
+    impl ConversationBindingService for AdmissionTestBindingService {
+        async fn resolve_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve(request)
+        }
+
+        async fn lookup_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve(request)
+        }
+    }
+
+    impl AdmissionTestBindingService {
+        fn resolve(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            Ok(ResolvedBinding {
+                tenant_id: TenantId::new(TENANT).map_err(binding_error("test OpenAI tenant id"))?,
+                actor_user_id: UserId::new(request.external_actor_ref.id())
+                    .map_err(binding_error("test OpenAI actor user id"))?,
+                subject_user_id: Some(
+                    UserId::new(request.external_actor_ref.id())
+                        .map_err(binding_error("test OpenAI subject user id"))?,
+                ),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:webui-test")
+                    .map_err(|reason| ProductWorkflowError::BindingResolutionFailed {
+                        reason: format!("test OpenAI source binding ref: {reason}"),
+                    })?,
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                    "reply:webui-test",
+                )
+                .map_err(|reason| {
+                    ProductWorkflowError::BindingResolutionFailed {
+                        reason: format!("test OpenAI reply target binding ref: {reason}"),
+                    }
+                })?,
+                thread_id: ThreadId::new(format!("thread-{}", request.external_event_id.as_str()))
+                    .map_err(binding_error("test OpenAI thread id"))?,
+                agent_id: Some(AgentId::new(AGENT).map_err(binding_error("test OpenAI agent id"))?),
+                project_id: Some(
+                    ProjectId::new(PROJECT).map_err(binding_error("test OpenAI project id"))?,
+                ),
+            })
+        }
+    }
+
+    fn binding_error(
+        field: &'static str,
+    ) -> impl FnOnce(ironclaw_host_api::HostApiError) -> ProductWorkflowError + 'static {
+        move |reason| ProductWorkflowError::BindingResolutionFailed {
+            reason: format!("{field}: {reason}"),
+        }
     }
 
     fn chat_request(token: Option<&str>) -> Request<Body> {

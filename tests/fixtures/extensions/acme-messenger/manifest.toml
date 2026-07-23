@@ -12,6 +12,15 @@ version = "0.1.0"
 description = "Invented-vendor fixture: one tool, one channel, and an OAuth recipe for the generic extension runtime's conformance and integration suites."
 trust = "first_party_requested"
 
+[admin_configuration]
+group_id = "vendor.acme"
+display_name = "Acme deployment configuration"
+description = "Deployment credentials for the Acme channel."
+fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
+]
+
 [runtime]
 kind = "first_party"
 service = "acme-messenger.extension/v1"
@@ -62,12 +71,6 @@ signed_payload = [
   { header = "X-Acme-Request-Timestamp" },
   { literal = ":" },
   { body = true },
-]
-
-[channel.config]                  # operator setup; the host renders the generic form
-fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true },
-  { handle = "acme_signing_secret", label = "Signing secret", secret = true },
 ]
 
 [[channel.egress]]

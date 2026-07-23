@@ -24,6 +24,7 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+rand = "0.10"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
@@ -38,6 +39,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }

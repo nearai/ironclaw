@@ -52,6 +52,13 @@ fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery()
             && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
         "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
     );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("inherits the current source run's authorized delivery route")
+            && TRIGGER_CREATE_DESCRIPTION.contains("only when no source route exists")
+            && TRIGGER_CREATE_DESCRIPTION.contains("never prompt parsing"),
+        "trigger_create description must explain trusted source-route inheritance and fallback: {TRIGGER_CREATE_DESCRIPTION}"
+    );
 }
 
 #[test]

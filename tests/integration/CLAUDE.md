@@ -493,7 +493,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 |---|---|---|
 | `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
-| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
 | `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |

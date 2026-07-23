@@ -1,21 +1,19 @@
-use std::collections::BTreeSet;
-
 use ironclaw_auth::AuthProductScope;
 use ironclaw_host_api::ExtensionId;
 
 use crate::{
-    ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductWorkflowError, RebornChannelConfigField,
-    RebornExtensionCredentialSetup, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornServicesError, RebornServicesErrorCode, RebornSetupExtensionResponse,
-    RebornViewDescriptor, WebUiAuthenticatedCaller, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiSetupExtensionRequest,
+    LifecycleExtensionCredentialRequirement, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, ProductWorkflowError, RebornServicesError,
+    RebornServicesErrorCode, RebornSetupExtensionResponse, RebornViewDescriptor,
+    WebUiAuthenticatedCaller, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiSetupExtensionRequest,
 };
 
 use super::{
     ExtensionCredentialSetupService, extension_credentials::credential_scope, extension_onboarding,
-    extension_setup_credentials, extension_setup_credentials::SetupSubmitPayload, views,
+    extension_setup_credentials, views,
 };
 
 pub const EXTENSION_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -32,7 +30,6 @@ enum SetupAction {
 pub(super) async fn setup_extension_view(
     facade: &dyn LifecycleProductFacade,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
     caller: WebUiAuthenticatedCaller,
     params: serde_json::Value,
 ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
@@ -42,7 +39,6 @@ pub(super) async fn setup_extension_view(
     setup_extension(
         facade,
         extension_credentials,
-        channel_config,
         caller,
         package_ref,
         WebUiSetupExtensionRequest::default(),
@@ -53,7 +49,6 @@ pub(super) async fn setup_extension_view(
 pub(super) async fn submit_extension_setup_capability(
     facade: &dyn LifecycleProductFacade,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
     caller: WebUiAuthenticatedCaller,
     input: serde_json::Value,
 ) -> Result<(), RebornServicesError> {
@@ -80,7 +75,6 @@ pub(super) async fn submit_extension_setup_capability(
     setup_extension(
         facade,
         extension_credentials,
-        channel_config,
         caller,
         package_ref,
         request,
@@ -92,7 +86,6 @@ pub(super) async fn submit_extension_setup_capability(
 pub(super) async fn setup_extension(
     facade: &dyn LifecycleProductFacade,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
     caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
     request: WebUiSetupExtensionRequest,
@@ -110,17 +103,12 @@ pub(super) async fn setup_extension(
     let lifecycle = project_package(facade, context.clone(), package_ref.clone()).await?;
     let requirements = extension_setup_credentials::requirements(&lifecycle);
     if action == SetupAction::Submit {
-        let mut submit = extension_setup_credentials::parse_submit_payload(request)?;
-        if channel_config.is_none() && !submit.fields.is_empty() {
-            return Err(RebornServicesError::service_unavailable(true));
-        }
-        let channel_fields = channel_field_status(channel_config, &extension_id).await?;
-        let channel_values =
-            route_channel_config_values(&mut submit, &channel_fields, &requirements)?;
-        if !channel_values.is_empty() {
-            let port =
-                channel_config.ok_or_else(|| RebornServicesError::service_unavailable(true))?;
-            port.save_values(&extension_id, channel_values).await?;
+        let submit = extension_setup_credentials::parse_submit_payload(request)?;
+        if !submit.fields.is_empty() {
+            return Err(validation_error(
+                "fields",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
         }
         extension_setup_credentials::submit_manual_tokens(
             extension_credentials,
@@ -130,11 +118,24 @@ pub(super) async fn setup_extension(
             submit.secrets,
         )
         .await?;
+        // Saving the caller's final setup input completes the single install
+        // transition. Activation/publication is an internal checkpoint, not a
+        // second user action: attempt it immediately, then project the
+        // authoritative caller-scoped state. If another requirement is still
+        // missing, the projection remains `setup_needed`.
+        facade
+            .execute(
+                context.clone(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .map_err(map_lifecycle_error)?;
         let refreshed = project_package(facade, context, package_ref).await?;
         let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
         return setup_extension_response(
             extension_credentials,
-            channel_config,
             scope,
             &extension_id,
             refreshed,
@@ -144,7 +145,6 @@ pub(super) async fn setup_extension(
     }
     setup_extension_response(
         extension_credentials,
-        channel_config,
         scope,
         &extension_id,
         lifecycle,
@@ -164,58 +164,8 @@ async fn project_package(
         .map_err(map_lifecycle_error)
 }
 
-async fn channel_field_status(
-    channel_config: Option<&dyn ChannelConfigFacade>,
-    extension_id: &ExtensionId,
-) -> Result<Vec<RebornChannelConfigField>, RebornServicesError> {
-    match channel_config {
-        Some(port) => port.field_status(extension_id).await,
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Split the submitted payload into channel-config values (routed to the
-/// configure port) and credential secrets (left for the credential path).
-/// Secret channel-config fields ride the `secrets` map under their handle;
-/// a name that is also a declared credential requirement keeps the existing
-/// credential path. Non-secret values ride the `fields` map and must match
-/// a declared non-secret field handle.
-fn route_channel_config_values(
-    submit: &mut SetupSubmitPayload,
-    channel_fields: &[RebornChannelConfigField],
-    requirements: &[LifecycleExtensionCredentialRequirement],
-) -> Result<Vec<(String, String)>, RebornServicesError> {
-    let requirement_names: BTreeSet<&str> = requirements
-        .iter()
-        .map(|requirement| requirement.name.as_str())
-        .collect();
-    let mut values = Vec::new();
-    for field in channel_fields.iter().filter(|field| field.secret) {
-        if requirement_names.contains(field.name.as_str()) {
-            continue;
-        }
-        if let Some(value) = submit.secrets.remove(&field.name) {
-            values.push((field.name.clone(), value));
-        }
-    }
-    for (name, value) in std::mem::take(&mut submit.fields) {
-        if !channel_fields
-            .iter()
-            .any(|field| !field.secret && field.name == name)
-        {
-            return Err(validation_error(
-                "fields",
-                WebUiInboundValidationCode::InvalidValue,
-            ));
-        }
-        values.push((name, value));
-    }
-    Ok(values)
-}
-
 async fn setup_extension_response(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     lifecycle: LifecycleProductResponse,
@@ -225,42 +175,13 @@ async fn setup_extension_response(
         .package_ref
         .clone()
         .ok_or_else(RebornServicesError::internal_invariant)?;
-    let mut secrets = extension_setup_credentials::project(
+    let secrets = extension_setup_credentials::project(
         extension_credentials,
         scope,
         extension_id,
         requirements,
     )
     .await?;
-    let channel_fields = channel_field_status(channel_config, extension_id).await?;
-    // Secret channel-config fields surface in the existing secrets shape
-    // (presence only — stored values are never echoed); a credential
-    // requirement with the same name keeps its richer projection.
-    for field in channel_fields.iter().filter(|field| field.secret) {
-        if secrets.iter().any(|secret| secret.name == field.name) {
-            continue;
-        }
-        secrets.push(RebornExtensionSetupSecret {
-            name: field.name.clone(),
-            provider: extension_id.as_str().to_string(),
-            prompt: field.label.clone(),
-            optional: false,
-            provided: field.provided,
-            setup: RebornExtensionCredentialSetup::ManualToken,
-            credential_ref: None,
-        });
-    }
-    secrets.sort_by_key(|secret| !secret.provided);
-    let fields = channel_fields
-        .iter()
-        .filter(|field| !field.secret)
-        .map(|field| RebornExtensionSetupField {
-            name: field.name.clone(),
-            prompt: field.label.clone(),
-            optional: false,
-            placeholder: None,
-        })
-        .collect();
     let onboarding = extension_onboarding::from_lifecycle(&lifecycle).onboarding;
     Ok(RebornSetupExtensionResponse {
         package_ref,
@@ -269,7 +190,6 @@ async fn setup_extension_response(
         onboarding,
         payload: lifecycle.payload,
         secrets,
-        fields,
     })
 }
 
@@ -297,11 +217,9 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         | ProductWorkflowError::UnsupportedActionKind { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
         }
-        // WebUI gets a plain 400 with no free text (the wire contract has no
-        // free-text field): the exact `config set` remediation reaches users
-        // via the LLM tool path and `ironclaw status`; bespoke WebUI
-        // messaging is a deliberately deferred scope-cut.
-        ProductWorkflowError::ProviderInstanceNotConfigured { .. } => {
+        // Deployment configuration metadata is operator-only; ordinary caller
+        // setup receives only the typed, free-text-free unavailable result.
+        ProductWorkflowError::ProviderInstanceNotConfigured => {
             RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
         }
         ProductWorkflowError::BindingAccessDenied => {
@@ -333,16 +251,11 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
 mod tests {
     use super::*;
 
-    /// Scope-cut: the WebUI facade gets a plain sanitized 400, never the
-    /// host-authored `reason` text — no free-text field exists on the wire
-    /// contract (see the variant's doc comment in
-    /// `ironclaw_product_workflow::error`).
+    /// The WebUI facade gets a plain sanitized 400 with no administrator
+    /// metadata because the domain error itself carries none.
     #[test]
     fn provider_instance_not_configured_maps_to_sanitized_400() {
-        let error = ProductWorkflowError::ProviderInstanceNotConfigured {
-            reason: "ironclaw config set google.client_id <id>.apps.googleusercontent.com"
-                .to_string(),
-        };
+        let error = ProductWorkflowError::ProviderInstanceNotConfigured;
 
         let mapped = map_lifecycle_error(error);
 

@@ -134,16 +134,143 @@ mod tests {
     fn engine_backed_route_state(
         shared: Arc<ironclaw_auth::InMemoryAuthProductServices>,
         recipes: Vec<ResolvedVendorAuthRecipe>,
+        extension_id: &str,
+        requirement_name: &str,
+        provider: &str,
+        scopes: &[&str],
     ) -> ProductAuthRouteState {
         let product_auth = RebornProductAuthServices::from_shared(shared, Arc::new(NoopDispatcher))
             .with_auth_engine(test_engine(recipes));
-        ProductAuthRouteState::new(
+        let mut state = ProductAuthRouteState::new(
             Arc::new(product_auth),
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        )
-        .with_test_installed_extension_lookup()
+        );
+        state.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::Scripted {
+            extension_id: ExtensionId::new(extension_id).expect("test extension id"),
+            requirement_name: requirement_name.to_string(),
+            requirement: InstalledExtensionOAuthRequirement {
+                provider: provider.to_string(),
+                account_label: format!("{extension_id} {provider}"),
+                scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
+            },
+        }));
+        state
+    }
+
+    #[tokio::test]
+    async fn extension_oauth_start_records_server_owned_lifecycle_activation() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let state = engine_backed_route_state(
+            shared.clone(),
+            vec![vendor_recipe("vendor-a", &[])],
+            "tool-a",
+            "primary_oauth",
+            "vendor-a",
+            &[],
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/tool-a/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "requirement": "primary_oauth",
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        assert_eq!(json["continuation"]["type"], "lifecycle_activation");
+        assert_eq!(json["continuation"]["package_ref"], "tool-a");
+
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let mut resource = test_resource_scope();
+        resource.invocation_id = invocation_id;
+        let flow = shared
+            .get_flow(
+                &AuthProductScope::new(resource, AuthSurface::Callback),
+                flow_id,
+            )
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert_eq!(
+            flow.continuation,
+            ironclaw_auth::AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("tool-a")
+                    .expect("package ref"),
+            }
+        );
+    }
+
+    /// Regression: an installed extension must not mint credentials for a
+    /// different extension's globally configured OAuth vendor/scopes. The
+    /// route must resolve the selected requirement from the installed
+    /// extension's manifest instead of treating the browser payload plus the
+    /// global recipe catalog as authority.
+    #[tokio::test]
+    async fn extension_oauth_start_rejects_cross_extension_oauth_requirement() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let state = engine_backed_route_state(
+            shared.clone(),
+            vec![
+                vendor_recipe("vendor-a", &["items:read"]),
+                vendor_recipe("vendor-b", &["admin:write"]),
+            ],
+            "tool-a",
+            "primary_oauth",
+            "vendor-a",
+            &["items:read"],
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/tool-a/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "requirement": "primary_oauth",
+                            "provider": "vendor-b",
+                            "account_label": "cross-extension account",
+                            "scopes": ["admin:write"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -155,7 +282,14 @@ mod tests {
         // full-equality compared `invocation_id` and so never matched, forking a
         // new account on every reconnect. The bind is now owner-granularity.
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let state = engine_backed_route_state(shared.clone(), vec![vendor_recipe("notion", &[])]);
+        let state = engine_backed_route_state(
+            shared.clone(),
+            vec![vendor_recipe("notion", &[])],
+            "notion",
+            "notion_oauth",
+            "notion",
+            &[],
+        );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -186,9 +320,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
-                            "scopes": [],
+                            "requirement": "notion_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -230,7 +362,14 @@ mod tests {
         // agent/project stay hard-`==` in the owner match, so a cross-owner
         // account is invisible and the flow starts with no update binding.
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let state = engine_backed_route_state(shared.clone(), vec![vendor_recipe("notion", &[])]);
+        let state = engine_backed_route_state(
+            shared.clone(),
+            vec![vendor_recipe("notion", &[])],
+            "notion",
+            "notion_oauth",
+            "notion",
+            &[],
+        );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -263,9 +402,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
-                            "scopes": [],
+                            "requirement": "notion_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -308,6 +445,10 @@ mod tests {
         let state = engine_backed_route_state(
             shared.clone(),
             vec![vendor_recipe("driveco", &["files:read"])],
+            "drive-ext",
+            "drive_oauth",
+            "driveco",
+            &["files:read"],
         );
         let app = product_auth_route_mount(state)
             .protected
@@ -346,9 +487,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": "driveco",
-                            "account_label": "drive account",
-                            "scopes": ["files:read"],
+                            "requirement": "drive_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -382,22 +521,26 @@ mod tests {
         assert_eq!(update_binding.account_id, account.id);
     }
 
-    /// The engine start path rejects scopes outside the vendor recipe ceiling
-    /// before any flow is created (AUTH-4 at the route tier), and an empty
-    /// scope list defaults to the recipe ceiling.
+    /// The route rejects requirement keys outside the installed manifest and
+    /// forwards only that manifest requirement's scopes into the auth engine.
     #[tokio::test]
-    async fn extension_oauth_start_enforces_the_recipe_scope_ceiling() {
+    async fn extension_oauth_start_uses_manifest_owned_requirement_scopes() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let state = engine_backed_route_state(
             shared.clone(),
             vec![vendor_recipe("acmevendor", &["msg:read", "msg:write"])],
+            "acme-messenger",
+            "acme_oauth",
+            "acmevendor",
+            &["msg:read", "msg:write"],
         );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
 
-        let start = |scopes: serde_json::Value| {
+        let start = |requirement: &str| {
             let app = app.clone();
+            let requirement = requirement.to_string();
             async move {
                 app.oneshot(
                     Request::builder()
@@ -406,9 +549,7 @@ mod tests {
                         .header(header::CONTENT_TYPE, "application/json")
                         .body(Body::from(
                             json!({
-                                "provider": "acmevendor",
-                                "account_label": "acme account",
-                                "scopes": scopes,
+                                "requirement": requirement,
                                 "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                                 "invocation_id": InvocationId::new().to_string(),
                             })
@@ -421,12 +562,13 @@ mod tests {
             }
         };
 
-        // Widening beyond the ceiling is rejected before any flow exists.
-        let response = start(json!(["admin"])).await;
+        // A requirement key not owned by this extension is rejected before
+        // the global recipe catalog can authorize it.
+        let response = start("admin_oauth").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        // Empty scopes default to the full recipe ceiling.
-        let response = start(json!([])).await;
+        // The selected manifest requirement supplies the provider scopes.
+        let response = start("acme_oauth").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await

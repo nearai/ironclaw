@@ -99,9 +99,8 @@ pub use input::{
 };
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
-/// and the Google OAuth redirect URI from env into `OAuthRedirectUri` when
-/// building the runtime input / OAuth client config. The
+/// `runtime/mod.rs` parses the Google OAuth redirect URI from env into
+/// `OAuthRedirectUri` when building the runtime input / OAuth client config. The
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
 /// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that

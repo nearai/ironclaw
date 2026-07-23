@@ -331,6 +331,7 @@ pub(crate) fn challenge_view_from_flow(
             account_label: None,
             authorization_url: Some(authorization_url.clone()),
             expires_at: Some(*expires_at),
+            pairing: None,
         }),
         Some(_) | None => Err(AuthProductError::BackendUnavailable),
     }

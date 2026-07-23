@@ -13,6 +13,7 @@ use ironclaw_host_api::{NetworkMethod, RestrictedEgress, RestrictedEgressRequest
 use ironclaw_product_adapters::{
     AdapterInstallationId, ChannelAdapter, ChannelContext, ChannelError, DeliveryReport,
     InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
+    render_channel_auth_prompt,
 };
 
 use ironclaw_telegram_v2_adapter::{
@@ -176,6 +177,24 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         if !sent {
                             // The report describes what the vendor accepted;
                             // the coordinator owns retry semantics.
+                            break 'parts;
+                        }
+                    }
+                }
+                OutboundPart::AuthPrompt {
+                    view,
+                    direct_message,
+                } => {
+                    let text = render_channel_auth_prompt(view, *direct_message);
+                    for chunk in telegram_text_chunks(&text) {
+                        let mut body = serde_json::json!({ "chat_id": chat_id, "text": chunk });
+                        if let Some(thread_id) = message_thread_id {
+                            body["message_thread_id"] = thread_id.into();
+                        }
+                        let outcome = send_telegram_message(egress, body).await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
                             break 'parts;
                         }
                     }

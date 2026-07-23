@@ -1219,6 +1219,28 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was invoked; saw {seen:?}").into())
     }
 
+    /// Assert every capability invoked by this harness belongs to the explicit
+    /// allowlist. This provider-neutral negative assertion is useful when a
+    /// product workflow must stay on host-owned operations and must not fall
+    /// back to any integration/provider tool whose concrete id is deliberately
+    /// not part of the contract.
+    pub async fn assert_only_tools_invoked(&self, allowed: &[&str]) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        let unexpected: Vec<&str> = delta
+            .iter()
+            .map(|invocation| invocation.capability_id.as_str())
+            .filter(|capability_id| !allowed.contains(capability_id))
+            .collect();
+        if unexpected.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "capabilities outside the host-owned allowlist were invoked; allowed={allowed:?}, unexpected={unexpected:?}"
+        )
+        .into())
+    }
+
     /// S2 seam: assert the named capability produced EXACTLY `expected`
     /// recorded RESULTS (`captured_capability_results`) — the proof that a
     /// gate resume dispatched the gated capability's real execution once,

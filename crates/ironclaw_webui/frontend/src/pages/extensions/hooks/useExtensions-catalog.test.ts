@@ -10,6 +10,10 @@ import { hasChannelSurface } from "../lib/extensions-schema";
 const toolSurfaces = [{ kind: "tool" }];
 
 function useExtensionsSourceForTest() {
+  const extensionActions = readFileSync(
+    new URL("../lib/extension-actions.ts", import.meta.url),
+    "utf8",
+  ).replaceAll("export function ", "function ");
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
@@ -24,7 +28,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, useOauthSetup };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions, useOauthSetup };`;
 }
 
 function useExtensionsForTest({ extensions, registry }) {
@@ -221,7 +225,7 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
   assert.deepEqual(refetched, ["extensions", "extension-registry"]);
 });
 
-test("install/activate auth popups: noopener null is not an error; insecure URLs are", () => {
+test("install auth popup: noopener null is not an error; insecure URLs are", () => {
   const stateUpdates = [];
   const mutationConfigs = [];
   const openCalls = [];
@@ -272,9 +276,9 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
   vm.runInNewContext(useExtensionsSourceForTest(), context);
   context.globalThis.__testExports.useExtensions();
 
-  // useExtensions declares its mutations in a fixed order: install first,
-  // activate second (same order-coupling convention the other vm tests use).
-  const [installConfig, activateConfig] = mutationConfigs;
+  // Install owns the full public lifecycle; there is no second activation
+  // mutation. Remove is declared second but is unrelated to OAuth.
+  const [installConfig] = mutationConfigs;
   const lastError = () =>
     stateUpdates.filter((value) => value && value.type === "error").at(-1);
 
@@ -292,16 +296,16 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
     features: "noopener,noreferrer",
   });
 
-  activateConfig.onSuccess(
-    { success: false, auth_url: "https://slack.com/oauth/v2/authorize" },
-    { displayName: "Slack" },
+  installConfig.onSuccess(
+    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
+    { displayName: "Slack", surfaces: toolSurfaces },
   );
   assert.equal(lastError(), undefined);
 
   // A genuinely non-HTTPS URL reports the translated client-side error key.
-  activateConfig.onSuccess(
-    { success: false, auth_url: "http://insecure.example/authorize" },
-    { displayName: "Slack" },
+  installConfig.onSuccess(
+    { success: true, auth_url: "http://insecure.example/authorize" },
+    { displayName: "Slack", surfaces: toolSurfaces },
   );
   assert.equal(lastError().message, "extensions.oauthInvalidAuthorizationUrl");
 });

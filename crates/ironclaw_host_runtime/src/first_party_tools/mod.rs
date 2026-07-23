@@ -11,6 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
+mod outbound_delivery;
 mod profile_set;
 mod schemas;
 mod shell;
@@ -53,6 +54,7 @@ pub use memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID,
 };
+pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
 pub use profile_set::PROFILE_SET_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -197,6 +199,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
                     profile_set::manifest()?,
+                    outbound_delivery::manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
@@ -334,6 +337,15 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
+/// Replace the fail-closed default for the current-run outbound route with the
+/// product-owned routing service selected by composition.
+pub fn register_outbound_delivery_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    router: Arc<dyn ironclaw_outbound::RouteCurrentRunFinalReply>,
+) -> Result<(), HostApiError> {
+    outbound_delivery::insert_handler(registry, router)
+}
+
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -448,8 +460,21 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         handler.clone(),
     );
     registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
+    outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
+}
+
+struct UnavailableRunFinalReplyRouter;
+
+#[async_trait]
+impl ironclaw_outbound::RouteCurrentRunFinalReply for UnavailableRunFinalReplyRouter {
+    async fn route_current_run_final_reply(
+        &self,
+        _request: ironclaw_outbound::RouteCurrentRunFinalReplyRequest,
+    ) -> Result<(), ironclaw_outbound::RouteCurrentRunFinalReplyError> {
+        Err(ironclaw_outbound::RouteCurrentRunFinalReplyError::Unavailable)
+    }
 }
 
 fn first_party_capability_manifest(

@@ -1,5 +1,6 @@
 //! Authorized first-party mutation for manifest-declared administrator configuration.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,9 +14,9 @@ use ironclaw_extensions::{
     ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind, SecretHandle, UserId,
+    CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile,
+    ResourceUsage, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -26,6 +27,7 @@ use ironclaw_secrets::SecretMaterial;
 use serde::Deserialize;
 
 use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
@@ -38,12 +40,16 @@ pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
+    affected_extensions: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
+    extension_management: Arc<RebornLocalExtensionManagementPort>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)?,
         Arc::new(AdminConfigurationReplaceHandler {
             service,
             operator_user_id,
+            affected_extensions,
+            extension_management,
         }),
     );
     Ok(())
@@ -89,6 +95,8 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 struct AdminConfigurationReplaceHandler {
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
+    affected_extensions: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
+    extension_management: Arc<RebornLocalExtensionManagementPort>,
 }
 
 #[derive(Deserialize)]
@@ -153,14 +161,45 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
                 })
             })
             .collect::<Result<Vec<_>, FirstPartyCapabilityError>>()?;
+        let reconcile = || async {
+            let Some(extension_ids) = self.affected_extensions.get(&group_id) else {
+                return Ok(());
+            };
+            let mut failed_reconciliations = 0usize;
+            for extension_id in extension_ids {
+                if let Err(error) = self
+                    .extension_management
+                    .reconcile_runtime_after_admin_configuration(extension_id)
+                    .await
+                {
+                    failed_reconciliations += 1;
+                    tracing::warn!(
+                        extension_id = %extension_id,
+                        error = %error,
+                        "active extension refresh after administrator configuration failed"
+                    );
+                }
+            }
+            if failed_reconciliations == 0 {
+                return Ok(());
+            }
+            tracing::warn!(
+                group_id = %group_id,
+                failed_reconciliations,
+                affected_extensions = extension_ids.len(),
+                "administrator configuration runtime reconciliation was incomplete"
+            );
+            Err(AdminConfigurationServiceError::RuntimeReconciliationFailed)
+        };
         let state = self
             .service
-            .replace(
+            .replace_with_reconcile(
                 &request.scope,
                 &group_id,
                 &idempotency_key,
                 input.expected_revision,
                 submitted,
+                reconcile,
             )
             .await
             .map_err(|error| map_service_error(error, started))?;
@@ -207,6 +246,10 @@ fn map_service_error(
         | AdminConfigurationServiceError::ValueTooLarge => RuntimeDispatchErrorKind::InputEncode,
         AdminConfigurationServiceError::RevisionConflict { .. }
         | AdminConfigurationServiceError::IdempotencyConflict => {
+            RuntimeDispatchErrorKind::OperationFailed
+        }
+        AdminConfigurationServiceError::RuntimeReconciliationFailed
+        | AdminConfigurationServiceError::RuntimeRollbackFailed => {
             RuntimeDispatchErrorKind::OperationFailed
         }
         AdminConfigurationServiceError::InvalidDescriptor

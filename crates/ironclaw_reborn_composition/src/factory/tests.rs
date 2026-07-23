@@ -224,107 +224,6 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
     }
 }
 
-/// Per-trigger delivery targets validate against the SAME registry the
-/// outbound target surface publishes from: an id a provider resolves for
-/// the caller is accepted; an unknown id (or an empty registry) fails
-/// closed as `DeliveryTargetInvalid`.
-#[tokio::test]
-async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
-    use crate::outbound::{
-        DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
-        OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
-    };
-    use ironclaw_outbound::OutboundError;
-
-    struct OneTargetProvider {
-        entry: OutboundDeliveryTargetEntry,
-    }
-
-    #[async_trait::async_trait]
-    impl OutboundDeliveryTargetProvider for OneTargetProvider {
-        async fn list_outbound_delivery_targets(
-            &self,
-            caller: &OutboundDeliveryTargetScope,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
-            // Fixture available to whichever caller asks: claim the querying
-            // caller as owner so it survives the registry caller-scoping filter.
-            Ok(vec![OutboundDeliveryTargetEntry {
-                summary: self.entry.summary.clone(),
-                capabilities: self.entry.capabilities.clone(),
-                reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
-                owner: OutboundDeliveryTargetOwner::for_scope(caller),
-            }])
-        }
-    }
-
-    let scope = ironclaw_host_api::ResourceScope {
-        tenant_id: TenantId::new("registry-validation-tenant").expect("tenant"),
-        user_id: UserId::new("registry-validation-user").expect("user"),
-        agent_id: None,
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
-    };
-    let target = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:me")
-        .expect("target id");
-
-    let registry = MutableOutboundDeliveryTargetRegistry::default();
-    // Empty registry → fail closed.
-    let rejected = validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
-        .await
-        .expect_err("empty registry must reject");
-    assert!(matches!(
-        rejected,
-        TriggerError::InvalidRecord {
-            kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-            ..
-        }
-    ));
-
-    // Registered provider that resolves the id for the caller → accept.
-    let entry = OutboundDeliveryTargetEntry {
-        summary: OutboundDeliveryTargetSummary::new(
-            OutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
-            "slack",
-            "Slack DM".to_string(),
-            None,
-        )
-        .expect("summary"),
-        capabilities: DeliveryTargetCapabilities {
-            final_replies: true,
-            progress: false,
-            gate_prompts: true,
-            auth_prompts: true,
-            modalities: Vec::new(),
-        },
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-            "reply:registry-validation",
-        )
-        .expect("binding ref"),
-        // Overwritten with the querying caller by `OneTargetProvider::list`;
-        // set to the scope identity here for clarity.
-        owner: OutboundDeliveryTargetOwner::new(
-            TenantId::new("registry-validation-tenant").expect("tenant"),
-            UserId::new("registry-validation-user").expect("user"),
-        ),
-    };
-    registry
-        .register_provider("test", Arc::new(OneTargetProvider { entry }))
-        .expect("register");
-    validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
-        .await
-        .expect("registered target must validate");
-
-    // A different id still fails closed.
-    let other = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:other")
-        .expect("target id");
-    validate_trigger_delivery_target_against_registry(&registry, &scope, &other)
-        .await
-        .expect_err("unknown target must reject");
-}
-
 fn trigger_record_for_pairing_test() -> TriggerRecord {
     TriggerRecord {
         trigger_id: ironclaw_triggers::TriggerId::new(),
@@ -415,6 +314,7 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         outbound_delivery_targets: Arc::clone(&base_runtime.outbound_delivery_targets),
         auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
         turn_state: Arc::clone(&base_runtime.turn_state),
+        trigger_source_turn_state: Arc::clone(&base_runtime.trigger_source_turn_state),
         trigger_repository: Arc::clone(&base_runtime.trigger_repository),
         project_service: Arc::clone(&base_runtime.project_service),
         outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
@@ -433,7 +333,7 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
         skill_management: Arc::clone(&base_runtime.skill_management),
         extension_management: base_runtime.extension_management.clone(),
-        channel_config: base_runtime.channel_config.clone(),
+        admin_configuration_resolver: base_runtime.admin_configuration_resolver.clone(),
         admin_configuration: base_runtime.admin_configuration.clone(),
         admin_configuration_uses: Arc::clone(&base_runtime.admin_configuration_uses),
         channel_identity_store: base_runtime.channel_identity_store.clone(),
@@ -485,21 +385,17 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
 }
 
 #[tokio::test]
-async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
-    let hook = LocalRuntimeTriggerCreatorPairingHook {
-        runtime: local_runtime_with_failing_trigger_conversations().await,
+async fn local_runtime_trigger_create_hook_fails_build_when_conversation_state_is_unavailable() {
+    let runtime = local_runtime_with_failing_trigger_conversations().await;
+    let error = match local_dev_trigger_create_hook(&runtime).await {
+        Ok(_) => panic!("conversation init failure should fail composition"),
+        Err(error) => error,
     };
-    let record = trigger_record_for_pairing_test();
 
-    let error = hook
-        .after_trigger_persisted(&record)
-        .await
-        .expect_err("conversation init failure should surface as trigger backend error");
-
-    let TriggerError::Backend { reason } = error else {
-        panic!("expected backend trigger error");
+    let RebornBuildError::InvalidConfig { reason } = error else {
+        panic!("expected invalid composition config");
     };
-    assert_eq!(reason, "trigger creator actor pairing failed");
+    assert!(reason.starts_with("trigger conversation services unavailable:"));
 }
 
 #[tokio::test]
@@ -1729,11 +1625,22 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         .expect("extension management");
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+    let owner_scope = local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+        .expect("NEAR AI MCP owner scope");
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        owner_scope.clone(),
+        services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .runtime_credential_account_selection_service(),
+    );
 
     let projection = extension_management
         .project(
             nearai_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
+            &owner_scope.user_id,
+            Some(&credential_gate),
         )
         .await
         .expect("NEAR AI MCP projected");
@@ -1820,11 +1727,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     // audience pattern carries the host only (port unconstrained).
     assert_eq!(search.runtime_credentials[0].audience.port, None);
 
-    let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
-        AuthSurface::Api,
-    );
+    let auth_scope = AuthProductScope::new(owner_scope, AuthSurface::Api);
     let accounts = services
         .product_auth
         .as_ref()
@@ -1976,6 +1879,8 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         .extension_management
         .as_ref()
         .expect("extension management");
+    let owner_scope = local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+        .expect("NEAR AI MCP owner scope");
     let removal_scope = ironclaw_host_api::ResourceScope::local_default(
         ironclaw_host_api::UserId::new(owner).expect("valid user"),
         ironclaw_host_api::InvocationId::new(),
@@ -1999,8 +1904,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         ),
         services.product_auth.as_ref().expect("product auth"),
         extension_management,
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        owner_scope.clone(),
     )
     .await
     .expect("bootstrap should reinstall discovered extension");
@@ -2008,11 +1912,16 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         outcome,
         crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
     );
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        owner_scope.clone(),
+        services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref, &owner_scope.user_id, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
     assert_eq!(projection.phase, InstallationState::Active);

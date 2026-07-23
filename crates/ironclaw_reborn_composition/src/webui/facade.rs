@@ -277,8 +277,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
-        if let Some(channel_config) = &local_runtime.channel_config {
-            lifecycle_facade = lifecycle_facade.with_channel_config(channel_config.clone());
+        if let Some(admin_configuration_resolver) = &local_runtime.admin_configuration_resolver {
+            lifecycle_facade = lifecycle_facade
+                .with_admin_configuration_resolver(admin_configuration_resolver.clone());
         }
         if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
             lifecycle_facade =
@@ -290,12 +291,6 @@ pub(crate) fn build_webui_services_with_channel_connection(
             );
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
-    }
-    // The generic channel-config configure port: the setup facade renders
-    // manifest-declared channel-config fields and routes submitted values
-    // through it (extension-runtime §6.4).
-    if let Some(channel_config) = services.channel_config_facade() {
-        api = api.with_channel_config_facade(channel_config);
     }
     if let Some(skill_management) = &services.skill_management {
         // Share the activation selector's live master switch so a Settings
@@ -338,12 +333,14 @@ pub(crate) fn build_webui_services_with_channel_connection(
         api = api.with_project_service(project_service);
     }
     if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
-            Arc::clone(&local_runtime.outbound_preferences),
-            Arc::new(OutboundDeliveryTargetRegistry::new(
-                outbound_delivery_target_providers,
-            )),
-        )));
+        api = api.with_outbound_preferences_facade(Arc::new(
+            RebornOutboundPreferencesFacade::new(
+                Arc::clone(&local_runtime.outbound_preferences),
+                Arc::new(OutboundDeliveryTargetRegistry::new(
+                    outbound_delivery_target_providers,
+                )),
+            ),
+        ));
     } else if !outbound_delivery_target_providers.is_empty() {
         return Err(RebornBuildError::InvalidConfig {
             reason: "outbound delivery target providers require local runtime services".to_string(),

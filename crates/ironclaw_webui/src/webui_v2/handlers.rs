@@ -2303,28 +2303,6 @@ pub async fn import_extension(
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/extensions/{package_id}/activate`
-pub async fn activate_extension(
-    State(state): State<WebUiV2State>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
-    let package_ref = extension_package_ref_for_request(
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
-        "package_id",
-    )?;
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller.clone(),
-        EXTENSION_ACTIVATE_CAPABILITY,
-        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-    )
-    .await?;
-    let response =
-        extension_activation_response(state.services(), caller, package_ref, resolution).await?;
-    Ok(Json(response))
-}
-
 /// `POST /api/webchat/v2/extensions/{package_id}/remove`
 pub async fn remove_extension(
     State(state): State<WebUiV2State>,

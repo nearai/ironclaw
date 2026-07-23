@@ -1,3 +1,4 @@
+// arch-exempt: large_file, whole-path delivery regressions reuse the existing conversation-store contract harness, plan #6175
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -10,7 +11,8 @@ use ironclaw_conversations::{
     ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
     InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
+    SessionThreadService, StoredReplyTargetAccess, ThreadAccessDecision,
     ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
@@ -238,6 +240,123 @@ async fn unpair_external_actor_revokes_direct_conversation_bindings() {
         rebound.turn_scope.thread_id, first.turn_scope.thread_id,
         "unpair must not silently reuse the pre-removal Slack DM thread route"
     );
+}
+
+#[tokio::test]
+async fn stored_reply_target_revalidates_durable_run_authority_and_revocation() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-stored-route");
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let resolved = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("stored-route-chat", None),
+            "stored-route-event",
+        ))
+        .await
+        .expect("direct binding");
+
+    let request = ResolveStoredReplyTargetRequest {
+        tenant_id: tenant(),
+        actor_user_id: user("alice"),
+        current_thread_id: resolved.turn_scope.thread_id.clone(),
+        reply_target_binding_ref: resolved.reply_target_binding_ref.clone(),
+        access: StoredReplyTargetAccess::ExactOriginActor,
+    };
+    let target = services
+        .resolve_stored_reply_target(request.clone())
+        .await
+        .expect("current owner may resolve stored target");
+    assert_eq!(target.adapter_kind, telegram());
+    assert_eq!(target.route_kind, ConversationRouteKind::Direct);
+    assert_eq!(
+        target.external_conversation_ref.conversation_id(),
+        "stored-route-chat"
+    );
+
+    services
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor)
+        .await;
+    let error = services
+        .resolve_stored_reply_target(request)
+        .await
+        .expect_err("unpair must revoke the durable route");
+    assert!(matches!(error, InboundTurnError::ThreadNotFound { .. }));
+}
+
+#[tokio::test]
+async fn stored_shared_reply_allows_participant_but_not_authority_bearing_prompt() {
+    let services = InMemoryConversationServices::default();
+    let alice_actor = external_actor("stored-shared-alice");
+    let bob_actor = external_actor("stored-shared-bob");
+    for (actor, owner) in [
+        (alice_actor.clone(), user("alice")),
+        (bob_actor.clone(), user("bob")),
+    ] {
+        services
+            .pair_external_actor(tenant(), telegram(), default_installation(), actor, owner)
+            .await;
+    }
+    let conversation = external_conversation("stored-shared-chat", Some("topic-a"));
+    let mut alice_request = resolve_request(
+        telegram(),
+        alice_actor,
+        conversation.clone(),
+        "stored-shared-alice-event",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let resolved = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice creates shared binding");
+    services
+        .add_thread_participant(&tenant(), &resolved.turn_scope.thread_id, user("bob"))
+        .await
+        .expect("bob is a thread participant");
+    let mut bob_request = resolve_request(
+        telegram(),
+        bob_actor,
+        conversation,
+        "stored-shared-bob-event",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+    let bob_resolution = services
+        .resolve_or_create_binding(bob_request)
+        .await
+        .expect("bob may enter the shared route");
+
+    let ordinary = services
+        .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+            tenant_id: tenant(),
+            actor_user_id: user("bob"),
+            current_thread_id: bob_resolution.turn_scope.thread_id.clone(),
+            reply_target_binding_ref: bob_resolution.reply_target_binding_ref.clone(),
+            access: StoredReplyTargetAccess::OrdinaryReply,
+        })
+        .await
+        .expect("shared participant may resolve an ordinary reply");
+    assert_eq!(ordinary.route_kind, ConversationRouteKind::Shared);
+
+    let error = services
+        .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+            tenant_id: tenant(),
+            actor_user_id: user("bob"),
+            current_thread_id: bob_resolution.turn_scope.thread_id,
+            reply_target_binding_ref: bob_resolution.reply_target_binding_ref,
+            access: StoredReplyTargetAccess::ExactOriginActor,
+        })
+        .await
+        .expect_err("shared widening cannot authorize an authority-bearing prompt");
+    assert!(matches!(error, InboundTurnError::AccessDenied { .. }));
 }
 
 #[tokio::test]

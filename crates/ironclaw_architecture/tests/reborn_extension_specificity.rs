@@ -1236,10 +1236,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        "github",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "google",
     ),
@@ -1311,8 +1307,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
     ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
     ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
-    // lane-4: dev-dep — the sanctioned DEL-7 dev-dependency on the concrete slack crate (test linkage only); the scanner sees the crate name in Cargo.toml
+    // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
+    // for the production-shaped channel-host E2E suite; the scanner sees the
+    // crate names in Cargo.toml even though Rust test sources are excluded.
     ("crates/ironclaw_reborn_composition/Cargo.toml", "slack"),
+    ("crates/ironclaw_reborn_composition/Cargo.toml", "telegram"),
     // lane-4: branch — the provider catalog names github_copilot (an LLM
     // provider id, not the github extension); degenericize with the catalog
     // slice or carve under an LLM-provider path outside composition.
@@ -1348,10 +1347,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/pages/chat/chat.tsx",
         "telegram",
     ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),

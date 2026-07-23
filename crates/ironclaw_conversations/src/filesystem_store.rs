@@ -644,6 +644,13 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
         self.inner.validate_reply_target(request).await
     }
+
+    async fn resolve_stored_reply_target(
+        &self,
+        request: crate::ResolveStoredReplyTargetRequest,
+    ) -> Result<crate::StoredReplyTargetBinding, InboundTurnError> {
+        self.inner.resolve_stored_reply_target(request).await
+    }
 }
 
 #[async_trait]

@@ -511,7 +511,7 @@ impl ApiKeyRecipe {
     }
 }
 
-/// One operator-entered secret field (shared shape with `[channel.config]`
+/// One operator-entered secret field (shared shape with administrator configuration
 /// fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

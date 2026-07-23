@@ -1359,6 +1359,7 @@ mod tests {
     /// Uses the system scope so no validated user/tenant id is needed.
     fn test_request(input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            origin: None,
             run_id: None,
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),

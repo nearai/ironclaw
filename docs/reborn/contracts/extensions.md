@@ -9,8 +9,9 @@
 ## 1. Purpose
 
 `ironclaw_extensions` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
-It also owns generic extension installation state: manifests, installations,
-activation state, health snapshots, and opaque credential bindings. Domain
+It also owns package manifests and caller-membership installation records.
+Caller membership is the only installation-lifecycle authority; runtime
+publication and administrator configuration are separate host concerns. Domain
 crates such as `ironclaw_product_adapter_registry` project their own host API
 sections from that generic state rather than owning a second installation
 store.
@@ -54,15 +55,25 @@ V1 installed extensions live under:
 /system/extensions/<extension_id>/
 ```
 
-Generic installation state lives in filesystem record rows under:
+Generic runtime and caller-membership state lives in filesystem record rows under:
 
 ```text
 /system/extensions/.installations/manifests/<hashed_extension_id>.json
 /system/extensions/.installations/installations/<hashed_installation_id>.json
 ```
 
-The store declares exact indexes for extension id, installation id, and
-activation state, and uses row CAS for activation/health updates and deletes.
+The store declares exact indexes for extension id and runtime installation id,
+and uses row CAS for membership, compatibility health metadata, and deletes.
+Health metadata is diagnostic, not lifecycle authority. These records do not
+own administrator configuration.
+
+Manifest-declared administrator configuration is stored once per tenant under
+the tenant-rewriting admin-configuration scoped mount, at the logical record
+prefix `/extension-admin-configuration/groups`. Its stable key is the
+`[admin_configuration].group_id`, so multiple manifests may consume one
+identical group. Secrets are referenced by opaque handles and only presence is
+projected. Admin configuration is deployment state: saving it does not add any
+user to an extension's membership set.
 
 Recommended package layout:
 
@@ -100,6 +111,40 @@ Every manifest — host-bundled exactly as installed — declares its sections
 through `[[host_api]]` contracts; tools live under
 `[[host_api]] id = "ironclaw.capability_provider/v1"`. Top-level
 `[[capabilities]]` is rejected for every manifest source.
+
+V3 manifests may additionally declare one deployment-owned form:
+
+```toml
+[admin_configuration]
+group_id = "vendor.example"
+display_name = "Example deployment credentials"
+description = "Credentials shared by Example extensions in this tenant."
+fields = [
+  { handle = "example_client_id", label = "Client ID", secret = false, required = true },
+  { handle = "example_client_secret", label = "Client secret", secret = true, required = true },
+]
+```
+
+This is the sole schema for operator-supplied extension configuration. It is
+not nested below `[channel]`, is not copied into an installation record, and
+may support channel, OAuth, MCP, tool, or future surfaces. Equal group ids must
+carry equal descriptors.
+
+Proof-code channel manifests may grant provider-specific inbound command
+syntax declaratively:
+
+```toml
+[channel.connection]
+strategy = "web_generated_code"
+inbound_code_prefixes = ["/connect"]
+```
+
+`inbound_code_prefixes` contains at most eight unique, non-empty prefixes of at
+most 32 bytes each. Prefixes cannot contain whitespace or control characters,
+and are invalid for OAuth and administrator-managed strategies. The generic
+pairing parser always accepts a bare proof code and strips only a
+manifest-declared prefix followed by whitespace; it has no implicit provider
+commands.
 
 Host-bundled WASM manifest:
 
@@ -535,3 +580,34 @@ failed/retry
 The extension registry/package source of truth is typed extension state with optional `/system/extensions/...` file projections. Extension config/state projections must validate through the typed repository and must not bypass lifecycle authorization.
 
 WASM, Script, and MCP are all first-class v2 runtime lanes; extension manifests and lifecycle state must be able to describe each lane without making dispatcher depend on concrete runtime crates.
+
+### Current product projection
+
+The dated freeze above records the original internal lifecycle scope. It does
+not define the current product-facing state machine or authorize public
+Activate/Deactivate operations. Current APIs expose one derived projection:
+
+```text
+caller is not a member                          -> uninstalled
+member has any non-ready typed readiness result -> setup_needed
+member has a complete typed readiness result    -> active
+```
+
+Install joins the authenticated caller to membership and immediately runs
+generic readiness reconciliation. Remove removes membership; it is the only
+user-facing way to disable an extension. Internal loading, discovery,
+provisioning, atomic publication, cleanup, and upgrade checkpoints may retain
+implementation names such as `activate` or `deactivate`, but they must never
+surface as additional states or required user actions.
+
+The host's complete typed readiness result includes every manifest-declared
+tenant and personal prerequisite plus bind, discovery, provisioning, conflict,
+and atomic-publication outcomes. A first publication that cannot complete has
+no callable surface. A refresh is different: once a catalog is active, a
+failed refresh reports its own error but retains the last successfully
+published callable surface and therefore the caller's `active` projection.
+Refreshing never pre-emptively demotes or unpublishes a working generation.
+
+Tenant `[admin_configuration]` and caller lifecycle are independent: an admin
+may configure a group before any user installs its consuming extensions, and
+each user's membership, OAuth grants, and channel pairings remain isolated.

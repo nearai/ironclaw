@@ -22,9 +22,9 @@ use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_extensions::{
-    CapabilityProviderHostApiContract, ExtensionActivationState, ExtensionInstallation,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
-    ExtensionManifestRef, HostApiContractRegistry, InstallationOwner,
+    CapabilityProviderHostApiContract, ExtensionInstallation, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    HostApiContractRegistry, InstallationOwner,
 };
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
@@ -37,11 +37,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornBuildInput, RebornChannelConnectStrategy, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornWebuiBundle, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, VendorId, build_reborn_runtime, build_webui_services,
-    local_dev_runtime_policy,
+    RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
+    build_reborn_runtime, build_webui_services, local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -507,7 +504,6 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new(installation_id).expect("valid installation id"),
                     canonical.extension_id().clone(),
-                    canonical.activation_state(),
                     canonical.manifest_ref().clone(),
                     canonical.credential_bindings().to_vec(),
                     canonical.updated_at(),
@@ -751,7 +747,6 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
             ExtensionInstallation::new(
                 ExtensionInstallationId::new("orphan-migrated").expect("valid installation id"),
                 orphan_extension_id.clone(),
-                ExtensionActivationState::Installed,
                 ExtensionManifestRef::new(
                     orphan_extension_id,
                     catalog_manifest.manifest_hash().cloned(),
@@ -845,15 +840,11 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .expect("rebuilt runtime shuts down");
 }
 
-/// Pins PR #5499 private-install membership through the PRODUCTION webui
-/// facade, mirroring the crate-tier invariants in
-/// `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/private_install_tests.rs`
-/// (`members_install_the_same_tool_independently` +
-/// `operator_install_evicts_member_installs_to_tenant_shared`), but driven
-/// through the real HTTP router instead of the facade directly.
+/// Pins caller-owned installation membership through the production WebUI
+/// facade. Operator authorization grants access to deployment configuration;
+/// it does not turn that operator's personal install into tenant-wide state.
 #[tokio::test]
-async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_through_production_webui_facade()
- {
+async fn users_and_operator_install_and_remove_independently_through_production_webui_facade() {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
@@ -1004,7 +995,8 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
         "masked denial must not leak member identities: {body}"
     );
 
-    // 6: operator installs the same id -> evicts both members to Tenant.
+    // 6: the operator installs for their own user. Administrative authority
+    // does not evict Alice/Bob or install anything for Carol.
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), operator_caller.clone()),
         "/api/webchat/v2/extensions/install",
@@ -1012,13 +1004,14 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     )
     .await;
     assert_eq!(status, StatusCode::OK, "operator install response: {body}");
-    assert_eq!(body["success"], true, "operator eviction response: {body}");
+    assert_eq!(body["success"], true, "operator install response: {body}");
 
-    // 7: everyone now sees the SHARED (tenant) entry.
+    // 7: only the three callers who installed see private state; Carol stays
+    // uninstalled.
     for (name, user_id) in [
         ("alice", alice_id.clone()),
         ("bob", bob_id.clone()),
-        ("carol", carol_id.clone()),
+        ("operator", operator_id.clone()),
     ] {
         let (status, body) = get_json(
             mount_webui_v2_router(Arc::clone(&webui.api), caller_for(user_id)),
@@ -1033,30 +1026,60 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
                     .iter()
                     .find(|extension| extension["package_ref"]["id"] == extension_id)
             })
-            .unwrap_or_else(|| panic!("{name} should see shared {extension_id}: {body}"));
-        assert_eq!(entry["install_scope"], "shared", "{name} scope: {body}");
+            .unwrap_or_else(|| panic!("{name} should see private {extension_id}: {body}"));
+        assert_eq!(entry["install_scope"], "private", "{name} scope: {body}");
     }
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(carol_id)),
+        "/api/webchat/v2/extensions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "carol extensions response: {body}");
+    assert!(body["extensions"].as_array().is_some_and(|extensions| {
+        !extensions
+            .iter()
+            .any(|extension| extension["package_ref"]["id"] == extension_id)
+    }));
 
-    // 8: a former member cannot remove the now-tenant row; the operator can.
+    // 8: each caller removes only their own membership. Alice's removal does
+    // not affect Bob or the operator.
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "alice must not be able to remove the tenant-shared row: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "alice remove response: {body}");
+
+    for (name, user_id) in [("bob", bob_id.clone()), ("operator", operator_id.clone())] {
+        let (status, body) = get_json(
+            mount_webui_v2_router(Arc::clone(&webui.api), caller_for(user_id)),
+            "/api/webchat/v2/extensions",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} extensions response: {body}");
+        assert!(body["extensions"].as_array().is_some_and(|extensions| {
+            extensions
+                .iter()
+                .any(|extension| extension["package_ref"]["id"] == extension_id)
+        }));
+    }
 
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.api), operator_caller),
+        mount_webui_v2_router(Arc::clone(&webui.api), operator_caller.clone()),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
         serde_json::json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "operator remove response: {body}");
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(bob_id)),
+        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "bob final remove response: {body}");
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
@@ -1269,6 +1292,20 @@ async fn non_operator_cannot_read_or_replace_admin_configuration() {
         (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN),
         "non-operator GET body: {get_body}; PUT body: {put_body}"
     );
+    for forbidden in [
+        "slack_bot_token",
+        "slack_signing_secret",
+        "slack_oauth_client_id",
+        "slack_oauth_client_secret",
+        "forbidden-secret",
+        "T-FORBIDDEN",
+    ] {
+        assert!(
+            !get_body.to_string().contains(forbidden) && !put_body.to_string().contains(forbidden),
+            "unauthorized response leaked administrator metadata `{forbidden}`: GET {get_body}; \
+             PUT {put_body}"
+        );
+    }
     fixture.shutdown().await;
 }
 
@@ -1416,13 +1453,12 @@ async fn user_extension_removal_does_not_erase_admin_configuration() {
     fixture.shutdown().await;
 }
 
-/// A manifest-declared channel consumer must resolve the tenant's saved admin
-/// values through the generic configuration path. This drives the ordinary
-/// extension setup and pairing projections rather than reading the admin store
-/// directly: pairing is available after install, before activation, with no
-/// Telegram-specific adapter branch in this journey.
+/// Tenant administrator configuration is consumed by the channel host but is
+/// never projected onto an ordinary caller's personal setup surface. Pairing
+/// still proves the manifest-declared consumer received the saved deployment
+/// values without exposing their handles or labels through the setup API.
 #[tokio::test]
-async fn extension_setup_consumer_sees_manifest_admin_configuration() {
+async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consumes_it() {
     let fixture = AdminConfigurationFixture::new("effective-consumer").await;
     let (save_status, save_body) = put_json(
         fixture.operator_router(),
@@ -1447,6 +1483,26 @@ async fn extension_setup_consumer_sees_manifest_admin_configuration() {
         "/api/webchat/v2/extensions/telegram/setup",
     )
     .await;
+    let (list_status, list_body) =
+        get_json(fixture.member_router(), "/api/webchat/v2/extensions").await;
+    let (registry_status, registry_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/registry",
+    )
+    .await;
+    let (caller_admin_submit_status, caller_admin_submit_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/setup",
+        serde_json::json!({
+            "action": "submit",
+            "payload": {
+                "fields": {
+                    "bot_username": "caller-must-not-configure-deployment"
+                }
+            }
+        }),
+    )
+    .await;
     let (pairing_status, pairing_body) = post_json(
         fixture.pairing_member_router(),
         "/api/webchat/v2/extensions/telegram/pairing/mint",
@@ -1455,29 +1511,55 @@ async fn extension_setup_consumer_sees_manifest_admin_configuration() {
     .await;
 
     assert_eq!(
-        (save_status, install_status, setup_status, pairing_status),
+        (
+            save_status,
+            install_status,
+            setup_status,
+            list_status,
+            registry_status,
+            caller_admin_submit_status,
+            pairing_status,
+        ),
         (
             StatusCode::OK,
             StatusCode::OK,
             StatusCode::OK,
             StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
         ),
-        "save: {save_body}; install: {install_body}; setup: {setup_body}; pairing: {pairing_body}"
+        "save: {save_body}; install: {install_body}; setup: {setup_body}; list: {list_body}; \
+         registry: {registry_body}; caller admin submit: {caller_admin_submit_body}; pairing: \
+         {pairing_body}"
     );
-    for handle in ["telegram_bot_token", "telegram_webhook_secret"] {
-        let secret = setup_body["secrets"]
-            .as_array()
-            .and_then(|secrets| secrets.iter().find(|secret| secret["name"] == handle))
-            .unwrap_or_else(|| panic!("setup consumer omitted {handle}: {setup_body}"));
-        assert_eq!(
-            secret["provided"], true,
-            "setup consumer did not resolve saved {handle}: {setup_body}"
-        );
-        assert!(
-            secret.get("value").is_none(),
-            "setup projection must remain presence-only: {secret}"
-        );
+    let ordinary_caller_wires = [
+        ("setup", setup_body.to_string()),
+        ("installed-list", list_body.to_string()),
+        ("registry", registry_body.to_string()),
+    ];
+    for forbidden in [
+        "telegram_bot_token",
+        "telegram_webhook_secret",
+        "telegram_webhook_url",
+        "bot_username",
+        "Bot token",
+        "Webhook secret token",
+        "Public webhook URL",
+        "Bot username",
+        "Telegram deployment configuration",
+    ] {
+        for (surface, wire) in &ordinary_caller_wires {
+            assert!(
+                !wire.contains(forbidden),
+                "ordinary caller {surface} leaked administrator metadata `{forbidden}`: {wire}"
+            );
+        }
     }
+    assert!(
+        setup_body.get("fields").is_none(),
+        "caller setup must not expose an administrator field collection: {setup_body}"
+    );
     assert!(
         pairing_body["code"]
             .as_str()
@@ -1509,7 +1591,6 @@ impl AdminConfigurationFixture {
         let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-            .with_account_setup_descriptors(vec![telegram_pairing_descriptor()])
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             ));
@@ -1569,31 +1650,6 @@ impl AdminConfigurationFixture {
         let Self { runtime, webui, .. } = self;
         drop(webui);
         runtime.shutdown().await.expect("runtime shuts down");
-    }
-}
-
-fn telegram_pairing_descriptor() -> ExtensionAccountSetupDescriptor {
-    let extension_id = ExtensionId::new("telegram").expect("extension id");
-    ExtensionAccountSetupDescriptor {
-        extension_id: extension_id.clone(),
-        auth_requirement: RuntimeCredentialAuthRequirement {
-            provider: VendorId::new("telegram").expect("vendor id"),
-            setup: RuntimeCredentialAccountSetup::Pairing,
-            requester_extension: extension_id,
-            provider_scopes: Vec::new(),
-        },
-        connection_requirement: ChannelConnectionRequirement {
-            channel: "telegram".to_string(),
-            display_name: "Telegram".to_string(),
-            strategy: RebornChannelConnectStrategy::WebGeneratedCode,
-            instructions: "Pair Telegram".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Open pairing".to_string(),
-            error_message: "Pairing failed".to_string(),
-        },
-        connection_notices: ChannelConnectionNoticePolicy::generic("Telegram"),
-        activation_success_message: "Telegram paired".to_string(),
-        pairing_deep_link_template: Some("https://t.me/{bot_username}?start={code}".to_string()),
     }
 }
 

@@ -131,7 +131,7 @@ fn no_credential_onboarding(
         _ => None,
     };
     let instructions = if phase == InstallationState::Configured {
-        Some(activation_instructions(summary))
+        Some(readiness_instructions(summary))
     } else if let Some(onboarding) = &summary.onboarding {
         Some(onboarding.instructions.clone())
     } else if matches!(
@@ -139,12 +139,12 @@ fn no_credential_onboarding(
         LifecycleExtensionRuntimeKind::McpServer
     ) {
         Some(format!(
-            "{} is installed. Activate it to make its MCP tools available.",
+            "IronClaw is finishing {} setup automatically; its MCP tools will appear when ready.",
             summary.name
         ))
     } else if phase == InstallationState::Installed {
         Some(format!(
-            "{} is installed. Activate it to make its tools available.",
+            "IronClaw is finishing {} setup automatically; its tools will appear when ready.",
             summary.name
         ))
     } else {
@@ -164,18 +164,18 @@ fn no_credential_onboarding(
     }
 }
 
-fn activation_instructions(summary: &LifecycleExtensionSummary) -> String {
+fn readiness_instructions(summary: &LifecycleExtensionSummary) -> String {
     if matches!(
         summary.runtime_kind,
         LifecycleExtensionRuntimeKind::McpServer
     ) {
         format!(
-            "{} is installed. Activate it to make its MCP tools available.",
+            "{} setup is complete. IronClaw publishes its MCP tools automatically; no separate activation action is required.",
             summary.name
         )
     } else {
         format!(
-            "{} is installed. Activate it to make its tools available.",
+            "{} setup is complete. IronClaw publishes its tools automatically; no separate activation action is required.",
             summary.name
         )
     }
@@ -208,7 +208,7 @@ fn credential_next_step(summary: &LifecycleExtensionSummary) -> String {
         .and_then(|onboarding| onboarding.credential_next_step.clone())
         .unwrap_or_else(|| {
             format!(
-                "After configuration completes, activate {} to publish its tools.",
+                "After configuration completes, IronClaw finishes {} installation automatically and publishes its tools.",
                 summary.name
             )
         })
@@ -234,7 +234,7 @@ mod tests {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
                 credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
                 setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
-                credential_next_step: Some("After saving the token, activate GitHub to publish its tools.".to_string()),
+                credential_next_step: Some("After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools.".to_string()),
             }),
         );
 
@@ -277,7 +277,7 @@ mod tests {
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After authorization completes, activate Gmail to publish its tools."
+                    "After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools."
                         .to_string(),
                 ),
             }),
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn web_access_projects_activation_message_without_credentials() {
+    fn web_access_projects_automatic_readiness_message_without_credentials() {
         let extension = installed_extension(
             "web-access",
             "Web Access",
@@ -305,10 +305,10 @@ mod tests {
             Vec::new(),
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
-                instructions: "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.".to_string(),
+                instructions: "Web Access does not need credentials and becomes active as soon as it is installed.".to_string(),
                 credential_instructions: Some("No credentials are required for Web Access.".to_string()),
                 setup_url: None,
-                credential_next_step: Some("Activate Web Access to publish its tools.".to_string()),
+                credential_next_step: Some("IronClaw publishes Web Access tools automatically during installation.".to_string()),
             }),
         );
 
@@ -322,13 +322,13 @@ mod tests {
         assert_eq!(
             onboarding.instructions.as_deref(),
             Some(
-                "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available."
+                "Web Access does not need credentials and becomes active as soon as it is installed."
             )
         );
     }
 
     #[test]
-    fn configured_credentialed_extension_projects_activation_message() {
+    fn configured_credentialed_extension_projects_automatic_readiness_message() {
         let extension = installed_extension(
             "github",
             "GitHub",
@@ -339,7 +339,7 @@ mod tests {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
                 credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
                 setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
-                credential_next_step: Some("After saving the token, activate GitHub to publish its tools.".to_string()),
+                credential_next_step: Some("After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools.".to_string()),
             }),
         );
 
@@ -352,12 +352,14 @@ mod tests {
         assert_eq!(onboarding.awaiting_token, None);
         assert_eq!(
             onboarding.instructions.as_deref(),
-            Some("GitHub is installed. Activate it to make its tools available.")
+            Some(
+                "GitHub setup is complete. IronClaw publishes its tools automatically; no separate activation action is required."
+            )
         );
     }
 
     #[test]
-    fn credential_ready_installed_extension_projects_activation_message() {
+    fn credential_ready_installed_extension_projects_automatic_readiness_message() {
         let extension = installed_extension(
             "gmail",
             "Gmail",
@@ -372,7 +374,7 @@ mod tests {
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After authorization completes, activate Gmail to publish its tools."
+                    "After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools."
                         .to_string(),
                 ),
             }),
@@ -390,7 +392,9 @@ mod tests {
         assert_eq!(onboarding.awaiting_token, None);
         assert_eq!(
             onboarding.instructions.as_deref(),
-            Some("Gmail is installed. Activate it to make its tools available.")
+            Some(
+                "Gmail setup is complete. IronClaw publishes its tools automatically; no separate activation action is required."
+            )
         );
     }
 
@@ -403,13 +407,13 @@ mod tests {
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
-                instructions: "Gmail activation failed.".to_string(),
+                instructions: "Gmail setup failed.".to_string(),
                 credential_instructions: Some(
                     "Authorize the Google account that IronClaw should use for Gmail.".to_string(),
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After authorization completes, activate Gmail to publish its tools."
+                    "After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools."
                         .to_string(),
                 ),
             }),
@@ -427,7 +431,7 @@ mod tests {
         assert_eq!(onboarding.awaiting_token, None);
         assert_eq!(
             onboarding.instructions.as_deref(),
-            Some("Gmail activation failed.")
+            Some("Gmail setup failed.")
         );
     }
 

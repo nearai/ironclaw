@@ -66,6 +66,11 @@ version = "0.1.0"
 description = "fixture: channel-only extension"
 trust = "third_party"
 
+[admin_configuration]
+group_id = "extension.acme-chat"
+display_name = "Acme Chat deployment configuration"
+fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true, required = false } ]
+
 [runtime]
 kind = "wasm"
 module = "wasm/acme_chat.wasm"
@@ -88,9 +93,6 @@ secret_handle = "acme_chat_signing_secret"
 signature_header = "X-Acme-Signature"
 signed_payload = [ { body = true } ]
 
-[channel.config]
-fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true } ]
-
 [[channel.egress]]
 scheme = "https"
 host = "api.acme.example"
@@ -104,6 +106,11 @@ name = "Acme"
 version = "0.1.0"
 description = "fixture: tool + channel + auth"
 trust = "third_party"
+
+[admin_configuration]
+group_id = "extension.acme"
+display_name = "Acme deployment configuration"
+fields = [ { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = false } ]
 
 [runtime]
 kind = "wasm"
@@ -141,9 +148,6 @@ kind = "hmac_sha256"
 secret_handle = "acme_signing_secret"
 signature_header = "X-Acme-Signature"
 signed_payload = [ { body = true } ]
-
-[channel.config]
-fields = [ { handle = "acme_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]
 scheme = "https"

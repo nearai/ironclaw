@@ -190,7 +190,7 @@ pub use types::{
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionRegistryResponse, RebornExtensionSetupSecret,
     RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
@@ -218,6 +218,7 @@ pub use types::{
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     RebornTraceHoldAuthorizeProductRequest, RebornVendorAuthAccounts,
+    web_app_outbound_delivery_target_option,
 };
 pub use views::{
     ProductOperation, ProductOperationId, ProductOperationRequest, ProductOperationResponse,
@@ -261,9 +262,6 @@ pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
 pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_IMPORT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_IMPORT_CAPABILITY_ID);
-pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
-pub const EXTENSION_ACTIVATE_CAPABILITY: ProductCapabilityDescriptor =
-    ProductCapabilityDescriptor::api_only(EXTENSION_ACTIVATE_CAPABILITY_ID);
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 pub const EXTENSION_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_REMOVE_CAPABILITY_ID);
@@ -584,44 +582,6 @@ impl ChannelConnectionFacade for StaticChannelConnectionFacade {
     ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
         Ok(std::collections::HashMap::new())
     }
-}
-
-/// Presence-only projection of one manifest-declared channel-config field.
-/// Secret fields report `provided` only; stored values are never echoed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornChannelConfigField {
-    /// The manifest-declared field handle (the submit key).
-    pub name: String,
-    /// Operator-facing label from the manifest.
-    pub label: String,
-    pub secret: bool,
-    pub provided: bool,
-}
-
-/// The generic channel-config configure port: per-extension operator config
-/// declared by the extension manifest's channel-config fields. Host
-/// composition implements it over the durable installation store and the
-/// scoped secret store; the setup facade routes submitted values through it
-/// and derives config completeness from the field status.
-#[async_trait]
-pub trait ChannelConfigFacade: Send + Sync {
-    /// Per-field presence for the extension's declared channel config.
-    /// Empty when the extension declares none (or is not installed yet).
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<RebornChannelConfigField>, RebornServicesError>;
-
-    /// Validate submitted `(handle, value)` pairs against the installed
-    /// manifest's declared fields and persist them (non-secret values
-    /// durably per installation, secret values into the scoped secret
-    /// store). Saving while the extension is active re-runs its activation
-    /// with the new values.
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), RebornServicesError>;
 }
 
 #[async_trait]
@@ -2467,7 +2427,6 @@ pub struct RebornServices<
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
-    channel_config_facade: Option<Arc<dyn ChannelConfigFacade>>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2545,7 +2504,6 @@ where
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
-            channel_config_facade: None,
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2872,18 +2830,6 @@ where
         self.list_visible_threads_for_scope(scope, request, caller)
             .await
     }
-
-    /// Wire the generic channel-config configure port. Without it, the
-    /// setup facade renders no channel-config fields and rejects
-    /// channel-config submissions as unavailable.
-    pub fn with_channel_config_facade(
-        mut self,
-        channel_config_facade: Arc<dyn ChannelConfigFacade>,
-    ) -> Self {
-        self.channel_config_facade = Some(channel_config_facade);
-        self
-    }
-
     pub fn with_operator_status_service(
         mut self,
         operator_status: Arc<dyn OperatorStatusService>,
@@ -4162,7 +4108,6 @@ where
                 let response = lifecycle_setup::setup_extension_view(
                     self.lifecycle_facade.as_ref(),
                     self.extension_credentials.as_deref(),
-                    self.channel_config_facade.as_deref(),
                     caller,
                     query.params,
                 )

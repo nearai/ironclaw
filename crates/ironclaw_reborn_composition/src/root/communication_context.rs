@@ -241,8 +241,8 @@ mod tests {
         ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-        RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+        RebornServicesError, RebornServicesErrorCode,
+        RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
@@ -308,6 +308,7 @@ mod tests {
                         next_cursor: None,
                     })
                 }
+
             }
         };
     }
@@ -541,6 +542,7 @@ mod tests {
                 next_cursor: None,
             })
         }
+
     }
 
     #[tokio::test]
@@ -774,6 +776,7 @@ mod tests {
                 next_cursor: None,
             })
         }
+
     }
 
     /// A preferences facade whose `get_outbound_preferences` panics immediately.
@@ -808,6 +811,7 @@ mod tests {
                 next_cursor: None,
             })
         }
+
     }
 
     #[tokio::test]

@@ -239,12 +239,12 @@ test("card class keeps grid siblings at natural height", () => {
   assert.ok(!cardClass.includes("h-full"), "CARD must not stretch to grid row height");
 });
 
-test("installed channel card omits generic Activate while installed MCP card keeps it", () => {
+test("setup-needed cards never expose a separate Activate action", () => {
   const channel = renderExtensionCard({
     package_ref: { id: "slack" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    installation_state: "installed",
+    installation_state: "setup_needed",
     display_name: "Slack",
   });
   assert.equal(
@@ -257,13 +257,29 @@ test("installed channel card omits generic Activate while installed MCP card kee
     package_ref: { id: "github" },
     runtime: "mcp",
     surfaces: toolSurfaces,
-    installation_state: "installed",
+    installation_state: "setup_needed",
     display_name: "GitHub",
   });
   assert.equal(
     renderedContainsValue(mcp, "activate"),
+    false,
+    "internal activation must never surface as a second user action",
+  );
+});
+
+test("setup-needed cards render the shared yellow warning status pill", () => {
+  const rendered = renderExtensionCard({
+    package_ref: { id: "slack" },
+    runtime: "first_party",
+    surfaces: channelSurfaces,
+    installation_state: "setup_needed",
+    display_name: "Slack",
+  });
+
+  assert.equal(
+    renderedContainsValue(rendered, "warning"),
     true,
-    "non-channel extensions should still expose their normal activation action",
+    "the ExtensionCard caller must pass the warning tone to Badge",
   );
 });
 
@@ -470,11 +486,11 @@ test("active package with missing auth renders auth needed setup state", () => {
     authenticated: false,
     needs_setup: true,
     has_auth: true,
-    installation_state: "active",
+    installation_state: "setup_needed",
   });
 
   assert.equal(
-    renderedContainsValue(rendered, "auth_required"),
+    renderedContainsValue(rendered, "setup_needed"),
     true,
     "missing Slack OAuth should show auth needed instead of active",
   );
@@ -508,22 +524,22 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Setup state: first_party runtime + channel surface, state=failed ---
+  // --- Internal failure projects to the same public setup_needed state ---
   await runCase(
-    "first_party channel surface in failed state includes Setup overflow action",
+    "first_party setup_needed channel does not duplicate its primary Configure action",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        onboarding_state: "failed",
+        onboarding_state: "setup_needed",
         display_name: "Telegram",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const ids = actions.map((a) => a.id);
-      assert.ok(ids.includes("setup"), `Expected 'setup' in overflow actions, got: ${JSON.stringify(ids)}`);
+      assert.ok(!ids.includes("setup"), `Expected no duplicate 'setup' action, got: ${JSON.stringify(ids)}`);
     },
   );
 
@@ -546,22 +562,22 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Setup state: wasm runtime + channel surface, state=failed ---
+  // --- Same projection for a wasm-backed channel ---
   await runCase(
-    "wasm channel surface in failed state includes Setup overflow action",
+    "wasm setup_needed channel does not duplicate its primary Configure action",
     () => {
       const ext = {
         package_ref: { id: "some-wasm-channel" },
         runtime: "wasm",
         surfaces: channelSurfaces,
-        onboarding_state: "failed",
+        onboarding_state: "setup_needed",
         display_name: "My WASM Channel",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const ids = actions.map((a) => a.id);
-      assert.ok(ids.includes("setup"), `Expected 'setup' in overflow actions, got: ${JSON.stringify(ids)}`);
+      assert.ok(!ids.includes("setup"), `Expected no duplicate 'setup' action, got: ${JSON.stringify(ids)}`);
     },
   );
 
@@ -603,9 +619,9 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Active state: channel surface, state=ready ---
+  // --- Legacy ready input does not invent a fourth public state ---
   await runCase(
-    "channel surface in ready state includes Reconfigure overflow action",
+    "legacy ready input is treated as setup_needed, not active",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
@@ -618,13 +634,13 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const ids = actions.map((a) => a.id);
-      assert.ok(ids.includes("reconfigure"), `Expected 'reconfigure' in overflow actions, got: ${JSON.stringify(ids)}`);
+      assert.ok(!ids.includes("reconfigure"), `Expected no active-only 'reconfigure' action, got: ${JSON.stringify(ids)}`);
     },
   );
 
-  // --- Active state: channel surface, state=pairing_required ---
+  // --- Legacy pairing_required input also projects to setup_needed ---
   await runCase(
-    "channel surface in pairing_required state includes Reconfigure overflow action",
+    "legacy pairing_required input does not render active-only Reconfigure",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
@@ -637,7 +653,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const ids = actions.map((a) => a.id);
-      assert.ok(ids.includes("reconfigure"), `Expected 'reconfigure' in overflow actions, got: ${JSON.stringify(ids)}`);
+      assert.ok(!ids.includes("reconfigure"), `Expected no active-only 'reconfigure' action, got: ${JSON.stringify(ids)}`);
     },
   );
 
@@ -664,9 +680,10 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Failed-state Setup action calls onConfigure ---
+  // --- Internal failure projects to setup_needed with one primary configure
+  // action, never a duplicate overflow Setup action. ---
   await runCase(
-    "Failed-state Setup overflow action invokes onConfigure with the correct payload",
+    "setup_needed failure projection has no duplicate Setup overflow action",
     () => {
       let configurePayload = null;
       const context = makeContext();
@@ -677,7 +694,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        onboarding_state: "failed",
+        onboarding_state: "setup_needed",
         display_name: "Telegram",
       };
       const rendered = ExtensionCard({
@@ -690,16 +707,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
 
       const actions = extractOverflowActions(rendered, OverflowMenu);
       assert.notEqual(actions, null, "OverflowMenu should be present");
-      const setupAction = actions.find((a) => a.id === "setup");
-      assert.notEqual(setupAction, undefined, "Setup action must exist");
-      assert.equal(setupAction.label, "setup");
-      setupAction.run();
-      assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
-      assert.equal(configurePayload.displayName, "Telegram");
-      assert.equal(configurePayload.onboardingState, "failed");
-      // The payload must carry the surfaces so the configure modal can route a
-      // channel-surface extension to the Connect/pairing panel.
-      assert.deepEqual(configurePayload.surfaces, channelSurfaces);
+      assert.equal(actions.some((action) => action.id === "setup"), false);
+      assert.equal(configurePayload, null);
     },
   );
 

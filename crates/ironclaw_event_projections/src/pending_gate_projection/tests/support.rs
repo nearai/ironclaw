@@ -173,6 +173,32 @@ impl TurnEventProjectionSource for MemoryTurnEventSource {
             rebase_required: None,
         })
     }
+
+    async fn read_turn_event_log_after(
+        &self,
+        after: Option<TurnEventCursor>,
+        limit: usize,
+    ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {
+        let after = after.unwrap_or_default();
+        let mut entries = self
+            .events
+            .iter()
+            .filter(|event| event.cursor > after)
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|event| event.cursor);
+        let truncated = entries.len() > limit;
+        if truncated {
+            entries.truncate(limit);
+        }
+        let next_cursor = entries.last().map_or(after, |event| event.cursor);
+        Ok(ironclaw_turns::TurnEventPage {
+            entries,
+            next_cursor,
+            truncated,
+            rebase_required: None,
+        })
+    }
 }
 
 pub(super) struct FailingTurnEventSource;
@@ -190,6 +216,16 @@ impl TurnEventProjectionSource for FailingTurnEventSource {
             reason: "test source failure".to_string(),
         })
     }
+
+    async fn read_turn_event_log_after(
+        &self,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {
+        Err(ironclaw_turns::TurnError::Unavailable {
+            reason: "test source failure".to_string(),
+        })
+    }
 }
 
 pub(super) struct RebaseTurnEventSource;
@@ -200,6 +236,19 @@ impl TurnEventProjectionSource for RebaseTurnEventSource {
         &self,
         _scope: &TurnScope,
         _owner_user_id: Option<&UserId>,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {
+        Ok(ironclaw_turns::TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: TurnEventCursor(5),
+            truncated: false,
+            rebase_required: Some(TurnEventCursor(5)),
+        })
+    }
+
+    async fn read_turn_event_log_after(
+        &self,
         _after: Option<TurnEventCursor>,
         _limit: usize,
     ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {

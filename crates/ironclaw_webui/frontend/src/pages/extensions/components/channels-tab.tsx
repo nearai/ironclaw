@@ -13,7 +13,7 @@ function packageId(item) {
 
 // Every channel package renders the same generic sections: the connect
 // section derives from the surface `connection` strategy, and the configure
-// affordance from the setup fields/secrets in the configure modal. OAuth
+// affordance from caller-scoped setup credentials in the configure modal. OAuth
 // connections (and channels without a connect affordance) render nothing
 // here — OAuth connect lives in the configure modal.
 export function ChannelConnectSections({ item }) {
@@ -40,7 +40,6 @@ export function ChannelConnectSections({ item }) {
 export function ChannelsTab({
   channels,
   channelRegistry,
-  onActivate,
   onConfigure,
   onRemove,
   onInstall,
@@ -69,7 +68,6 @@ export function ChannelsTab({
                   <div key={packageId(ch)} className="flex flex-col gap-3">
                     <ExtensionCard
                       ext={ch}
-                      onActivate={onActivate}
                       onConfigure={onConfigure}
                       onRemove={onRemove}
                       isBusy={isBusy}

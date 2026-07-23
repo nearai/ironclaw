@@ -233,8 +233,20 @@ pub(crate) async fn bootstrap_nearai_mcp(
                 reason: format!("NEAR AI MCP package ref is invalid: {error}"),
             }
         })?;
+    let resource_scope = ResourceScope {
+        invocation_id: InvocationId::new(),
+        ..owner_scope.without_thread_and_mission()
+    };
+    let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+        resource_scope.clone(),
+        product_auth.runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
-        .project(package_ref.clone(), &owner_scope.user_id)
+        .project(
+            package_ref.clone(),
+            &owner_scope.user_id,
+            Some(&credential_gate),
+        )
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP extension projection failed: {error}"),
@@ -267,10 +279,6 @@ pub(crate) async fn bootstrap_nearai_mcp(
         }
     }
 
-    let resource_scope = ResourceScope {
-        invocation_id: InvocationId::new(),
-        ..owner_scope.without_thread_and_mission()
-    };
     let scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Api);
     let provider =
         AuthProviderId::new("nearai").map_err(|error| RebornBuildError::InvalidConfig {
@@ -334,9 +342,8 @@ pub(crate) async fn bootstrap_nearai_mcp(
         }
     }
 
-    // Bootstrap acts as the base owner (the tenant operator), so the install
-    // derives a tenant-shared owner — the NEAR AI MCP extension is for the
-    // whole tenant, matching pre-#5459 behavior.
+    // Bootstrap installs for the owner named by the runtime scope. Extension
+    // membership remains per user even when that owner is also the operator.
     let bootstrap_caller = resource_scope.user_id.clone();
     if !installed {
         extension_management

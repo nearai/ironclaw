@@ -100,7 +100,7 @@ function persistDismissedOnboardingId(threadId, sourceMessageId) {
   }
 }
 
-// The backend marks an `extension_activate` result for a connectable channel
+// The backend marks an `extension_install` result for a connectable channel
 // with this `output_kind`; the structured connect action rides on the card's
 // `toolResultPreview` JSON. This is the structured replacement for the deleted
 // prose regex — the panel is derived from typed fields, never from message text.
@@ -278,7 +278,7 @@ export function useChannelOnboarding(
 
   // Derive the in-chat pairing panel from the durable, structured
   // channel-connection-required tool card the backend attaches to an
-  // `extension_activate` result for a connectable channel. The trigger is a
+  // `extension_install` result for a connectable channel. The trigger is a
   // concrete per-thread card (present only after the agent engaged the channel
   // here), so — unlike the removed global poll — it never fires on an empty or
   // unrelated chat and never races history loading. It is gated on the live

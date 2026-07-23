@@ -111,7 +111,7 @@ function ChipGrid({ items }) {
   );
 }
 
-export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }) {
+export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const t = useT();
   const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
@@ -122,7 +122,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const tools = ext.tools || [];
   const [capsOpen, setCapsOpen] = React.useState(false);
 
-  const setupState = state === "setup_required" || state === "auth_required";
+  const setupState = state === "setup_needed";
   const onboardingHint =
     (setupState
       ? ext.onboarding?.credential_instructions || ext.onboarding?.credential_next_step
@@ -171,12 +171,6 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       label: configureLabel,
       run: () => onConfigure(configurePayload),
     });
-  } else if (primaryAction === "activate") {
-    primaryActions.push({
-      id: "activate",
-      label: t("extensions.activate"),
-      run: () => onActivate(configurePayload),
-    });
   }
   if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
     overflowActions.push({
@@ -193,7 +187,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     canManage &&
     primaryAction !== "configure" &&
     hasChannelSurface(ext) &&
-    (state === "setup_required" || state === "failed")
+    state === "setup_needed"
   ) {
     overflowActions.push({
       id: "setup",
@@ -206,7 +200,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     canManage &&
     hasChannelSurface(ext) &&
     !hasOverflowConfigureAction &&
-    (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
+    state === "active"
   ) {
     overflowActions.push({
       id: "reconfigure",
@@ -252,11 +246,8 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       {ext.description && (<p className={DESC}>{ext.description}</p>)}
 
-      {/* `activation_error` is present iff `installation_state === "failed"`
-          (a terminal, non-auth activation failure — §6.1); gating on the
-          field's own presence renders the redacted reason whenever the wire
-          sends one, independent of which axis wins the onboarding/
-          installation state-badge above. */}
+      {/* Internal startup failures remain attached to the public
+          `setup_needed` state as redacted remediation context. */}
       {ext.activation_error &&
       (
         <div

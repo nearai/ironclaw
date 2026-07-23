@@ -18,13 +18,11 @@
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
-pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 
 pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: &[&str] = &[
     EXTENSION_SEARCH_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID,
-    EXTENSION_ACTIVATE_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID,
 ];
 

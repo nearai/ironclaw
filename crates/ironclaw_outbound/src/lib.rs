@@ -13,6 +13,8 @@ mod error;
 mod filesystem_store;
 mod ids;
 mod resolution_engine;
+mod run_final_reply_handoff;
+mod run_final_reply_target;
 mod service;
 mod store;
 mod triggered_run_delivery;
@@ -51,6 +53,12 @@ pub use ids::{
     OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
     TriggerOriginRef,
 };
+pub use run_final_reply_handoff::{MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, RunFinalReplyHandoffRecord};
+pub use run_final_reply_target::{
+    OutboundDeliveryTargetId, RouteCurrentRunFinalReply, RouteCurrentRunFinalReplyError,
+    RouteCurrentRunFinalReplyRequest, RunFinalReplyDestination, RunFinalReplyTargetRecord,
+    RunFinalReplyTargetRequest, WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+};
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
@@ -59,10 +67,10 @@ pub use triggered_run_delivery::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 pub use types::{
-    AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
-    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
-    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
-    PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryDecision,
+    OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
+    OutboundPushTargetRequest, PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadNotificationPolicy, ThreadNotificationTarget,
     ThreadProjectionAccessClaim, ThreadProjectionAccessGrant, ThreadProjectionAccessRequest,

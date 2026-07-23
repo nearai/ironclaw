@@ -11,7 +11,7 @@ use ironclaw_extension_host::{
     NativeExtensionFactory,
 };
 use ironclaw_reborn_composition::ChannelExtensionBinding;
-use ironclaw_telegram_extension::TelegramChannelAdapter;
+use ironclaw_telegram_extension::{TelegramChannelAdapter, TelegramPreferenceTargetCodec};
 
 /// Every native factory the binary assembles (`first_party`-runtime
 /// extensions bind their adapters through these).
@@ -42,7 +42,7 @@ pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBindin
             extension_id: "telegram".to_string(),
             adapter: Arc::new(TelegramChannelAdapter::default()),
             inbound_payload_classifier: None,
-            preference_target_codec: None,
+            preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
         },
     ]
 }
@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn slack_channel_binding_carries_adapter_classifier_and_codec() {
+    fn bundled_channel_bindings_carry_their_production_extras() {
         let bindings = bundled_channel_extension_bindings();
         let slack = bindings
             .iter()
@@ -101,5 +101,9 @@ mod tests {
             .find(|binding| binding.extension_id == "telegram")
             .expect("the binary supplies the telegram deployment channel binding");
         assert!(telegram.inbound_payload_classifier.is_none());
+        assert!(
+            telegram.preference_target_codec.is_some(),
+            "the shipping Telegram binding must expose outbound preference targets"
+        );
     }
 }

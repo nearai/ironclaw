@@ -6,7 +6,7 @@
 //! come from generic state only:
 //!
 //! - **Shared conversations** — the extension's `*_subject_routes`
-//!   `[channel.config]` value: entries whose subject is the caller become
+//!   administrator value: entries whose subject is the caller become
 //!   the caller's shared-conversation targets.
 //! - **Personal direct messages** — the generic per-(extension, user)
 //!   DM-target store seeded by post-bind provisioning (and the H.4 fold).
@@ -33,7 +33,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::PreferenceTargetCodec;
 use ironclaw_turns::ReplyTargetBindingRef;
 
-use crate::extension_host::channel_config::ChannelConfigService;
+use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::extension_host::channel_dm_targets::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
@@ -62,7 +62,7 @@ pub(crate) struct ChannelOutboundTargetIdentity {
 pub(crate) struct GenericChannelOutboundTargetDeps {
     pub(crate) watch: SnapshotWatch,
     pub(crate) assembly: Arc<GenericChannelHostAssembly>,
-    pub(crate) channel_config: Arc<ChannelConfigService>,
+    pub(crate) admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     pub(crate) dm_targets: Arc<FilesystemChannelDmTargetStore>,
     pub(crate) identity: ChannelOutboundTargetIdentity,
 }
@@ -142,10 +142,11 @@ impl GenericChannelOutboundTargetProvider {
         // The `*_team_id` connection-scoping claim (same handle-suffix
         // convention as the identity hook) supplies the space id.
         let mut space_id = None;
-        if let Some(field) = channel
-            .config
-            .fields
+        if let Some(field) = active
+            .resolved
+            .admin_configuration
             .iter()
+            .flat_map(|descriptor| &descriptor.fields)
             .filter(|field| !field.secret)
             .find(|field| handle_declares_field(field.handle.as_str(), "team_id"))
         {
@@ -156,7 +157,7 @@ impl GenericChannelOutboundTargetProvider {
         }
 
         let mut subject_routes = BTreeMap::new();
-        let handles = shared_channel_admission_handles(&channel.config.fields);
+        let handles = shared_channel_admission_handles(&active.resolved.admin_configuration);
         if let Some(handle) = handles.subject_routes.as_deref()
             && let Some(raw) = self.config_value(&extension_id, handle).await?
         {
@@ -191,7 +192,7 @@ impl GenericChannelOutboundTargetProvider {
         handle: &str,
     ) -> Result<Option<String>, OutboundError> {
         self.deps
-            .channel_config
+            .admin_configuration_resolver
             .non_secret_value(extension_id, handle)
             .await
             .map_err(|error| {
@@ -200,7 +201,7 @@ impl GenericChannelOutboundTargetProvider {
                     extension_id = %extension_id,
                     handle,
                     %error,
-                    "channel config unavailable while resolving outbound targets"
+                    "administrator configuration unavailable while resolving outbound targets"
                 );
                 OutboundError::Backend
             })
@@ -260,7 +261,14 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            reply_target_binding_ref,
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            },
+            current_target: Some(ironclaw_product_workflow::CurrentDeliveryTarget {
+                extension_id: context.extension_id.clone(),
+                external_conversation_ref: conversation,
+                personal_direct_message: false,
+            }),
             owner: OutboundDeliveryTargetOwner::new(
                 self.deps.identity.tenant_id.clone(),
                 owner_user,
@@ -275,7 +283,8 @@ impl GenericChannelOutboundTargetProvider {
         caller: &OutboundDeliveryTargetScope,
         record: &ChannelDmTargetRecord,
     ) -> Option<OutboundDeliveryTargetEntry> {
-        let (space_id, conversation_id) = dm_record_conversation(record)?;
+        let (record_space_id, conversation_id) = dm_record_conversation(record)?;
+        let space_id = record_space_id.or_else(|| context.space_id.clone());
         let conversation =
             ExternalConversationRef::new(space_id.as_deref(), &conversation_id, None, None).ok()?;
         let reply_target_binding_ref = context.codec.encode_personal_direct_message_target(
@@ -303,7 +312,14 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            reply_target_binding_ref,
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            },
+            current_target: Some(ironclaw_product_workflow::CurrentDeliveryTarget {
+                extension_id: context.extension_id.clone(),
+                external_conversation_ref: conversation,
+                personal_direct_message: true,
+            }),
             // The owner is the record's provisioned user (the resolved
             // resource), never echoed from the caller.
             owner: OutboundDeliveryTargetOwner::new(

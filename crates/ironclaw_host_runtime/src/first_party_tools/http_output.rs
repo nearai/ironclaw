@@ -83,7 +83,7 @@ fn unauthorized_extension_hint(status: u16) -> Option<&'static str> {
         "This request was rejected for authentication/authorization. If this host is served by \
          an installable extension, that extension injects the required credentials for you: \
          search for it with builtin.extension_search (by the service or domain name), then \
-         builtin.extension_install and builtin.extension_activate, and retry through the \
+         builtin.extension_install, and retry through the \
          extension's tools instead of an unauthenticated builtin.http call.",
     )
 }

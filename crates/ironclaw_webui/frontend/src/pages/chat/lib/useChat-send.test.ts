@@ -3653,22 +3653,22 @@ test("useChat: channel-connected event from same chat does not duplicate the con
   );
 });
 
-test("useChat: timeline Slack OAuth activation guidance does not open a connection panel from prose", async () => {
-  const threadId = "thread-slack-oauth-activation";
+test("useChat: timeline Slack OAuth install guidance does not open a connection panel from prose", async () => {
+  const threadId = "thread-slack-oauth-install";
   const stateUpdates = [];
   const renderedMessages = [
     {
-      id: "tool-extension-activate",
+      id: "tool-extension-install",
       role: "tool_activity",
-      capabilityId: "builtin.extension_activate",
+      capabilityId: "builtin.extension_install",
       toolStatus: "success",
       toolResultPreview: JSON.stringify({
         message:
           "Slack is installed as an inbound channel. Configure Slack OAuth from the extension settings, then message the Slack bot directly. If the user's Slack account is already connected, continue the user's original request. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.",
         package_ref: { id: "slack", kind: "extension" },
         payload: {
-          activated: true,
-          kind: "extension_activate",
+          kind: "extension_install",
+          installed: true,
           visible_capability_ids: [],
         },
         phase: "active",
@@ -3696,7 +3696,7 @@ test("useChat: timeline Slack OAuth activation guidance does not open a connecti
     globalThis: {},
     queryClient: {
       getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Slack OAuth activation thread" }],
+        threads: [{ thread_id: threadId, title: "Slack OAuth install thread" }],
       }),
       invalidateQueries: () => {},
     },
@@ -3731,7 +3731,7 @@ test("useChat: timeline Slack OAuth activation guidance does not open a connecti
   );
 });
 
-test("useChat: Slack-read package activation guidance does not render a connection panel from prose", async () => {
+test("useChat: Slack-read package install guidance does not render a connection panel from prose", async () => {
   const threadId = "thread-slack-read-no-tool";
   const stateUpdates = [];
   const renderedMessages = [
@@ -3741,17 +3741,17 @@ test("useChat: Slack-read package activation guidance does not render a connecti
       content: "any new slack messages?",
     },
     {
-      id: "tool-extension-activate",
+      id: "tool-extension-install",
       role: "tool_activity",
-      capabilityId: "builtin.extension_activate",
+      capabilityId: "builtin.extension_install",
       toolStatus: "success",
       toolResultPreview: JSON.stringify({
         message:
           "Slack is installed as an inbound channel. Configure Slack OAuth from the extension settings, then message the Slack bot directly. If the user's Slack account is already connected, continue the user's original request. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.",
         package_ref: { id: "slack", kind: "extension" },
         payload: {
-          activated: true,
-          kind: "extension_activate",
+          kind: "extension_install",
+          installed: true,
           visible_capability_ids: [],
         },
         phase: "active",
@@ -3918,9 +3918,9 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
 // (timeline), so the in-chat panel derives from it in both cases.
 function channelConnectionRequiredCard(overrides = {}) {
   return {
-    id: "tool-activate-1",
+    id: "tool-install-1",
     role: "tool_activity",
-    capabilityId: "builtin.extension_activate",
+    capabilityId: "builtin.extension_install",
     outputKind: "channel_connection_required",
     toolStatus: "success",
     toolResultPreview: JSON.stringify({
@@ -4035,7 +4035,7 @@ test("useChat: a channel-connection-required tool card opens the Slack OAuth pan
   );
   assert.equal(onboardingUpdate?.value?.extensionName, "slack");
   assert.equal(onboardingUpdate?.value?.threadId, threadId);
-  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-activate-1");
+  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-install-1");
   assert.equal(onboardingUpdate?.value?.strategy, "oauth");
   assert.match(onboardingUpdate?.value?.instructions, /Connect Slack with OAuth/);
   assert.equal(onboardingUpdate?.value?.inputPlaceholder, "");
@@ -4062,7 +4062,7 @@ test("useChat: a channel-connection-required tool card opens the pairing panel w
   );
   assert.equal(onboardingUpdate?.value?.extensionName, "slack");
   assert.equal(onboardingUpdate?.value?.threadId, threadId);
-  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-activate-1");
+  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-install-1");
 });
 
 test("useChat: a channel-connection-required tool card does NOT open the panel when Slack is already connected", async () => {
@@ -4150,7 +4150,7 @@ test("useChat: a dismissed channel-connection-required tool card stays closed", 
     },
     stateUpdates,
     storage: {
-      getItem: (key) => (key === dismissedKey ? JSON.stringify(["tool-activate-1"]) : null),
+      getItem: (key) => (key === dismissedKey ? JSON.stringify(["tool-install-1"]) : null),
       setItem: () => {},
     },
   });

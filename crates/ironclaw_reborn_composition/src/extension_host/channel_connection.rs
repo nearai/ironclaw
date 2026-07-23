@@ -11,7 +11,7 @@
 //! the credential revokes first so a mid-sequence failure leaves the caller
 //! visibly connected with every step retryable.
 //!
-//! Channel lanes whose configure surface predates `[channel.config]`
+//! Channel lanes whose configure surface predates manifest administrator configuration
 //! register a [`ChannelConnectionEntry`] carrying their own scope source and
 //! cleanup port; pure-manifest extensions are discovered generically over
 //! the durable installation store.
@@ -27,13 +27,14 @@ use ironclaw_auth::{
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
 use ironclaw_product_workflow::{
-    ChannelAuthAccountState, ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
+    ChannelAuthAccountState, ChannelConnectionFacade, ChannelPairingRegistry,
+    ChannelPairingService, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
 use crate::extension_host::channel_identity::{
-    ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
-    discover_channel_extensions,
+    ChannelConnectionScope, ChannelConnectionScopeSource,
+    admin_configuration_connection_scope_source, discover_channel_extensions,
 };
 use crate::provider_identity::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup};
 
@@ -175,7 +176,7 @@ pub(crate) struct GenericChannelConnectionFacade {
     /// Pairing services for `WebGeneratedCode` channels: their connected
     /// state and disconnect semantics (codes + DM target + conversation-actor
     /// cleanup) are owned by the pairing service, not the OAuth lane.
-    channel_pairing: Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
+    channel_pairing: Option<Arc<ChannelPairingRegistry>>,
 }
 
 impl GenericChannelConnectionFacade {
@@ -190,9 +191,7 @@ impl GenericChannelConnectionFacade {
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
         account_status_reader: Option<Arc<dyn ChannelAccountStatusReader>>,
         dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
-        channel_pairing: Option<
-            Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>,
-        >,
+        channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     ) -> Self {
         Self {
             tenant_id,
@@ -207,10 +206,7 @@ impl GenericChannelConnectionFacade {
         }
     }
 
-    fn pairing_service_for(
-        &self,
-        extension_id: &str,
-    ) -> Option<Arc<crate::extension_host::channel_pairing::ChannelPairingService>> {
+    fn pairing_service_for(&self, extension_id: &str) -> Option<Arc<ChannelPairingService>> {
         self.channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(extension_id))
@@ -242,7 +238,7 @@ impl GenericChannelConnectionFacade {
             entries.push(ChannelConnectionEntry {
                 extension_id: extension.extension_id,
                 providers: extension.providers,
-                scope_source: channel_config_connection_scope_source(
+                scope_source: admin_configuration_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
                     None,
@@ -915,8 +911,8 @@ mod tests {
     #[tokio::test]
     async fn discovered_extension_disconnect_drops_the_callers_dm_target() {
         use ironclaw_extensions::{
-            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-            ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
+            ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
+            ExtensionManifestRef, ManifestSource,
         };
         use ironclaw_filesystem::InMemoryBackend;
 
@@ -927,6 +923,15 @@ name = "AcmeChat"
 version = "0.1.0"
 description = "discovered disconnect fixture"
 trust = "first_party_requested"
+
+[admin_configuration]
+group_id = "extension.acmechat"
+display_name = "AcmeChat deployment configuration"
+fields = [
+  { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true, required = false },
+  { handle = "acmechat_team_id", label = "Workspace ID", secret = false, required = false },
+  { handle = "acmechat_oauth_client_id", label = "OAuth client ID", secret = false, required = false },
+]
 
 [runtime]
 kind = "first_party"
@@ -963,12 +968,6 @@ body_limit_bytes = 1048576
 kind = "shared_secret_header"
 secret_handle = "acmechat_webhook_secret"
 header = "X-AcmeChat-Secret"
-
-[channel.config]
-fields = [
-  { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
-  { handle = "acmechat_team_id", label = "Workspace ID", secret = false },
-]
 
 [channel.presentation]
 supports_markdown = false
@@ -1008,25 +1007,15 @@ team_id = "/team/id"
                     ExtensionInstallationId::new("install-alpha".to_string())
                         .expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extensions::InstallationOwner::user(caller().user_id),
                 )
                 .expect("installation"),
             )
             .await
             .expect("persist install");
-        // Connection scoping is configured (fail-closed otherwise).
-        installation_store
-            .set_channel_config(
-                &extension_id,
-                vec![("acmechat_team_id".to_string(), "T123".to_string())],
-            )
-            .await
-            .expect("save scoping value");
-
         let identity_store = bound_identity_store("install-alpha");
         let dm_store = Arc::new(FilesystemChannelDmTargetStore::new(
             Arc::new(InMemoryBackend::new()),
@@ -1096,8 +1085,8 @@ team_id = "/team/id"
     #[tokio::test]
     async fn connection_discovery_includes_channel_without_auth_vendor() {
         use ironclaw_extensions::{
-            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-            ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
+            ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
+            ExtensionManifestRef, ManifestSource,
         };
 
         const PAIRING_CHANNEL_MANIFEST: &str = r#"
@@ -1107,6 +1096,14 @@ name = "PairChat"
 version = "0.1.0"
 description = "proof-code channel discovery fixture"
 trust = "first_party_requested"
+
+[admin_configuration]
+group_id = "extension.pairchat"
+display_name = "PairChat deployment configuration"
+fields = [
+  { handle = "pairchat_bot_token", label = "Bot token", secret = true, required = false },
+  { handle = "pairchat_webhook_secret", label = "Webhook secret", secret = true, required = false },
+]
 
 [runtime]
 kind = "first_party"
@@ -1128,12 +1125,6 @@ body_limit_bytes = 1048576
 kind = "shared_secret_header"
 secret_handle = "pairchat_webhook_secret"
 header = "X-PairChat-Secret"
-
-[channel.config]
-fields = [
-  { handle = "pairchat_bot_token", label = "Bot token", secret = true },
-  { handle = "pairchat_webhook_secret", label = "Webhook secret", secret = true },
-]
 
 [[channel.egress]]
 scheme = "https"
@@ -1160,11 +1151,10 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new("pairchat-install").expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extensions::InstallationOwner::user(caller().user_id),
                 )
                 .expect("installation"),
             )

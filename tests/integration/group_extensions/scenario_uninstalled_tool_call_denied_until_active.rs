@@ -1,14 +1,14 @@
 //! Scenario 5: a model call to a bundled extension capability whose extension
-//! is NOT installed/activated is rejected fail-closed at the model gateway
+//! is NOT installed is rejected fail-closed at the model gateway
 //! (the capability has no registry descriptor, so it is never advertised nor
 //! resolvable) — the call never reaches the capability port and the run
 //! recovers via a model retry instead of wedging. After a real
-//! `extension_install` + `extension_activate` on a sibling thread over the
+//! `extension_install` on a sibling thread over the
 //! SAME shared runtime, the identical call on the SAME conversation
 //! dispatches. Grants alone must never make an unpublished extension
-//! capability callable; only activation-time registry publication may.
+//! capability callable; only install-time registry publication may.
 //!
-//! Uses "gmail" (untouched by scenarios 1-4). Activation's credential gate
+//! Uses "gmail" (untouched by scenarios 1-4). Install's credential gate
 //! and turn 2's dispatch-time staging pass via the google account this
 //! scenario seeds under the capability dispatch scope.
 //!
@@ -17,7 +17,7 @@
 //! binary runs on: `g` is deliberately built WITHOUT a Google OAuth backend so
 //! Scenario 4.5's readiness-map chokepoint has something to fire on, and
 //! that chokepoint gates the "google" PROVIDER build-time-wide — not just
-//! the specific package — so a "gmail" activation on `g` would now hit the
+//! the specific package — so a "gmail" install on `g` would now hit the
 //! same early-fail Scenario 4.5 pins, never reaching the seeded credential
 //! account this scenario actually wants to exercise. This scenario shares no
 //! cross-thread state with `g` (its own doc always called out "gmail,
@@ -72,15 +72,11 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.extension_install",
                 json!({"extension_id": "gmail"}),
             ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "gmail"}),
-            ),
             RebornScriptedReply::text("gmail ready"),
         ])
         .build()
         .await?;
-    // gmail's activation credential gate and turn 2's dispatch-time credential
+    // gmail's install credential gate and turn 2's dispatch-time credential
     // staging both select a google account under the CAPABILITY dispatch scope
     // — seed one with real material through the production manual-token flow.
     lifecycle
@@ -94,19 +90,18 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
             ],
         )
         .await?;
-    lifecycle.submit_turn("install and activate gmail").await?;
+    lifecycle.submit_turn("install gmail").await?;
     lifecycle
         .assert_tool_result_contains("\"installed\":true")
         .await?;
-    // Value, not key: an activated:false / auth-gate outcome must not satisfy this.
     lifecycle
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     lifecycle
         .assert_model_message_content_contains(r#"\"installed\":true"#)
         .await?;
     lifecycle
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
     // ── Turn 2 (same conversation): the identical call now dispatches ───────

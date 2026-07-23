@@ -99,7 +99,7 @@ async fn subscription_access_policy_gates_cursor_checkpoint_creation() {
 }
 
 #[tokio::test]
-async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_without_target() {
+async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_identity() {
     let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
@@ -123,9 +123,17 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         .await
         .expect("second authorized delivery attempt");
     assert!(matches!(
-        second,
+        &second,
         OutboundDeliveryDecision::Authorized { .. }
     ));
+    let OutboundDeliveryDecision::Authorized {
+        attempt: second_attempt,
+        ..
+    } = second
+    else {
+        unreachable!("matched above")
+    };
+    assert_eq!(second_attempt.delivery_id, attempt.delivery_id);
     assert_eq!(
         validator.calls(),
         2,
@@ -150,21 +158,9 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         .list_delivery_attempts(scope)
         .await
         .expect("list delivery attempts");
-    assert_eq!(attempts.len(), 3);
-    assert_eq!(
-        attempts
-            .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Prepared)
-            .count(),
-        2
-    );
-    assert_eq!(
-        attempts
-            .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Failed)
-            .count(),
-        1
-    );
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].delivery_id, attempt.delivery_id);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
 }
 
 #[tokio::test]

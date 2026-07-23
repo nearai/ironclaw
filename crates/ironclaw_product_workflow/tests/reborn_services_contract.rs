@@ -49,7 +49,7 @@ use ironclaw_product_workflow::{
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
-    CREATE_THREAD_OPERATION, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    CREATE_THREAD_OPERATION, ChannelAuthAccountState, ChannelConnectionFacade,
     ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
@@ -62,7 +62,8 @@ use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    LifecyclePublicState, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
@@ -84,7 +85,7 @@ use ironclaw_product_workflow::{
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
     RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionSurface,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
@@ -1001,9 +1002,16 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
-        _action: ironclaw_product_workflow::LifecycleProductAction,
+        action: ironclaw_product_workflow::LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ironclaw_product_workflow::ProductWorkflowError> {
-        panic!("setup_extension should project package state, not execute lifecycle actions")
+        let LifecycleProductAction::ExtensionInstall { package_ref } = action else {
+            panic!("setup_extension may only re-enter the idempotent install action after save")
+        };
+        Ok(LifecycleProductResponse::projection(
+            Some(package_ref),
+            InstallationState::Configured,
+            Vec::new(),
+        ))
     }
 
     async fn project_package(
@@ -1518,6 +1526,7 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
             next_cursor: None,
         })
     }
+
 }
 
 fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
@@ -5942,7 +5951,9 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
     );
     assert_eq!(
         onboarding.credential_next_step.as_deref(),
-        Some("After saving the token, activate GitHub to publish its tools.")
+        Some(
+            "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools."
+        )
     );
 }
 
@@ -6073,7 +6084,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     // so the frontend never derives a label from the channel id.
     assert_eq!(connection.display_name, "Slack");
     // §6.1 installation-state enum replaces the activation_status string.
-    assert_eq!(info.installation_state, InstallationState::Active);
+    assert_eq!(info.installation_state, LifecyclePublicState::Active);
 }
 
 /// A caller-scoped channel-connection facade that reports a fixed set of
@@ -6157,7 +6168,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         .expect("multi-surface extension listed");
 
     // §6.1 installation-state enum on the wire (replaces the activation_status string).
-    assert_eq!(info.installation_state, InstallationState::Active);
+    assert_eq!(info.installation_state, LifecyclePublicState::Active);
 
     // §6.4 / ADR 0001 accounts list — the frozen shape, named field for field.
     // A live grant backfills to `connected` (MIG-1); one account per vendor,
@@ -6363,14 +6374,13 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         .find(|extension| extension.package_ref.id.as_str() == "acme")
         .expect("extension listed");
 
-    // (a) The terminal §6.1 `Failed` state projects distinctly — NOT collapsed
-    // to Installed/Active.
+    // Internal startup failure remains a redacted error attached to the one
+    // caller-visible setup state; it never creates a fourth lifecycle state.
     assert_eq!(
         info.installation_state,
-        InstallationState::Failed,
-        "a Failed extension must project its own installation_state",
+        LifecyclePublicState::SetupNeeded,
+        "a failed internal activation checkpoint must remain setup_needed",
     );
-    assert_ne!(info.installation_state, InstallationState::Installed);
 
     // (c) The redacted activation error reaches the DTO with its reason (the
     // frontend card renders this slot; it was fed `None` before).
@@ -9533,11 +9543,15 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
     assert_eq!(response.phase, InstallationState::Configured);
     assert_eq!(
         onboarding.credential_instructions.as_deref(),
-        Some("github is installed. Activate it to make its tools available.")
+        Some(
+            "github setup is complete. IronClaw publishes its tools automatically; no separate activation action is required."
+        )
     );
     assert_eq!(
         onboarding.credential_next_step.as_deref(),
-        Some("After saving the token, activate GitHub to publish its tools.")
+        Some(
+            "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools."
+        )
     );
 }
 
@@ -9625,154 +9639,14 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
     assert_eq!(credentials.submit_count(), 0);
 }
 
-/// One recorded configure-port save: the target extension id plus the
-/// submitted `(handle, value)` pairs.
-type RecordedChannelConfigSave = (String, Vec<(String, String)>);
-
-/// Recording fake of the channel-config configure port: serves a fixed
-/// field-status projection and records every save.
-#[derive(Default)]
-struct RecordingChannelConfigFacade {
-    fields: Vec<RebornChannelConfigField>,
-    saves: Mutex<Vec<RecordedChannelConfigSave>>,
-}
-
-impl RecordingChannelConfigFacade {
-    fn with_fields(fields: Vec<RebornChannelConfigField>) -> Self {
-        Self {
-            fields,
-            saves: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn saves(&self) -> Vec<RecordedChannelConfigSave> {
-        self.saves.lock().expect("saves lock").clone()
-    }
-}
-
-#[async_trait]
-impl ChannelConfigFacade for RecordingChannelConfigFacade {
-    async fn field_status(
-        &self,
-        _extension_id: &ExtensionId,
-    ) -> Result<Vec<RebornChannelConfigField>, RebornServicesError> {
-        Ok(self.fields.clone())
-    }
-
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), RebornServicesError> {
-        self.saves
-            .lock()
-            .expect("saves lock")
-            .push((extension_id.as_str().to_string(), values));
-        Ok(())
-    }
-}
-
-fn channel_config_field(name: &str, label: &str, secret: bool) -> RebornChannelConfigField {
-    RebornChannelConfigField {
-        name: name.to_string(),
-        label: label.to_string(),
-        secret,
-        provided: false,
-    }
-}
-
-/// The setup facade renders manifest-declared channel-config fields (the
-/// non-secret descriptors in `fields`, the secret ones in the existing
-/// `secrets` shape, presence only) and routes submitted values to the
-/// configure port while credential secrets keep the credential path.
+/// Caller setup accepts personal credential requirements only. Deployment
+/// administrator fields have a separate authorized API, so even a
+/// manifest-shaped field handle is rejected before credential storage.
 #[tokio::test]
-async fn setup_extension_projects_and_routes_channel_config_values() {
+async fn setup_extension_rejects_admin_configuration_fields() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
-    let channel_config = Arc::new(RecordingChannelConfigFacade::with_fields(vec![
-        channel_config_field("bot_token", "Bot token", true),
-        channel_config_field("public_url", "Public webhook URL", false),
-    ]));
-    let services =
-        setup_services_with_requirements(vec![manual_credential_requirement("api_token", false)])
-            .with_extension_credentials(credentials.clone())
-            .with_channel_config_facade(channel_config.clone());
-
-    // View: fields from the non-secret descriptors, secret channel fields in
-    // the secrets list (presence only, manual-token shape).
-    let view = query_extension_setup(&services, caller(), "github")
-        .await
-        .expect("setup view");
-    assert_eq!(view.fields.len(), 1);
-    assert_eq!(view.fields[0].name, "public_url");
-    assert_eq!(view.fields[0].prompt, "Public webhook URL");
-    assert!(view.fields[0].placeholder.is_none());
-    let bot_token = view
-        .secrets
-        .iter()
-        .find(|secret| secret.name == "bot_token")
-        .expect("secret channel field surfaces in the secrets shape");
-    assert!(!bot_token.provided);
-    assert!(
-        view.secrets.iter().any(|secret| secret.name == "api_token"),
-        "credential requirements keep their own entry"
-    );
-
-    // Submit: channel values route to the configure port; the credential
-    // secret stays on the credential path.
-    let response = submit_extension_setup_and_query(
-        &services,
-        caller(),
-        "github",
-        WebUiSetupExtensionRequest {
-            action: Some("submit".to_string()),
-            payload: Some(json!({
-                "secrets": {
-                    "bot_token": "xbt-123",
-                    "api_token": "cred-456"
-                },
-                "fields": {
-                    "public_url": "https://hooks.example.test/updates"
-                }
-            })),
-        },
-    )
-    .await
-    .expect("setup submit");
-    assert_eq!(response.fields.len(), 1);
-    let saves = channel_config.saves();
-    assert_eq!(saves.len(), 1);
-    assert_eq!(saves[0].0, "github");
-    assert!(
-        saves[0]
-            .1
-            .contains(&("bot_token".to_string(), "xbt-123".to_string()))
-    );
-    assert!(saves[0].1.contains(&(
-        "public_url".to_string(),
-        "https://hooks.example.test/updates".to_string()
-    )));
-    assert!(
-        !saves[0].1.iter().any(|(name, _)| name == "api_token"),
-        "credential secrets must not leak into the channel-config port"
-    );
-    assert_eq!(
-        credentials.submit_count(),
-        1,
-        "the credential secret still reaches the credential path"
-    );
-}
-
-/// A submitted `fields` value that matches no declared non-secret handle is
-/// rejected before anything is stored.
-#[tokio::test]
-async fn setup_extension_rejects_unknown_channel_config_field() {
-    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
-    let channel_config = Arc::new(RecordingChannelConfigFacade::with_fields(vec![
-        channel_config_field("public_url", "Public webhook URL", false),
-    ]));
     let services = setup_services_with_requirements(Vec::new())
-        .with_extension_credentials(credentials.clone())
-        .with_channel_config_facade(channel_config.clone());
+        .with_extension_credentials(credentials.clone());
 
     let err = invoke_extension_setup_submit(
         &services,
@@ -9782,16 +9656,15 @@ async fn setup_extension_rejects_unknown_channel_config_field() {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "fields": {
-                    "unknown_field": "value"
+                    "deployment_provider_id": "tenant-owned-value"
                 }
             })),
         },
     )
     .await
-    .expect_err("unknown field handle is rejected");
+    .expect_err("administrator fields are rejected on caller setup");
 
     assert_setup_validation(err, "fields", WebUiInboundValidationCode::InvalidValue);
-    assert!(channel_config.saves().is_empty());
     assert_eq!(credentials.submit_count(), 0);
 }
 
@@ -12339,7 +12212,7 @@ fn onboarding_fixture() -> LifecycleExtensionOnboarding {
         credential_instructions: Some("Paste the GitHub token IronClaw should use.".to_string()),
         setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
         credential_next_step: Some(
-            "After saving the token, activate GitHub to publish its tools.".to_string(),
+            "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools.".to_string(),
         ),
     }
 }

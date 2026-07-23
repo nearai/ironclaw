@@ -32,6 +32,7 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
   await context.globalThis.__testExports.startExtensionOauth(
     { kind: "extension", id: "slack" },
     {
+      name: "slack_personal_oauth",
       provider: "slack",
       setup: {
         account_label: "slack slack",
@@ -46,5 +47,33 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
   const ttlMs = Date.parse(payload.expires_at) - before;
   assert.ok(ttlMs > 4 * 60 * 1000, "expiry should leave enough time to authorize");
   assert.ok(ttlMs <= 6 * 60 * 1000, "expiry should not sit on the 10 minute backend limit");
+  assert.equal(payload.requirement, "slack_personal_oauth");
   assert.equal(payload.invocation_id, "invocation-alpha");
+  assert.equal("provider" in payload, false);
+  assert.equal("account_label" in payload, false);
+  assert.equal("scopes" in payload, false);
+});
+
+test("startExtensionOauth does not crash while a requirement projection is refreshing", async () => {
+  const apiCalls = [];
+  const context = {
+    apiFetch: async (url, options) => {
+      apiCalls.push({ url, options });
+      return { success: false };
+    },
+    encodeURIComponent,
+    globalThis: {},
+    redeemPairingCode: () => {},
+    setupExtension: () => {},
+  };
+  vm.runInNewContext(extensionsApiSourceForTest(), context);
+
+  await context.globalThis.__testExports.startExtensionOauth(
+    { kind: "extension", id: "slack" },
+    undefined,
+  );
+
+  assert.equal(apiCalls.length, 1);
+  const payload = JSON.parse(apiCalls[0].options.body);
+  assert.equal("requirement" in payload, false);
 });

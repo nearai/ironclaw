@@ -2741,7 +2741,7 @@ where
         // relocated from host_runtime's former `auth_resume_capability` call to
         // `apply_persistent_approval_policy`. The loop rebuilds a grant-less
         // context after the credential gate; a capability authorized only by a
-        // persistent grant (e.g. `extension_activate` under admin-config trust)
+        // persistent grant (e.g. `extension_install` under admin-config trust)
         // would otherwise be re-authorized grant-less and denied. Excluded for
         // `resume_json` (`PendingClaim`), which always carries a fresh approval
         // lease and never had persistent-approval applied — preserving behavior.

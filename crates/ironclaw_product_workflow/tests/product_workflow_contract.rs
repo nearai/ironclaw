@@ -815,6 +815,10 @@ fn fake_binding() -> ResolvedBinding {
         tenant_id: TenantId::new("tenant:fake").expect("valid tenant"),
         actor_user_id: UserId::new("user:fake").expect("valid actor user"),
         subject_user_id: Some(UserId::new("user:fake").expect("valid subject user")),
+        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-binding")
+            .expect("valid source binding ref"),
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply:test-binding")
+            .expect("valid reply target binding ref"),
         thread_id: ThreadId::new("thread:fake").expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
@@ -897,7 +901,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+            return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
@@ -931,6 +935,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         };
 
         self.accept_fresh_user_message(envelope_for_turn)
+            .map(Box::new)
             .map(InboundUserMessageDispatch::Accepted)
     }
 }
@@ -1697,6 +1702,12 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
         tenant_id: TenantId::new("tenant:install_alpha").expect("tenant"),
         actor_user_id: UserId::new("user:user1").expect("actor"),
         subject_user_id: Some(UserId::new("user:user1").expect("subject")),
+        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:approval-route")
+            .expect("source binding ref"),
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+            "reply:approval-route",
+        )
+        .expect("reply target binding ref"),
         thread_id: ThreadId::new("thread:dm-topic").expect("thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("agent")),
         project_id: None,

@@ -6,14 +6,13 @@ import {
   extensionLifecycleState,
   extensionIsActive,
   primaryExtensionAction,
-  setupReadyForActivation,
 } from "./extension-actions";
 
 const notionRef = { kind: "extension", id: "notion" };
 const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
 const toolSurfaces = [{ kind: "tool" }];
 
-test("primaryExtensionAction opens configuration before OAuth-required activation", () => {
+test("primaryExtensionAction opens configuration for OAuth-required setup", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: notionRef,
@@ -25,42 +24,40 @@ test("primaryExtensionAction opens configuration before OAuth-required activatio
   );
 });
 
-test("primaryExtensionAction activates configured inactive MCP extensions", () => {
+test("primaryExtensionAction keeps incomplete MCP extensions in setup", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: notionRef,
       runtime: "mcp",
       surfaces: toolSurfaces,
-      installation_state: "installed",
+      installation_state: "setup_needed",
     }),
-    "activate",
+    "configure",
   );
 });
 
-test("primaryExtensionAction suppresses activation for channel-surface extensions", () => {
-  // The suppression is surface-driven, not runtime-driven: a first-party and a
-  // WASM channel extension behave identically.
+test("primaryExtensionAction configures setup-needed channels generically", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
       runtime: "first_party",
       surfaces: channelSurfaces,
-      installation_state: "installed",
+      installation_state: "setup_needed",
     }),
-    null,
+    "configure",
   );
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "telegram" },
       runtime: "wasm",
       surfaces: channelSurfaces,
-      installation_state: "installed",
+      installation_state: "setup_needed",
     }),
-    null,
+    "configure",
   );
 });
 
-test("primaryExtensionAction suppresses Activate for channel surfaces in pairing states", () => {
+test("primaryExtensionAction routes legacy onboarding substates to configuration", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
@@ -68,8 +65,8 @@ test("primaryExtensionAction suppresses Activate for channel surfaces in pairing
       surfaces: channelSurfaces,
       onboarding_state: "pairing_required",
     }),
-    null,
-    "channel surface + pairing_required should return null (pairing section owns it)",
+    "configure",
+    "channel surface + pairing_required should route to its generic setup UI",
   );
   assert.equal(
     primaryExtensionAction({
@@ -78,22 +75,22 @@ test("primaryExtensionAction suppresses Activate for channel surfaces in pairing
       surfaces: channelSurfaces,
       onboarding_state: "pairing",
     }),
-    null,
-    "channel surface + pairing should return null (configure/setup owns it)",
+    "configure",
+    "channel surface + pairing should route to its generic setup UI",
   );
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
       runtime: "first_party",
       surfaces: channelSurfaces,
-      installation_state: "installed",
+      installation_state: "setup_needed",
     }),
-    null,
-    "channel surface + installed should hand off to channel configure/setup UI",
+    "configure",
+    "channel surface + setup_needed should hand off to generic setup UI",
   );
 });
 
-test("primaryExtensionAction hides activation for active extensions", () => {
+test("primaryExtensionAction returns no action for active extensions", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: notionRef,
@@ -105,7 +102,7 @@ test("primaryExtensionAction hides activation for active extensions", () => {
   );
 });
 
-test("extensionLifecycleState does not call active unauthenticated setup active", () => {
+test("extensionLifecycleState trusts the collapsed caller-scoped projection", () => {
   assert.equal(
     extensionLifecycleState({
       package_ref: { kind: "extension", id: "slack" },
@@ -114,46 +111,20 @@ test("extensionLifecycleState does not call active unauthenticated setup active"
       authenticated: false,
       needs_setup: true,
       has_auth: true,
-      installation_state: "active",
+      installation_state: "setup_needed",
     }),
-    "auth_required",
+    "setup_needed",
   );
 });
 
 test("extensionIsActive accepts card payload lifecycle fields", () => {
   assert.equal(extensionIsActive({ active: true }), true);
-  assert.equal(extensionIsActive({ installationState: "ready" }), true);
+  assert.equal(extensionIsActive({ installationState: "ready" }), false);
+  assert.equal(extensionIsActive({ onboardingState: "ready" }), false);
   assert.equal(extensionIsActive({ onboardingState: "auth_required" }), false);
-});
-
-test("setupReadyForActivation waits until all setup secrets are provided", () => {
   assert.equal(
-    setupReadyForActivation({
-      secrets: [{ provided: true }, { provided: true }],
-      fields: [],
-    }),
-    true,
-  );
-  assert.equal(
-    setupReadyForActivation({
-      secrets: [{ provided: true }, { provided: false }],
-      fields: [],
-    }),
+    extensionIsActive({ installationState: "setup_needed", onboardingState: "active" }),
     false,
-  );
-  assert.equal(
-    setupReadyForActivation({
-      secrets: [{ provided: true }],
-      fields: [{ name: "workspace" }],
-    }),
-    false,
-  );
-  assert.equal(
-    setupReadyForActivation({
-      extension: { active: true },
-      secrets: [{ provided: true }],
-      fields: [],
-    }),
-    false,
+    "the canonical installation state must win over stale onboarding metadata",
   );
 });

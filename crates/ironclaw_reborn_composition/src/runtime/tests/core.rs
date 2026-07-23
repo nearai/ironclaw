@@ -49,6 +49,27 @@ impl ironclaw_network::NetworkHttpEgress for SlackDmOpenNetworkEgress {
     }
 }
 
+fn runtime_extension_credential_gate(
+    runtime: &super::RebornRuntime,
+    user_id: &UserId,
+) -> crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate
+{
+    let mut scope = runtime.thread_scope.to_resource_scope();
+    scope.user_id = user_id.clone();
+    scope.mission_id = None;
+    scope.thread_id = None;
+    scope.invocation_id = InvocationId::new();
+    crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        scope,
+        runtime
+            .services()
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .runtime_credential_account_selection_service(),
+    )
+}
+
 #[test]
 fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
     let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
@@ -243,13 +264,12 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("install Slack before OAuth callback");
 
-    let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
     local_runtime
-        .channel_config
+        .admin_configuration_resolver
         .as_ref()
-        .expect("channel config service")
-        .save(
-            &slack_id,
+        .expect("administrator configuration resolver")
+        .configure_admin_group_for_test(
+            "extension.slack",
             vec![
                 ("slack_bot_token".to_string(), "xoxb-test".to_string()),
                 (
@@ -258,6 +278,16 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
                 ),
                 ("slack_team_id".to_string(), "T-RUNTIME".to_string()),
                 ("slack_api_app_id".to_string(), "A-RUNTIME".to_string()),
+                ("slack_installation_id".to_string(), "I-RUNTIME".to_string()),
+                ("slack_bot_user_id".to_string(), "U-BOT-RUNTIME".to_string()),
+                (
+                    "slack_oauth_client_id".to_string(),
+                    "runtime-client-id".to_string(),
+                ),
+                (
+                    "slack_oauth_client_secret".to_string(),
+                    "runtime-client-secret".to_string(),
+                ),
             ],
         )
         .await
@@ -1948,11 +1978,10 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
         .expect("extension management");
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+    let operator = extension_management.tenant_operator_user_id_for_test();
+    let credential_gate = runtime_extension_credential_gate(&runtime, operator);
     let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref, operator, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
     assert_eq!(projection.phase, InstallationState::Active);
@@ -2059,11 +2088,10 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
         .expect("extension management");
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+    let operator = extension_management.tenant_operator_user_id_for_test();
+    let credential_gate = runtime_extension_credential_gate(&runtime, operator);
     let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref, operator, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
     assert_eq!(projection.phase, InstallationState::Active);
@@ -5327,7 +5355,16 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
             "runtime-webui-lifecycle-owner",
             root.path().join("local-dev"),
         )
-        .with_runtime_policy(local_dev_runtime_policy()),
+        .with_runtime_policy(local_dev_runtime_policy())
+        .with_vendor_oauth_client(
+            ironclaw_auth::GOOGLE_PROVIDER_ID,
+            crate::OAuthClientConfig::new(
+                "runtime-webui-google-client.apps.googleusercontent.com",
+                "http://127.0.0.1/oauth/callback/google",
+                None,
+            )
+            .expect("valid test Google OAuth client config"),
+        ),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-lifecycle-tenant".to_string(),
@@ -5349,6 +5386,13 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         Some(AgentId::new("runtime-webui-lifecycle-agent").unwrap()),
         None,
     );
+    let github_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+        .expect("valid package ref");
+    bundle
+        .api
+        .install_extension(caller.clone(), github_ref.clone())
+        .await
+        .expect("install GitHub before projecting its setup");
 
     let setup = query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "github").await;
 
@@ -5364,6 +5408,13 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
+    let google_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+        .expect("valid package ref");
+    bundle
+        .api
+        .install_extension(caller.clone(), google_ref)
+        .await
+        .expect("install Google Calendar before projecting its setup");
     let google_setup =
         query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
@@ -5819,6 +5870,13 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+    bundle
+        .api
+        .install_extension(caller.clone(), package_ref)
+        .await
+        .expect("install GitHub before configuring credentials");
+
     let first = submit_webui_extension_setup(
         bundle.api.as_ref(),
         caller.clone(),
@@ -6452,9 +6510,8 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 .expect("lifecycle facade must be seeded before send_user_message");
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
-            // #5459 P1: act as the runtime owner (the tenant operator) so
-            // the install is tenant-shared and visible to the run's
-            // surface user — a non-operator install would now be private.
+            // Install for the exact run user. Operator role never creates a
+            // tenant-wide membership; install auto-reconciles readiness.
             let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                 tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
                 user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
@@ -6471,15 +6528,6 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 )
                 .await
                 .expect("install github extension");
-            facade_handle
-                .facade
-                .execute(
-                    ctx,
-                    LifecycleProductAction::ExtensionActivate { package_ref },
-                )
-                .await
-                .expect("activate github extension");
-
             // Register call #2 — after surface change.
             // Post-fix: reuses current port, so both candidates carry the same surface version.
             call1.id = "call-multi-2".to_string();

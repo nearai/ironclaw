@@ -5,7 +5,9 @@ use ironclaw_extensions::{
     package_with_discovered_hosted_mcp_tools,
 };
 use ironclaw_host_api::{ResourceScope, RuntimeHttpEgress};
-use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHttpAdapter};
+use ironclaw_mcp::{
+    McpClient, McpClientError, McpClientRequest, McpHostHttpClient, McpRuntimeHttpAdapter,
+};
 
 use crate::extension_host::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
@@ -17,6 +19,7 @@ pub(crate) enum HostedMcpDiscoveryError {
 
 pub(crate) async fn discover_hosted_mcp_package(
     package: &ExtensionPackage,
+    max_tools: u32,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 ) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
@@ -61,19 +64,27 @@ pub(crate) async fn discover_hosted_mcp_package(
         RegistryMcpEgressPlanner::new(registry),
     );
     let output = client
-        .discover_tools(McpClientRequest {
-            provider: package.id.clone(),
-            capability_id: planning_capability_id,
-            scope,
-            transport,
-            command,
-            args,
-            url,
-            input: serde_json::Value::Null,
-            max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
-        })
+        .discover_tools(
+            McpClientRequest {
+                provider: package.id.clone(),
+                capability_id: planning_capability_id,
+                scope,
+                transport,
+                command,
+                args,
+                url,
+                input: serde_json::Value::Null,
+                max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
+            },
+            max_tools,
+        )
         .await
-        .map_err(|error| HostedMcpDiscoveryError::Transient(error.stable_reason().to_string()))?;
+        .map_err(|error| match error {
+            McpClientError::InvalidToolCatalog { reason } => {
+                HostedMcpDiscoveryError::Permanent(reason)
+            }
+            error => HostedMcpDiscoveryError::Transient(error.stable_reason().to_string()),
+        })?;
     if output.tools.is_empty() {
         return Err(HostedMcpDiscoveryError::Transient(format!(
             "hosted MCP provider {} returned no discoverable tools",

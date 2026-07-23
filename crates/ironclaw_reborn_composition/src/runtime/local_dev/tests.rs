@@ -58,8 +58,8 @@ mod tests {
     };
 
     use crate::extension_host::extension_lifecycle_capabilities::{
-        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
+        EXTENSION_SEARCH_CAPABILITY_ID,
     };
     use crate::outbound::{
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
@@ -376,14 +376,13 @@ mod tests {
         )
     }
 
-    /// #5459 P1: lifecycle context acting AS the runtime's tenant operator, so
-    /// test installs are tenant-shared and visible to every surface user —
-    /// what these runtime-surface tests always meant. A `lifecycle_context`
-    /// user would now produce a PRIVATE install invisible to the run's user.
-    fn operator_lifecycle_context(label: &str, operator: &UserId) -> LifecycleProductContext {
+    /// Lifecycle context for the same member whose runtime capability surface
+    /// the test later inspects. Extension membership is per user, including
+    /// when that user also happens to hold the tenant operator role.
+    fn member_lifecycle_context(label: &str, member: &UserId) -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-            user_id: operator.clone(),
+            user_id: member.clone(),
             agent_id: None,
             project_id: None,
         })
@@ -644,11 +643,12 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context(label).await;
-        install_gsuite_extensions(&services, extension_state).await;
+        let user_id = UserId::new(user).expect("user id");
+        install_gsuite_extensions(&services, &user_id, extension_state).await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            UserId::new(user).expect("user id"),
+            user_id.clone(),
             Arc::new(
                 crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
@@ -661,12 +661,7 @@ mod tests {
         )
         .expect("local-dev capability wiring");
 
-        enable_global_auto_approve_for_run(
-            &services,
-            &run_context,
-            &UserId::new(user).expect("user id"),
-        )
-        .await;
+        enable_global_auto_approve_for_run(&services, &run_context, &user_id).await;
 
         GsuiteSurfaceHarness {
             _dir: dir,
@@ -677,6 +672,7 @@ mod tests {
 
     async fn install_gsuite_extensions(
         services: &crate::RebornServices,
+        user_id: &UserId,
         extension_state: GsuiteExtensionState,
     ) {
         let local_runtime = services
@@ -688,47 +684,36 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        // #5459 P1: install AS the runtime's tenant operator so the extensions
-        // are tenant-shared (what these surface tests always meant) — a
-        // non-operator context would now produce a private install invisible
-        // to the run's surface user.
-        let operator = extension_management
-            .tenant_operator_user_id_for_test()
-            .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
-        .with_extension_management(extension_management)
+        .with_extension_management(extension_management.clone())
         .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
                     .expect("valid extension ref");
-            let operator_context = |label: &str| {
+            let member_context = |label: &str| {
                 LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-                    user_id: operator.clone(),
+                    user_id: user_id.clone(),
                     agent_id: None,
                     project_id: None,
                 })
             };
-            facade
-                .execute(
-                    operator_context(extension_id),
-                    LifecycleProductAction::ExtensionInstall {
-                        package_ref: package_ref.clone(),
-                    },
-                )
-                .await
-                .expect("install GSuite extension");
             if matches!(extension_state, GsuiteExtensionState::Activated) {
                 facade
                     .execute(
-                        operator_context(extension_id),
-                        LifecycleProductAction::ExtensionActivate { package_ref },
+                        member_context(extension_id),
+                        LifecycleProductAction::ExtensionInstall { package_ref },
                     )
                     .await
-                    .expect("activate GSuite extension");
+                    .expect("install auto-advances GSuite extension");
+            } else {
+                extension_management
+                    .install(package_ref, user_id)
+                    .await
+                    .expect("seed internal pre-readiness GSuite row");
             }
         }
     }
@@ -2119,18 +2104,23 @@ mod tests {
             NetworkPolicy::default()
         );
 
-        for capability_id in [
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-        ] {
-            let grant = grant_for(capability_id);
-            assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
-            assert_eq!(grant.constraints.mounts, system_extensions_lifecycle_mounts);
-            assert_eq!(grant.constraints.network, NetworkPolicy::default());
-        }
-        let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
+        let extension_remove_grant = grant_for(EXTENSION_REMOVE_CAPABILITY_ID);
         assert_eq!(
-            extension_activate_grant.constraints.allowed_effects,
+            extension_remove_grant.constraints.allowed_effects,
+            local_dev_allowed_effects
+        );
+        assert_eq!(
+            extension_remove_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
+        assert_eq!(
+            extension_remove_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        let extension_install_grant = grant_for(EXTENSION_INSTALL_CAPABILITY_ID);
+        assert_eq!(
+            extension_install_grant.constraints.allowed_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -2139,11 +2129,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            extension_activate_grant.constraints.mounts,
+            extension_install_grant.constraints.mounts,
             system_extensions_lifecycle_mounts
         );
         assert_eq!(
-            extension_activate_grant
+            extension_install_grant
                 .constraints
                 .network
                 .allowed_targets
@@ -2153,7 +2143,7 @@ mod tests {
             vec!["*"]
         );
         assert!(
-            extension_activate_grant
+            extension_install_grant
                 .constraints
                 .network
                 .deny_private_ip_ranges
@@ -3674,7 +3664,10 @@ mod tests {
             OutboundDeliveryTargetEntry {
                 summary: slack_target_summary,
                 capabilities: slack_target_capabilities,
-                reply_target_binding_ref: slack_reply_target.clone(),
+                destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                    reply_target_binding_ref: slack_reply_target.clone(),
+                },
+                current_target: None,
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -4401,7 +4394,10 @@ mod tests {
                     auth_prompts: false,
                     modalities: Vec::new(),
                 },
-                reply_target_binding_ref: slack_reply_target.clone(),
+                destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                    reply_target_binding_ref: slack_reply_target.clone(),
+                },
+                current_target: None,
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -5223,9 +5219,7 @@ mod tests {
                 .as_ref()
                 .expect("extension management")
                 .clone();
-            let operator = extension_management
-                .tenant_operator_user_id_for_test()
-                .clone();
+            let user_id = UserId::new("local-dev-github-user").expect("user id");
             let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
@@ -5235,20 +5229,13 @@ mod tests {
                 .expect("valid github ref");
             facade
                 .execute(
-                    operator_lifecycle_context("github-install", &operator),
+                    member_lifecycle_context("github-install", &user_id),
                     LifecycleProductAction::ExtensionInstall {
                         package_ref: package_ref.clone(),
                     },
                 )
                 .await
                 .expect("install github extension");
-            facade
-                .execute(
-                    operator_lifecycle_context("github-activate", &operator),
-                    LifecycleProductAction::ExtensionActivate { package_ref },
-                )
-                .await
-                .expect("activate github extension");
         }
 
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -5330,9 +5317,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let operator = extension_management
-            .tenant_operator_user_id_for_test()
-            .clone();
+        let user_id = UserId::new("local-dev-live-github-user").expect("user id");
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -5342,20 +5327,13 @@ mod tests {
             .expect("valid github ref");
         facade
             .execute(
-                operator_lifecycle_context("github-live-install", &operator),
+                member_lifecycle_context("github-live-install", &user_id),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
             )
             .await
             .expect("install github extension");
-        facade
-            .execute(
-                operator_lifecycle_context("github-live-activate", &operator),
-                LifecycleProductAction::ExtensionActivate { package_ref },
-            )
-            .await
-            .expect("activate github extension");
 
         let active_surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
@@ -5545,9 +5523,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let operator = extension_management
-            .tenant_operator_user_id_for_test()
-            .clone();
+        let user_id = UserId::new("local-dev-mid-response-user").expect("user id");
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -5557,20 +5533,13 @@ mod tests {
             .expect("valid github ref");
         facade
             .execute(
-                operator_lifecycle_context("mid-response-install", &operator),
+                member_lifecycle_context("mid-response-install", &user_id),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
             )
             .await
             .expect("install github extension");
-        facade
-            .execute(
-                operator_lifecycle_context("mid-response-activate", &operator),
-                LifecycleProductAction::ExtensionActivate { package_ref },
-            )
-            .await
-            .expect("activate github extension");
 
         let mut call2 = provider_tool_call_with_name(
             "builtin__read_file",

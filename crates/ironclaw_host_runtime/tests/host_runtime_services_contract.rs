@@ -4291,6 +4291,42 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
 }
 
 #[tokio::test]
+async fn host_runtime_services_surfaces_invalid_mcp_catalog_without_retrying() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(MCP_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(Vec::new())),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
+    .with_mcp_runtime(Arc::new(InvalidToolCatalogMcpExecutor));
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability((
+            execution_context_with_dispatch_grant(mcp_capability_id()),
+            mcp_capability_id(),
+            ResourceEstimate::default(),
+            json!({"query": "reject an invalid catalog"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidOutput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+        }
+        other => panic!("expected non-retryable invalid-output failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime() {
     let scoped_mounts = mount_view(
         "/workspace",

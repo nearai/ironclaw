@@ -13,13 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider
   diagnostics or granting an unbounded retry budget.
-- **Hosted MCP discovery:** bound overlong valid tool descriptions at the
-  generic MCP boundary instead of rejecting the provider's entire catalog.
-- **Channel delivery:** keep live source-route observers attached for normal
-  long-running turns so every channel receives the durable final reply.
+- **Generic channel pairing:** accept command-wrapped proof codes only through
+  bounded manifest-declared prefixes; Telegram now declares `/start`, while
+  undeclared commands remain ordinary inbound messages.
+- **Extension OAuth authorization:** resolve provider, account label, and
+  scopes from the installed extension's manifest requirement instead of
+  accepting browser-selected credential authority; after OAuth, retry only
+  internal caller-scoped readiness until the extension is active, without a
+  second provider exchange or public activation step.
+- **Hosted MCP discovery:** accept bounded OpenAPI-derived tool catalogs within
+  the manifest's declared tool budget, reject malformed catalogs atomically,
+  and never publish bundled static declarations as a fallback for failed live
+  discovery.
+- **Channel delivery:** consume durable turn-lifecycle events through the
+  generic, source-route-revalidating coordinator so OAuth-delayed final replies
+  return to Slack, Telegram, and future channels without a polling watcher.
 - **Automation delivery:** honor each trigger's creator-selected outbound
   target at fire time instead of silently falling back to the user-wide
   default.
+- **Telegram automation delivery:** expose paired Telegram DMs through the
+  generic outbound-target registry so creator-selected routine results resolve
+  and deliver through the shipping Telegram channel.
 - **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
   through the shared lifecycle before deleting any channel installation, so
   removing Telegram, Slack, or a future channel unpairs it on every surface.

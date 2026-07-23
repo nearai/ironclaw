@@ -252,7 +252,6 @@ pub(crate) fn imported_extension_package(
         channel_presentation: None,
         assets,
         onboarding_override: None,
-        oauth_setup_override: None,
     })
 }
 

@@ -1593,7 +1593,7 @@ fn assert_recorded_fixture_matches_expected_result(
         }
         "github_notifications" => {
             // No credential is seeded, so the agent should onboard the github
-            // extension (install + activate) and reach the auth gate rather than
+            // extension through the single install action and reach the auth gate rather than
             // silently give up. The onboarding tool choices are the guardrail;
             // the outcome may be an auth gate or an onboarding reply.
             assert_recorded_tool_call(
@@ -1601,13 +1601,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["github"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["github"],
             );
         }
@@ -1618,13 +1611,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["gmail"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["gmail"],
             );
         }

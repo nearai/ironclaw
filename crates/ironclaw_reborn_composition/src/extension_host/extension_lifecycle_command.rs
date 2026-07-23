@@ -1,3 +1,4 @@
+use ironclaw_host_api::InstallationState;
 use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
@@ -12,7 +13,6 @@ use crate::factory::RebornServices;
 pub enum RebornExtensionLifecycleCommand {
     Search { query: String },
     Install { id: String },
-    Activate { id: String },
     Remove { id: String },
 }
 
@@ -77,18 +77,15 @@ pub fn render_reborn_extension_lifecycle_response(
             installed,
             visible_capability_ids,
             next_step,
-        }) => {
-            push_line(&mut output, format_args!("installed: {installed}"));
-            render_string_array(&mut output, visible_capability_ids, "visible_capability");
-            push_line(&mut output, format_args!("next_step: {next_step}"));
-        }
-        Some(LifecycleProductPayload::ExtensionActivate {
-            activated,
-            visible_capability_ids,
             ..
         }) => {
-            push_line(&mut output, format_args!("activated: {activated}"));
+            push_line(&mut output, format_args!("installed: {installed}"));
+            push_line(
+                &mut output,
+                format_args!("active: {}", response.phase == InstallationState::Active),
+            );
             render_string_array(&mut output, visible_capability_ids, "visible_capability");
+            push_line(&mut output, format_args!("next_step: {next_step}"));
         }
         Some(LifecycleProductPayload::ExtensionRemove { removed }) => {
             push_line(&mut output, format_args!("removed: {removed}"));
@@ -103,9 +100,6 @@ impl RebornExtensionLifecycleCommand {
         Ok(match self {
             Self::Search { query } => LifecycleProductAction::ExtensionSearch { query },
             Self::Install { id } => LifecycleProductAction::ExtensionInstall {
-                package_ref: extension_package_ref(id)?,
-            },
-            Self::Activate { id } => LifecycleProductAction::ExtensionActivate {
                 package_ref: extension_package_ref(id)?,
             },
             Self::Remove { id } => LifecycleProductAction::ExtensionRemove {
@@ -258,7 +252,7 @@ mod tests {
             .await
             .expect("manual-token submit");
 
-        execute_reborn_extension_lifecycle_command(
+        let install = execute_reborn_extension_lifecycle_command(
             &services,
             RebornExtensionLifecycleCommand::Install {
                 id: "github".to_string(),
@@ -266,25 +260,15 @@ mod tests {
         )
         .await
         .expect("install credentialed extension");
-        let activate = execute_reborn_extension_lifecycle_command(
-            &services,
-            RebornExtensionLifecycleCommand::Activate {
-                id: "github".to_string(),
-            },
-        )
-        .await
-        .expect("activate uses product-auth credentials");
 
-        assert_eq!(activate.phase, InstallationState::Active);
-        let Some(LifecycleProductPayload::ExtensionActivate {
-            activated,
+        assert_eq!(install.phase, InstallationState::Active);
+        let Some(LifecycleProductPayload::ExtensionInstall {
             visible_capability_ids,
             ..
-        }) = activate.payload
+        }) = install.payload
         else {
-            panic!("expected extension activation payload");
+            panic!("expected extension install payload");
         };
-        assert!(activated);
         assert!(
             visible_capability_ids
                 .iter()

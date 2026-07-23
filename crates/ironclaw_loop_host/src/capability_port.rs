@@ -2954,7 +2954,21 @@ fn invocation_context_from_visible(
     // model-initiated, so the loop ingress seals `LoopRun`. The kernel would also
     // reconstruct this from `run_id`, but stamping `origin` explicitly makes the
     // loop the authoritative source rather than relying on the compat fallback.
-    context.origin = Some(InvocationOrigin::LoopRun(run_id));
+    context.origin = Some(
+        match request
+            .run_context
+            .product_context
+            .as_ref()
+            .map(|product_context| product_context.origin)
+        {
+            Some(ironclaw_turns::TurnOriginKind::ScheduledTrigger) => {
+                InvocationOrigin::ScheduledLoopRun(run_id)
+            }
+            Some(ironclaw_turns::TurnOriginKind::WebUi)
+            | Some(ironclaw_turns::TurnOriginKind::Inbound)
+            | None => InvocationOrigin::LoopRun(run_id),
+        },
+    );
     context.authenticated_actor_user_id = request
         .run_context
         .actor()

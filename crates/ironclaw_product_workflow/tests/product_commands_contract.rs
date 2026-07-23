@@ -160,27 +160,6 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
 
 #[test]
 fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
-    let configure_payload = InboundCommandPayload::new(
-        "extension_configure",
-        r#"{"id":"github","payload":{"mode":"dry_run"}}"#,
-        ProductTriggerReason::BotCommand,
-    )
-    .expect("valid command payload");
-
-    assert_eq!(
-        ProductCommand::from_payload(&configure_payload).expect("parse configure command"),
-        ProductCommand::Lifecycle {
-            action: LifecycleProductAction::ExtensionConfigure {
-                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
-                    LifecyclePackageKind::Extension,
-                    "github",
-                )
-                .unwrap(),
-                payload: Some(serde_json::json!({"mode": "dry_run"})),
-            },
-        }
-    );
-
     for arguments in [r#"{"id":"review-helper"}"#, r#"{"name":"review-helper"}"#] {
         let payload =
             InboundCommandPayload::new("skill_remove", arguments, ProductTriggerReason::BotCommand)
@@ -230,32 +209,6 @@ fn lifecycle_command_parser_maps_every_lifecycle_command_variant() {
             ProductCommand::Lifecycle {
                 action: LifecycleProductAction::ExtensionSearch {
                     query: "git".to_string(),
-                },
-            },
-        ),
-        (
-            "extension_auth",
-            "github",
-            ProductCommand::Lifecycle {
-                action: LifecycleProductAction::ExtensionAuth {
-                    package_ref: LifecyclePackageRef::new(
-                        LifecyclePackageKind::Extension,
-                        "github",
-                    )
-                    .unwrap(),
-                },
-            },
-        ),
-        (
-            "extension_activate",
-            "github",
-            ProductCommand::Lifecycle {
-                action: LifecycleProductAction::ExtensionActivate {
-                    package_ref: LifecyclePackageRef::new(
-                        LifecyclePackageKind::Extension,
-                        "github",
-                    )
-                    .unwrap(),
                 },
             },
         ),
@@ -363,9 +316,6 @@ fn command_registry_declares_canonical_lifecycle_commands() {
     for name in [
         "extension_search",
         "extension_install",
-        "extension_auth",
-        "extension_activate",
-        "extension_configure",
         "extension_remove",
         "skill_search",
         "skill_install",
@@ -373,4 +323,12 @@ fn command_registry_declares_canonical_lifecycle_commands() {
     ] {
         assert!(names.contains(&name), "missing lifecycle command {name}");
     }
+    assert!(
+        !names.contains(&"extension_activate"),
+        "activation is an internal readiness checkpoint, not a public command"
+    );
+    assert!(
+        !names.contains(&"extension_auth") && !names.contains(&"extension_configure"),
+        "personal setup continuations and administrator configuration are not public lifecycle commands"
+    );
 }

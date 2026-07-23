@@ -1037,6 +1037,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
                 .with_timezone(&chrono::Utc),
         ),
         connection: None,
+        pairing: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
@@ -1073,6 +1074,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
         authorization_url: None,
         expires_at: None,
         connection: None,
+        pairing: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert!(

@@ -108,15 +108,12 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
-  // A channel-pairing gate is a `manual_token` auth gate that also carries a
-  // `connection` requirement (gates.ts normalizes it onto `pendingGate.connection`).
-  // Render the pairing card off the live gate — wired to a redeem submit and a
-  // run-cancel dismiss — instead of the plain token card. This is the generic
-  // proof-code channel-connect path; the durable-timeline `pendingOnboarding`
-  // panel is the separate, no-active-gate entry point below.
+  // A channel connection gate is identified only by its manifest-derived
+  // `connection` context. Provider names never select presentation behavior.
+  // Manual-token connections redeem a pasted proof; pairing connections
+  // complete externally through the rendered deep-link/QR flow.
   const channelConnectionGate =
     pendingGate?.kind === "auth_required" &&
-    pendingGate?.challengeKind === "manual_token" &&
     pendingGate?.connection
       ? pendingGate.connection
       : null;
@@ -132,14 +129,8 @@ export function Chat({
         errorMessage: channelConnectionGate.errorMessage,
       }
     : null;
-  // A Telegram BlockedAuth pairing gate is a channel-connection gate too:
-  // the composer must say "finish pairing", not "resolve the approval".
-  const telegramPairingGate =
-    pendingGate?.kind === "auth_required" &&
-    pendingGate?.challengeKind === "pairing" &&
-    pendingGate?.provider === "telegram";
   const activeThreadHasChannelConnectionGate =
-    activeThreadHasGate && (Boolean(channelConnectionGate) || telegramPairingGate);
+    activeThreadHasGate && Boolean(channelConnectionGate);
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
@@ -391,20 +382,13 @@ export function Chat({
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
                 ))
-                  : telegramPairingGate
+                  : pendingGate.challengeKind === "pairing" && channelConnectionGate
                   ? (
-                  // A live BlockedAuth pairing gate renders the same pairing
-                  // panel the Extensions card uses (dual-surface parity —
-                  // docs/reborn/contracts/telegram-v2.md "The in-chat gate").
-                  // Pairing completes over the Telegram webhook and the
-                  // continuation fanout resumes the run; there is nothing to
-                  // submit here, so only cancel is wired.
+                  // External completion uses the same manifest-derived panel
+                  // as the Extensions surface. There is nothing to submit to
+                  // IronClaw; the provider-side action resumes the run.
                   <OnboardingPairingCard
-                    onboarding={{
-                      extensionName: pendingGate.provider,
-                      strategy: "web_generated_code",
-                      instructions: pendingGate.body || pendingGate.headline || "",
-                    }}
+                    onboarding={gateConnectionOnboarding}
                     onCancel={handleCancelRun}
                   />
                 )

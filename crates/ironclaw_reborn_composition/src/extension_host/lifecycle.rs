@@ -4,7 +4,7 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, HostApiError, HostPath, InstallationState, InvocationId, MountView, ResourceScope,
+    HostApiError, HostPath, InstallationState, InvocationId, MountView, ResourceScope,
     RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
@@ -217,7 +217,11 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
-    channel_config: Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    admin_configuration_resolver: Option<
+        Arc<
+            crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+        >,
+    >,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
@@ -227,7 +231,7 @@ impl RebornLocalLifecycleFacade {
         Self {
             skill_management,
             extension_management: None,
-            channel_config: None,
+            admin_configuration_resolver: None,
             runtime_http_egress: None,
             credential_accounts: None,
         }
@@ -241,11 +245,13 @@ impl RebornLocalLifecycleFacade {
         self
     }
 
-    pub(crate) fn with_channel_config(
+    pub(crate) fn with_admin_configuration_resolver(
         mut self,
-        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+        admin_configuration_resolver: Arc<
+            crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+        >,
     ) -> Self {
-        self.channel_config = Some(channel_config);
+        self.admin_configuration_resolver = Some(admin_configuration_resolver);
         self
     }
 
@@ -367,83 +373,32 @@ impl RebornLocalLifecycleFacade {
                     return unsupported_projection(None);
                 };
                 let caller = lifecycle_caller(&context)?;
-                extension_management.list_installed(&caller).await
+                let credential_gate = self.lifecycle_credential_gate(&context)?;
+                extension_management
+                    .list_installed(&caller, credential_gate.as_ref())
+                    .await
             }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
-                extension_management.install(package_ref, &caller).await
-            }
-            LifecycleProductAction::ExtensionActivate { package_ref } => {
-                let Some(extension_management) = &self.extension_management else {
-                    return unsupported_projection(Some(package_ref));
-                };
-                let caller = lifecycle_caller(&context)?;
-                let credential_gate = self
-                    .extension_activation_credential_gate(
+                let install = extension_management
+                    .install(package_ref.clone(), &caller)
+                    .await?;
+                let activation = self
+                    .reconcile_extension_readiness_action(
                         &context,
                         extension_management,
-                        &package_ref,
+                        package_ref,
                         &caller,
                     )
                     .await?;
-                if extension_management
-                    .package_requires_hosted_mcp_discovery(&package_ref)
-                    .await?
-                {
-                    let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
-                        return Err(ProductWorkflowError::InvalidBindingRequest {
-                            reason: format!(
-                                "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
-                                package_ref.id
-                            ),
-                        });
-                    };
-                    let scope = lifecycle_resource_scope(&context)?;
-                    let mode =
-                        crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
-                            scope,
-                            runtime_http_egress,
-                        };
-                    return match credential_gate {
-                        Some(credential_gate) => {
-                            extension_management
-                                .activate_with_credential_gate(
-                                    package_ref,
-                                    mode,
-                                    credential_gate,
-                                    &caller,
-                                )
-                                .await
-                        }
-                        None => {
-                            extension_management
-                                .activate(package_ref, mode, &caller)
-                                .await
-                        }
-                    };
-                }
-                let mode =
-                    crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static;
-                match credential_gate {
-                    Some(credential_gate) => {
-                        extension_management
-                            .activate_with_credential_gate(
-                                package_ref,
-                                mode,
-                                credential_gate,
-                                &caller,
-                            )
-                            .await
-                    }
-                    None => {
-                        extension_management
-                            .activate(package_ref, mode, &caller)
-                            .await
-                    }
-                }
+                Ok(
+                    crate::extension_host::extension_lifecycle::complete_install_response(
+                        install, activation,
+                    ),
+                )
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -456,37 +411,6 @@ impl RebornLocalLifecycleFacade {
                 extension_management
                     .remove(package_ref, &scope, Some(&scope.user_id))
                     .await
-            }
-            LifecycleProductAction::ExtensionAuth { package_ref } => {
-                unsupported_extension_auth_configure_projection(Some(package_ref))
-            }
-            LifecycleProductAction::ExtensionConfigure {
-                package_ref,
-                payload,
-            } => {
-                // The configure half of the setup surface: validate + persist
-                // manifest-declared channel-config values (extension-runtime
-                // §6.4; a save against an active extension re-runs activation
-                // per §6.5). Auth keeps the unsupported projection above.
-                let (Some(extension_management), Some(channel_config)) =
-                    (&self.extension_management, &self.channel_config)
-                else {
-                    return unsupported_extension_auth_configure_projection(Some(package_ref));
-                };
-                let extension_id = ExtensionId::new(package_ref.id.as_str()).map_err(|error| {
-                    ProductWorkflowError::InvalidBindingRequest {
-                        reason: format!("invalid extension id: {error}"),
-                    }
-                })?;
-                let values = parse_channel_config_payload(payload.as_ref())?;
-                channel_config
-                    .save(&extension_id, values)
-                    .await
-                    .map_err(map_channel_config_error)?;
-                let caller = lifecycle_caller(&context)?;
-                let mut response = extension_management.project(package_ref, &caller).await?;
-                response.message = Some("channel configuration saved".to_string());
-                Ok(response)
             }
         }
     }
@@ -519,6 +443,72 @@ impl RebornLocalLifecycleFacade {
             Arc::clone(credential_accounts),
         )))
     }
+
+    fn lifecycle_credential_gate(
+        &self,
+        context: &LifecycleProductContext,
+    ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
+        if !matches!(context, LifecycleProductContext::Surface(_)) {
+            return Ok(None);
+        }
+        self.credential_accounts
+            .as_ref()
+            .map(|accounts| {
+                Ok(RuntimeExtensionActivationCredentialGate::new(
+                    lifecycle_resource_scope(context)?,
+                    Arc::clone(accounts),
+                ))
+            })
+            .transpose()
+    }
+
+    async fn reconcile_extension_readiness_action(
+        &self,
+        context: &LifecycleProductContext,
+        extension_management: &RebornLocalExtensionManagementPort,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let credential_gate = self
+            .extension_activation_credential_gate(
+                context,
+                extension_management,
+                &package_ref,
+                caller,
+            )
+            .await?;
+        let mode = if extension_management
+            .package_requires_hosted_mcp_discovery(&package_ref)
+            .await?
+        {
+            let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
+                return Err(ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} requires hosted MCP schema discovery and cannot finish installation through the static lifecycle facade",
+                        package_ref.id
+                    ),
+                });
+            };
+            crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
+                scope: lifecycle_resource_scope(context)?,
+                runtime_http_egress,
+            }
+        } else {
+            crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static
+        };
+        match credential_gate {
+            Some(credential_gate) => {
+                extension_management
+                    .activate_with_credential_gate(package_ref, mode, credential_gate, caller)
+                    .await
+            }
+            None => {
+                extension_management
+                    .activate(package_ref, mode, caller)
+                    .await
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -541,7 +531,10 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
                 return unsupported_projection(Some(package_ref));
             };
             let caller = lifecycle_caller(&context)?;
-            return extension_management.project(package_ref, &caller).await;
+            let credential_gate = self.lifecycle_credential_gate(&context)?;
+            return extension_management
+                .project(package_ref, &caller, credential_gate.as_ref())
+                .await;
         }
         unsupported_projection(Some(package_ref))
     }
@@ -675,58 +668,6 @@ fn unsupported_projection(
             "extension_lifecycle_local_runtime_unwired".to_string(),
         ))?],
     ))
-}
-
-fn unsupported_extension_auth_configure_projection(
-    package_ref: Option<LifecyclePackageRef>,
-) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-    Ok(LifecycleProductResponse::projection(
-        package_ref,
-        InstallationState::Unsupported,
-        vec![LifecycleReadinessBlocker::runtime(Some(
-            "extension_auth_and_configure_not_yet_wired".to_string(),
-        ))?],
-    ))
-}
-
-/// Decode a configure payload: optional `fields` and `secrets` string maps,
-/// unioned into `(handle, value)` pairs (the service classifies each handle
-/// by its manifest descriptor, so which map a value rode in is advisory).
-fn parse_channel_config_payload(
-    payload: Option<&serde_json::Value>,
-) -> Result<Vec<(String, String)>, ProductWorkflowError> {
-    #[derive(Default, serde::Deserialize)]
-    struct ConfigurePayload {
-        #[serde(default)]
-        fields: std::collections::BTreeMap<String, String>,
-        #[serde(default)]
-        secrets: std::collections::BTreeMap<String, String>,
-    }
-    let decoded = match payload {
-        Some(payload) => {
-            serde_json::from_value::<ConfigurePayload>(payload.clone()).map_err(|error| {
-                ProductWorkflowError::InvalidBindingRequest {
-                    reason: format!("invalid extension configure payload: {error}"),
-                }
-            })?
-        }
-        None => ConfigurePayload::default(),
-    };
-    Ok(decoded.fields.into_iter().chain(decoded.secrets).collect())
-}
-
-fn map_channel_config_error(
-    error: crate::extension_host::channel_config::ChannelConfigError,
-) -> ProductWorkflowError {
-    use crate::extension_host::channel_config::ChannelConfigError;
-    match error {
-        ChannelConfigError::Storage { reason } => ProductWorkflowError::Transient { reason },
-        ChannelConfigError::NotInstalled { .. }
-        | ChannelConfigError::UnknownField { .. }
-        | ChannelConfigError::Reactivation { .. } => ProductWorkflowError::InvalidBindingRequest {
-            reason: error.to_string(),
-        },
-    }
 }
 
 fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {

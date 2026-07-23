@@ -34,6 +34,10 @@ async fn extension_install_survives_independent_reopen() {
         .build()
         .await
         .expect("thread builds");
+    harness
+        .seed_capability_credential_account("github", "durable github ready path", &[])
+        .await
+        .expect("GitHub credential is ready for the durable install path");
 
     harness
         .submit_turn("install github")

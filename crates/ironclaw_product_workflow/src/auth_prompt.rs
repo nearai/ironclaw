@@ -13,9 +13,18 @@ use ironclaw_host_api::{
     InvocationId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId,
 };
 use ironclaw_product_adapters::{
-    AuthPromptChallengeKind, AuthPromptView, ProductAdapterError, RedactedString,
+    AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, PairingPromptView,
+    ProductAdapterError, RedactedString,
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
+
+use crate::{ChannelConnectionRequirement, ChannelPairingIssue};
+
+#[derive(Debug, Clone)]
+pub struct PairingAuthChallengeView {
+    pub issue: ChannelPairingIssue,
+    pub connection: ChannelConnectionRequirement,
+}
 
 /// Redacted view of a pending auth challenge used for product auth prompt
 /// enrichment. Contains only data safe to surface over product adapters.
@@ -27,6 +36,7 @@ pub struct AuthChallengeView {
     pub account_label: Option<CredentialAccountLabel>,
     pub authorization_url: Option<OAuthAuthorizationUrl>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub pairing: Option<PairingAuthChallengeView>,
 }
 
 impl AuthChallengeView {
@@ -41,16 +51,39 @@ impl AuthChallengeView {
         view.account_label = self.account_label.map(|label| label.as_str().to_string());
         view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
         view.expires_at = self.expires_at;
-        // OAuth relay / stored-secret challenges carry no channel-connection
-        // context; that rides only on the credential-requirement fallback path.
-        view.connection = None;
+        if let Some(pairing) = self.pairing {
+            let connection = pairing.connection;
+            view.connection = Some(ConnectionPromptContext {
+                channel: connection.channel.clone(),
+                strategy: Some(connection.strategy.as_str().to_string()),
+                instructions: Some(connection.instructions.clone()),
+                input_placeholder: Some(connection.input_placeholder),
+                submit_label: Some(connection.submit_label),
+                error_message: Some(connection.error_message),
+            });
+            view.pairing = Some(PairingPromptView {
+                channel: connection.channel,
+                display_name: connection.display_name,
+                instructions: connection.instructions,
+                code: pairing.issue.code.as_str().to_string(),
+                deep_link: pairing.issue.deep_link,
+                expires_at: pairing.issue.expires_at,
+            });
+        } else {
+            // OAuth relay and stored-secret challenges carry no channel
+            // connection context.
+            view.connection = None;
+            view.pairing = None;
+        }
         view
     }
 }
 
-/// Narrow read-only interface used by product surfaces to enrich
-/// `AuthPromptView` with challenge metadata. Implemented by the composition's
-/// product-auth services when a flow record source is wired in.
+/// Narrow challenge-materialization interface used by product surfaces to
+/// enrich `AuthPromptView`. Implemented by composition over product-auth and
+/// host-issued pairing services. Materialization may durably create a bounded
+/// challenge, but replay must reuse a still-live challenge rather than rotate
+/// it.
 ///
 /// Implementations MUST verify caller user, run id, gate ref, and
 /// tenant/agent/project/thread before returning a record.
@@ -170,6 +203,7 @@ pub async fn auth_prompt_view_for_blocked_auth(
         authorization_url: None,
         expires_at: None,
         connection: None,
+        pairing: None,
     };
     Ok(match challenge {
         Some(c) => c.enrich(base_view),
@@ -196,9 +230,9 @@ fn auth_prompt_from_credential_requirement(
         // A retired setup kind (legacy persisted record) has no serviceable
         // challenge; keep the generic requirement-derived prompt.
         RuntimeCredentialAccountSetup::Retired => {}
-        // Pairing setups are serviced by the channel pairing surface (code
-        // redemption), not an auth-prompt challenge; keep the generic prompt.
-        RuntimeCredentialAccountSetup::Pairing => {}
+        RuntimeCredentialAccountSetup::Pairing => {
+            view.challenge_kind = Some(AuthPromptChallengeKind::Pairing);
+        }
     }
     view.provider = Some(provider);
     view

@@ -36,6 +36,14 @@
 //!   gate_ref)`. Written when an approval prompt is delivered to a personal
 //!   target on a different thread from the run; used by the routing wrapper to
 //!   rewrite DM replies to the correct run scope.
+//! - `/outbound/run-final-reply-targets/<turn-run-id>.json` — exact,
+//!   actor-scoped final-reply destination for one run. The record contains
+//!   metadata only and is revalidated against current target authority before
+//!   provider egress.
+//! - `/outbound/run-final-reply-handoffs/<event-cursor>-<turn-run-id>.json` —
+//!   minimal rebuildable projection keys for completed-run delivery. The
+//!   sibling metadata cursor records how far the authoritative turn-event log
+//!   has been materialized; neither contains reply content or target data.
 
 use std::sync::Arc;
 
@@ -47,7 +55,7 @@ use ironclaw_filesystem::{
     IndexName, IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
-use ironclaw_turns::{TurnActor, TurnScope};
+use ironclaw_turns::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -60,10 +68,12 @@ use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
     CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
     DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
-    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError, OutboundStateStore,
-    ProjectionSubscriptionId, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
-    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt, OutboundDeliveryId,
+    OutboundDeliveryStatus, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
+    ProjectionSubscriptionRecord, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
+    RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -106,6 +116,17 @@ const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
 const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
 const DELIVERED_GATE_ROUTES_ROOT: &str = "/outbound/delivered-gate-routes";
 const DELIVERED_GATE_ROUTES_CONV_IDX_ROOT: &str = "/outbound/delivered-gate-routes/conv-idx";
+const RUN_FINAL_REPLY_TARGETS_ROOT: &str = "/outbound/run-final-reply-targets";
+const RUN_FINAL_REPLY_HANDOFFS_ROOT: &str = "/outbound/run-final-reply-handoffs";
+const RUN_FINAL_REPLY_HANDOFF_CURSOR_PATH: &str =
+    "/outbound/run-final-reply-handoff-meta/cursor.json";
+const RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_KEY: &str = "event_cursor";
+const RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_NAME: &str = "run_final_reply_handoff_cursor";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct RunFinalReplyHandoffCursorRecord {
+    event_cursor: TurnEventCursor,
+}
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
@@ -155,18 +176,23 @@ where
         attempt: &OutboundDeliveryAttempt,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
-        let body = serde_json::to_vec(attempt).map_err(|_| OutboundError::Serialization)?;
-        let entry = Entry::bytes(body)
-            .with_content_type(ContentType::json())
-            .with_indexed(
-                delivery_scope_index_key(),
-                delivery_scope_index_value(&attempt.scope),
-            )
-            .with_indexed(
-                tenant_id_index_key(),
-                tenant_id_index_value(&attempt.scope.tenant_id),
-            );
+        let entry = delivery_attempt_entry(attempt)?;
         self.put_with_byte_fallback(scope, path, entry, cas).await
+    }
+
+    async fn ensure_run_final_reply_handoff_index(&self) -> Result<(), OutboundError> {
+        let root = run_final_reply_handoffs_root()?;
+        let name = IndexName::new(RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_NAME)
+            .map_err(|_| OutboundError::Backend)?;
+        let spec = IndexSpec::new(
+            name,
+            vec![run_final_reply_handoff_cursor_index_key()?],
+            IndexKind::Exact,
+        );
+        self.filesystem
+            .ensure_index(&ResourceScope::system(), &root, &spec)
+            .await
+            .map_err(map_fs_error)
     }
 
     /// Write `entry` with the given CAS expectation, falling back to a
@@ -510,6 +536,69 @@ impl<F> OutboundStateStore for FilesystemOutboundStateStore<F>
 where
     F: RootFilesystem,
 {
+    async fn put_run_final_reply_target(
+        &self,
+        record: RunFinalReplyTargetRecord,
+    ) -> Result<(), OutboundError> {
+        let path = run_final_reply_target_path(record.run_id)?;
+        let resource_scope = record.scope.to_resource_scope();
+        self.ensure_tenant_id_index(
+            &resource_scope,
+            &ScopedPath::new(RUN_FINAL_REPLY_TARGETS_ROOT).map_err(|_| OutboundError::Backend)?,
+        )
+        .await?;
+        for _ in 0..MAX_CAS_RETRIES {
+            if let Some(existing) = self
+                .get_json::<RunFinalReplyTargetRecord>(&resource_scope, &path)
+                .await?
+            {
+                return if existing == record {
+                    Ok(())
+                } else {
+                    Err(OutboundError::InvalidRequest {
+                        reason: "final reply target is already sealed for this run",
+                    })
+                };
+            }
+            match self
+                .put_json(
+                    &resource_scope,
+                    &path,
+                    &record,
+                    &record.scope.tenant_id,
+                    CasExpectation::Absent,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_final_reply_target(
+        &self,
+        request: RunFinalReplyTargetRequest,
+    ) -> Result<Option<RunFinalReplyTargetRecord>, OutboundError> {
+        let path = run_final_reply_target_path(request.run_id)?;
+        let resource_scope = request.scope.to_resource_scope();
+        let Some(record) = self
+            .get_json::<RunFinalReplyTargetRecord>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if record.run_id != request.run_id
+            || record.scope != request.scope
+            || record.actor != request.actor
+        {
+            return Ok(None);
+        }
+        Ok(Some(record))
+    }
+
     async fn put_thread_notification_policy(
         &self,
         policy: ThreadNotificationPolicy,
@@ -689,6 +778,51 @@ where
         Err(OutboundError::Backend)
     }
 
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: crate::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        let path = delivery_path(&request.delivery_id)?;
+        let resource_scope = request.scope.to_resource_scope();
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some((mut attempt, versioned)) = self
+                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+                .await?
+            else {
+                return Err(OutboundError::DeliveryNotFound);
+            };
+            if attempt.scope != request.scope {
+                return Err(OutboundError::SubscriptionScopeMismatch);
+            }
+            if attempt.status != OutboundDeliveryStatus::Prepared {
+                return Ok(false);
+            }
+            attempt.status = OutboundDeliveryStatus::Sending;
+            attempt.failure_kind = None;
+            let entry = delivery_attempt_entry(&attempt)?;
+            // This ownership transition must never use the byte-only
+            // last-write-wins fallback: a backend without versioned CAS is
+            // incapable of proving sole vendor-egress ownership and must
+            // fail closed instead.
+            match self
+                .filesystem
+                .put(
+                    &resource_scope,
+                    &path,
+                    entry,
+                    CasExpectation::Version(versioned.version),
+                )
+                .await
+                .map_err(map_fs_error)
+            {
+                Ok(_) => return Ok(true),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
+
     async fn update_delivery_status(
         &self,
         request: UpdateDeliveryStatusRequest,
@@ -770,11 +904,199 @@ where
         deliveries.sort_by_key(|attempt| (attempt.attempted_at, attempt.delivery_id.to_string()));
         Ok(deliveries)
     }
+
+    async fn put_run_final_reply_handoff(
+        &self,
+        record: RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        self.ensure_run_final_reply_handoff_index().await?;
+        let resource_scope = ResourceScope::system();
+        let path = run_final_reply_handoff_path(&record)?;
+        for _ in 0..MAX_CAS_RETRIES {
+            if let Some(existing) = self
+                .get_json::<RunFinalReplyHandoffRecord>(&resource_scope, &path)
+                .await?
+            {
+                return if existing == record {
+                    Ok(())
+                } else {
+                    Err(OutboundError::InvalidRequest {
+                        reason: "final reply handoff event key conflicts with an existing record",
+                    })
+                };
+            }
+            let body = serde_json::to_vec(&record).map_err(|_| OutboundError::Serialization)?;
+            let cursor = i64::try_from(record.event_cursor.0).unwrap_or(i64::MAX);
+            let entry = Entry::bytes(body)
+                .with_content_type(ContentType::json())
+                .with_indexed(
+                    run_final_reply_handoff_cursor_index_key()?,
+                    IndexValue::I64(cursor),
+                )
+                .with_indexed(
+                    tenant_id_index_key(),
+                    tenant_id_index_value(&record.scope.tenant_id),
+                );
+            match self
+                .filesystem
+                .put(&resource_scope, &path, entry, CasExpectation::Absent)
+                .await
+                .map(|_| ())
+                .map_err(map_fs_error)
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
+
+    async fn list_pending_run_final_reply_handoffs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        if limit == 0 || limit > MAX_RUN_FINAL_REPLY_HANDOFF_PAGE {
+            return Err(OutboundError::InvalidRequest {
+                reason: "final reply handoff page limit is invalid",
+            });
+        }
+        self.ensure_run_final_reply_handoff_index().await?;
+        let root = run_final_reply_handoffs_root()?;
+        let filter = Filter::Range {
+            key: run_final_reply_handoff_cursor_index_key()?,
+            lo: IndexValue::I64(0),
+            hi: IndexValue::I64(i64::MAX),
+        };
+        let page_limit = u32::try_from(limit).map_err(|_| OutboundError::InvalidRequest {
+            reason: "final reply handoff page limit is invalid",
+        })?;
+        let entries = self
+            .filesystem
+            .query(
+                &ResourceScope::system(),
+                &root,
+                &filter,
+                Page::first(page_limit),
+            )
+            .await
+            .map_err(map_fs_error)?;
+        let mut records = entries
+            .into_iter()
+            .map(|versioned| {
+                serde_json::from_slice::<RunFinalReplyHandoffRecord>(&versioned.entry.body)
+                    .map_err(|_| OutboundError::Serialization)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        records.sort_by_key(|record| (record.event_cursor, record.run_id));
+        Ok(records)
+    }
+
+    async fn complete_run_final_reply_handoff(
+        &self,
+        record: &RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        let resource_scope = ResourceScope::system();
+        let path = run_final_reply_handoff_path(record)?;
+        let Some(existing) = self
+            .get_json::<RunFinalReplyHandoffRecord>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(());
+        };
+        if existing != *record {
+            return Err(OutboundError::Backend);
+        }
+        match self.filesystem.delete(&resource_scope, &path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_fs_error(error)),
+        }
+    }
+
+    async fn load_run_final_reply_handoff_cursor(&self) -> Result<TurnEventCursor, OutboundError> {
+        let path = run_final_reply_handoff_cursor_path()?;
+        Ok(self
+            .get_json::<RunFinalReplyHandoffCursorRecord>(&ResourceScope::system(), &path)
+            .await?
+            .map(|record| record.event_cursor)
+            .unwrap_or_default())
+    }
+
+    async fn advance_run_final_reply_handoff_cursor(
+        &self,
+        cursor: TurnEventCursor,
+    ) -> Result<(), OutboundError> {
+        let resource_scope = ResourceScope::system();
+        let path = run_final_reply_handoff_cursor_path()?;
+        for _ in 0..MAX_CAS_RETRIES {
+            let (current, cas) = match self
+                .get_versioned_json::<RunFinalReplyHandoffCursorRecord>(&resource_scope, &path)
+                .await?
+            {
+                Some((record, versioned)) => {
+                    if record.event_cursor >= cursor {
+                        return Ok(());
+                    }
+                    (
+                        record.event_cursor,
+                        CasExpectation::Version(versioned.version),
+                    )
+                }
+                None => (TurnEventCursor::default(), CasExpectation::Absent),
+            };
+            let record = RunFinalReplyHandoffCursorRecord {
+                event_cursor: current.max(cursor),
+            };
+            let body = serde_json::to_vec(&record).map_err(|_| OutboundError::Serialization)?;
+            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            match self
+                .filesystem
+                .put(&resource_scope, &path, entry, cas)
+                .await
+                .map(|_| ())
+                .map_err(map_fs_error)
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
 }
 
 fn policy_path(scope: &TurnScope) -> Result<ScopedPath, OutboundError> {
     let key = thread_scope_key(scope);
     ScopedPath::new(format!("/outbound/policies/{key}.json")).map_err(|_| OutboundError::Backend)
+}
+
+fn run_final_reply_target_path(
+    run_id: ironclaw_turns::TurnRunId,
+) -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(format!("{RUN_FINAL_REPLY_TARGETS_ROOT}/{run_id}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
+fn run_final_reply_handoffs_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(RUN_FINAL_REPLY_HANDOFFS_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn run_final_reply_handoff_cursor_path() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(RUN_FINAL_REPLY_HANDOFF_CURSOR_PATH).map_err(|_| OutboundError::Backend)
+}
+
+fn run_final_reply_handoff_path(
+    record: &RunFinalReplyHandoffRecord,
+) -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(format!(
+        "{RUN_FINAL_REPLY_HANDOFFS_ROOT}/{:020}-{}.json",
+        record.event_cursor.0, record.run_id
+    ))
+    .map_err(|_| OutboundError::Backend)
+}
+
+fn run_final_reply_handoff_cursor_index_key() -> Result<IndexKey, OutboundError> {
+    IndexKey::new(RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_KEY).map_err(|_| OutboundError::Backend)
 }
 
 fn subscription_path(
@@ -807,6 +1129,20 @@ fn subscription_path(
 fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(format!("/outbound/deliveries/{delivery_id}.json"))
         .map_err(|_| OutboundError::Backend)
+}
+
+fn delivery_attempt_entry(attempt: &OutboundDeliveryAttempt) -> Result<Entry, OutboundError> {
+    let body = serde_json::to_vec(attempt).map_err(|_| OutboundError::Serialization)?;
+    Ok(Entry::bytes(body)
+        .with_content_type(ContentType::json())
+        .with_indexed(
+            delivery_scope_index_key(),
+            delivery_scope_index_value(&attempt.scope),
+        )
+        .with_indexed(
+            tenant_id_index_key(),
+            tenant_id_index_value(&attempt.scope.tenant_id),
+        ))
 }
 
 fn delivered_gate_route_path(

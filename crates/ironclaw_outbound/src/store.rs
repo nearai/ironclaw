@@ -5,14 +5,59 @@ use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
-    AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
-    OutboundPushTargetRequest, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
-    UpdateDeliveryStatusRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPushCandidate,
+    OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
 pub trait OutboundStateStore: Send + Sync {
+    /// Persist the minimal completed-run projection key used to resume final
+    /// reply delivery after a process crash.
+    async fn put_run_final_reply_handoff(
+        &self,
+        record: RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError>;
+
+    async fn list_pending_run_final_reply_handoffs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError>;
+
+    async fn complete_run_final_reply_handoff(
+        &self,
+        record: &RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError>;
+
+    async fn load_run_final_reply_handoff_cursor(
+        &self,
+    ) -> Result<ironclaw_turns::EventCursor, OutboundError>;
+
+    async fn advance_run_final_reply_handoff_cursor(
+        &self,
+        cursor: ironclaw_turns::EventCursor,
+    ) -> Result<(), OutboundError>;
+
+    /// Seal the final-reply destination for one run.
+    ///
+    /// Implementations must make an identical retry idempotent and reject a
+    /// different record for the same run. A run target is not a user-wide
+    /// preference and must not mutate communication defaults.
+    async fn put_run_final_reply_target(
+        &self,
+        record: RunFinalReplyTargetRecord,
+    ) -> Result<(), OutboundError>;
+
+    /// Load a run target only for the exact actor and turn scope.
+    ///
+    /// Missing and unauthorized records are deliberately indistinguishable.
+    async fn load_run_final_reply_target(
+        &self,
+        request: RunFinalReplyTargetRequest,
+    ) -> Result<Option<RunFinalReplyTargetRecord>, OutboundError>;
+
     async fn put_thread_notification_policy(
         &self,
         policy: ThreadNotificationPolicy,
@@ -58,6 +103,14 @@ pub trait OutboundStateStore: Send + Sync {
         &self,
         attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError>;
+
+    /// Atomically reserve the one allowed vendor-egress drive for a prepared
+    /// attempt. Returns `true` only to the caller that persisted the
+    /// `Prepared -> Sending` transition.
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError>;
 
     async fn update_delivery_status(
         &self,

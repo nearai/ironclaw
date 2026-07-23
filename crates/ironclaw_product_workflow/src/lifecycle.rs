@@ -13,7 +13,6 @@ use ironclaw_host_api::{
     UserId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use serde_json::Value;
 
 use crate::{ProductCommandContext, ProductWorkflowError, RebornChannelConnectStrategy};
 
@@ -157,17 +156,6 @@ pub enum LifecycleProductAction {
     ExtensionInstall {
         package_ref: LifecyclePackageRef,
     },
-    ExtensionAuth {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionActivate {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionConfigure {
-        package_ref: LifecyclePackageRef,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<Value>,
-    },
     ExtensionRemove {
         package_ref: LifecyclePackageRef,
     },
@@ -190,9 +178,6 @@ pub enum LifecycleCommandKind {
     ExtensionSearch,
     ExtensionList,
     ExtensionInstall,
-    ExtensionAuth,
-    ExtensionActivate,
-    ExtensionConfigure,
     ExtensionRemove,
     SkillSearch,
     SkillInstall,
@@ -200,13 +185,10 @@ pub enum LifecycleCommandKind {
 }
 
 impl LifecycleCommandKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 7] = [
         Self::ExtensionSearch,
         Self::ExtensionList,
         Self::ExtensionInstall,
-        Self::ExtensionAuth,
-        Self::ExtensionActivate,
-        Self::ExtensionConfigure,
         Self::ExtensionRemove,
         Self::SkillSearch,
         Self::SkillInstall,
@@ -218,9 +200,6 @@ impl LifecycleCommandKind {
             Self::ExtensionSearch => "extension_search",
             Self::ExtensionList => "extension_list",
             Self::ExtensionInstall => "extension_install",
-            Self::ExtensionAuth => "extension_auth",
-            Self::ExtensionActivate => "extension_activate",
-            Self::ExtensionConfigure => "extension_configure",
             Self::ExtensionRemove => "extension_remove",
             Self::SkillSearch => "skill_search",
             Self::SkillInstall => "skill_install",
@@ -242,9 +221,6 @@ impl LifecycleProductAction {
             Self::ExtensionSearch { .. } => LifecycleCommandKind::ExtensionSearch,
             Self::ExtensionList => LifecycleCommandKind::ExtensionList,
             Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
-            Self::ExtensionAuth { .. } => LifecycleCommandKind::ExtensionAuth,
-            Self::ExtensionActivate { .. } => LifecycleCommandKind::ExtensionActivate,
-            Self::ExtensionConfigure { .. } => LifecycleCommandKind::ExtensionConfigure,
             Self::ExtensionRemove { .. } => LifecycleCommandKind::ExtensionRemove,
             Self::SkillSearch { .. } => LifecycleCommandKind::SkillSearch,
             Self::SkillInstall { .. } => LifecycleCommandKind::SkillInstall,
@@ -261,9 +237,6 @@ impl LifecycleProductAction {
     pub fn package_ref(&self) -> Option<&LifecyclePackageRef> {
         match self {
             Self::ExtensionInstall { package_ref }
-            | Self::ExtensionAuth { package_ref }
-            | Self::ExtensionActivate { package_ref }
-            | Self::ExtensionConfigure { package_ref, .. }
             | Self::ExtensionRemove { package_ref }
             | Self::SkillRemove { package_ref } => Some(package_ref),
             Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
@@ -308,11 +281,6 @@ pub enum LifecycleProductPayload {
         visible_capability_ids: Vec<String>,
         #[serde(default)]
         next_step: String,
-    },
-    ExtensionActivate {
-        activated: bool,
-        #[serde(default)]
-        visible_capability_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection_required: Option<ChannelConnectionRequirement>,
     },
@@ -385,17 +353,25 @@ pub struct LifecycleSearchExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     /// The installed state of this catalog result for the caller, or `None`
     /// when the caller has no visible installation of it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_public_state",
+        deserialize_with = "deserialize_optional_public_state"
+    )]
     pub installation_phase: Option<InstallationState>,
 }
 
-/// Whether an installed extension is tenant-shared or private to the caller
-/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
-/// `Option` on the summary so pre-#5459 payloads keep deserializing.
+/// Compatibility projection of persisted installation ownership.
+///
+/// Current lifecycle operations always return `Private`: tenant-level admin
+/// configuration is not user membership. `Shared` remains only so a legacy
+/// tenant-owned row can be read and narrowed during restore without changing
+/// the durable wire enum in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleInstallScope {
-    /// Installed for the whole tenant (admin install) — visible to every user.
+    /// Legacy tenant-owned installation; never created by current lifecycle.
     Shared,
     /// Installed privately by the caller — visible only to them.
     Private,
@@ -405,11 +381,99 @@ pub enum LifecycleInstallScope {
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     /// The projected installation state (§6.1) for the caller's installation.
+    #[serde(
+        serialize_with = "serialize_public_state",
+        deserialize_with = "deserialize_public_state"
+    )]
     pub phase: InstallationState,
     /// `None` only when the caller has no visible installation (projection of
     /// an uninstalled package); list responses always carry `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_scope: Option<LifecycleInstallScope>,
+}
+
+/// The complete public extension lifecycle vocabulary.
+///
+/// Host/runtime checkpoints such as `Installed`, `Configured`, `Disabled`,
+/// `Failed`, and `Removed` are implementation details. Product surfaces must
+/// never expose them as additional user actions or resting states: membership
+/// is absent (`uninstalled`), present but not ready (`setup_needed`), or
+/// present and callable (`active`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePublicState {
+    Uninstalled,
+    SetupNeeded,
+    Active,
+}
+
+impl LifecyclePublicState {
+    /// Collapse a host-owned internal checkpoint onto the product contract.
+    pub fn from_host_checkpoint(state: InstallationState) -> Self {
+        match state {
+            InstallationState::Active => Self::Active,
+            InstallationState::Removed => Self::Uninstalled,
+            InstallationState::Installed
+            | InstallationState::Configured
+            | InstallationState::Disabled
+            | InstallationState::Failed
+            | InstallationState::Unsupported => Self::SetupNeeded,
+        }
+    }
+
+    fn host_checkpoint(self) -> InstallationState {
+        match self {
+            Self::Uninstalled => InstallationState::Removed,
+            Self::SetupNeeded => InstallationState::Installed,
+            Self::Active => InstallationState::Active,
+        }
+    }
+}
+
+pub(crate) fn serialize_public_state<S>(
+    state: &InstallationState,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    LifecyclePublicState::from_host_checkpoint(*state).serialize(serializer)
+}
+
+pub(crate) fn deserialize_public_state<'de, D>(
+    deserializer: D,
+) -> Result<InstallationState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    LifecyclePublicState::deserialize(deserializer).map(LifecyclePublicState::host_checkpoint)
+}
+
+fn serialize_optional_public_state<S>(
+    state: &Option<InstallationState>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    state
+        .map(LifecyclePublicState::from_host_checkpoint)
+        .serialize(serializer)
+}
+
+fn deserialize_optional_public_state<'de, D>(
+    deserializer: D,
+) -> Result<Option<InstallationState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            let deserializer = serde::de::value::StringDeserializer::<D::Error>::new(value);
+            deserialize_public_state(deserializer)
+        })
+        .transpose()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,11 +559,12 @@ pub enum LifecycleSkillSource {
 pub struct LifecycleProductResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<LifecyclePackageRef>,
-    /// The package's resting installation state for a single-package action
-    /// (install → `Installed`, activate → `Active`, remove → `Removed`,
-    /// failure → `Failed` / `Unsupported`). For multi-item responses (search /
-    /// list) this is a neutral `Installed`; the per-item states ride the
-    /// payload.
+    /// The package's public lifecycle state. Internal installation/runtime
+    /// checkpoints are deliberately collapsed before crossing this boundary.
+    #[serde(
+        serialize_with = "serialize_public_state",
+        deserialize_with = "deserialize_public_state"
+    )]
     pub phase: InstallationState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
@@ -706,4 +771,44 @@ fn validate_optional_ref(
     value: Option<String>,
 ) -> Result<Option<LifecycleBlockerRef>, ProductWorkflowError> {
     value.map(LifecycleBlockerRef::new).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_response_wire_exposes_only_the_three_public_states() {
+        for (checkpoint, expected) in [
+            (InstallationState::Removed, "uninstalled"),
+            (InstallationState::Installed, "setup_needed"),
+            (InstallationState::Configured, "setup_needed"),
+            (InstallationState::Disabled, "setup_needed"),
+            (InstallationState::Failed, "setup_needed"),
+            (InstallationState::Unsupported, "setup_needed"),
+            (InstallationState::Active, "active"),
+        ] {
+            let response = LifecycleProductResponse::projection(None, checkpoint, Vec::new());
+            let wire = serde_json::to_value(response).expect("lifecycle response serializes");
+            assert_eq!(wire["phase"], expected, "checkpoint {checkpoint:?}");
+        }
+    }
+
+    #[test]
+    fn public_state_wire_round_trips_without_reintroducing_host_vocabulary() {
+        for (wire, expected_checkpoint) in [
+            ("uninstalled", InstallationState::Removed),
+            ("setup_needed", InstallationState::Installed),
+            ("active", InstallationState::Active),
+        ] {
+            let response: LifecycleProductResponse = serde_json::from_value(serde_json::json!({
+                "phase": wire,
+                "blockers": []
+            }))
+            .expect("public lifecycle response deserializes");
+            assert_eq!(response.phase, expected_checkpoint);
+            let serialized = serde_json::to_value(response).expect("response reserializes");
+            assert_eq!(serialized["phase"], wire);
+        }
+    }
 }

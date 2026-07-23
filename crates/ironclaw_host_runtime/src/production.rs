@@ -636,7 +636,7 @@ impl HostRuntime for DefaultHostRuntime {
         // Trust classification and the persistent-approval re-application on
         // auth-resume now live in the kernel's `authorize_resumed` fold
         // (§5.2.7/§5.3.2): a capability authorized only by a persistent grant
-        // (e.g. `extension_activate` under admin-config FirstParty trust) is
+        // (e.g. `extension_install` under admin-config FirstParty trust) is
         // re-authorized by the kernel injecting the candidate grant after the
         // credential gate, and a trust rejection fails the blocked run there —
         // replacing the former host_runtime pre-authorization + `context.trust`
