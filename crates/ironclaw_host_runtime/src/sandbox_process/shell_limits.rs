@@ -9,28 +9,28 @@
 use std::time::Duration;
 
 /// Default shell command timeout when the model omits `timeout`.
-pub const SHELL_TIMEOUT_DEFAULT_SECS: u64 = 120;
+pub(crate) const SHELL_TIMEOUT_DEFAULT_SECS: u64 = 120;
 /// Operator ceiling for `timeout`. Requests above this are clamped down,
 /// never rejected.
-pub const SHELL_TIMEOUT_MAX_SECS: u64 = 600;
+pub(crate) const SHELL_TIMEOUT_MAX_SECS: u64 = 600;
 /// Floor for `timeout`; zero-second timeouts are rejected upstream by
 /// `shell_core::parse_timeout`, but the clamp still enforces the floor for
 /// any other caller of `clamp_shell_timeout_secs`.
-pub const SHELL_TIMEOUT_MIN_SECS: u64 = 1;
+pub(crate) const SHELL_TIMEOUT_MIN_SECS: u64 = 1;
 
 /// Default captured-output cap (stdout+stderr) when the model omits
 /// `output_limit`.
-pub const SHELL_OUTPUT_LIMIT_DEFAULT_BYTES: u64 = 64 * 1024;
+pub(crate) const SHELL_OUTPUT_LIMIT_DEFAULT_BYTES: u64 = 64 * 1024;
 /// Operator ceiling for `output_limit`. Requests above this are clamped
 /// down, never rejected.
-pub const SHELL_OUTPUT_LIMIT_MAX_BYTES: u64 = 1024 * 1024;
+pub(crate) const SHELL_OUTPUT_LIMIT_MAX_BYTES: u64 = 1024 * 1024;
 /// Floor for `output_limit`; requests below this are clamped up.
-pub const SHELL_OUTPUT_LIMIT_MIN_BYTES: u64 = 1024;
+pub(crate) const SHELL_OUTPUT_LIMIT_MIN_BYTES: u64 = 1024;
 
 /// Clamp a model-requested shell timeout (seconds) to
 /// `[SHELL_TIMEOUT_MIN_SECS, SHELL_TIMEOUT_MAX_SECS]`, defaulting to
 /// `SHELL_TIMEOUT_DEFAULT_SECS` when unset.
-pub fn clamp_shell_timeout_secs(requested: Option<u64>) -> Duration {
+pub(crate) fn clamp_shell_timeout_secs(requested: Option<u64>) -> Duration {
     let secs = requested
         .unwrap_or(SHELL_TIMEOUT_DEFAULT_SECS)
         .clamp(SHELL_TIMEOUT_MIN_SECS, SHELL_TIMEOUT_MAX_SECS);
@@ -40,7 +40,7 @@ pub fn clamp_shell_timeout_secs(requested: Option<u64>) -> Duration {
 /// Clamp a model-requested output cap (bytes) to
 /// `[SHELL_OUTPUT_LIMIT_MIN_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES]`,
 /// defaulting to `SHELL_OUTPUT_LIMIT_DEFAULT_BYTES` when unset.
-pub fn clamp_shell_output_limit_bytes(requested: Option<u64>) -> usize {
+pub(crate) fn clamp_shell_output_limit_bytes(requested: Option<u64>) -> usize {
     let bytes = requested
         .unwrap_or(SHELL_OUTPUT_LIMIT_DEFAULT_BYTES)
         .clamp(SHELL_OUTPUT_LIMIT_MIN_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES);

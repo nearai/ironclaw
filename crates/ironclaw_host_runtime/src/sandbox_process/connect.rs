@@ -252,12 +252,24 @@ mod tests {
     // override is read and selected before local-default discovery: an
     // unreachable override path must fail with an error naming the override
     // env var, not the generic local-discovery failure message.
-    #[tokio::test]
-    async fn docker_host_env_override_is_consulted_first() {
+    //
+    // Plain `#[test]` (not `#[tokio::test]`) so the `lock_env()` guard —
+    // which must stay held for the whole set-env/connect/read-error window
+    // to keep this test's env mutation from interleaving with any other
+    // test touching the same runtime-env overlay — is never held across a
+    // `.await` in an outer async fn. `block_on` drives `connect_once` to
+    // completion synchronously inside the guarded section instead, so
+    // there's no clippy-visible suspension point while the guard is live.
+    #[test]
+    fn docker_host_env_override_is_consulted_first() {
         let _guard = lock_env();
         set_runtime_env(DOCKER_HOST_ENV, "/nonexistent/ironclaw-test-docker.sock");
 
-        let result = connect_once().await;
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_once());
 
         remove_runtime_env(DOCKER_HOST_ENV);
 
@@ -271,12 +283,19 @@ mod tests {
 
     // Natural on this machine: no Docker daemon is running, so connect_once
     // (and therefore the readiness probe) fails through local discovery.
-    #[tokio::test]
-    async fn readiness_surfaces_reason_on_unreachable_daemon() {
+    // See the comment on `docker_host_env_override_is_consulted_first` for
+    // why this is a plain `#[test]` driving the async probe via `block_on`
+    // rather than `#[tokio::test]` holding the guard across an `.await`.
+    #[test]
+    fn readiness_surfaces_reason_on_unreachable_daemon() {
         let _guard = lock_env();
         remove_runtime_env(DOCKER_HOST_ENV);
 
-        let readiness = sandbox_docker_readiness().await;
+        let readiness = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(sandbox_docker_readiness());
 
         match readiness {
             SandboxDockerReadiness::Unreachable { reason } => {

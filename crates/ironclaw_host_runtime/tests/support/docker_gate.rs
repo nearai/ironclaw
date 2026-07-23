@@ -12,7 +12,7 @@ use std::process::Command;
 /// True iff the `docker` CLI can reach a live daemon (`docker version`
 /// succeeds only against a running daemon). Mirrors the gate
 /// `ironclaw_process_sandbox/tests/docker_security.rs` already uses.
-pub fn docker_available() -> bool {
+pub(crate) fn docker_available() -> bool {
     Command::new("docker")
         .arg("version")
         .output()
@@ -25,7 +25,7 @@ pub fn docker_available() -> bool {
 /// (`ironclaw-worker:latest` by default, `IRONCLAW_REBORN_SANDBOX_IMAGE` /
 /// `IRONCLAW_SANDBOX_IMAGE` override) is never pulled automatically — a
 /// daemon can be reachable with the image still missing.
-pub fn docker_image_available(image: &str) -> bool {
+pub(crate) fn docker_image_available(image: &str) -> bool {
     Command::new("docker")
         .args(["image", "inspect", image])
         .output()
@@ -36,7 +36,7 @@ pub fn docker_image_available(image: &str) -> bool {
 /// Resolve the sandbox worker image name the same way
 /// `RebornSandboxConfig::new` does, so the gate checks the image the test
 /// will actually launch.
-pub fn configured_sandbox_image() -> String {
+pub(crate) fn configured_sandbox_image() -> String {
     std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
         .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
         .unwrap_or_else(|_| "ironclaw-worker:latest".to_string())

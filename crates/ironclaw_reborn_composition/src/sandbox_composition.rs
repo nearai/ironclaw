@@ -183,7 +183,6 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
 }
 
 pub(crate) struct SandboxRuntimeBindings {
-    pub(crate) activity: Arc<SandboxActivityRegistry>,
     pub(crate) reaper: Option<crate::sandbox_reaper_task::SandboxReaperRuntimeHandle>,
     pub(crate) egress_proxy: Option<SandboxEgressProxyRuntimeHandle>,
     pub(crate) secret_lease: Option<SandboxSecretLeaseDaemonHandle>,
@@ -191,12 +190,9 @@ pub(crate) struct SandboxRuntimeBindings {
 
 impl SandboxRuntimeBindings {
     /// The non-sandboxed-profile / production-build-context case: no
-    /// background tasks. The activity registry is still real (not
-    /// `Option`) so the field never needs unwrapping at call sites — it
-    /// is simply never touched by anything for these profiles.
+    /// background tasks.
     pub(crate) fn none() -> Self {
         Self {
-            activity: Arc::new(SandboxActivityRegistry::new()),
             reaper: None,
             egress_proxy: None,
             secret_lease: None,
@@ -289,7 +285,6 @@ impl SandboxRuntimeBindings {
         );
 
         Ok(Self {
-            activity: inputs.activity,
             reaper,
             egress_proxy,
             secret_lease,

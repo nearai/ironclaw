@@ -32,10 +32,11 @@ mod reaper;
 mod registry;
 mod scope_key;
 mod secret_lease;
-pub mod shell_limits;
+pub(crate) mod shell_limits;
 mod user_key;
 
 use mounts::RebornSandboxMountSources;
+use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
@@ -53,7 +54,6 @@ pub use secret_lease::{
     SandboxSecretLease, SandboxSecretLeaseError, SandboxSecretLeaseResolver,
     SandboxSecretLeaseServer,
 };
-pub use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 pub use user_key::RebornSandboxUserKey;
 
 /// Docker label prefix for container metadata attached by
@@ -436,7 +436,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         // ceiling here rather than rejected when it overshoots.
         let requested_secs = request
             .timeout_secs
-            .unwrap_or_else(|| self.config.default_timeout.as_secs());
+            .unwrap_or(self.config.default_timeout.as_secs());
         let timeout = clamp_shell_timeout_secs(Some(requested_secs));
         // Clamp to `[SHELL_OUTPUT_LIMIT_MIN_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES]`,
         // falling back to the configured default when the model omits
