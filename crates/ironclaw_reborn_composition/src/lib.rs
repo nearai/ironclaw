@@ -29,6 +29,7 @@ mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
 pub mod deployment;
+mod attested;
 mod error;
 mod extension_host;
 mod factory;
@@ -60,6 +61,7 @@ mod webui;
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
+pub use attested::{NoopBroadcaster, RebornAttestedComposition};
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 pub use extension_host::channel_identity::{

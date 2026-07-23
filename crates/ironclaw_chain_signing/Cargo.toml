@@ -1,0 +1,54 @@
+[package]
+name = "ironclaw_chain_signing"
+version = "0.1.0"
+# Internal workspace crate (path-dep on sibling crates) — not published to
+# crates.io; satisfies cargo-deny `wildcards = "deny"` (the allow-wildcard-paths
+# exemption only applies to publish = false crates). Mirrors ironclaw_turns.
+publish = false
+edition = "2024"
+rust-version = "1.92"
+description = "Custodial chain-key signing + per-chain decode/render/sign/broadcast/policy for the IronClaw attested-signing substrate (EVM/Solana/NEAR)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+# Attested-signing substrate (lower PRs in the stack).
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+secrecy = "0.10"
+
+# EVM (secp256k1 over EIP-1559/legacy/EIP-712). Modular alloy sub-crates,
+# not the umbrella, per the conservative-deps rule.
+alloy-primitives = "1"
+alloy-consensus = "1"
+alloy-eips = "1"
+alloy-network = "1"
+alloy-signer = "1"
+alloy-rpc-types-eth = "1"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+
+# Solana / NEAR ed25519 signing primitive — already vendored in-tree, so the
+# heavy solana-sdk / near-primitives SDKs are NOT pulled (see crate docs and
+# the PR body: SDK-level wire encode/decode for Solana/NEAR is the immediate
+# next slice). Signing operates over PR2's shared canonical signing bytes
+# (review finding #4), so no chain-specific wire serializer (and no borsh) is
+# needed in this slice.
+ed25519-dalek = "2"
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+hex = "0.4"
+rand_core = "0.6"
