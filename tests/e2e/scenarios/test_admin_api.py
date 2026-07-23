@@ -4,8 +4,9 @@ Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
 `ironclaw_product_workflow::AdminUserService`) over HTTP against the standalone
 Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
 router in-process), this exercises serve.rs's real wiring and operator
-env-bearer authenticator. User creation returns identity records only; login
-credentials remain owned by verified login/claim flows.
+env-bearer authenticator. Private-user creation is credential-free by default;
+an administrator may explicitly request a reusable login token, while managed
+agents never receive a login credential.
 
 Authorization: the operator env-bearer (`IRONCLAW_REBORN_WEBUI_TOKEN`) is an
 implicit owner, so it clears the admin boundary. Last-admin protection (409) is
@@ -63,6 +64,23 @@ async def test_user(admin_client):
     await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
 
 
+@pytest.fixture()
+async def managed_agent(admin_client):
+    """Create a managed subject for administrator-on-behalf resource tests."""
+    suffix = uuid.uuid4().hex[:8]
+    r = await admin_client.post(
+        f"{ADMIN_BASE}/agents",
+        json={"display_name": f"E2E Managed Agent {suffix}"},
+    )
+    assert r.status_code == 200, r.text
+    user = r.json()["user"]
+    yield {
+        "id": user["user_id"],
+        "display_name": user["display_name"],
+    }
+    await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
+
+
 # ---------------------------------------------------------------
 # Private-user and managed-agent creation
 # ---------------------------------------------------------------
@@ -81,6 +99,7 @@ async def test_create_private_user_returns_record_without_login_credential(admin
     assert body["user"]["role"] == "member"
     assert body["user"]["content_access_policy"] == "private"
     assert "api_token" not in body
+    assert "login_token" not in body
     await admin_client.delete(f"{ADMIN_BASE}/users/{body['user']['user_id']}")
 
 
@@ -96,7 +115,50 @@ async def test_create_managed_agent_returns_member_user_without_login_credential
     assert user["role"] == "member"
     assert user["content_access_policy"] == "tenant_admin_managed"
     assert "api_token" not in created
+    assert "login_token" not in created
     await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
+
+
+async def test_reusable_login_token_survives_logout_but_honors_user_lifecycle(
+    admin_client, reborn_v2_server
+):
+    """The real serve wiring reuses the token but rechecks active user state."""
+    created = await admin_client.post(
+        f"{ADMIN_BASE}/users",
+        json={
+            "display_name": "Reusable Token User",
+            "role": "member",
+            "issue_login_token": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    user_id = body["user"]["user_id"]
+    login_token = body["login_token"]
+    headers = {"Authorization": f"Bearer {login_token}"}
+
+    async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as user:
+        assert (await user.get(f"{ADMIN_BASE}/users", headers=headers)).status_code == 403
+        assert (await user.post("/auth/logout", headers=headers)).status_code == 204
+        assert (await user.get(f"{ADMIN_BASE}/users", headers=headers)).status_code == 403
+
+        suspended = await admin_client.post(
+            f"{ADMIN_BASE}/users/{user_id}/status",
+            json={"status": "suspended"},
+        )
+        assert suspended.status_code == 200, suspended.text
+        assert (await user.get(f"{ADMIN_BASE}/users", headers=headers)).status_code == 401
+
+        active = await admin_client.post(
+            f"{ADMIN_BASE}/users/{user_id}/status",
+            json={"status": "active"},
+        )
+        assert active.status_code == 200, active.text
+        assert (await user.get(f"{ADMIN_BASE}/users", headers=headers)).status_code == 403
+
+        deleted = await admin_client.delete(f"{ADMIN_BASE}/users/{user_id}")
+        assert deleted.status_code == 200, deleted.text
+        assert (await user.get(f"{ADMIN_BASE}/users", headers=headers)).status_code == 401
 
 
 # ---------------------------------------------------------------
@@ -199,10 +261,10 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
     )
 
 
-async def test_admin_user_creation_never_renders_a_login_token(
-    admin_client, reborn_v2_page, reborn_v2_server, test_user
+async def test_admin_user_creation_renders_a_login_token_only_when_requested(
+    admin_client, reborn_v2_page, reborn_v2_server
 ):
-    """Private-user creation and user details never expose a login token."""
+    """The browser opt-in renders the bearer once after successful creation."""
     await reborn_v2_page.goto(
         f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
     )
@@ -216,6 +278,7 @@ async def test_admin_user_creation_never_renders_a_login_token(
         create_form = reborn_v2_page.locator(SEL_V2["admin_create_form"])
         await create_form.locator(SEL_V2["admin_display_name_input"]).fill(display_name)
         await create_form.locator(SEL_V2["admin_email_input"]).fill(email)
+        await create_form.get_by_test_id("admin-user-issue-login-token").check()
 
         async with reborn_v2_page.expect_response(
             lambda response: response.request.method == "POST"
@@ -229,28 +292,10 @@ async def test_admin_user_creation_never_renders_a_login_token(
         created = await create_response.json()
         created_user_id = created["user"]["user_id"]
         assert "api_token" not in created
-        await expect(reborn_v2_page.locator(SEL_V2["admin_token_value"])).to_have_count(0)
-
-        await reborn_v2_page.get_by_role(
-            "button", name=test_user["display_name"], exact=True
-        ).click()
+        assert created["login_token"]
         await expect(
-            reborn_v2_page.get_by_role(
-                "heading", name=test_user["display_name"], exact=True
-            )
-        ).to_be_visible(timeout=15000)
-        await expect(
-            reborn_v2_page.get_by_role(
-                "button",
-                name=SEL_V2["admin_create_token_button_name"],
-                exact=True,
-            )
-        ).to_have_count(0)
-        await expect(
-            reborn_v2_page.get_by_text(
-                SEL_V2["admin_token_description_text"], exact=True
-            )
-        ).to_have_count(0)
+            reborn_v2_page.get_by_test_id("admin-user-login-token")
+        ).to_contain_text(created["login_token"])
     finally:
         if created_user_id is not None:
             cleanup = await admin_client.delete(
@@ -483,8 +528,8 @@ async def test_suspend_and_activate(admin_client, test_user):
 # ---------------------------------------------------------------
 
 
-async def test_secret_lifecycle(admin_client, test_user):
-    uid = test_user["id"]
+async def test_secret_lifecycle(admin_client, managed_agent):
+    uid = managed_agent["id"]
 
     r = await admin_client.put(
         f"{ADMIN_BASE}/users/{uid}/secrets/abound_token",
@@ -506,7 +551,7 @@ async def test_secret_lifecycle(admin_client, test_user):
 
 
 async def test_admin_user_detail_manages_write_only_secrets(
-    admin_client, reborn_v2_page, reborn_v2_server, test_user
+    admin_client, reborn_v2_page, reborn_v2_server, managed_agent
 ):
     """The Admin UI provisions, replaces, and confirms deletion without echoing values."""
     page = reborn_v2_page
@@ -514,7 +559,7 @@ async def test_admin_user_detail_manages_write_only_secrets(
         f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
     )
     await page.get_by_role(
-        "button", name=test_user["display_name"], exact=True
+        "button", name=managed_agent["display_name"], exact=True
     ).click()
     await expect(page.locator(SEL_V2["admin_user_secrets_panel"])).to_be_visible(
         timeout=15000
@@ -534,7 +579,7 @@ async def test_admin_user_detail_manages_write_only_secrets(
     async with page.expect_response(
         lambda response: response.request.method == "PUT"
         and response.url.endswith(
-            f"{ADMIN_BASE}/users/{test_user['id']}/secrets/{handle}"
+            f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets/{handle}"
         )
     ) as put_info:
         await save_button.click()
@@ -546,7 +591,7 @@ async def test_admin_user_detail_manages_write_only_secrets(
     await expect(value_input).to_have_value("")
     assert first_value not in await page.locator("body").inner_text()
 
-    listed = await admin_client.get(f"{ADMIN_BASE}/users/{test_user['id']}/secrets")
+    listed = await admin_client.get(f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets")
     assert listed.status_code == 200, listed.text
     assert first_value not in listed.text
     handles = [secret["handle"] for secret in listed.json()["secrets"]]
@@ -560,7 +605,7 @@ async def test_admin_user_detail_manages_write_only_secrets(
     async with page.expect_response(
         lambda response: response.request.method == "PUT"
         and response.url.endswith(
-            f"{ADMIN_BASE}/users/{test_user['id']}/secrets/{handle}"
+            f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets/{handle}"
         )
     ) as replace_info:
         await save_button.click()
@@ -578,7 +623,7 @@ async def test_admin_user_detail_manages_write_only_secrets(
     async with page.expect_response(
         lambda response: response.request.method == "DELETE"
         and response.url.endswith(
-            f"{ADMIN_BASE}/users/{test_user['id']}/secrets/{handle}"
+            f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets/{handle}"
         )
     ) as delete_info:
         await page.locator(SEL_V2["admin_secret_delete_confirm"]).click()
@@ -588,7 +633,7 @@ async def test_admin_user_detail_manages_write_only_secrets(
     await expect(row).to_have_count(0, timeout=15000)
     await expect(page.locator(SEL_V2["admin_secret_status"])).to_contain_text(handle)
     listed_after_delete = await admin_client.get(
-        f"{ADMIN_BASE}/users/{test_user['id']}/secrets"
+        f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets"
     )
     assert listed_after_delete.status_code == 200, listed_after_delete.text
     assert handle not in [

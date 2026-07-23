@@ -628,6 +628,8 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Install the host signer used only for explicitly requested private-user
+    /// login credentials. Issuance fails closed when no signer is installed.
     pub fn with_admin_login_token_minter(
         mut self,
         minter: Arc<dyn crate::AdminLoginTokenMinter>,

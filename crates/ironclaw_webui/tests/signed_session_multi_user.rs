@@ -196,6 +196,7 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
             &SecretString::from("operator-secret".to_string()),
             &tenant_id,
         ),
+        reusable_login_token_validator: None,
         tenant_id,
         user_directory: Arc::new(DistinctUserDirectory),
         base_url: "https://gateway.example".to_string(),

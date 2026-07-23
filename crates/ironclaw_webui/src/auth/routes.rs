@@ -183,14 +183,6 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
     PublicRouteMount::new(router, sso_route_descriptors())
 }
 
-/// Build the inert auth discovery mount used when no SSO providers are
-/// configured. This deliberately does not mount the login/session/logout
-/// handlers because there is no revocable SSO session store in env-bearer mode.
-pub fn empty_webui_v2_auth_providers_mount() -> PublicRouteMount {
-    let router = axum::Router::new().route(PATH_PROVIDERS, get(empty_providers_handler));
-    PublicRouteMount::new(router, vec![providers_descriptor()])
-}
-
 /// Build provider discovery plus logout for hosts that issue signed sessions
 /// without configuring an OAuth provider (CLI claim or explicit admin issue).
 pub fn signed_session_webui_v2_auth_mount(

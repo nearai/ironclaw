@@ -398,6 +398,12 @@ mod tests {
             ) -> Result<RebornUser, RebornIdentityError> {
                 unimplemented!("not used")
             }
+            async fn create_user_with_id(
+                &self,
+                _user: ironclaw_reborn_identity::PreallocatedRebornUser,
+            ) -> Result<RebornUser, RebornIdentityError> {
+                unimplemented!("not used")
+            }
             async fn update_profile(
                 &self,
                 _user_id: &UserId,

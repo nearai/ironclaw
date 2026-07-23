@@ -382,7 +382,6 @@ impl ServeCommand {
             } else {
                 None
             };
-
             // Fire-time trigger access is a config value, not a persisted store
             // (arch-simplification §4.4). When the poller is on, the operator
             // owner may always fire; when SSO is also on, any active tenant
@@ -455,6 +454,7 @@ impl ServeCommand {
             } else {
                 None
             };
+            let reusable_login_token_validator = runtime.reusable_login_token_validator();
 
             // Cloned before the moves below: the CLI-token-login mount (built
             // after `build_webui_auth_surface`) needs its own tenant id and
@@ -478,6 +478,7 @@ impl ServeCommand {
                 identity_resolver,
                 tenant_id.clone(),
                 Arc::clone(&cli_login_session_store),
+                reusable_login_token_validator,
                 env_authenticator,
             )
             .await?;

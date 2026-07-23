@@ -3388,22 +3388,49 @@ where
         request: AdminUserCreationRequest,
     ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
-        let (created, issue_login_token) = match request {
+        let (created, login_token) = match request {
             AdminUserCreationRequest::Private(request) => {
-                let issue_login_token = request.issue_login_token;
+                let email = request
+                    .email
+                    .map(|email| email.trim().to_string())
+                    .filter(|email| !email.is_empty());
+                if email.is_none() && !request.issue_login_token {
+                    return Err(RebornServicesError::from_status(
+                        RebornServicesErrorCode::InvalidRequest,
+                        400,
+                        false,
+                    ));
+                }
+                let issued = if request.issue_login_token {
+                    Some(
+                        self.admin_user_login_tokens
+                            .issue_login_token(
+                                &caller.tenant_id,
+                                &caller.user_id,
+                                caller.operator_webui_config,
+                            )
+                            .await
+                            .map_err(map_admin_user_error)?,
+                    )
+                } else {
+                    None
+                };
                 let created = self
                     .admin_users
                     .create_private_user(
                         &caller.tenant_id,
                         &caller.user_id,
                         AdminCreatePrivateUserFields {
-                            email: request.email,
+                            user_id: issued.as_ref().map(|issued| issued.subject_user_id.clone()),
+                            email,
                             display_name: request.display_name,
                             role: request.role,
                         },
                     )
-                    .await;
-                (created, issue_login_token)
+                    .await
+                    .map_err(map_admin_user_error)?;
+                let login_token = issued.map(|issued| issued.token.expose_secret().to_string());
+                (created, login_token)
             }
             AdminUserCreationRequest::Managed(request) => {
                 let created = self
@@ -3415,39 +3442,10 @@ where
                             display_name: request.display_name,
                         },
                     )
-                    .await;
-                (created, false)
+                    .await
+                    .map_err(map_admin_user_error)?;
+                (created, None)
             }
-        };
-        let created = created.map_err(map_admin_user_error)?;
-        let login_token = if issue_login_token {
-            match self
-                .admin_user_login_tokens
-                .issue_login_token(&caller.tenant_id, &caller.user_id, &created.record.user_id)
-                .await
-            {
-                Ok(issued) => Some(issued.token.expose_secret().to_string()),
-                Err(issue_error) => {
-                    if let Err(rollback_error) = self
-                        .admin_users
-                        .delete_user(&caller.tenant_id, &created.record.user_id)
-                        .await
-                    {
-                        tracing::error!(
-                            tenant_id = %caller.tenant_id,
-                            actor_user_id = %caller.user_id,
-                            subject_user_id = %created.record.user_id,
-                            ?issue_error,
-                            ?rollback_error,
-                            "login-token issuance failed and private-user creation could not be rolled back"
-                        );
-                        return Err(RebornServicesError::internal());
-                    }
-                    return Err(map_admin_user_error(issue_error));
-                }
-            }
-        } else {
-            None
         };
         Ok(RebornAdminUserCreatedResponse {
             user: created.record,

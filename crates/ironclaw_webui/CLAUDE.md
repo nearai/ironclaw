@@ -121,9 +121,12 @@ non-operator capabilities. `webui.v2.admin.*` user lifecycle is
 admin/operator-gated server-side in `ProductSurface` (`AdminUserService`,
 last-admin protection). Private-user creation returns a reusable login bearer
 only when explicitly requested; managed-agent creation never returns a login
-credential. Managed-resource operations use the separate canonical
-target-policy gate. `webui.v2.settings.tools` is a normal authenticated-caller
-route (tenant/user-scoped tool-approval settings), not an operator route.
+credential. Logout revokes ordinary sessions but deliberately leaves that
+reusable credential valid for a later login; each use rechecks the identity
+record, so suspension or deletion disables it immediately. Managed-resource
+operations use the separate canonical target-policy gate.
+`webui.v2.settings.tools` is a normal authenticated-caller route
+(tenant/user-scoped tool-approval settings), not an operator route.
 
 ### Streaming model (SSE + WebSocket)
 

@@ -14263,11 +14263,16 @@ impl AdminUserService for FakeAdminUsers {
         _actor: &UserId,
         fields: AdminCreatePrivateUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
-        let record = admin_record("created-user", fields.role, AdminUserStatus::Active);
+        let user_id = fields
+            .user_id
+            .unwrap_or_else(|| UserId::new("created-user").expect("user"));
+        let mut record = admin_record(user_id.as_str(), fields.role, AdminUserStatus::Active);
+        record.email = fields.email;
+        record.display_name = fields.display_name;
         self.users
             .lock()
             .unwrap()
-            .insert("created-user".to_string(), record.clone());
+            .insert(user_id.as_str().to_string(), record.clone());
         Ok(AdminCreatedUser { record })
     }
 
@@ -14402,23 +14407,36 @@ impl AdminUserLoginTokenIssuer for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         actor_user_id: &UserId,
-        subject_user_id: &UserId,
+        actor_is_operator: bool,
     ) -> Result<AdminIssuedLoginToken, AdminUserError> {
         let users = self.users.lock().unwrap();
-        let actor = users
-            .get(actor_user_id.as_str())
-            .ok_or(AdminUserError::Forbidden)?;
-        let subject = users
-            .get(subject_user_id.as_str())
-            .ok_or(AdminUserError::Forbidden)?;
-        if !actor.role.is_admin()
-            || subject.content_access_policy != AdminUserContentAccessPolicy::Private
-        {
-            return Err(AdminUserError::Forbidden);
+        if !actor_is_operator {
+            let actor = users
+                .get(actor_user_id.as_str())
+                .ok_or(AdminUserError::Forbidden)?;
+            if !actor.role.is_admin() {
+                return Err(AdminUserError::Forbidden);
+            }
         }
+        let subject_user_id = UserId::new("issued-private-user").expect("user");
         Ok(AdminIssuedLoginToken {
+            subject_user_id: subject_user_id.clone(),
             token: SecretString::from(format!("login-for-{}", subject_user_id.as_str())),
         })
+    }
+}
+
+struct FailingLoginTokenIssuer;
+
+#[async_trait]
+impl AdminUserLoginTokenIssuer for FailingLoginTokenIssuer {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        _actor_user_id: &UserId,
+        _actor_is_operator: bool,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        Err(AdminUserError::Unavailable)
     }
 }
 
@@ -14912,6 +14930,99 @@ async fn admin_caller_lists_and_creates_private_user_without_a_token() {
     assert!(
         encoded.get("login_token").is_none(),
         "private-user creation must omit a bearer unless explicitly requested"
+    );
+}
+
+#[tokio::test]
+async fn private_user_requires_an_email_or_explicit_login_token() {
+    let fake = FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]);
+    let services = admin_services(fake.clone());
+    let error = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("   ".to_string()),
+                display_name: Some("Unclaimable".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: false,
+            }
+            .into(),
+        )
+        .await
+        .expect_err("credential-free private user needs a claimable email");
+    assert_eq!(error.status_code, 400);
+    assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(
+        fake.users.lock().unwrap().len(),
+        1,
+        "validation must run before persistence"
+    );
+}
+
+#[tokio::test]
+async fn login_token_signing_failure_persists_no_private_user() {
+    let fake = FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]);
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(fake.clone()))
+    .with_admin_user_login_token_issuer(Arc::new(FailingLoginTokenIssuer))
+    .with_admin_managed_resource_service(Arc::new(fake.clone()));
+
+    let error = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: None,
+                display_name: Some("Token User".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: true,
+            }
+            .into(),
+        )
+        .await
+        .expect_err("signing failure must fail before user creation");
+    assert_eq!(error.status_code, 503);
+    assert_eq!(
+        fake.users.lock().unwrap().len(),
+        1,
+        "pre-issuance failure must leave no partial user to compensate"
+    );
+}
+
+#[tokio::test]
+async fn explicit_login_token_and_created_user_share_the_preallocated_user_id() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let created = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: None,
+                display_name: Some("Token User".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: true,
+            }
+            .into(),
+        )
+        .await
+        .expect("explicit token creation");
+    assert_eq!(created.user.user_id.as_str(), "issued-private-user");
+    assert_eq!(
+        created.login_token.as_deref(),
+        Some("login-for-issued-private-user")
     );
 }
 

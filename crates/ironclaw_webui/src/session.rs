@@ -16,6 +16,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_reborn_composition::ReusableLoginTokenValidator;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -73,12 +74,24 @@ pub struct SessionRecord {
     /// than accidentally granting escalation.
     #[serde(default)]
     pub operator: bool,
+    /// Whether this bearer is an ordinary revocable session or a reusable
+    /// login credential that requires a current identity-policy check.
+    #[serde(default)]
+    pub credential_kind: SessionCredentialKind,
 }
 
 impl SessionRecord {
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCredentialKind {
+    #[default]
+    Session,
+    ReusableLoginToken,
 }
 
 /// Errors raised by signed session operations.
@@ -95,11 +108,34 @@ pub enum SessionStoreError {
 #[derive(Clone)]
 pub struct SessionAuthenticator {
     store: Arc<SignedTokenSessionStore>,
+    reusable_login_token_validator: Arc<dyn ReusableLoginTokenValidator>,
+}
+
+struct RejectingReusableLoginTokenValidator;
+
+#[async_trait]
+impl ReusableLoginTokenValidator for RejectingReusableLoginTokenValidator {
+    async fn validate(&self, _tenant: &TenantId, _user_id: &UserId) -> bool {
+        false
+    }
 }
 
 impl SessionAuthenticator {
     pub fn new(store: Arc<SignedTokenSessionStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            reusable_login_token_validator: Arc::new(RejectingReusableLoginTokenValidator),
+        }
+    }
+
+    /// Install the identity-backed current-state check required before a
+    /// reusable credential may authenticate.
+    pub fn with_reusable_login_token_validator(
+        mut self,
+        validator: Arc<dyn ReusableLoginTokenValidator>,
+    ) -> Self {
+        self.reusable_login_token_validator = validator;
+        self
     }
 }
 
@@ -142,6 +178,14 @@ impl WebuiAuthenticator for SessionAuthenticator {
                 session_id = %record.session_id,
                 "rejecting expired session",
             );
+            return None;
+        }
+        if record.credential_kind == SessionCredentialKind::ReusableLoginToken
+            && !self
+                .reusable_login_token_validator
+                .validate(&record.tenant_id, &record.user_id)
+                .await
+        {
             return None;
         }
         // Never re-derive operator-ness from the bearer; only stamp what

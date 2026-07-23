@@ -90,6 +90,10 @@ pub struct AdminUserSecretMeta {
 /// Fields for creating a private human user record.
 #[derive(Debug, Clone)]
 pub struct AdminCreatePrivateUserFields {
+    /// Identity-owned id preallocated when credential issuance is requested.
+    /// `None` lets the directory allocate the id during ordinary invitation
+    /// creation.
+    pub user_id: Option<UserId>,
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub role: AdminUserRole,
@@ -106,9 +110,11 @@ pub struct AdminCreatedUser {
     pub record: AdminUserRecord,
 }
 
-/// One-time response value for an explicitly requested private-user login
-/// credential. The plaintext bearer is never persisted by this contract.
+/// Response value for an explicitly requested reusable private-user login
+/// credential. The plaintext bearer is shown once and never persisted by this
+/// contract.
 pub struct AdminIssuedLoginToken {
+    pub subject_user_id: UserId,
     pub token: SecretString,
 }
 
@@ -207,15 +213,16 @@ pub trait AdminUserService: Send + Sync {
     async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError>;
 }
 
-/// Narrow authentication port for issuing a login credential to a private
-/// user. Implementations must reject managed subjects and cross-tenant targets.
+/// Narrow authentication port for preparing a credential and canonical
+/// `UserId` before a new private user is persisted. The bearer is not returned
+/// to the administrator unless creation of that exact subject succeeds.
 #[async_trait]
 pub trait AdminUserLoginTokenIssuer: Send + Sync {
     async fn issue_login_token(
         &self,
         tenant: &TenantId,
         actor_user_id: &UserId,
-        subject_user_id: &UserId,
+        actor_is_operator: bool,
     ) -> Result<AdminIssuedLoginToken, AdminUserError>;
 }
 
@@ -345,7 +352,7 @@ impl AdminUserLoginTokenIssuer for RejectingAdminUserLoginTokenIssuer {
         &self,
         _tenant: &TenantId,
         _actor_user_id: &UserId,
-        _subject_user_id: &UserId,
+        _actor_is_operator: bool,
     ) -> Result<AdminIssuedLoginToken, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }

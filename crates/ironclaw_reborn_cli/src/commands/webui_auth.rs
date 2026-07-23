@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use ironclaw_reborn_composition::host_api::TenantId;
-use ironclaw_reborn_composition::{PublicRouteMount, RebornIdentityResolver};
+use ironclaw_reborn_composition::{
+    PublicRouteMount, RebornIdentityResolver, ReusableLoginTokenValidator,
+};
 use ironclaw_webui::{
     CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
     SignedTokenSessionStore, WebuiAuthenticator, build_signed_session_login,
@@ -36,8 +38,8 @@ pub(crate) struct WebuiAuthSurface {
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the listener
 /// keeps its env-bearer authenticator, also validates signed session tokens
-/// issued by the existing CLI claim/login flow, and mounts the inert auth surface so
-/// `/auth/providers` can return an empty provider list.
+/// issued by the existing CLI claim/login flow, and mounts provider discovery
+/// plus signed-session logout.
 /// With providers configured, this layers the fail-closed email-domain
 /// admission adapter on top of the runtime-owned canonical Reborn identity
 /// resolver and hands the result to the ingress signed-session builder.
@@ -55,6 +57,7 @@ pub(crate) async fn build_webui_auth_surface(
     identity_resolver: Option<Arc<dyn RebornIdentityResolver>>,
     tenant_id: TenantId,
     session_store: Arc<SignedTokenSessionStore>,
+    reusable_login_token_validator: Option<Arc<dyn ReusableLoginTokenValidator>>,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
@@ -66,8 +69,12 @@ pub(crate) async fn build_webui_auth_surface(
         // operator capabilities still follow the env token only, so every
         // session bearer stays non-operator. The same store is shared with the
         // explicit private-user token issuer so revocation state is coherent.
-        let session_authenticator: Arc<dyn WebuiAuthenticator> =
-            Arc::new(SessionAuthenticator::new(Arc::clone(&session_store)));
+        let mut session_authenticator = SessionAuthenticator::new(Arc::clone(&session_store));
+        if let Some(validator) = reusable_login_token_validator {
+            session_authenticator =
+                session_authenticator.with_reusable_login_token_validator(validator);
+        }
+        let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(session_authenticator);
         let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
             session_authenticator,
             env_authenticator,
@@ -100,6 +107,7 @@ pub(crate) async fn build_webui_auth_surface(
         tenant_id,
         user_directory: Arc::new(user_directory),
         session_store,
+        reusable_login_token_validator,
         base_url: sso.base_url,
         providers: sso.providers,
         env_authenticator,
@@ -182,6 +190,7 @@ mod tests {
                 &secrecy::SecretString::from("session-signing-secret".to_string()),
                 &TenantId::new("tenant-host").expect("tenant"),
             ),
+            None,
             Arc::new(RejectingAuth),
         )
         .await;
@@ -197,10 +206,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_sso_composes_env_and_session_auth_and_mounts_empty_provider_route() {
+    async fn no_sso_composes_env_and_session_auth_and_mounts_discovery_and_logout() {
         // With no SSO configured the surface still needs env-bearer access
         // plus signed-session bearer access for the CLI claim/login flow. It also
-        // mounts an inert public auth surface for provider discovery. The
+        // mounts provider discovery plus signed-session logout. The
         // absent-resolver check must not fire on this path.
         let result = build_webui_auth_surface(
             None,
@@ -210,6 +219,7 @@ mod tests {
                 &secrecy::SecretString::from("session-signing-secret".to_string()),
                 &TenantId::new("tenant-host").expect("tenant"),
             ),
+            None,
             Arc::new(RejectingAuth),
         )
         .await;
@@ -221,7 +231,7 @@ mod tests {
                         && mount.descriptors[0].route_pattern().as_str() == "/auth/providers"
                         && mount.descriptors[1].route_pattern().as_str() == "/auth/logout"
                 }),
-                "no SSO must mount only /auth/providers with an empty list"
+                "no SSO must mount /auth/providers and /auth/logout"
             ),
             Err(error) => panic!("no SSO is a valid configuration, got error: {error}"),
         }
@@ -252,6 +262,7 @@ mod tests {
                 &secrecy::SecretString::from("operator-session-secret".to_string()),
                 &TenantId::new("sso-bootstrap-tenant").expect("tenant"),
             ),
+            None,
             Arc::new(RejectingAuth),
         )
         .await

@@ -40,7 +40,7 @@ export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || (!email.trim() && !issueLoginToken)) return;
     resetError?.();
     try {
       const created = await onCreate({
@@ -105,6 +105,7 @@ export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.currentTarget.value)}
+              required={!issueLoginToken}
               className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
               placeholder={t("admin.users.emailPlaceholder")}
             />
@@ -148,7 +149,7 @@ export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   );
 }
 
-function CreateManagedAgentForm({ onCreate, isCreating, error, resetError }) {
+export function CreateManagedAgentForm({ onCreate, isCreating, error, resetError }) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [isOpen, setIsOpen] = React.useState(false);

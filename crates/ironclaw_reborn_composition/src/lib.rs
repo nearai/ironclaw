@@ -59,7 +59,7 @@ mod turn_run_snapshot;
 mod web_access;
 mod webui;
 
-pub use admin_login_token::AdminLoginTokenMinter;
+pub use admin_login_token::{AdminLoginTokenMinter, ReusableLoginTokenValidator};
 pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;

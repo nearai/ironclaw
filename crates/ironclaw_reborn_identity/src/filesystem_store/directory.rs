@@ -15,7 +15,6 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{TenantId, UserId};
 use std::collections::BTreeMap;
-use uuid::Uuid;
 
 use super::paths::{
     child_path, external_tenant_dir_path, user_id_from_file_name, user_path, user_tombstone_path,
@@ -29,7 +28,7 @@ use super::{FilesystemRebornIdentityStore, backend, to_user_id};
 use crate::RebornIdentityError;
 use crate::user_directory::{
     AdminManagedUserOperation, RebornUser, RebornUserDirectory, RebornUserProfileUpdate,
-    RebornUserRole, RebornUserStatus, UserContentAccessPolicy,
+    RebornUserRole, RebornUserStatus, UserContentAccessPolicy, new_user_id,
 };
 
 fn now_rfc3339() -> String {
@@ -349,33 +348,49 @@ where
         content_access_policy: UserContentAccessPolicy,
         created_by: &UserId,
     ) -> Result<RebornUser, RebornIdentityError> {
-        if content_access_policy == UserContentAccessPolicy::TenantAdminManaged
-            && role != RebornUserRole::Member
+        let user_id = new_user_id()?;
+        self.create_user_with_id(crate::PreallocatedRebornUser {
+            user_id,
+            tenant_id: tenant_id.clone(),
+            email,
+            display_name,
+            role,
+            content_access_policy,
+            created_by: created_by.clone(),
+        })
+        .await
+    }
+
+    async fn create_user_with_id(
+        &self,
+        user: crate::PreallocatedRebornUser,
+    ) -> Result<RebornUser, RebornIdentityError> {
+        if user.content_access_policy == UserContentAccessPolicy::TenantAdminManaged
+            && user.role != RebornUserRole::Member
         {
             return Err(RebornIdentityError::UserPolicyViolation(
                 "admin-managed users must remain members",
             ));
         }
-        let new_user_id = to_user_id(Uuid::new_v4().to_string())?;
         let now = now_rfc3339();
         let record = StoredUser {
-            email,
-            display_name,
+            email: user.email,
+            display_name: user.display_name,
             created_at: now.clone(),
             updated_at: now,
             status: StoredUserStatus::Active,
-            role: role_to_stored(role),
-            content_access_policy: policy_to_stored(content_access_policy),
-            created_by: Some(created_by.as_str().to_string()),
+            role: role_to_stored(user.role),
+            content_access_policy: policy_to_stored(user.content_access_policy),
+            created_by: Some(user.created_by.as_str().to_string()),
             last_login_at: None,
-            tenant_id: Some(tenant_id.as_str().to_string()),
+            tenant_id: Some(user.tenant_id.as_str().to_string()),
             metadata: BTreeMap::new(),
         };
         // A minted UUID collision would surface as VersionMismatch on the
         // Absent CAS; astronomically unlikely, and surfaced (not retried) so it
         // is never silently overwritten.
         self.write_record(
-            &user_path(new_user_id.as_str())?,
+            &user_path(user.user_id.as_str())?,
             &record,
             CasExpectation::Absent,
         )
@@ -386,26 +401,26 @@ where
         // later provider-verified OAuth identity can consume this index. The
         // user record is written first so a crash can leave only an
         // unreferenced user, never an index pointing at a missing user.
-        if content_access_policy == UserContentAccessPolicy::Private
+        if user.content_access_policy == UserContentAccessPolicy::Private
             && let Some(email) = record
                 .email
                 .as_deref()
                 .map(str::to_ascii_lowercase)
                 .filter(|email| !email.is_empty())
         {
-            let index_path = verified_email_path(tenant_id.as_str(), &email)?;
+            let index_path = verified_email_path(user.tenant_id.as_str(), &email)?;
             let index_write = self
                 .write_record(
                     &index_path,
                     &StoredVerifiedEmailIndex {
-                        user_id: new_user_id.as_str().to_string(),
+                        user_id: user.user_id.as_str().to_string(),
                     },
                     CasExpectation::Absent,
                 )
                 .await;
             if let Err(error) = index_write {
                 self.filesystem
-                    .delete(&self.scope, &user_path(new_user_id.as_str())?)
+                    .delete(&self.scope, &user_path(user.user_id.as_str())?)
                     .await
                     .map_err(backend)?;
                 return match error {
@@ -418,7 +433,7 @@ where
                 };
             }
         }
-        to_reborn_user(new_user_id.as_str().to_string(), record)
+        to_reborn_user(user.user_id.as_str().to_string(), record)
     }
 
     async fn update_profile(

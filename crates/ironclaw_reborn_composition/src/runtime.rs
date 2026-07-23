@@ -92,7 +92,7 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_outbound::OutboundError;
+use ironclaw_outbound::{OutboundDeliveryTargetRegistrationOutcome, OutboundError};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::run_profile::UserProfileContext;
@@ -102,8 +102,6 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 use crate::deployment::{DeploymentConfig, RuntimeSubstrate, TrafficPolicy};
 use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
-#[cfg(any(test, feature = "test-support"))]
-use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
@@ -1497,6 +1495,25 @@ impl RebornRuntime {
 
     pub(crate) fn admin_login_token_minter(&self) -> Option<Arc<dyn crate::AdminLoginTokenMinter>> {
         self.admin_login_token_minter.clone()
+    }
+
+    pub(crate) fn reborn_login_policy(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornLoginPolicy>> {
+        self.reborn_user_directory()
+            .map(ironclaw_reborn_identity::login_policy)
+    }
+
+    /// Current-state validator for reusable private-user login credentials.
+    /// Host ingress uses this facade instead of retaining lifecycle-directory
+    /// mutation access.
+    pub fn reusable_login_token_validator(
+        &self,
+    ) -> Option<Arc<dyn crate::ReusableLoginTokenValidator>> {
+        self.reborn_login_policy().map(|policy| {
+            Arc::new(crate::admin_login_token::RebornReusableLoginTokenValidator::new(policy))
+                as Arc<dyn crate::ReusableLoginTokenValidator>
+        })
     }
 
     /// Test-only accessor for the admin user directory the WebUI facade wires.

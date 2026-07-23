@@ -165,12 +165,11 @@ pub(crate) fn build_webui_services_with_channel_connection(
         api = api.with_admin_user_service(Arc::new(
             crate::admin_user_directory::RebornAdminUserDirectory::new(Arc::clone(&directory)),
         ));
-        if let Some(minter) = runtime.admin_login_token_minter() {
+        if let Some(minter) = runtime.admin_login_token_minter()
+            && let Some(login_policy) = runtime.reborn_login_policy()
+        {
             api = api.with_admin_user_login_token_issuer(Arc::new(
-                crate::admin_login_token::RebornAdminLoginTokenIssuer::new(
-                    Arc::clone(&directory),
-                    minter,
-                ),
+                crate::admin_login_token::RebornAdminLoginTokenIssuer::new(login_policy, minter),
             ));
         }
         if let Some(provisioner) = runtime.reborn_admin_secret_provisioner() {

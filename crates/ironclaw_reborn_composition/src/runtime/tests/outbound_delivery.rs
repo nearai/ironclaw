@@ -7,6 +7,7 @@ use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
+use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
 use ironclaw_outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetId, OutboundDeliveryTargetScope,
     OutboundDeliveryTargetSummary, OutboundError,
@@ -22,7 +23,6 @@ use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
 use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
 };
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 

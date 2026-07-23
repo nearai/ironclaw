@@ -16,8 +16,8 @@ use ironclaw_product_workflow::{
     AdminUserStatus,
 };
 use ironclaw_reborn_identity::{
-    RebornIdentityError, RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole,
-    RebornUserStatus, UserContentAccessPolicy,
+    PreallocatedRebornUser, RebornIdentityError, RebornUser, RebornUserDirectory,
+    RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, UserContentAccessPolicy,
 };
 
 /// Adapter wiring identity lifecycle into the product-workflow contract.
@@ -85,18 +85,34 @@ impl AdminUserService for RebornAdminUserDirectory {
         actor: &UserId,
         fields: AdminCreatePrivateUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
-        let created = self
-            .directory
-            .create_user(
-                tenant,
-                fields.email,
-                fields.display_name,
-                role_to_identity(fields.role),
-                UserContentAccessPolicy::Private,
-                actor,
-            )
-            .await
-            .map_err(map_identity_error)?;
+        let created = match fields.user_id {
+            Some(user_id) => {
+                self.directory
+                    .create_user_with_id(PreallocatedRebornUser {
+                        user_id,
+                        tenant_id: tenant.clone(),
+                        email: fields.email,
+                        display_name: fields.display_name,
+                        role: role_to_identity(fields.role),
+                        content_access_policy: UserContentAccessPolicy::Private,
+                        created_by: actor.clone(),
+                    })
+                    .await
+            }
+            None => {
+                self.directory
+                    .create_user(
+                        tenant,
+                        fields.email,
+                        fields.display_name,
+                        role_to_identity(fields.role),
+                        UserContentAccessPolicy::Private,
+                        actor,
+                    )
+                    .await
+            }
+        }
+        .map_err(map_identity_error)?;
         Ok(AdminCreatedUser {
             record: to_admin_record(created),
         })

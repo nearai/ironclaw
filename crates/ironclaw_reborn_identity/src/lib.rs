@@ -32,8 +32,9 @@ mod user_directory;
 pub use filesystem_store::FilesystemRebornIdentityStore;
 pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
 pub use user_directory::{
-    AdminManagedUserOperation, RebornUser, RebornUserDirectory, RebornUserProfileUpdate,
-    RebornUserRole, RebornUserStatus, UserContentAccessPolicy,
+    AdminManagedUserOperation, PreallocatedRebornUser, RebornLoginPolicy, RebornUser,
+    RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,
+    UserContentAccessPolicy, login_policy, new_user_id,
 };
 
 use async_trait::async_trait;

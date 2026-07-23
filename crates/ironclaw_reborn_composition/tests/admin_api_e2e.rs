@@ -170,7 +170,12 @@ async fn build_admin_harness_from(
     let env =
         EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
             .expect("env authenticator");
-    let session = SessionAuthenticator::new(session_store.clone());
+    let session = SessionAuthenticator::new(session_store.clone())
+        .with_reusable_login_token_validator(
+            runtime
+                .reusable_login_token_validator()
+                .expect("identity-backed login-token validator"),
+        );
     let authenticator = Arc::new(DualAuthenticator { env, session });
 
     let config = WebuiServeConfig::new(
@@ -340,6 +345,15 @@ impl AdminApiDriver {
         )
         .await
     }
+
+    async fn delete_secret(&self, user_id: &str, handle: &str) -> (StatusCode, Value) {
+        self.send(
+            Method::DELETE,
+            &format!("/api/webchat/v2/admin/users/{user_id}/secrets/{handle}"),
+            None,
+        )
+        .await
+    }
 }
 
 fn user_id_of(created: &Value) -> String {
@@ -363,6 +377,14 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         users["users"].as_array().map(Vec::len),
         Some(0),
         "no users exist before the admin creates any"
+    );
+    let (status, _) = operator
+        .create_user(None, "Unclaimable User", "member")
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a private user needs either a claimable email or an explicit login token"
     );
 
     // Private user creation preserves normal RBAC lifecycle and defaults to no
@@ -392,7 +414,7 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
     // An administrator may explicitly request a private user's login token.
     // The returned bearer authenticates as that UserId, not as the operator.
     let (status, token_user) = operator
-        .create_user_with_token(Some("token-user@acme.test"), "Token User", "member", true)
+        .create_user_with_token(None, "Token User", "member", true)
         .await;
     assert_eq!(status, StatusCode::OK);
     let token_user_id = user_id_of(&token_user);
@@ -418,6 +440,22 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         status,
         StatusCode::FORBIDDEN,
         "logout leaves the reusable auth token valid as the same non-admin user"
+    );
+    let (status, _) = operator.set_status(&token_user_id, "suspended").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = operator.as_bearer(login_token).list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "suspension invalidates a reusable login token immediately"
+    );
+    let (status, _) = operator.set_status(&token_user_id, "active").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = operator.as_bearer(login_token).list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "reactivation restores the same reusable token as a non-admin user"
     );
 
     // Managed-agent creation is a separate workflow but still returns an
@@ -470,6 +508,16 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         !secrets.to_string().contains("sk-super-secret-value"),
         "listing secrets must not expose material"
     );
+    let (status, deleted) = admin_session.delete_secret(&managed_id, "openai_key").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["deleted"].as_bool(), Some(true));
+    let (_, secrets) = admin_session.list_secrets(&managed_id).await;
+    assert!(
+        secrets["secrets"]
+            .as_array()
+            .is_some_and(|entries| entries.is_empty()),
+        "the real adapter removes the managed target's secret"
+    );
 
     // Admin/operator status alone is never enough to reach a private human's
     // resources. The existing endpoint now fails closed.
@@ -478,6 +526,8 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = admin_session.list_secrets(&admin_id).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = admin_session.delete_secret(&admin_id, "forbidden").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // The managed policy permits administrator-on-behalf access; it does not
@@ -490,6 +540,19 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
     let member_session = authenticated_user(&harness, &operator, &member_id).await;
     let (status, _) = member_session.list_secrets(&managed_id).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = member_session
+        .delete_secret(&managed_id, "openai_key")
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = operator.delete_user(&token_user_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = operator.as_bearer(login_token).list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deletion permanently invalidates the reusable login token"
+    );
 
     // Delete cascades: the managed record is gone, and a re-read is a 404.
     let (status, deleted) = operator.delete_user(&managed_id).await;
@@ -509,7 +572,9 @@ async fn admin_last_admin_protection_over_http() {
     let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
 
     // One admin user record → it is the sole active admin.
-    let (_, sole) = operator.create_user(None, "Sole Admin", "admin").await;
+    let (_, sole) = operator
+        .create_user(Some("sole-admin@acme.test"), "Sole Admin", "admin")
+        .await;
     let sole_id = user_id_of(&sole);
 
     let (status, demote) = operator.set_role(&sole_id, "member").await;
@@ -531,7 +596,9 @@ async fn admin_last_admin_protection_over_http() {
     );
 
     // A second admin removes the protection.
-    let (_, second) = operator.create_user(None, "Second Admin", "admin").await;
+    let (_, second) = operator
+        .create_user(Some("second-admin@acme.test"), "Second Admin", "admin")
+        .await;
     let second_id = user_id_of(&second);
     let (status, _) = operator.set_role(&second_id, "member").await;
     assert_eq!(
@@ -554,7 +621,13 @@ fn session_store_with_secret(secret: &str) -> Arc<SignedTokenSessionStore> {
 }
 
 async fn create_admin(operator: &AdminApiDriver, display_name: &str) -> (String, ()) {
-    let (status, created) = operator.create_user(None, display_name, "admin").await;
+    let email = format!(
+        "{}@acme.test",
+        display_name.to_ascii_lowercase().replace(' ', "-")
+    );
+    let (status, created) = operator
+        .create_user(Some(&email), display_name, "admin")
+        .await;
     assert_eq!(status, StatusCode::OK, "operator creates an admin user");
     (user_id_of(&created), ())
 }

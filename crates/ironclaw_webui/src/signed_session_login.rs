@@ -1,4 +1,4 @@
-//! Stateless, HMAC-signed session login wiring.
+//! HMAC-signed session login wiring.
 //!
 //! [`build_signed_session_login`] assembles the pieces the
 //! `ironclaw-reborn serve` binary needs to mount the OAuth login
@@ -11,9 +11,8 @@
 //!
 //! - [`SignedTokenSessionStore`] — a session backend whose bearer token
 //!   carries the tenant/user/expiry, HMAC-SHA256-signed with a key
-//!   derived from the operator secret. Validation needs no persistence,
-//!   so tokens survive a restart as long as the operator secret is
-//!   stable. Ordinary sessions honor process-local revocation via an
+//!   derived from the operator secret. Tokens survive a restart as long as
+//!   the operator secret is stable. Ordinary sessions honor process-local revocation via an
 //!   in-memory denylist. Explicit reusable authentication credentials carry a
 //!   signed purpose claim and deliberately survive logout so they can be used
 //!   for the next login. The denylist clears on restart, after which a
@@ -45,7 +44,9 @@ use uuid::Uuid;
 use crate::auth::{
     OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, webui_v2_auth_router,
 };
+use crate::session::SessionCredentialKind;
 use crate::session::{SessionAuthenticator, SessionId, SessionRecord, SessionStoreError};
+use ironclaw_reborn_composition::ReusableLoginTokenValidator;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -61,6 +62,9 @@ pub struct SignedSessionLoginConfig {
     /// Host-owned signed-session store shared with every session issuer so
     /// logout revocation is observed consistently within this process.
     pub session_store: Arc<SignedTokenSessionStore>,
+    /// Identity-backed current-state validator for reusable login credentials.
+    /// `None` rejects those credentials while ordinary sessions still work.
+    pub reusable_login_token_validator: Option<Arc<dyn ReusableLoginTokenValidator>>,
     /// Public base URL used to build provider callback URLs.
     pub base_url: String,
     /// Configured OAuth providers. An empty list disables the login
@@ -92,8 +96,12 @@ pub fn build_signed_session_login(
     }
 
     let session_store = config.session_store;
-    let session_authenticator: Arc<dyn WebuiAuthenticator> =
-        Arc::new(SessionAuthenticator::new(session_store.clone()));
+    let mut session_authenticator = SessionAuthenticator::new(session_store.clone());
+    if let Some(validator) = config.reusable_login_token_validator {
+        session_authenticator =
+            session_authenticator.with_reusable_login_token_validator(validator);
+    }
+    let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(session_authenticator);
 
     let router_config = OAuthRouterConfig::new(
         config.tenant_id,
@@ -123,9 +131,8 @@ pub fn build_signed_session_login(
 /// `exp`).
 const MAX_REVOKED_ENTRIES: usize = 4096;
 
-/// Stateless session backend whose "record" is the cryptographic
-/// signature itself (HMAC-SHA256 over the base64url payload), plus a
-/// process-local denylist that makes `revoke` (logout) effective.
+/// Signed-token backend whose bearer metadata is self-contained, plus
+/// process-local revocation state that makes ordinary-session logout effective.
 pub struct SignedTokenSessionStore {
     key: Vec<u8>,
     /// Host tenant this store is bound to. The signing key is derived from
@@ -140,11 +147,12 @@ pub struct SignedTokenSessionStore {
 }
 
 /// Build a signed-token store for minting/validating bearers from an
-/// operator secret + tenant. The store is stateless and deterministic in the
-/// signing key, so an instance built here mints tokens that validate under any
-/// other instance sharing the same operator secret + tenant (e.g. the SSO login
-/// surface's own store). Authenticated login/claim flows mint revocable
-/// sessions; explicit administrator issuance mints reusable user credentials.
+/// operator secret + tenant. Signing is deterministic, so another instance
+/// sharing the same secret and tenant can verify the token, but logout state is
+/// process- and instance-local. Issuers and authenticators that require
+/// coherent revocation must share this `Arc`. Authenticated login/claim flows
+/// mint revocable sessions; explicit administrator issuance mints reusable
+/// user credentials whose current identity state is checked separately.
 pub fn signed_session_store(
     operator_secret: &SecretString,
     tenant_id: &TenantId,
@@ -318,6 +326,10 @@ impl SignedTokenSessionStore {
             created_at,
             expires_at,
             operator: payload.op,
+            credential_kind: match payload.purpose {
+                TokenPurpose::Session => SessionCredentialKind::Session,
+                TokenPurpose::ReusableAuth => SessionCredentialKind::ReusableLoginToken,
+            },
         }))
     }
 
@@ -957,6 +969,7 @@ mod tests {
                 &SecretString::from("operator-secret".to_string()),
                 &tenant_id,
             ),
+            reusable_login_token_validator: None,
             tenant_id,
             user_directory: Arc::new(StubUserDirectory),
             base_url: "https://app.example".to_string(),

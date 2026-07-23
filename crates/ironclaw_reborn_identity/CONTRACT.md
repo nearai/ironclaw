@@ -92,11 +92,18 @@ stack; the boundary tests still allow no new edge).
   such pre-admin records).
 - `create_user` — creates an active user with **no external identity** and an
   immutable content-access policy. `Private` is the compatibility-safe default
-  and uses the verified login/claim path; it never returns an administrator-
-  minted credential. `TenantAdminManaged` creates a non-login, Member-only
-  subject for administrator management. A private user's email reserves the
-  same tenant-scoped claim index used by SSO, but only a provider-verified
-  OAuth identity can bind to it; managed subjects write no login index.
+  and normally uses the verified login/claim path. An administrator may
+  explicitly request one reusable signed login credential while creating a
+  private user. `TenantAdminManaged` creates a non-login, Member-only subject
+  for administrator management and can never receive that credential. A
+  private user's email reserves the same tenant-scoped claim index used by SSO,
+  but only a provider-verified OAuth identity can bind to it; managed subjects
+  write no login index.
+- `RebornLoginPolicy` — the narrow, read-only policy used at credential
+  issuance and on every reusable-credential authentication. Authentication
+  requires an active, explicitly same-tenant `Private` record, so suspension,
+  deletion, cross-tenant use, and managed subjects fail closed without exposing
+  directory mutation methods to ingress.
 - `update_profile` / `update_status` / `update_role` — partial mutations through
   the shared `ironclaw_filesystem::cas_update` helper (never a per-record mutex;
   `ironclaw_filesystem/CLAUDE.md` invariant 2). Each bumps `updated_at`.

@@ -34,6 +34,14 @@ function findByType(root, type) {
   return found;
 }
 
+function findWithProp(root, prop) {
+  let found = null;
+  visit(root, (node) => {
+    if (!found && typeof node === "object" && node.props?.[prop]) found = node;
+  });
+  return found;
+}
+
 function collectScalars(root) {
   const scalars = [];
   visit(root, (value) => {
@@ -126,7 +134,7 @@ function baseAdminState(overrides = {}) {
 function loadUsersView(harness) {
   return runVmModuleForTest(
     "./users-tab.tsx",
-    ["AdminUsersTabView", "ConfirmModal", "CreateUserForm", "UserRow"],
+    ["AdminUsersTabView", "ConfirmModal", "CreateManagedAgentForm", "CreateUserForm", "UserRow"],
     {
       React: harness.React,
       useT: () => translate,
@@ -195,6 +203,52 @@ test("private-user form opts into and renders the one-time login token", async (
   rendered = harness.render(CreateUserForm, props);
   assert.ok(findByTestId(rendered, "admin-user-login-token"));
   assert.ok(collectScalars(rendered).includes("signed-user-session"));
+});
+
+test("private-user form does not submit without an email or login-token opt-in", async () => {
+  const harness = createReactHarness();
+  const { CreateUserForm } = loadUsersView(harness);
+  const createdPayloads = [];
+  const props = {
+    onCreate: async (payload) => createdPayloads.push(payload),
+    isCreating: false,
+    error: null,
+    resetError: () => {},
+  };
+  let rendered = harness.render(CreateUserForm, props);
+  findWithProp(rendered, "onClick").props.onClick();
+  rendered = harness.render(CreateUserForm, props);
+  const inputs = [];
+  visit(rendered, (node) => {
+    if (typeof node === "object" && node.type === "input") inputs.push(node);
+  });
+  inputs[0].props.onChange({ currentTarget: { value: "No Login Path" } });
+  rendered = harness.render(CreateUserForm, props);
+  await findByType(rendered, "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(createdPayloads, []);
+});
+
+test("managed-agent form opens, submits the dedicated payload, and closes", async () => {
+  const harness = createReactHarness();
+  const { CreateManagedAgentForm } = loadUsersView(harness);
+  const createdPayloads = [];
+  const props = {
+    onCreate: async (payload) => createdPayloads.push(payload),
+    isCreating: false,
+    error: null,
+    resetError: () => {},
+  };
+  let rendered = harness.render(CreateManagedAgentForm, props);
+  findWithProp(rendered, "onClick").props.onClick();
+  rendered = harness.render(CreateManagedAgentForm, props);
+  const input = findByType(rendered, "input");
+  input.props.onChange({ currentTarget: { value: "Build Agent" } });
+  rendered = harness.render(CreateManagedAgentForm, props);
+  await findByType(rendered, "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(createdPayloads.length, 1);
+  assert.equal(createdPayloads[0].display_name, "Build Agent");
+  rendered = harness.render(CreateManagedAgentForm, props);
+  assert.equal(findByType(rendered, "form"), null);
 });
 
 function loadDetailModule(harness) {

@@ -236,3 +236,114 @@ async fn managed_users_cannot_be_promoted_or_record_a_login() {
         RebornIdentityError::ManagedUserLoginDisabled(_)
     ));
 }
+
+#[tokio::test]
+async fn reusable_login_policy_rechecks_actor_and_subject_state() {
+    let store = Arc::new(store());
+    let acme = tenant("acme");
+    let other = tenant("other");
+    let creator = UserId::new("bootstrap").expect("creator");
+    let admin = store
+        .create_user(
+            &acme,
+            None,
+            Some("Admin".to_string()),
+            RebornUserRole::Admin,
+            UserContentAccessPolicy::Private,
+            &creator,
+        )
+        .await
+        .expect("admin");
+    let private = store
+        .create_user(
+            &acme,
+            None,
+            Some("Private".to_string()),
+            RebornUserRole::Member,
+            UserContentAccessPolicy::Private,
+            &admin.user_id,
+        )
+        .await
+        .expect("private");
+    let managed = store
+        .create_user(
+            &acme,
+            None,
+            Some("Managed".to_string()),
+            RebornUserRole::Member,
+            UserContentAccessPolicy::TenantAdminManaged,
+            &admin.user_id,
+        )
+        .await
+        .expect("managed");
+    let directory: Arc<dyn RebornUserDirectory> = store.clone();
+    let policy = crate::login_policy(directory);
+
+    assert!(
+        policy
+            .authorize_admin_login_token_issuance(&acme, &admin.user_id)
+            .await
+            .expect("issuance policy")
+    );
+    assert!(
+        !policy
+            .authorize_admin_login_token_issuance(&other, &admin.user_id)
+            .await
+            .expect("cross-tenant issuance policy")
+    );
+    assert!(
+        !policy
+            .authorize_admin_login_token_issuance(&acme, &private.user_id)
+            .await
+            .expect("member issuance policy")
+    );
+    assert!(
+        policy
+            .authorize_reusable_login_token(&acme, &private.user_id)
+            .await
+            .expect("private login policy")
+    );
+    assert!(
+        !policy
+            .authorize_reusable_login_token(&acme, &managed.user_id)
+            .await
+            .expect("managed login policy")
+    );
+    assert!(
+        !policy
+            .authorize_reusable_login_token(&other, &private.user_id)
+            .await
+            .expect("cross-tenant login policy")
+    );
+
+    store
+        .update_status(&private.user_id, RebornUserStatus::Suspended)
+        .await
+        .expect("suspend");
+    assert!(
+        !policy
+            .authorize_reusable_login_token(&acme, &private.user_id)
+            .await
+            .expect("suspended login policy")
+    );
+    store
+        .update_status(&admin.user_id, RebornUserStatus::Suspended)
+        .await
+        .expect("suspend admin");
+    assert!(
+        !policy
+            .authorize_admin_login_token_issuance(&acme, &admin.user_id)
+            .await
+            .expect("suspended admin issuance policy")
+    );
+    store
+        .delete_user(&acme, &private.user_id)
+        .await
+        .expect("delete");
+    assert!(
+        !policy
+            .authorize_reusable_login_token(&acme, &private.user_id)
+            .await
+            .expect("deleted login policy")
+    );
+}
