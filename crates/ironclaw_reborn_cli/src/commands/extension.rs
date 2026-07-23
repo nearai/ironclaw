@@ -108,11 +108,11 @@ fn execute_lifecycle_command(
         .build()
         .context("failed to build tokio runtime for extension lifecycle command")?;
     runtime.block_on(async move {
-        let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(
-            runtime_services.services_input,
-        ))
-        .await
-        .context("failed to assemble Reborn runtime for extension lifecycle command")?;
+        let services_input =
+            crate::runtime::with_binary_host_extension_bindings(runtime_services.services_input);
+        let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(services_input))
+            .await
+            .context("failed to assemble Reborn runtime for extension lifecycle command")?;
         let response = execute_reborn_extension_lifecycle_command(&runtime, command)
             .await
             .map_err(anyhow::Error::from)?;

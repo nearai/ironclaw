@@ -538,26 +538,7 @@ pub(crate) fn build_runtime_input_with_options(
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
 
-    // The binary assembles the native extension factory registry and the
-    // channel-adapter bindings (DEL-7's target shape); composition receives
-    // them as input and never links a concrete extension crate.
-    //
-    // It also injects the first-party package inventory (as neutral bundles),
-    // the concrete GSuite/web-access capability handler registrars, and the
-    // Google-account credential visibility policy (DEL-7): composition names no
-    // concrete first-party extension crate.
-    let first_party_bundles = crate::first_party::bundled_first_party_bundles();
-    crate::first_party::assert_first_party_bundles_present(&first_party_bundles);
-    let services_input = runtime_services
-        .services_input
-        .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
-        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
-        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors())
-        .with_first_party_bundles(first_party_bundles)
-        .with_first_party_registrars(crate::first_party::bundled_first_party_registrars())
-        .with_credential_account_visibility_policy(
-            crate::first_party::first_party_credential_account_visibility_policy(),
-        );
+    let services_input = with_binary_host_extension_bindings(runtime_services.services_input);
 
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_build_input(services_input)
@@ -616,6 +597,32 @@ pub(crate) fn build_runtime_input_with_options(
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
     })
+}
+
+pub(crate) fn with_binary_host_extension_bindings(
+    services_input: RebornHostBindings,
+) -> RebornHostBindings {
+    // The binary assembles the native extension factory registry and the
+    // channel-adapter bindings (DEL-7's target shape); composition receives
+    // them as input and never links a concrete extension crate.
+    //
+    // It also injects the first-party package inventory (as neutral bundles),
+    // the concrete GSuite/web-access capability handler registrars, and the
+    // Google-account credential visibility policy (DEL-7): composition names no
+    // concrete first-party extension crate. Keep this helper independent from
+    // LLM resolution so lifecycle-only commands can expose the production
+    // extension catalog without requiring run-time model config.
+    let first_party_bundles = crate::first_party::bundled_first_party_bundles();
+    crate::first_party::assert_first_party_bundles_present(&first_party_bundles);
+    services_input
+        .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
+        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
+        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors())
+        .with_first_party_bundles(first_party_bundles)
+        .with_first_party_registrars(crate::first_party::bundled_first_party_registrars())
+        .with_credential_account_visibility_policy(
+            crate::first_party::first_party_credential_account_visibility_policy(),
+        )
 }
 
 pub(crate) struct RuntimeServicesInput {
