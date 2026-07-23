@@ -32,6 +32,23 @@
 //! - **Disabled routes pass through.** A descriptor with
 //!   `RateLimitPolicy::Disabled` (the v2 beta does not have any, but
 //!   the type allows it) records no counters and never returns 429.
+//! - **Explicitly-marked downstream 429s are refunded.** A handler can
+//!   opt a specific rejection out of this middleware's charge by calling
+//!   [`mark_rate_limit_refundable`] on its response — used today by the
+//!   SSE per-caller concurrency cap in `webui_v2::sse_capacity`, which
+//!   reflects a resource limit unrelated to request-volume abuse. The
+//!   marker is a response *extension* (server-side-only metadata, never
+//!   serialized onto the wire) that this middleware consumes and removes
+//!   before returning — it never reaches the client either way.
+//!   Refunding is opt-in and keyed off this explicit marker, **not**
+//!   the bare `429` status code: this protected surface also carries
+//!   system-wide admission-control 429s (`TurnErrorCategory::
+//!   AdmissionRejected` / `CapacityExceeded`, mapped in
+//!   `ironclaw_product_workflow::reborn_services::map_turn_error`) that
+//!   must keep draining the caller's budget precisely during the
+//!   overload they exist to signal — refunding those would let a
+//!   caller flooding the system during an outage dodge the very limit
+//!   meant to contain it.
 
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -299,6 +316,27 @@ fn caller_key(caller: &WebUiAuthenticatedCaller) -> String {
     )
 }
 
+/// Marker a handler attaches to its own `429` response (via
+/// [`mark_rate_limit_refundable`]) to opt that specific rejection out of
+/// [`enforce_rate_limit`]'s charge — see the "Explicitly-marked downstream
+/// 429s are refunded" module doc. Carried as a response *extension*, not a
+/// header: extensions are server-side-only metadata that never serialize
+/// onto the wire, so there is no risk of this internal signal leaking to
+/// the actual HTTP client.
+#[derive(Clone)]
+struct RateLimitRefundable;
+
+/// Marks a handler's own `429` response as refundable against the caller's
+/// [`enforce_rate_limit`] budget — use for a rejection that reflects a
+/// resource limit unrelated to request-volume abuse (e.g. the SSE
+/// per-caller concurrency cap in `webui_v2::sse_capacity`). Do **not** use
+/// for a system-wide capacity/admission-control signal: those must keep
+/// draining the caller's budget during the overload they exist to contain.
+pub(crate) fn mark_rate_limit_refundable(mut response: Response) -> Response {
+    response.extensions_mut().insert(RateLimitRefundable);
+    response
+}
+
 fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -352,9 +390,9 @@ pub(crate) async fn enforce_rate_limit(
     let now = now_epoch_secs();
     let window_seconds = window.as_secs().max(1);
 
-    let shard = &state.shards[shard_index(&key.bucket_key)];
-    let allowed = {
-        let mut guard = match shard.lock() {
+    let shard_idx = shard_index(&key.bucket_key);
+    let charged_window_start = {
+        let mut guard = match state.shards[shard_idx].lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::debug!(
@@ -365,7 +403,7 @@ pub(crate) async fn enforce_rate_limit(
             }
         };
 
-        let window_entry = guard.get_or_insert_mut(key, || Window {
+        let window_entry = guard.get_or_insert_mut(key.clone(), || Window {
             remaining: max_requests,
             window_start: now,
         });
@@ -375,24 +413,69 @@ pub(crate) async fn enforce_rate_limit(
             // request against the fresh budget.
             window_entry.window_start = now;
             window_entry.remaining = max_requests.saturating_sub(1);
-            true
+            Some(window_entry.window_start)
         } else if window_entry.remaining == 0 {
-            false
+            None
         } else {
             window_entry.remaining -= 1;
-            true
+            Some(window_entry.window_start)
         }
     };
 
-    if !allowed {
+    let Some(charged_window_start) = charged_window_start else {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Try again shortly.",
         )
             .into_response();
+    };
+
+    let mut response = next.run(request).await;
+
+    if response
+        .extensions_mut()
+        .remove::<RateLimitRefundable>()
+        .is_some()
+    {
+        refund_charge(
+            &state.shards[shard_idx],
+            &key,
+            charged_window_start,
+            max_requests,
+        );
     }
 
-    next.run(request).await
+    response
+}
+
+/// Credits back a charge made by [`enforce_rate_limit`] when the downstream
+/// handler marked its own `429` response refundable (see
+/// [`mark_rate_limit_refundable`]). Only refunds into the exact window it
+/// charged (`window_start` must be unchanged); if the window rolled over or
+/// the entry was evicted under LRU pressure in the meantime, this is a
+/// no-op rather than mis-crediting a different window.
+fn refund_charge(
+    shard: &Mutex<LruCache<CounterKey, Window>>,
+    key: &CounterKey,
+    charged_window_start: u64,
+    max_requests: u32,
+) {
+    let mut guard = match shard.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::webui_rate_limit",
+                "rate-limit LRU mutex poisoned during refund — recovering",
+            );
+            poisoned.into_inner()
+        }
+    };
+    if let Some(window_entry) = guard.get_mut(key)
+        && window_entry.window_start == charged_window_start
+        && window_entry.remaining < max_requests
+    {
+        window_entry.remaining += 1;
+    }
 }
 
 #[cfg(test)]
@@ -601,5 +684,240 @@ mod tests {
             request_counter_key(0, &route, &request),
             Err(CounterKeyError::Misconfigured)
         ));
+    }
+
+    /// Shared harness for the two `enforce_rate_limit` + downstream-429
+    /// regression tests below: a real axum app with the middleware wired
+    /// exactly as production does (`middleware::from_fn_with_state`, per
+    /// `webui_serve.rs`), fronting a handler that always 429s — marking the
+    /// response refundable or not depending on `mark_refundable`.
+    fn refund_test_app(
+        max_requests: u32,
+        succeed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        mark_refundable: bool,
+    ) -> axum::Router {
+        use axum::Router;
+        use axum::extract::State as AxumState;
+        use axum::middleware;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone)]
+        struct HandlerState {
+            succeed: Arc<AtomicBool>,
+            mark_refundable: bool,
+        }
+
+        async fn handler(AxumState(state): AxumState<HandlerState>) -> Response {
+            if state.succeed.load(Ordering::SeqCst) {
+                StatusCode::OK.into_response()
+            } else if state.mark_refundable {
+                mark_rate_limit_refundable(StatusCode::TOO_MANY_REQUESTS.into_response())
+            } else {
+                StatusCode::TOO_MANY_REQUESTS.into_response()
+            }
+        }
+
+        // `limited_state` registers its route as POST — match it here, or
+        // `match_route` silently no-ops the limiter for the whole test
+        // (mismatched method looks like an unrelated route to the matcher).
+        Router::new()
+            .route("/api/test", post(handler))
+            .with_state(HandlerState {
+                succeed,
+                mark_refundable,
+            })
+            .route_layer(middleware::from_fn_with_state(
+                limited_state(max_requests, 60),
+                enforce_rate_limit,
+            ))
+    }
+
+    fn refund_test_request(alice: &WebUiAuthenticatedCaller) -> Request<axum::body::Body> {
+        use axum::body::Body;
+        use axum::http::{Method as HttpMethod, Request};
+
+        let mut request = Request::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/test")
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(alice.clone());
+        request
+    }
+
+    /// Regression test for issue #6581: a downstream handler rejecting a
+    /// request with its own 429 marked refundable (e.g. the SSE per-caller
+    /// concurrency cap in `webui_v2::sse_capacity`, via
+    /// `mark_rate_limit_refundable`) must not also drain the caller's
+    /// per-route rate-limit budget.
+    #[tokio::test]
+    async fn refundable_downstream_429_does_not_consume_rate_limit_budget() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tower::ServiceExt;
+
+        let succeed = Arc::new(AtomicBool::new(false));
+        let app = refund_test_app(2, succeed.clone(), true);
+        let alice = caller("tenant-alpha", "alice");
+
+        // max_requests is 2, but fire 5 requests against the always-429
+        // handler. If the budget were spent on these, the middleware itself
+        // would start rejecting before the handler is even reached.
+        for attempt in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(refund_test_request(&alice))
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "attempt {attempt} should reach the handler and get its 429"
+            );
+        }
+
+        // Now let the handler succeed. This proves the budget was never
+        // actually spent by the downstream refundable 429s above.
+        succeed.store(true, Ordering::SeqCst);
+        let response = app
+            .clone()
+            .oneshot(refund_test_request(&alice))
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "refundable downstream 429s must not have consumed the rate-limit budget"
+        );
+    }
+
+    /// Security regression: a downstream 429 that is NOT marked refundable
+    /// — e.g. the turn-submission admission-control rejections mapped in
+    /// `ironclaw_product_workflow::reborn_services::map_turn_error`
+    /// (`TurnErrorCategory::AdmissionRejected` / `CapacityExceeded`) — must
+    /// keep draining the caller's budget. Refunding these would let a
+    /// caller flooding the system during an overload dodge the very limit
+    /// meant to contain it.
+    #[tokio::test]
+    async fn unmarked_downstream_429_still_consumes_rate_limit_budget() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tower::ServiceExt;
+
+        let succeed = Arc::new(AtomicBool::new(false));
+        let app = refund_test_app(2, succeed.clone(), false);
+        let alice = caller("tenant-alpha", "alice");
+
+        // Two unmarked 429s spend the whole (max_requests = 2) budget.
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(refund_test_request(&alice))
+                .await
+                .expect("oneshot");
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        // Even once the handler would succeed, the middleware itself now
+        // rejects because the budget was genuinely spent.
+        succeed.store(true, Ordering::SeqCst);
+        let response = app
+            .clone()
+            .oneshot(refund_test_request(&alice))
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "unmarked downstream 429s must still consume the rate-limit budget"
+        );
+    }
+
+    #[test]
+    fn refund_charge_noops_when_window_rolled_over_since_charge() {
+        let state = limited_state(3, 60);
+        let alice = caller("tenant-alpha", "alice");
+        let key = CounterKey {
+            route_idx: 0,
+            bucket_key: caller_key(&alice),
+        };
+        let shard = &state.shards[shard_index(&key.bucket_key)];
+
+        // Simulate a charge made against a now-stale window: insert an
+        // entry whose window_start is different from what the (stale)
+        // caller believes it charged.
+        {
+            let mut guard = shard.lock().expect("lock");
+            guard.get_or_insert_mut(key.clone(), || Window {
+                remaining: 1,
+                window_start: 1_000,
+            });
+        }
+        let stale_charged_window_start = 500; // does not match the 1_000 above
+
+        refund_charge(shard, &key, stale_charged_window_start, 3);
+
+        let guard = shard.lock().expect("lock");
+        let entry = guard.peek(&key).expect("entry still present");
+        assert_eq!(
+            entry.remaining, 1,
+            "refund into a rolled-over window must be a no-op"
+        );
+    }
+
+    #[test]
+    fn refund_charge_noops_when_key_missing_from_cache() {
+        let state = limited_state(3, 60);
+        let alice = caller("tenant-alpha", "alice");
+        let key = CounterKey {
+            route_idx: 0,
+            bucket_key: caller_key(&alice),
+        };
+        let shard = &state.shards[shard_index(&key.bucket_key)];
+
+        // No entry was ever inserted for this key (never charged, or
+        // evicted under LRU pressure) — refund must not fabricate one.
+        refund_charge(shard, &key, now_epoch_secs(), 3);
+
+        let guard = shard.lock().expect("lock");
+        assert!(
+            guard.peek(&key).is_none(),
+            "refund must not create an entry for an uncharged/evicted key"
+        );
+    }
+
+    #[test]
+    fn refund_charge_does_not_credit_past_max_requests() {
+        let state = limited_state(3, 60);
+        let alice = caller("tenant-alpha", "alice");
+        let key = CounterKey {
+            route_idx: 0,
+            bucket_key: caller_key(&alice),
+        };
+        let shard = &state.shards[shard_index(&key.bucket_key)];
+        let window_start = now_epoch_secs();
+
+        {
+            let mut guard = shard.lock().expect("lock");
+            guard.get_or_insert_mut(key.clone(), || Window {
+                remaining: 3,
+                window_start,
+            });
+        }
+
+        // Two refunds for the same charge (a duplicate/racing refund)
+        // must not push `remaining` past `max_requests`.
+        refund_charge(shard, &key, window_start, 3);
+        refund_charge(shard, &key, window_start, 3);
+
+        let guard = shard.lock().expect("lock");
+        let entry = guard.peek(&key).expect("entry still present");
+        assert_eq!(
+            entry.remaining, 3,
+            "refund must not credit a window past max_requests"
+        );
     }
 }

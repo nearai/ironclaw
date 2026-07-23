@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::{SecretHandle, UserId};
 
+use crate::webui_rate_limit::mark_rate_limit_refundable;
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::webui_v2::schema::WebChatV2EventFrame;
@@ -893,10 +894,12 @@ pub async fn stream_events(
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let slot = state
+    let Some(slot) = state
         .sse_capacity()
         .try_acquire(&caller.tenant_id, &caller.user_id)
-        .ok_or_else(sse_concurrency_exhausted)?;
+    else {
+        return Ok(sse_capacity_rejected());
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
@@ -921,7 +924,16 @@ pub async fn stream_events(
     Ok(response)
 }
 
-/// Build the 429 response for SSE openings that exceed the per-caller
+/// Build the 429 response for SSE openings (both `stream_events` and
+/// `stream_events_ws`) that exceed the per-caller concurrency cap, marked
+/// refundable so it doesn't also drain `enforce_rate_limit`'s separate
+/// request-volume budget — see that middleware's module doc for why this
+/// differs from e.g. turn-submission admission-control 429s.
+fn sse_capacity_rejected() -> Response {
+    mark_rate_limit_refundable(sse_concurrency_exhausted().into_response())
+}
+
+/// Build the 429 error for SSE openings that exceed the per-caller
 /// concurrency cap. `retryable: true` because the slot will free as soon
 /// as one of the caller's existing streams closes.
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
@@ -2244,10 +2256,12 @@ pub async fn stream_events_ws(
     Query(query): Query<StreamEventsQuery>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
-    let slot = state
+    let Some(slot) = state
         .sse_capacity()
         .try_acquire(&caller.tenant_id, &caller.user_id)
-        .ok_or_else(sse_concurrency_exhausted)?;
+    else {
+        return Ok(sse_capacity_rejected());
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
