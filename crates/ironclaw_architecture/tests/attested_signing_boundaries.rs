@@ -137,14 +137,15 @@ fn attestation_crate_has_no_chain_secrets_or_webauthn_dependency() {
     );
 }
 
-/// The dependency names the external-wallet crate (PR7) must never carry. It
-/// implements the browser injected provider and holds NO key material, so it
-/// must not pull the heavy chain SDKs (`solana-sdk` / `near-primitives`) nor the
-/// key-custody crate (`ironclaw_secrets`) nor the chain-signing crate
-/// (`ironclaw_chain_signing`). It IS allowed `k256` / `ed25519-dalek` / `sha3` /
-/// `sha2` for signer recovery + ed25519 verification, plus
-/// `ironclaw_signing_provider` and `ironclaw_attestation` — so those are
-/// deliberately absent from this list.
+/// The dependency names the external-wallet crate (PR7 + PR9) must never carry.
+/// It implements the browser injected provider (PR7) and the WalletConnect v2
+/// provider (PR9) and holds NO key material, so it must not pull the heavy chain
+/// SDKs (`solana-sdk` / `near-primitives`) nor the key-custody crate
+/// (`ironclaw_secrets`) nor the chain-signing crate (`ironclaw_chain_signing`).
+/// It IS allowed `k256` / `ed25519-dalek` / `sha3` / `sha2` for signer recovery
+/// and ed25519 verification, the openssl-free WalletConnect relay fork
+/// (`relay_client` / `relay_rpc`, PR9), plus `ironclaw_signing_provider` and
+/// `ironclaw_attestation` — so those are deliberately absent from this list.
 const WALLET_EXTERNAL_FORBIDDEN_DEPENDENCY_PREFIXES: &[&str] = &[
     "solana-sdk",
     "solana-program",
@@ -188,12 +189,85 @@ fn wallet_external_crate_has_no_chain_sdk_secrets_or_chain_signing_dependency() 
 
     assert!(
         violations.is_empty(),
-        "ironclaw_wallet_external is the injected-wallet provider (PR7) and holds no key material; \
-         it must carry no chain SDK, secrets, or chain-signing dependency. Broadcasting the \
-         wallet-signed tx (ironclaw_chain_signing) is deferred to PR10. Forbidden dependencies \
+        "ironclaw_wallet_external is the external-wallet provider (PR7 + PR9) and holds no key \
+         material; it must carry no chain SDK, secrets, or chain-signing dependency. Broadcasting \
+         the wallet-signed tx (ironclaw_chain_signing) is deferred to PR10. Forbidden dependencies \
          found:\n{}\nSee docs/plans/2026-05-23-attested-signing-substrate.md.",
         violations.join("\n")
     );
+
+    // Positive assertion (PR9): the openssl-free WalletConnect relay fork IS a
+    // dependency of the external-wallet crate. This guards against the WC deps
+    // being silently dropped (which would make the provider unbuildable) and
+    // documents that `relay_client` / `relay_rpc` are the allowed transport.
+    let names: Vec<&str> = dependencies
+        .iter()
+        .filter_map(|d| d["name"].as_str())
+        .collect();
+    for expected in ["relay_client", "relay_rpc"] {
+        assert!(
+            names.contains(&expected),
+            "ironclaw_wallet_external (PR9) must depend on `{expected}` from the openssl-free \
+             WalletConnect fork (tracecommons/walletconnect-rs). Present dependencies: {names:?}"
+        );
+    }
+}
+
+/// The whole attested-signing substrate is deliberately openssl-free: every TLS
+/// path uses rustls/ring so the workspace carries no OpenSSL C dependency (no
+/// system-openssl build/runtime coupling, smaller attack surface, reproducible
+/// cross-compilation). PR9 adds the WalletConnect relay client via the
+/// openssl-free fork (`tracecommons/walletconnect-rs`, rustls default,
+/// `relay_rpc`'s `cacao` feature DISABLED — `cacao` pulls `alloy 0.3.6 → reqwest
+/// default-tls → openssl`). This test fails if anything in the workspace graph
+/// (re)introduces `openssl-sys`, against the Linux target where native-tls would
+/// otherwise resolve to openssl.
+///
+/// If this regresses after a dependency change, the fix is to disable the
+/// offending crate's openssl/native-tls feature and select rustls — NOT to
+/// silence this test.
+#[test]
+fn workspace_graph_is_openssl_free() {
+    // `cargo tree -i <pkg>` exits non-zero with "did not match any packages"
+    // when the package is absent from the graph — exactly the success case here.
+    let manifest_path = workspace_root().join("Cargo.toml");
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "--workspace",
+            "-i",
+            "openssl-sys",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--manifest-path",
+        ])
+        .arg(&manifest_path)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run cargo tree: {error}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if output.status.success() {
+        // A zero exit with non-empty output means openssl-sys IS in the graph.
+        let listed = stdout.trim();
+        assert!(
+            listed.is_empty(),
+            "the attested-signing workspace must stay openssl-free, but `openssl-sys` is in the \
+             dependency graph (Linux target):\n{listed}\n\nThe likely culprit is a native-tls / \
+             default-tls feature — most often `relay_rpc`'s `cacao` (alloy → reqwest default-tls). \
+             Disable it and select rustls; do NOT silence this test. See \
+             docs/plans/2026-05-23-attested-signing-substrate.md."
+        );
+    } else {
+        // Non-zero exit: confirm it is the "no such package" case (openssl-sys
+        // absent = success), not a cargo invocation failure.
+        assert!(
+            stderr.contains("did not match any packages"),
+            "cargo tree failed unexpectedly while checking for openssl-sys:\nstdout: {stdout}\n\
+             stderr: {stderr}"
+        );
+    }
 }
 
 fn cargo_metadata() -> Value {
