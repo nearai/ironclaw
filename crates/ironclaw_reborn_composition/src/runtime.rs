@@ -756,7 +756,13 @@ pub(crate) fn local_lifecycle_facade(
 /// Erase the concrete lifecycle authority only at the product-workflow
 /// boundary. Runtime capability surfaces retain the concrete source so they do
 /// not derive execution authority through an `ExtensionList` DTO.
+// `pub(crate)` and only reachable from this crate's own `#[cfg(test)]` tests,
+// so it reads as dead when the lib is compiled under `test-support` alone (as a
+// dev-dependency of another crate's `--all-targets` build). The `test-support`
+// gate cannot export a `pub(crate)` item, so keep it available there but allow
+// it to be unused in that build shape.
 #[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn local_lifecycle_product_facade(
     services: &RebornServices,
 ) -> Option<Arc<dyn ironclaw_product_workflow::LifecycleProductFacade>> {
@@ -3607,6 +3613,7 @@ pub async fn build_reborn_runtime(
     let channel_run_delivery_events =
         Arc::new(ironclaw_product_workflow::RunDeliveryEventRouter::new(
             turn_event_projection_source,
+            Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
             outbound_state,
         ));
     // Skill learning shares the turn-end seam with trace capture (composed

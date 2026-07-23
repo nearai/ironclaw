@@ -27,7 +27,7 @@ use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
 use ironclaw_turns::{
     EventCursor, GetRunStateRequest, ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnError,
     TurnEventKind, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent, TurnOriginKind,
-    TurnRunId, TurnRunState, TurnStatus, TurnSurfaceType,
+    TurnRunId, TurnRunState, TurnStateStore, TurnStatus, TurnSurfaceType,
 };
 use tokio::sync::{Notify, Semaphore};
 
@@ -78,6 +78,12 @@ struct RunDeliveryEventRouterInner {
 
 struct DurableRunDeliveryReplay {
     source: Arc<dyn TurnEventProjectionSource>,
+    /// Host-owned run-state lookup used only to classify a completed run's
+    /// origin/destination at materialization time. Materializing a handoff for
+    /// a run no channel handler will ever own (a WebApp-destined WebUI answer,
+    /// a scheduled trigger the volatile driver owns, or a context-less run)
+    /// leaks a permanent pending row that every later drain re-scans.
+    run_state: Arc<dyn TurnStateStore>,
     outbound_state: Arc<dyn OutboundStateStore>,
     active: AtomicBool,
     dirty: AtomicBool,
@@ -154,10 +160,12 @@ impl RunDeliveryEventRouter {
     /// coordinator.
     pub fn new(
         source: Arc<dyn TurnEventProjectionSource>,
+        run_state: Arc<dyn TurnStateStore>,
         outbound_state: Arc<dyn OutboundStateStore>,
     ) -> Self {
         let router = Self::build(Some(DurableRunDeliveryReplay {
             source,
+            run_state,
             outbound_state,
             active: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
@@ -339,7 +347,9 @@ impl RunDeliveryEventRouter {
                 if event.cursor <= last_cursor {
                     return Err(DurableRunDeliveryReplayError::MalformedPage);
                 }
-                if event.kind == TurnEventKind::Completed {
+                if event.kind == TurnEventKind::Completed
+                    && self.completed_run_needs_channel_handoff(&event).await
+                {
                     replay
                         .outbound_state
                         .put_run_final_reply_handoff(RunFinalReplyHandoffRecord {
@@ -365,6 +375,79 @@ impl RunDeliveryEventRouter {
             }
             if last_cursor == after {
                 return Err(DurableRunDeliveryReplayError::MalformedPage);
+            }
+        }
+    }
+
+    /// Decide whether a completed run needs a durable channel-delivery handoff.
+    ///
+    /// The handoff exists only to resume external channel delivery — the final
+    /// reply and/or the source handler's progress-placeholder cleanup — across
+    /// a crash. A run that no channel handler will ever own (a WebApp-destined
+    /// WebUI answer, a scheduled trigger the volatile driver owns, or a run
+    /// with no product context) has nothing to deliver, so a materialized
+    /// handoff would leak a permanent pending row that every later drain
+    /// re-scans. Skip those. On any lookup uncertainty the default is
+    /// conservative — materialize — so a real channel delivery is never
+    /// dropped; a channel-originated run that was blocked on OAuth and later
+    /// completed is `Inbound` and always materializes.
+    async fn completed_run_needs_channel_handoff(&self, event: &TurnLifecycleEvent) -> bool {
+        let Some(replay) = self.inner.durable_replay.as_ref() else {
+            return true;
+        };
+        let state = match replay
+            .run_state
+            .get_run_state(GetRunStateRequest {
+                scope: event.scope.clone(),
+                run_id: event.run_id,
+            })
+            .await
+        {
+            Ok(state) => state,
+            // The just-committed run's state should be readable; a leaked
+            // WebApp handoff on a rare transient read error is strictly better
+            // than a dropped channel reply, so fall back to materializing.
+            Err(_) => return true,
+        };
+        let Some(context) = state.product_context.as_ref() else {
+            // No product context means no channel adapter and no origin any
+            // handler serves: nothing to deliver, so a handoff would only leak.
+            return false;
+        };
+        match context.origin {
+            // Channel-origin runs always have a source handler that either
+            // delivers the final reply or retracts its progress placeholder and
+            // settles, so their handoff is never orphaned.
+            TurnOriginKind::Inbound => true,
+            // Scheduled triggers are delivered by the separate volatile
+            // triggered driver, never by this durable channel path.
+            TurnOriginKind::ScheduledTrigger => false,
+            // A WebUI answer lives in the web app unless the run sealed an
+            // explicit external channel target (the cross-channel "send my
+            // answer to X" case). No target, or a WebApp target, needs no
+            // channel handoff.
+            TurnOriginKind::WebUi => {
+                let Some(actor) = state.actor.clone() else {
+                    return true;
+                };
+                match replay
+                    .outbound_state
+                    .load_run_final_reply_target(RunFinalReplyTargetRequest {
+                        run_id: state.run_id,
+                        scope: state.scope.clone(),
+                        actor,
+                    })
+                    .await
+                {
+                    Ok(Some(record)) => {
+                        matches!(
+                            record.destination,
+                            RunFinalReplyDestination::External { .. }
+                        )
+                    }
+                    Ok(None) => false,
+                    Err(_) => true,
+                }
             }
         }
     }

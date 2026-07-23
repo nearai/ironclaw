@@ -48,10 +48,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, ProductTurnContext, ReplyTargetBindingRef, ResumeTurnRequest,
     ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnEventKind, TurnEventPage, TurnEventProjectionSource,
-    TurnEventSink, TurnId, TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus, TurnSurfaceType,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnAdmissionPolicy, TurnCoordinator, TurnError, TurnEventKind, TurnEventPage,
+    TurnEventProjectionSource, TurnEventSink, TurnId, TurnLifecycleEvent, TurnOriginKind,
+    TurnOwner, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus, TurnSurfaceType,
 };
 
 // ── Scripted fakes ─────────────────────────────────────────────────────────
@@ -1469,6 +1469,59 @@ impl TurnCoordinator for FailNextGetRunStateCoordinator {
     }
 }
 
+/// Adapts a scripted `TurnCoordinator` into the `TurnStateStore` seam the
+/// production `RunDeliveryEventRouter::new` uses to classify a completed run's
+/// origin/destination at materialization time. Only `get_run_state` is
+/// exercised by the durable replay; the mutating turn operations are
+/// unreachable from that path.
+struct CoordinatorRunStateStore(Arc<dyn TurnCoordinator>);
+
+#[async_trait]
+impl TurnStateStore for CoordinatorRunStateStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-state store adapter does not submit turns".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-state store adapter does not resume turns".to_string(),
+        })
+    }
+
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-state store adapter does not retry turns".to_string(),
+        })
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-state store adapter does not cancel turns".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        self.0.get_run_state(request).await
+    }
+}
+
+fn run_state_store(coordinator: Arc<dyn TurnCoordinator>) -> Arc<dyn TurnStateStore> {
+    Arc::new(CoordinatorRunStateStore(coordinator))
+}
+
 struct StaticDurableTurnEventLog {
     events: Mutex<Vec<TurnLifecycleEvent>>,
     rebase_required: Mutex<Option<EventCursor>>,
@@ -2523,9 +2576,12 @@ async fn durable_handoff_drain_reaches_later_page_when_first_page_is_deferred() 
         let mut state = event_run_state(run_id, ProductConversationRouteKind::Direct);
         state.status = TurnStatus::Completed;
         state.event_cursor = EventCursor(cursor);
-        if cursor < HANDOFF_COUNT {
-            state.product_context = None;
-        } else {
+        // Every filler stays a channel-origin (Inbound) run with no finalized
+        // message: it materializes a handoff (Inbound always does) but defers at
+        // drain, while only the last page's run has a reply to deliver. A
+        // context-less run is now skipped at materialization, so it can no
+        // longer stand in as a durable-but-deferred filler.
+        if cursor == HANDOFF_COUNT {
             deliverable_run_id = Some(run_id);
         }
         events.push(TurnLifecycleEvent::from_run_state(
@@ -2545,7 +2601,7 @@ async fn durable_handoff_drain_reaches_later_page_when_first_page_is_deferred() 
     seed_final_message(&threads, deliverable_run_id, "later page reply").await;
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let handler = build_event_delivery_handler_for_extension(
-        turns,
+        Arc::clone(&turns),
         binding,
         Arc::clone(&adapter),
         threads,
@@ -2558,6 +2614,7 @@ async fn durable_handoff_drain_reaches_later_page_when_first_page_is_deferred() 
     let event_log = Arc::new(StaticDurableTurnEventLog::new(events));
     let router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(turns as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     router.register(EXTENSION_ID, &handler);
@@ -2664,6 +2721,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     ]));
     let replay_router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     // Destination registration can race source graph startup. A destination
@@ -2735,6 +2793,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     );
     let reopened_router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&reopened_turns) as Arc<dyn TurnCoordinator>),
         Arc::clone(&reopened_store) as Arc<dyn OutboundStateStore>,
     );
     source_adapter.reports.lock().expect("reports").extend([
@@ -2833,6 +2892,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
     );
     let settled_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&settled_turns) as Arc<dyn TurnCoordinator>),
         Arc::clone(&settled_store) as Arc<dyn OutboundStateStore>,
     );
     settled_router.register(DESTINATION_EXTENSION_ID, &settled_destination_handler);
@@ -2918,6 +2978,7 @@ async fn completed_reply_replays_after_crash_before_volatile_observer_and_reopen
     // process. Startup catch-up alone must recover it.
     let first_router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
         Arc::clone(&first_store) as Arc<dyn OutboundStateStore>,
     );
     first_router.register(EXTENSION_ID, &first_handler);
@@ -2959,6 +3020,7 @@ async fn completed_reply_replays_after_crash_before_volatile_observer_and_reopen
     );
     let reopened_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
         reopened_store as Arc<dyn OutboundStateStore>,
     );
     reopened_router.register(EXTENSION_ID, &reopened_handler);
@@ -2997,7 +3059,7 @@ async fn completed_reply_replay_is_duplicate_safe_across_workers() {
         None,
     );
     let handler_b = build_event_delivery_handler(
-        turns,
+        Arc::clone(&turns),
         binding,
         Arc::clone(&adapter),
         threads,
@@ -3006,10 +3068,12 @@ async fn completed_reply_replay_is_duplicate_safe_across_workers() {
     );
     let router_a = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
         store_a as Arc<dyn OutboundStateStore>,
     );
     let router_b = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(turns as Arc<dyn TurnCoordinator>),
         store_b as Arc<dyn OutboundStateStore>,
     );
     router_a.register(EXTENSION_ID, &handler_a);
@@ -3064,6 +3128,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     );
     let router = RunDeliveryEventRouter::new(
         Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     router.register(EXTENSION_ID, &handler);
@@ -3086,7 +3151,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
         .await
         .expect("reinsert handoff for recovery");
     let recovery_handler = build_event_delivery_handler(
-        turns,
+        Arc::clone(&turns),
         binding,
         Arc::clone(&adapter),
         threads,
@@ -3095,6 +3160,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     );
     let recovery_router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(turns as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     recovery_router.register(EXTENSION_ID, &recovery_handler);
@@ -3126,7 +3192,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     let later_threads = Arc::new(InMemorySessionThreadService::default());
     seed_final_message(&later_threads, later_run_id, "later channel reply").await;
     let later_handler = build_event_delivery_handler(
-        later_turns,
+        Arc::clone(&later_turns),
         later_binding,
         Arc::clone(&adapter),
         later_threads,
@@ -3135,6 +3201,7 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
     );
     let later_router = RunDeliveryEventRouter::new(
         later_event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(later_turns as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     later_router.register(EXTENSION_ID, &later_handler);
@@ -3173,8 +3240,14 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
 async fn completed_reply_replay_fails_loud_without_skipping_a_retention_gap() {
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let event_log = Arc::new(StaticDurableTurnEventLog::requiring_rebase(EventCursor(9)));
+    // The retention-gap short-circuits materialization before any run-state
+    // lookup, so the run-state seam is never exercised here.
     let router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::new(EventTurnCoordinator::new(event_run_state(
+            TurnRunId::new(),
+            ProductConversationRouteKind::Direct,
+        ))) as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     router.wait_until_durable_replay_idle().await;
@@ -3208,7 +3281,7 @@ async fn completed_reply_replay_settles_without_send_after_membership_removal() 
     seed_final_message(&threads, run_id, "must not leak").await;
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let handler = build_event_delivery_handler(
-        turns,
+        Arc::clone(&turns),
         binding,
         Arc::clone(&adapter),
         threads,
@@ -3217,6 +3290,7 @@ async fn completed_reply_replay_settles_without_send_after_membership_removal() 
     );
     let router = RunDeliveryEventRouter::new(
         event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(turns as Arc<dyn TurnCoordinator>),
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
     );
     router.register(EXTENSION_ID, &handler);
@@ -3244,6 +3318,176 @@ async fn completed_reply_replay_settles_without_send_after_membership_removal() 
             .expect("pending handoffs")
             .is_empty(),
         "current authority denial is a terminal fail-closed handoff outcome"
+    );
+}
+
+/// Drive a completed run with no external channel destination through the
+/// durable replay and assert it never materializes a handoff (which no channel
+/// handler would ever settle) yet still advances the consumer cursor past the
+/// skipped event, so later drains cannot re-scan it.
+async fn assert_completed_run_materializes_no_channel_handoff(state: TurnRunState) {
+    let run_id = state.run_id;
+    let turns = Arc::new(EventTurnCoordinator::new(state.clone()));
+    let event_log = Arc::new(StaticDurableTurnEventLog::new(vec![
+        TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Completed, None),
+    ]));
+    let binding = Arc::new(EffectiveMembershipBindingService::new(
+        ProductConversationRouteKind::Direct,
+    ));
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    // A finalized reply exists: the point is that it must not be fanned out to a
+    // channel, not that there is nothing to say.
+    seed_final_message(&threads, run_id, "must not leak to a channel").await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let handler = build_event_delivery_handler(
+        Arc::clone(&turns),
+        binding,
+        Arc::clone(&adapter),
+        threads,
+        Arc::clone(&store),
+        None,
+    );
+    let router = RunDeliveryEventRouter::new(
+        event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(turns as Arc<dyn TurnCoordinator>),
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    router.register(EXTENSION_ID, &handler);
+    router.wait_until_durable_replay_idle().await;
+
+    assert!(
+        adapter.texts().is_empty(),
+        "a completed run with no external channel destination must not deliver to a channel"
+    );
+    assert!(
+        store
+            .list_pending_run_final_reply_handoffs(16)
+            .await
+            .expect("pending handoffs")
+            .is_empty(),
+        "a completed run no channel handler can own must not leak a durable pending handoff"
+    );
+    assert_eq!(
+        store
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("handoff cursor"),
+        EventCursor(2),
+        "the consumer cursor advances past the skipped event so later drains never re-scan it"
+    );
+}
+
+#[tokio::test]
+async fn completed_webui_webapp_run_does_not_leak_a_durable_handoff() {
+    let run_id = TurnRunId::new();
+    let mut state = event_run_state(run_id, ProductConversationRouteKind::Direct);
+    state.status = TurnStatus::Completed;
+    state.event_cursor = EventCursor(2);
+    let actor = state.actor.clone().expect("webui run actor");
+    // A pure WebUI chat: no channel adapter, and no sealed external target, so
+    // the answer lives in the web app. Every normal chat completion looks like
+    // this; it must not accrete a permanent pending handoff.
+    state.product_context = Some(ProductTurnContext::new(
+        TurnOriginKind::WebUi,
+        Some(TurnSurfaceType::Direct),
+        None,
+        TurnOwner::Personal {
+            user: actor.user_id,
+        },
+    ));
+    assert_completed_run_materializes_no_channel_handoff(state).await;
+}
+
+#[tokio::test]
+async fn completed_scheduled_trigger_run_does_not_leak_a_durable_handoff() {
+    let run_id = TurnRunId::new();
+    let mut state = event_run_state(run_id, ProductConversationRouteKind::Direct);
+    state.status = TurnStatus::Completed;
+    state.event_cursor = EventCursor(2);
+    // A scheduled trigger is delivered by the separate volatile triggered
+    // driver, never by this durable channel path, so a handoff here is pure
+    // leak even though the run carries a channel adapter.
+    state.product_context = Some(ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        Some(TurnSurfaceType::Direct),
+        Some(RunOriginAdapter::new(EXTENSION_ID).expect("adapter")),
+        TurnOwner::Personal { user: user() },
+    ));
+    assert_completed_run_materializes_no_channel_handoff(state).await;
+}
+
+#[tokio::test]
+async fn completed_final_delivery_dedups_across_a_post_completed_cursor_advance() {
+    let run_id = TurnRunId::new();
+    let turns = Arc::new(EventTurnCoordinator::new(event_run_state(
+        run_id,
+        ProductConversationRouteKind::Direct,
+    )));
+    let completed = turns.transition(TurnStatus::Completed, None, 2);
+    let completed_event =
+        TurnLifecycleEvent::from_run_state(&completed, TurnEventKind::Completed, None);
+    let event_log = Arc::new(StaticDurableTurnEventLog::new(vec![
+        completed_event.clone(),
+    ]));
+    let binding = Arc::new(EffectiveMembershipBindingService::new(
+        ProductConversationRouteKind::Direct,
+    ));
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    seed_final_message(&threads, run_id, "exactly-once final").await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let handler = build_event_delivery_handler(
+        Arc::clone(&turns),
+        Arc::clone(&binding),
+        Arc::clone(&adapter),
+        Arc::clone(&threads),
+        Arc::clone(&store),
+        None,
+    );
+    let router = RunDeliveryEventRouter::new(
+        Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    router.register(EXTENSION_ID, &handler);
+    router.wait_until_durable_replay_idle().await;
+    assert_eq!(adapter.texts(), vec!["exactly-once final"]);
+
+    // Simulate a later post-Completed cursor advance in live run state, then a
+    // recovery process re-encountering the same rebuildable handoff (frozen at
+    // event cursor 2). The durable Final at-most-once identity must key off the
+    // frozen event cursor the drain validated, not the re-fetched live
+    // `state.event_cursor`; otherwise the deterministic delivery attempt lands
+    // on a fresh id and the terminal first send fails to suppress a duplicate.
+    turns.transition(TurnStatus::Completed, None, 7);
+    store
+        .put_run_final_reply_handoff(ironclaw_outbound::RunFinalReplyHandoffRecord {
+            event_cursor: completed_event.cursor,
+            scope: completed_event.scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("reinsert handoff for recovery");
+    let recovery_handler = build_event_delivery_handler(
+        Arc::clone(&turns),
+        binding,
+        Arc::clone(&adapter),
+        threads,
+        Arc::clone(&store),
+        None,
+    );
+    let recovery_router = RunDeliveryEventRouter::new(
+        event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(turns as Arc<dyn TurnCoordinator>),
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    recovery_router.register(EXTENSION_ID, &recovery_handler);
+    recovery_router.wait_until_durable_replay_idle().await;
+    assert_eq!(
+        adapter.texts(),
+        vec!["exactly-once final"],
+        "the final reply must dedup on the frozen event cursor even after a later cursor advance"
     );
 }
 

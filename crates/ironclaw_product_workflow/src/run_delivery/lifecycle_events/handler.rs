@@ -197,7 +197,14 @@ impl RunDeliveryEventHandler {
                 source_cleanup_settled,
             ));
         };
-        let projection_epoch = stage.projection_epoch(state.event_cursor.0);
+        // The durable at-most-once identity for this notification must be keyed
+        // off the frozen cursor of the event being processed — already loaded
+        // and validated by the drain (`handoff.event_cursor` == `event.cursor`)
+        // — not the re-fetched live `state.event_cursor`. They coincide only
+        // while Completed is terminal; a future post-Completed cursor bump would
+        // otherwise drift the Final projection ref to a new `delivery_id`,
+        // defeating the CAS dedup and double-sending the final reply.
+        let projection_epoch = stage.projection_epoch(event.cursor.0);
         let key = DeliveryEventKey {
             run_id: state.run_id,
             stage,
