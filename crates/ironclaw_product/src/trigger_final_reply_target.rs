@@ -135,10 +135,29 @@ impl TriggerFinalReplyTargetService {
             {
                 web_app_trigger_target().map(Some)
             }
-            None => self
-                .resolve_current_binding(scope, &state.reply_target_binding_ref)
+            // Implicit inference only: a source run whose reply binding maps
+            // to no current outbound target (e.g. a WebUI-less synthetic or
+            // retired binding) simply seals no inherited target. Explicit
+            // model-supplied targets still fail closed in
+            // `validate_explicit_target`.
+            None => match self
+                .current_targets
+                .resolve_current_target_id(scope, &state.reply_target_binding_ref)
                 .await
-                .map(Some),
+            {
+                Ok(Some(target_id)) => Ok(Some(target_id)),
+                Ok(None) => Ok(None),
+                Err(error) => {
+                    tracing::warn!(
+                        target = "ironclaw::product_workflow::trigger_final_reply_target",
+                        %error,
+                        "current delivery target lookup failed during trigger target inheritance"
+                    );
+                    Err(target_backend_error(
+                        "outbound delivery target lookup unavailable",
+                    ))
+                }
+            },
         }
     }
 

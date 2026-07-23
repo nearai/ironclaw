@@ -5612,7 +5612,11 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
     .expect("outbound target listing uses composed facade");
     let targets: ironclaw_product::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    assert!(targets.targets.is_empty());
+    // #6520: the host-owned WebApp final-reply destination is always
+    // registered (host_owned_outbound_delivery_target_registry), so a runtime
+    // with zero active channels lists exactly that one target.
+    assert_eq!(targets.targets.len(), 1, "targets: {:?}", targets.targets);
+    assert_eq!(targets.targets[0].target.channel.as_str(), "web_app");
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

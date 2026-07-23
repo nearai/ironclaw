@@ -177,13 +177,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     )
     .await?;
 
-    // The capability must never have reached dispatch — reads the SAME
-    // invocation recorder `assert_tool_invoked` uses for the positive case in
-    // `scenario_verbs_lifecycle`, not a bare `.is_err()` on something unrelated.
-    if h.assert_tool_invoked("builtin.trigger_create")
-        .await
-        .is_ok()
-    {
+    // #6520 consolidated the origin policy into the host authorize step, so
+    // the port-level invocation record exists even for a denial; the handler
+    // must still never have executed. Absence of a recorded capability RESULT
+    // is the post-consolidation observable for "denied before dispatch" (the
+    // trigger_list read below additionally proves no durable side effect).
+    if h.tool_result_output("builtin.trigger_create").await.is_ok() {
         return Err(
             "expected builtin.trigger_create to be denied for a scheduled-trigger fire, \
              but the capability recorder shows it was invoked"
@@ -254,7 +253,14 @@ async fn assert_capability_denied(
         })
         .await?;
     match resolution {
-        Resolution::Done(done) if !done.verdict.is_success() => Ok(()),
+        // #6520: a policy denial surfaces as the terminal typed
+        // `Resolution::Denied` channel (not a failed `Done` verdict); pin the
+        // redacted reason kind so a different denial class cannot pass.
+        Resolution::Denied(denial)
+            if denial.reason_kind == Some(ironclaw_host_api::DenyReason::PolicyDenied) =>
+        {
+            Ok(())
+        }
         other => {
             Err(format!("scheduled-trigger origin must deny {capability_id}, got {other:?}").into())
         }

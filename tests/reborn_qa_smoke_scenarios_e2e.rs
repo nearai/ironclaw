@@ -774,7 +774,19 @@ async fn qa_installing_bundled_extensions_exposes_complete_model_surface_e2e() {
             expected_tool_results: Vec::new(),
         },
         RebornModelReplayStep::AssertProviderToolsThenResponse {
-            capability_ids: capability_ids(BUNDLED_EXTENSION_CAPABILITY_IDS),
+            // `nearai.web_search` is hosted-MCP-backed: #6520 publishes it
+            // fail-closed only after live discovery, which this binary-tier
+            // harness has no scripted egress seam for. Its install→publish→
+            // dispatch contract is pinned end-to-end by
+            // `reborn_integration_mcp::nearai_web_search_dispatches_through_bundled_hosted_mcp`;
+            // this smoke asserts the statically-published surface.
+            capability_ids: capability_ids(
+                &BUNDLED_EXTENSION_CAPABILITY_IDS
+                    .iter()
+                    .copied()
+                    .filter(|id| *id != "nearai.web_search")
+                    .collect::<Vec<_>>(),
+            ),
             response: HostManagedModelResponse::assistant_reply(
                 "qa bundled extension surface complete",
             ),

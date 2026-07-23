@@ -561,6 +561,11 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) trigger_source_turn_state:
         Arc<std::sync::RwLock<Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>>>,
+    /// Sibling rebindable slot for the trigger delivery-target service; the
+    /// test-support repoint seam swaps both slots together.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) trigger_source_turn_state_store:
+        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::TurnStateStore>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -4476,6 +4481,8 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
+        #[cfg(any(test, feature = "test-support"))]
+        trigger_source_turn_state_store: Arc::clone(&services.trigger_source_turn_state_store),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),
