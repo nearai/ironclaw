@@ -4,15 +4,16 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
 };
 use ironclaw_reborn_openai_compat::{
-    OpenAiCompatActorScope, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
-    OpenAiCompatProjectionRef, OpenAiCompatPublicId, OpenAiCompatRequestFingerprint,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID, OpenAiCompatActorScope,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatPublicId, OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,

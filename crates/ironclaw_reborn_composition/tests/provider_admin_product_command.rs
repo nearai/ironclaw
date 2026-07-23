@@ -5,10 +5,10 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflow, ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
+    ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
 };
 use ironclaw_product_workflow::{
-    DefaultProductWorkflow, FakeConversationBindingService, FakeIdempotencyLedger,
+    DefaultProductSurface, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, ProductCommandAdmission, ProductCommandAdmissionService,
     ProductCommandContext, ProductWorkflowError,
 };
@@ -64,7 +64,7 @@ impl ProductCommandAdmissionService for AllowingCommandAdmissionService {
 
 fn workflow_for_reborn_home(
     reborn_home: &std::path::Path,
-) -> (DefaultProductWorkflow, Arc<FakeInboundTurnService>) {
+) -> (DefaultProductSurface, Arc<FakeInboundTurnService>) {
     let home = RebornHome::resolve_from_env_parts(
         Some(reborn_home.as_os_str().to_os_string()),
         None,
@@ -76,7 +76,7 @@ fn workflow_for_reborn_home(
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger, binding)
         .with_product_command_admission_service(Arc::new(AllowingCommandAdmissionService))
         .with_product_command_service(command_service);
     (workflow, inbound)

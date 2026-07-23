@@ -1,5 +1,6 @@
 use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
 use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
+use ironclaw_product_workflow::{RebornServicesError, RebornServicesErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -192,6 +193,20 @@ impl OpenAiCompatHttpError {
         }
     }
 
+    pub fn from_reborn_services_error(error: RebornServicesError) -> Self {
+        let kind = match error.code {
+            RebornServicesErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
+            RebornServicesErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
+            RebornServicesErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
+            RebornServicesErrorCode::NotFound => OpenAiCompatErrorKind::NotFound,
+            RebornServicesErrorCode::Conflict => OpenAiCompatErrorKind::Conflict,
+            RebornServicesErrorCode::RateLimited => OpenAiCompatErrorKind::RateLimited,
+            RebornServicesErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
+            RebornServicesErrorCode::Internal => OpenAiCompatErrorKind::Internal,
+        };
+        Self::from_kind(error.status_code, error.retryable, kind, error.field)
+    }
+
     pub fn internal() -> Self {
         Self::from_kind(500, false, OpenAiCompatErrorKind::Internal, None)
     }
@@ -212,6 +227,12 @@ impl OpenAiCompatHttpError {
 impl From<ProductAdapterError> for OpenAiCompatHttpError {
     fn from(error: ProductAdapterError) -> Self {
         Self::from_product_adapter_error(error)
+    }
+}
+
+impl From<RebornServicesError> for OpenAiCompatHttpError {
+    fn from(error: RebornServicesError) -> Self {
+        Self::from_reborn_services_error(error)
     }
 }
 

@@ -6,7 +6,7 @@
 //! declares inbound channel ingress gets one registration — a dynamic
 //! verification-secrets port over the
 //! `[channel.config]` secret storage plus a [`GenericChannelInboundSink`]
-//! over a per-extension `DefaultProductWorkflow` (durable idempotency ledger
+//! over per-extension ProductSurface admission (durable idempotency ledger
 //! and durable conversation binding at extension-keyed storage roots),
 //! observed by the generic run-delivery observer when the composed runtime
 //! has a delivery coordinator. Deployment registrations remain independent
@@ -46,12 +46,12 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ProductSurface, ProductWorkflowError, RebornFilesystemIdempotencyLedger,
+    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
 use ironclaw_threads::SessionThreadService;
@@ -619,8 +619,9 @@ impl GenericChannelHostAssembly {
     }
 
     /// Build one extension's generic inbound graph: dynamic verification
-    /// secrets over the `[channel.config]` secret storage, the per-extension
-    /// durable workflow, and (with a coordinator) the run-delivery observer.
+    /// secrets over the `[channel.config]` secret storage, per-extension
+    /// ProductSurface admission, and (with a coordinator) the run-delivery
+    /// observer.
     async fn build_generic_graph(
         &self,
         source: &HostedChannelSource,
@@ -654,7 +655,7 @@ impl GenericChannelHostAssembly {
             Arc::clone(&self.deps.thread_service),
             Arc::clone(&self.deps.turn_coordinator),
         ));
-        let mut workflow = DefaultProductWorkflow::new(
+        let mut workflow = DefaultProductSurface::new(
             inbound,
             Arc::clone(&workflow_state.ledger),
             Arc::clone(&binding),
@@ -685,11 +686,12 @@ impl GenericChannelHostAssembly {
                 service
                     as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
             });
+        let surface = Arc::new(workflow) as Arc<dyn ProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,
             classifier: extras.classifier.clone(),
-            workflow: Arc::new(workflow),
+            surface,
             observer: observer
                 .clone()
                 .map(|observer| observer as Arc<dyn PostAdmissionObserver>),

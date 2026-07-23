@@ -3,19 +3,20 @@ use std::{
     sync::Arc,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_auth::{CredentialAccountStatus, project_auth_account_state};
 use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
 
 use crate::{
     ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornAccountBindingSource,
-    RebornAuthAccount, RebornExtensionActionResponse, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornServicesError,
-    RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
+    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
+    RebornServicesError, RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
+    WebUiInboundValidationCode,
 };
 
 use super::{
@@ -24,10 +25,16 @@ use super::{
         ExtensionCredentialReadiness, credential_scope, readiness_for_requirements,
     },
     extension_onboarding,
-    lifecycle_setup::map_lifecycle_error,
+    lifecycle_setup::{map_lifecycle_error, validation_error},
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
+
+pub const EXTENSIONS_VIEW: ProductView<serde_json::Value, RebornExtensionListResponse> =
+    ProductView::unpaginated("extensions");
+
+pub const EXTENSION_REGISTRY_VIEW: ProductView<serde_json::Value, RebornExtensionRegistryResponse> =
+    ProductView::unpaginated("extension_registry");
 
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
@@ -111,68 +118,34 @@ pub(super) async fn list_extension_registry(
     })
 }
 
-pub(super) async fn install_extension(
+pub(super) async fn import_extension_capability(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
-    package_ref: LifecyclePackageRef,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    input: serde_json::Value,
+) -> Result<(), RebornServicesError> {
+    let bundle_base64 = match input {
+        serde_json::Value::Object(mut object) => object
+            .remove("bundle_base64")
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .ok_or_else(|| {
+                validation_error("bundle_base64", WebUiInboundValidationCode::MissingField)
+            })?,
+        _ => {
+            return Err(validation_error(
+                "input",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
+    };
+    let bundle = STANDARD
+        .decode(bundle_base64)
+        .map_err(|_| validation_error("bundle_base64", WebUiInboundValidationCode::InvalidValue))?;
     let context = lifecycle_surface_context(caller);
-    let lifecycle = execute_lifecycle(
-        facade,
-        context.clone(),
-        LifecycleProductAction::ExtensionInstall { package_ref },
-    )
-    .await?;
-    let projection = project_action_package_best_effort(facade, context, &lifecycle).await;
-    Ok(action_response(&lifecycle, None, projection.as_ref()))
-}
-
-pub(super) async fn import_extension(
-    facade: &dyn LifecycleProductFacade,
-    caller: WebUiAuthenticatedCaller,
-    bundle: Vec<u8>,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let context = lifecycle_surface_context(caller);
-    let lifecycle = facade
+    facade
         .import_extension_bundle(context, bundle)
         .await
         .map_err(map_lifecycle_error)?;
-    Ok(action_response(&lifecycle, None, None))
-}
-
-pub(super) async fn activate_extension(
-    facade: &dyn LifecycleProductFacade,
-    caller: WebUiAuthenticatedCaller,
-    package_ref: LifecyclePackageRef,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let context = lifecycle_surface_context(caller);
-    let lifecycle = execute_lifecycle(
-        facade,
-        context.clone(),
-        LifecycleProductAction::ExtensionActivate { package_ref },
-    )
-    .await?;
-    let projection = project_action_package_best_effort(facade, context, &lifecycle).await;
-    Ok(action_response(
-        &lifecycle,
-        Some(lifecycle.phase == InstallationState::Active),
-        projection.as_ref(),
-    ))
-}
-
-pub(super) async fn remove_extension(
-    facade: &dyn LifecycleProductFacade,
-    caller: WebUiAuthenticatedCaller,
-    package_ref: LifecyclePackageRef,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let context = lifecycle_surface_context(caller);
-    let lifecycle = execute_lifecycle(
-        facade,
-        context,
-        LifecycleProductAction::ExtensionRemove { package_ref },
-    )
-    .await?;
-    Ok(action_response(&lifecycle, None, None))
+    Ok(())
 }
 
 async fn execute_lifecycle(
@@ -184,35 +157,6 @@ async fn execute_lifecycle(
         .execute(context, action)
         .await
         .map_err(map_lifecycle_error)
-}
-
-async fn project_action_package(
-    facade: &dyn LifecycleProductFacade,
-    context: LifecycleProductContext,
-    lifecycle: &LifecycleProductResponse,
-) -> Result<Option<LifecycleProductResponse>, RebornServicesError> {
-    let Some(package_ref) = lifecycle.package_ref.clone() else {
-        return Ok(None);
-    };
-    facade
-        .project_package(context, package_ref)
-        .await
-        .map(Some)
-        .map_err(map_lifecycle_error)
-}
-
-async fn project_action_package_best_effort(
-    facade: &dyn LifecycleProductFacade,
-    context: LifecycleProductContext,
-    lifecycle: &LifecycleProductResponse,
-) -> Option<LifecycleProductResponse> {
-    // Install/activate already mutated lifecycle state. Projection only enriches
-    // the response with onboarding copy, so failure must not turn a completed
-    // action into a browser-visible mutation error.
-    project_action_package(facade, context, lifecycle)
-        .await
-        .ok()
-        .flatten()
 }
 
 fn lifecycle_surface_context(caller: WebUiAuthenticatedCaller) -> LifecycleProductContext {
@@ -506,34 +450,6 @@ fn vendor_auth_accounts(
     }]
 }
 
-fn action_response(
-    lifecycle: &LifecycleProductResponse,
-    activated: Option<bool>,
-    projection: Option<&LifecycleProductResponse>,
-) -> RebornExtensionActionResponse {
-    let success = !matches!(
-        lifecycle.phase,
-        InstallationState::Failed | InstallationState::Unsupported
-    );
-    let onboarding = projection
-        .map(extension_onboarding::from_lifecycle)
-        .unwrap_or_else(extension_onboarding::ExtensionOnboarding::empty);
-    RebornExtensionActionResponse {
-        success,
-        message: onboarding
-            .instructions
-            .clone()
-            .or_else(|| lifecycle.message.clone())
-            .unwrap_or_else(|| "Extension lifecycle action completed".to_string()),
-        activated,
-        auth_url: None,
-        awaiting_token: onboarding.awaiting_token,
-        instructions: onboarding.instructions,
-        onboarding_state: onboarding.state,
-        onboarding: onboarding.onboarding,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -555,9 +471,10 @@ mod tests {
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
-        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
-        RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
+        RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+        WebUiAuthenticatedCaller,
     };
 
     #[derive(Default)]
@@ -592,110 +509,6 @@ mod tests {
 
     fn channel_connections(entries: &[(&str, bool)]) -> Arc<dyn ChannelConnectionFacade> {
         Arc::new(TestConnections::with_connections(entries))
-    }
-
-    #[tokio::test]
-    async fn install_action_projects_lifecycle_onboarding_when_available() {
-        let facade = ActionProjectionFacade {
-            projection_error: false,
-        };
-
-        let response = install_extension(&facade, caller(), package_ref())
-            .await
-            .expect("install response");
-
-        assert!(response.success);
-        assert_eq!(
-            response.message,
-            "Fixture needs a token before its tools can run."
-        );
-        assert_eq!(
-            response.onboarding_state,
-            Some(RebornExtensionOnboardingState::SetupRequired)
-        );
-        assert_eq!(response.awaiting_token, Some(true));
-        assert_eq!(
-            response
-                .onboarding
-                .as_ref()
-                .and_then(|payload| payload.credential_instructions.as_deref()),
-            Some("Paste the fixture token.")
-        );
-    }
-
-    #[tokio::test]
-    async fn install_action_keeps_success_when_message_projection_fails() {
-        let facade = ActionProjectionFacade {
-            projection_error: true,
-        };
-
-        let response = install_extension(&facade, caller(), package_ref())
-            .await
-            .expect("install response");
-
-        assert!(response.success);
-        assert_eq!(response.message, "Fixture installed.");
-        assert!(response.onboarding_state.is_none());
-        assert!(response.onboarding.is_none());
-    }
-
-    #[tokio::test]
-    async fn remove_action_delegates_once_with_authenticated_surface_context() {
-        let facade = RemoveFacade::default();
-        let caller = caller();
-
-        let response = remove_extension(&facade, caller.clone(), package_ref())
-            .await
-            .expect("remove response");
-
-        assert!(response.success);
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 1);
-        let (context, action) = &calls[0];
-        assert_eq!(
-            *action,
-            LifecycleProductAction::ExtensionRemove {
-                package_ref: package_ref(),
-            }
-        );
-        match context {
-            LifecycleProductContext::Surface(surface) => {
-                assert_eq!(surface.tenant_id, caller.tenant_id);
-                assert_eq!(surface.user_id, caller.user_id);
-                assert_eq!(surface.agent_id, caller.agent_id);
-                assert_eq!(surface.project_id, caller.project_id);
-            }
-            other => panic!("unexpected lifecycle context: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn remove_action_stays_retryable_when_removal_fails_after_disconnect() {
-        let facade = RemoveFacade::default();
-        facade.fail_next_removes(1);
-        let caller = caller();
-
-        let error = remove_extension(&facade, caller.clone(), package_ref())
-            .await
-            .expect_err("removal failure must surface after disconnect succeeded");
-        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-        assert!(error.retryable, "transient removal failures stay retryable");
-
-        remove_extension(&facade, caller, package_ref())
-            .await
-            .expect("retry converges once removal succeeds");
-
-        let calls = facade.calls.lock().expect("lock");
-        let actions: Vec<_> = calls.iter().map(|(_, action)| action.clone()).collect();
-        assert_eq!(actions.len(), 2, "one remove call per attempt");
-        assert!(matches!(
-            actions[0],
-            LifecycleProductAction::ExtensionRemove { .. }
-        ));
-        assert!(matches!(
-            actions[1],
-            LifecycleProductAction::ExtensionRemove { .. }
-        ));
     }
 
     #[tokio::test]
@@ -1254,148 +1067,6 @@ mod tests {
         }
     }
 
-    struct ActionProjectionFacade {
-        projection_error: bool,
-    }
-
-    #[async_trait]
-    impl LifecycleProductFacade for ActionProjectionFacade {
-        async fn execute(
-            &self,
-            _context: LifecycleProductContext,
-            action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            assert!(matches!(
-                action,
-                LifecycleProductAction::ExtensionInstall { .. }
-            ));
-            Ok(LifecycleProductResponse {
-                package_ref: Some(package_ref()),
-                phase: InstallationState::Installed,
-                blockers: Vec::new(),
-                message: Some("Fixture installed.".to_string()),
-                payload: Some(LifecycleProductPayload::ExtensionInstall {
-                    installed: true,
-                    visible_capability_ids: Vec::new(),
-                    next_step: "Call builtin.extension_activate next.".to_string(),
-                }),
-            })
-        }
-
-        async fn project_package(
-            &self,
-            _context: LifecycleProductContext,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            if self.projection_error {
-                return Err(ProductWorkflowError::Transient {
-                    reason: "projection unavailable".to_string(),
-                });
-            }
-            Ok(LifecycleProductResponse {
-                package_ref: Some(package_ref()),
-                phase: InstallationState::Installed,
-                blockers: Vec::new(),
-                message: None,
-                payload: Some(LifecycleProductPayload::ExtensionList {
-                    extensions: vec![LifecycleInstalledExtensionSummary {
-                        summary: summary_with_onboarding(),
-                        phase: InstallationState::Installed,
-                        install_scope: None,
-                    }],
-                    count: 1,
-                }),
-            })
-        }
-    }
-
-    struct RemoveFacade {
-        calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
-        summary: LifecycleExtensionSummary,
-        channel: bool,
-        remove_failures: Mutex<usize>,
-    }
-
-    impl Default for RemoveFacade {
-        fn default() -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                summary: summary_with_onboarding(),
-                channel: true,
-                remove_failures: Mutex::new(0),
-            }
-        }
-    }
-
-    impl RemoveFacade {
-        fn fail_next_removes(&self, count: usize) {
-            *self.remove_failures.lock().expect("lock") = count;
-        }
-    }
-
-    #[async_trait]
-    impl LifecycleProductFacade for RemoveFacade {
-        async fn execute(
-            &self,
-            context: LifecycleProductContext,
-            action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            self.calls
-                .lock()
-                .expect("lock")
-                .push((context, action.clone()));
-            match action {
-                LifecycleProductAction::ExtensionList => {
-                    let mut summary = self.summary.clone();
-                    if self.channel {
-                        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
-                    }
-                    Ok(LifecycleProductResponse {
-                        package_ref: None,
-                        phase: InstallationState::Installed,
-                        blockers: Vec::new(),
-                        message: None,
-                        payload: Some(LifecycleProductPayload::ExtensionList {
-                            extensions: vec![LifecycleInstalledExtensionSummary {
-                                summary,
-                                phase: InstallationState::Installed,
-                                install_scope: None,
-                            }],
-                            count: 1,
-                        }),
-                    })
-                }
-                LifecycleProductAction::ExtensionRemove { package_ref } => {
-                    {
-                        let mut failures = self.remove_failures.lock().expect("lock");
-                        if *failures > 0 {
-                            *failures -= 1;
-                            return Err(ProductWorkflowError::Transient {
-                                reason: "extension removal unavailable".to_string(),
-                            });
-                        }
-                    }
-                    Ok(LifecycleProductResponse {
-                        package_ref: Some(package_ref),
-                        phase: InstallationState::Removed,
-                        blockers: Vec::new(),
-                        message: Some("Fixture removed.".to_string()),
-                        payload: Some(LifecycleProductPayload::ExtensionRemove { removed: true }),
-                    })
-                }
-                other => panic!("unexpected lifecycle action: {other:?}"),
-            }
-        }
-
-        async fn project_package(
-            &self,
-            _context: LifecycleProductContext,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            panic!("remove_extension should not project one package")
-        }
-    }
-
     fn caller() -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller::new(
             TenantId::new("tenant-alpha").expect("valid tenant"),
@@ -1403,10 +1074,6 @@ mod tests {
             Some(AgentId::new("agent-alpha").expect("valid agent")),
             Some(ProjectId::new("project-alpha").expect("valid project")),
         )
-    }
-
-    fn package_ref() -> LifecyclePackageRef {
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("valid ref")
     }
 
     fn summary_with_onboarding() -> LifecycleExtensionSummary {

@@ -14,11 +14,11 @@ use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationHoldReason, RebornAutomationRecentRunStatus,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState, RebornServices,
-    RebornServicesApi, RebornServicesErrorCode, RebornServicesErrorKind,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
+    ProductSurface, ProductWorkflowError, RebornAutomationHoldReason,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornListThreadsResponse, RebornServices, RebornServicesErrorCode,
+    RebornServicesErrorKind, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    THREADS_VIEW, WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
@@ -753,15 +753,23 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
     }));
 
     let response = services
-        .list_threads(
+        .query(
             webui_caller(&c),
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            THREADS_VIEW
+                .query(
+                    WebUiListThreadsRequest {
+                        needs_approval: true,
+                        ..WebUiListThreadsRequest::default()
+                    },
+                    None,
+                )
+                .expect("thread list params"),
         )
         .await
         .expect("list approval notification threads");
+    let response: RebornListThreadsResponse = THREADS_VIEW
+        .decode_page(response)
+        .expect("thread list payload");
 
     assert_eq!(
         response

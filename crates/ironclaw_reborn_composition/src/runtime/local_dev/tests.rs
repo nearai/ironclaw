@@ -22,21 +22,23 @@ mod tests {
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-        SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-        WRITE_FILE_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_host::{
         CapabilityWriteResult, DurablePersistence, HostManagedModelError,
         HostManagedModelErrorKind, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextSource,
     };
-    use ironclaw_outbound::CommunicationPreferenceKey;
+    use ironclaw_outbound::{
+        CommunicationPreferenceKey, DeliveryTargetCapabilities, OutboundDeliveryTargetId,
+        OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
+    };
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
         LifecycleProductFacade, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-        RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-        RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+        RebornOutboundDeliveryTargetId,
     };
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, FilesystemSessionThreadService,
@@ -59,12 +61,9 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
-    use crate::outbound::outbound_preferences::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
-    };
     use crate::outbound::{
-        OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
-        RebornOutboundPreferencesFacade,
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
 
@@ -312,8 +311,8 @@ mod tests {
 
     struct StaticOutboundDeliveryTargetProvider {
         entry: OutboundDeliveryTargetEntry,
-        expected_caller: std::sync::Mutex<Option<WebUiAuthenticatedCaller>>,
-        observed_callers: std::sync::Mutex<Vec<WebUiAuthenticatedCaller>>,
+        expected_caller: std::sync::Mutex<Option<OutboundDeliveryTargetScope>>,
+        observed_callers: std::sync::Mutex<Vec<OutboundDeliveryTargetScope>>,
     }
 
     impl StaticOutboundDeliveryTargetProvider {
@@ -325,11 +324,11 @@ mod tests {
             }
         }
 
-        fn expect_caller(&self, caller: WebUiAuthenticatedCaller) {
+        fn expect_caller(&self, caller: OutboundDeliveryTargetScope) {
             *self.expected_caller.lock().expect("caller lock") = Some(caller);
         }
 
-        fn observed_callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        fn observed_callers(&self) -> Vec<OutboundDeliveryTargetScope> {
             self.observed_callers
                 .lock()
                 .expect("observed caller lock")
@@ -341,8 +340,8 @@ mod tests {
     impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             self.observed_callers
                 .lock()
                 .expect("observed caller lock")
@@ -359,7 +358,7 @@ mod tests {
             // Fixture answers a single expected caller; claim that caller as
             // owner so the entry survives the registry caller-scoping filter.
             let mut entry = self.entry.clone();
-            entry.owner = OutboundDeliveryTargetOwner::for_caller(caller);
+            entry.owner = OutboundDeliveryTargetOwner::for_scope(caller);
             Ok(vec![entry])
         }
     }
@@ -367,13 +366,8 @@ mod tests {
     fn expected_outbound_delivery_caller(
         run_context: &LoopRunContext,
         user_id: UserId,
-    ) -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
-            run_context.scope.tenant_id.clone(),
-            user_id,
-            run_context.scope.agent_id.clone(),
-            run_context.scope.project_id.clone(),
-        )
+    ) -> OutboundDeliveryTargetScope {
+        OutboundDeliveryTargetScope::new(run_context.scope.tenant_id.clone(), user_id)
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
@@ -1971,6 +1965,8 @@ mod tests {
         // wrap_synthetic_capabilities, not a policy capability.
         assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_UPDATE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
@@ -2001,6 +1997,7 @@ mod tests {
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
                 EffectKind::UseSecret,
+                EffectKind::ModifyApproval,
                 EffectKind::ExternalWrite
             ]
         );
@@ -2188,6 +2185,36 @@ mod tests {
         assert_eq!(
             skill_install_grant.constraints.network,
             local_dev_shell_network_policy
+        );
+
+        let skill_update_grant = grant_for(SKILL_UPDATE_CAPABILITY_ID);
+        assert_eq!(
+            skill_update_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(skill_update_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_update_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        let skill_auto_activate_grant = grant_for(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID);
+        assert_eq!(
+            skill_auto_activate_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(skill_auto_activate_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_auto_activate_grant.constraints.network,
+            NetworkPolicy::default()
         );
 
         let skill_remove_grant = grant_for(SKILL_REMOVE_CAPABILITY_ID);
@@ -3627,17 +3654,19 @@ mod tests {
             .expect("local runtime substrate");
         let slack_target_id =
             RebornOutboundDeliveryTargetId::new("slack:test-dm").expect("target id");
-        let slack_target_summary = RebornOutboundDeliveryTargetSummary::new(
-            slack_target_id.clone(),
+        let slack_target_summary = OutboundDeliveryTargetSummary::new(
+            OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
             "slack",
             "Slack DM",
             Some("Personal Slack direct message".to_string()),
         )
         .expect("target summary");
-        let slack_target_capabilities = RebornOutboundDeliveryTargetCapabilities {
+        let slack_target_capabilities = DeliveryTargetCapabilities {
             final_replies: true,
+            progress: false,
             gate_prompts: false,
             auth_prompts: false,
+            modalities: Vec::new(),
         };
         let slack_reply_target =
             ReplyTargetBindingRef::new("reply:test:slack-dm").expect("reply target");
@@ -4353,8 +4382,8 @@ mod tests {
             .expect("local runtime substrate");
         let slack_target_id =
             RebornOutboundDeliveryTargetId::new("slack:yolo-dm").expect("target id");
-        let slack_target_summary = RebornOutboundDeliveryTargetSummary::new(
-            slack_target_id.clone(),
+        let slack_target_summary = OutboundDeliveryTargetSummary::new(
+            OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
             "slack",
             "Slack DM",
             Some("Personal Slack direct message".to_string()),
@@ -4365,10 +4394,12 @@ mod tests {
         let slack_provider = Arc::new(StaticOutboundDeliveryTargetProvider::new(
             OutboundDeliveryTargetEntry {
                 summary: slack_target_summary,
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                capabilities: DeliveryTargetCapabilities {
                     final_replies: true,
+                    progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    modalities: Vec::new(),
                 },
                 reply_target_binding_ref: slack_reply_target.clone(),
                 // Overwritten with the querying caller at list-time.

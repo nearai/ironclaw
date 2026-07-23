@@ -1,7 +1,7 @@
 //! HTTP gateway composition for the Reborn WebChat v2 native surface.
 //!
 //! The `ironclaw_webui_v2` crate ships handlers that dispatch through
-//! `RebornServicesApi` but is deliberately unaware of bearer tokens,
+//! `ProductSurface` but is deliberately unaware of bearer tokens,
 //! OIDC, CORS, body limits, and static security headers — its CLAUDE.md
 //! lists these as "host composition still owes". This module is the
 //! Reborn-side home for that work: it exposes [`webui_v2_app`], the
@@ -217,7 +217,7 @@ pub struct WebuiServeConfig {
     /// Trusted default agent id stamped onto every
     /// [`WebUiAuthenticatedCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
-    /// identity. Required because the downstream `RebornServicesApi`
+    /// identity. Required because the downstream `ProductSurface`
     /// facade builds `ThreadScope` from `caller.agent_id` for every
     /// v2 mutation and read, and a `None` agent_id collapses to a
     /// `400 InvalidRequest` before the handler reaches the workflow.

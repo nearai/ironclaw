@@ -5,25 +5,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
-use ironclaw_host_api::{
-    EffectKind, ExtensionId, InvocationId, ResourceScope, RuntimeKind, UserId,
-};
+use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    ChannelConnectionFacade, OperatorStatusService, ProductSurface, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    RebornServices as ProductRebornServices, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
@@ -44,104 +41,6 @@ use crate::{
     },
 };
 
-static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
-    std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
-
-#[derive(Clone)]
-struct ActiveRegistryOperatorToolCatalog {
-    registry: Arc<SharedExtensionRegistry>,
-    synthetic_tools: Arc<[RebornOperatorToolInfo]>,
-    /// Source of the installation owner-by-extension map (#5459 P1). Present
-    /// for the local-dev runtime; `None` for assemblies without extension
-    /// management, where every registry tool is treated as tenant-shared
-    /// (there is no per-user install path to leak).
-    owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
-}
-
-impl ActiveRegistryOperatorToolCatalog {
-    fn new(
-        registry: Arc<SharedExtensionRegistry>,
-        synthetic_tools: Vec<RebornOperatorToolInfo>,
-        owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
-    ) -> Self {
-        Self {
-            registry,
-            synthetic_tools: Arc::from(synthetic_tools),
-            owner_source,
-        }
-    }
-}
-
-/// Owner data available to one `list_operator_tools` read.
-enum OwnerVisibility {
-    /// No extension management wired: no per-user install path exists, so
-    /// every registry tool is tenant-shared (pre-#5459 behavior).
-    AllShared,
-    /// Owner-aware assembly with a healthy owner map.
-    Owners(std::collections::BTreeMap<ExtensionId, InstallationOwner>),
-    /// Owner-aware assembly whose owner map could not be read. Install-backed
-    /// tools must fail CLOSED — an empty map is indistinguishable from
-    /// "no private owners" (#5525 review).
-    Unavailable,
-}
-
-#[async_trait]
-impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
-    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo> {
-        // #5459 P1: the settings/tools catalog is read by any authenticated
-        // member, so it MUST hide another user's private tool. The global
-        // registry carries no owner, so join the installation owner map and
-        // keep an install-backed capability only when its provider's owner row
-        // says it is tenant-shared or owned by `caller`. Host-authored
-        // builtins (`FirstParty`/`System` runtime — kinds the manifest wire
-        // format cannot even declare) have no install path and stay visible.
-        let owner_by_extension = match &self.owner_source {
-            Some(port) => match port.installation_owners().await {
-                Ok(owners) => OwnerVisibility::Owners(owners),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "settings tool catalog could not read installation owners; \
-                         hiding install-backed registry tools for this read"
-                    );
-                    OwnerVisibility::Unavailable
-                }
-            },
-            None => OwnerVisibility::AllShared,
-        };
-        let snapshot = self.registry.snapshot();
-        let mut tools = snapshot
-            .capabilities()
-            .filter(|descriptor| match &owner_by_extension {
-                OwnerVisibility::AllShared => true,
-                _ if matches!(
-                    descriptor.runtime,
-                    RuntimeKind::FirstParty | RuntimeKind::System
-                ) =>
-                {
-                    true
-                }
-                // Fail closed on a missing owner row: a published
-                // install-backed capability without one is anomalous and could
-                // be private (#5525 review).
-                OwnerVisibility::Owners(owners) => owners
-                    .get(&descriptor.provider)
-                    .is_some_and(|owner| owner.visible_to(caller)),
-                OwnerVisibility::Unavailable => false,
-            })
-            .map(|descriptor| RebornOperatorToolInfo {
-                capability_id: descriptor.id.clone(),
-                provider: descriptor.provider.clone(),
-                description: Arc::<str>::from(descriptor.description.as_str()),
-                default_permission: descriptor.default_permission,
-                effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
-            })
-            .collect::<Vec<_>>();
-        tools.extend(self.synthetic_tools.iter().cloned());
-        tools
-    }
-}
-
 /// WebUI-facing Reborn service bundle for host composition.
 ///
 /// This bundle deliberately exposes facade-shaped product handles consumed
@@ -153,7 +52,7 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
 /// the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
-    pub api: Arc<dyn RebornServicesApi>,
+    pub api: Arc<dyn ProductSurface>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
 }
@@ -162,7 +61,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RebornWebuiBundle")
-            .field("api", &"Arc<dyn RebornServicesApi>")
+            .field("api", &"Arc<dyn ProductSurface>")
             .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .finish()
@@ -537,10 +436,9 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     // The skill activation selector's live master switch (see
-    // `RebornRuntimeSubstrate::skill_auto_activate_learned`); writing it here
-    // changes the next turn's selection without a runtime rebuild. `None` when no
-    // flag-reading selector is wired (the production assembly) — the toggle then
-    // reports unavailable instead of writing to a flag nothing reads.
+    // `RebornRuntimeSubstrate::skill_auto_activate_learned`). The read facade
+    // reports it for the skills view; writes go through the first-party
+    // `builtin.skill_auto_activate_learned_set` capability.
     //
     // Process-global by design: this is a single-operator local-dev switch, so it
     // is intentionally not scoped per caller. A future multi-user surface would
@@ -600,26 +498,6 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         })
     }
 
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        let content = content.ok_or_else(invalid_skill_request)?;
-        validate_skill_content_safety(&content)?;
-        let installed = self
-            .skill_management
-            .install_for_scope(scope, Some(&name), &content)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{}' installed", installed.name),
-        })
-    }
-
     async fn read_skill_content(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -634,105 +512,6 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         Ok(RebornSkillContentResponse {
             name: content.name,
             content: content.content,
-        })
-    }
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        validate_skill_content_safety(&content)?;
-        let updated = self
-            .skill_management
-            .update_for_scope(scope, &name, &content)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{}' updated", updated.name),
-        })
-    }
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        let removed = self
-            .skill_management
-            .remove_for_scope(scope, &name)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{}' removed", removed.name),
-        })
-    }
-
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        let current = self
-            .skill_management
-            .read_content_for_scope(scope.clone(), &name)
-            .await
-            .map_err(map_skill_management_error)?;
-        let updated = ironclaw_skills::set_skill_auto_activate(&current.content, enabled);
-        // The toggled document is trusted prompt text loaded into the next run,
-        // so re-scan it before persisting (parity with install/update).
-        validate_skill_content_safety(&updated)?;
-        // dispatch-exempt: caller-scoped operator skill metadata write,
-        // not an in-turn tool call.
-        let result = self
-            .skill_management
-            .update_for_scope(scope, &name, &updated)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Skill '{}' auto-activation {}",
-                result.name,
-                if enabled { "enabled" } else { "disabled" }
-            ),
-        })
-    }
-
-    async fn set_auto_activate_learned(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        // Fail closed when no flag-reading selector is wired (production
-        // assembly): better to tell the operator the control is unavailable than
-        // to silently accept a write that changes nothing. When a selector is
-        // wired (local-dev), it reads this flag every turn, so the store alone
-        // makes the change take effect on the next message — no runtime rebuild.
-        let Some(flag) = self.auto_activate_learned.as_ref() else {
-            return Err(RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
-                status_code: 503,
-                retryable: false,
-                field: None,
-                validation_code: None,
-            });
-        };
-        flag.store(enabled, Ordering::Relaxed);
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Default skill auto-activation {}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
         })
     }
 }
@@ -838,18 +617,6 @@ fn map_skill_management_error(error: RebornLocalSkillManagementError) -> RebornS
             | ironclaw_skills::SkillManagementErrorKind::InvalidSkill => invalid_skill_request(),
         },
     }
-}
-
-fn validate_skill_content_safety(content: &str) -> Result<(), RebornServicesError> {
-    ironclaw_safety::validate_trusted_trigger_prompt(&*SKILL_CONTENT_SAFETY, content).map_err(
-        |error| {
-            tracing::warn!(
-                reason = error.reason(),
-                "skill content rejected by safety scan"
-            );
-            invalid_skill_request()
-        },
-    )
 }
 
 fn invalid_skill_request() -> RebornServicesError {

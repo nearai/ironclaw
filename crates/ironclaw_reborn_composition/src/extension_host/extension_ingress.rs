@@ -3,7 +3,7 @@
 //! Assembly only: this module constructs the [`ExtensionIngressRouter`] over
 //! the generic host's snapshot watch, provides the per-extension
 //! registration surface concrete channel graphs plug into (secrets + inbound
-//! sink), the generic inbound sink over the EXISTING product workflow
+//! sink), the generic inbound sink over the ProductSurface channel admission
 //! (idempotency ledger → identity/conversation binding → turn submission),
 //! and — behind the serve feature — the one `PublicRouteMount` that serves
 //! `/webhooks/extensions/{extension_id}/{route_suffix}` for every active
@@ -21,12 +21,16 @@ use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::{SecretHandle, TenantId, UserId};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductWorkflow, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload,
+    AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
+    NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    ProductSourceChannel, ProtocolAuthEvidence,
+};
+use ironclaw_product_workflow::{
+    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
+    ChannelInboundSurfaceRequest, ProductOperationRequest, ProductSurface,
+    WebUiAuthenticatedCaller,
 };
 use tokio::task::JoinSet;
 
@@ -64,11 +68,11 @@ pub trait PostAdmissionObserver: Send + Sync {
 }
 
 /// Optional protocol-specific reclassification of a normalized message into
-/// a richer workflow payload (today: gate-resolution replies like
+/// a richer channel payload classification (today: gate-resolution replies like
 /// `approve` / `deny gate:<ref>` / `auth deny <ref>`). Transitional debt:
-/// deleted when gate replies become a host-generic workflow concern.
+/// deleted when gate replies become a host-generic channel concern.
 pub type InboundPayloadClassifier =
-    dyn Fn(&NormalizedInboundMessage) -> Option<ProductInboundPayload> + Send + Sync;
+    dyn Fn(&NormalizedInboundMessage) -> Option<ChannelInboundClassification> + Send + Sync;
 
 /// How the sink mints the trusted auth claim for admitted messages —
 /// mirrors the ingress verification recipe the router executed.
@@ -292,11 +296,11 @@ impl InboundSink for ExtensionIngressRegistry {
     }
 }
 
-// ── The generic inbound sink over the existing workflow ─────────────────────
+// ── The generic inbound sink over ProductSurface admission ──────────────────
 
 /// Pre-admission pairing interception for `WebGeneratedCode` channels: a
 /// direct message from an actor with no identity binding is offered to the
-/// pairing seam BEFORE workflow admission, so a pairing code is consumed
+/// pairing seam BEFORE ProductSurface admission, so a pairing code is consumed
 /// instead of becoming (or failing as) a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChannelPairingInterception {
@@ -322,9 +326,9 @@ pub struct ChannelInboundSinkConfig {
     pub evidence: VerifiedEvidenceMint,
     /// Optional protocol-specific payload reclassification (gate replies).
     pub classifier: Option<Arc<InboundPayloadClassifier>>,
-    /// The EXISTING product workflow: durable idempotency ledger →
+    /// The ProductSurface channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
-    pub workflow: Arc<dyn ProductWorkflow>,
+    pub surface: Arc<dyn ProductSurface>,
     /// Optional post-admission follow-up (e.g. final-reply delivery).
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
@@ -359,8 +363,8 @@ impl ChannelPairingOutcomeObserver {
 }
 
 /// The generic [`InboundSink`]: builds the trusted inbound envelope from a
-/// normalized message and submits it synchronously through the product
-/// workflow — the durable dedupe + admission commit the router requires
+/// normalized message and submits it synchronously through ProductSurface —
+/// the durable dedupe + admission commit the router requires
 /// before acking 2xx. Post-admission observers run on tracked background
 /// tasks drained at shutdown.
 pub struct GenericChannelInboundSink {
@@ -395,6 +399,15 @@ impl GenericChannelInboundSink {
             retryable: false,
             reason: reason.to_string(),
         }
+    }
+
+    fn channel_caller() -> Result<WebUiAuthenticatedCaller, InboundSinkError> {
+        Ok(WebUiAuthenticatedCaller::new(
+            TenantId::new("channel-ingress").map_err(Self::permanent)?,
+            UserId::new("channel-ingress").map_err(Self::permanent)?,
+            None,
+            None,
+        ))
     }
 
     async fn spawn_observer<F>(&self, run: F)
@@ -468,53 +481,40 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
         let evidence = self.config.evidence.mint(&installation_id);
-        let context = TrustedInboundContext::from_verified_evidence(
-            self.config.adapter_id.clone(),
-            installation,
-            Utc::now(),
-            &evidence,
-        )
-        .map_err(Self::permanent)?;
-
-        let payload = match self
-            .config
-            .classifier
-            .as_ref()
-            .and_then(|classify| classify(&message))
-        {
-            Some(payload) => payload,
-            None => ProductInboundPayload::UserMessage(
-                UserMessagePayload::new(
-                    message.text.clone(),
-                    message
-                        .attachments
-                        .iter()
-                        .map(|attachment| attachment.descriptor.clone())
-                        .collect(),
-                    message.trigger,
-                )
-                .map_err(Self::permanent)?,
-            ),
-        };
-        let parsed = ParsedProductInbound::new(
-            message.event_id.clone(),
-            message.actor.clone(),
-            message.conversation.clone(),
-            payload,
-        )
-        .map_err(Self::permanent)?;
-        let envelope =
-            ProductInboundEnvelope::from_trusted_parse(context, parsed).map_err(Self::permanent)?;
-
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
         // router's 2xx is ack-after-commit.
-        // Boxed: the workflow admission (ledger → identity/actor resolution →
+        // Boxed: ProductSurface admission (ledger → identity/actor resolution →
         // conversation binding → turn submission) is the deepest subtree in
         // this future; boxing keeps instrumented builds off the stack limit.
-        match Box::pin(self.config.workflow.submit_inbound(envelope.clone())).await {
-            Ok(ack) => {
+        let request = ChannelInboundSurfaceRequest {
+            adapter_id: self.config.adapter_id.clone(),
+            source_channel: ProductSourceChannel::new(self.config.adapter_id.as_str())
+                .map_err(Self::permanent)?,
+            installation_id: installation,
+            evidence,
+            received_at: Utc::now(),
+            classification: self
+                .config
+                .classifier
+                .as_ref()
+                .and_then(|classify| classify(&message)),
+            message,
+        };
+        let response = Box::pin(self.config.surface.execute_command(
+            Self::channel_caller()?,
+            ProductOperationRequest::channel_inbound(request),
+        ))
+        .await
+        .map_err(Self::permanent)?
+        .into_channel_inbound()
+        .map_err(Self::permanent)?;
+        match response {
+            ChannelInboundSurfaceOutcome::Admitted(admission) => {
+                let admission = *admission;
+                let envelope = admission.envelope;
+                let ack = admission.ack;
                 let duplicate = matches!(ack, ProductInboundAck::Duplicate { .. });
                 let durable = ack.is_durable_outcome();
                 if let Some(observer) = self.config.observer.clone() {
@@ -530,11 +530,13 @@ impl InboundSink for GenericChannelInboundSink {
                 } else {
                     Err(InboundSinkError {
                         retryable: true,
-                        reason: "workflow returned a non-durable rejection".to_string(),
+                        reason: "ProductSurface returned a non-durable rejection".to_string(),
                     })
                 }
             }
-            Err(error) => {
+            ChannelInboundSurfaceOutcome::Invalid(error) => Err(Self::permanent(error)),
+            ChannelInboundSurfaceOutcome::Rejected(rejection) => {
+                let ChannelInboundSurfaceRejectedAdmission { envelope, error } = *rejection;
                 let retryable = error.is_retryable();
                 if let Some(observer) = self.config.observer.clone() {
                     self.spawn_observer(async move {
@@ -549,10 +551,10 @@ impl InboundSink for GenericChannelInboundSink {
                 if retryable {
                     Err(InboundSinkError {
                         retryable: true,
-                        reason: "workflow admission failed retryably".to_string(),
+                        reason: "ProductSurface admission failed retryably".to_string(),
                     })
                 } else {
-                    // A non-retryable workflow error is settled in the durable
+                    // A non-retryable ProductSurface error is settled in the durable
                     // idempotency ledger (a vendor redelivery replays as
                     // Duplicate) — the event is durably accounted for, so the
                     // vendor gets its 2xx; user-visible feedback flows through
@@ -800,19 +802,24 @@ mod tests {
 
     use ironclaw_host_api::UserId;
     use ironclaw_product_adapters::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAdapterError,
-        ProductTriggerReason,
+        ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
+        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
+    };
+    use ironclaw_product_workflow::{
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
+        ProductOperationResponse, ProductOperationTypedInput, ProductSurface, RebornServicesError,
+        RebornServicesErrorCode, RebornServicesErrorKind,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::*;
     use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
-    struct CountingWorkflow {
+    struct CountingSurface {
         submissions: AtomicUsize,
     }
 
-    impl CountingWorkflow {
+    impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
@@ -825,17 +832,71 @@ mod tests {
     }
 
     #[async_trait]
-    impl ProductWorkflow for CountingWorkflow {
-        async fn submit_inbound(
+    impl ProductSurface for CountingSurface {
+        async fn execute_command(
             &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            _caller: WebUiAuthenticatedCaller,
+            request: ProductOperationRequest,
+        ) -> Result<ProductOperationResponse, RebornServicesError> {
+            let operation_id =
+                ProductOperationId::parse(request.operation_id.as_str()).ok_or_else(unavailable)?;
+            if operation_id != ProductOperationId::ChannelInboundAdmit {
+                return Err(unavailable());
+            }
+            let Some(ProductOperationTypedInput::ChannelInbound(request)) = request.typed_input
+            else {
+                return Ok(ProductOperationResponse::channel_inbound(
+                    ChannelInboundSurfaceOutcome::unavailable(),
+                ));
+            };
             self.submissions.fetch_add(1, Ordering::SeqCst);
-            Ok(ProductInboundAck::Accepted {
+            let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
                 submitted_run_id: TurnRunId::new(),
-            })
+            };
+            let envelope = ProductInboundEnvelope::from_trusted_parse(
+                TrustedInboundContext::from_verified_evidence_with_source_channel(
+                    request.adapter_id,
+                    request.source_channel,
+                    request.installation_id,
+                    request.received_at,
+                    &request.evidence,
+                )
+                .expect("verified evidence"),
+                ParsedProductInbound::new(
+                    request.message.event_id,
+                    request.message.actor,
+                    request.message.conversation,
+                    ProductInboundPayload::UserMessage(
+                        UserMessagePayload::new(
+                            request.message.text,
+                            Vec::new(),
+                            request.message.trigger,
+                        )
+                        .expect("user message payload"),
+                    ),
+                )
+                .expect("parsed inbound"),
+            )
+            .expect("trusted envelope");
+            Ok(ProductOperationResponse::channel_inbound(
+                ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
+                    envelope,
+                    ack,
+                })),
+            ))
+        }
+    }
+
+    fn unavailable() -> RebornServicesError {
+        RebornServicesError {
+            code: RebornServicesErrorCode::Unavailable,
+            kind: RebornServicesErrorKind::ServiceUnavailable,
+            status_code: 503,
+            retryable: false,
+            field: None,
+            validation_code: None,
         }
     }
 
@@ -875,10 +936,10 @@ mod tests {
         interception: ChannelPairingInterception,
     ) -> (
         GenericChannelInboundSink,
-        Arc<CountingWorkflow>,
+        Arc<CountingSurface>,
         Arc<std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>>,
     ) {
-        let workflow = Arc::new(CountingWorkflow::new());
+        let workflow = Arc::new(CountingSurface::new());
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
@@ -886,7 +947,7 @@ mod tests {
                 header: "X-Vendor-Secret".to_string(),
             },
             classifier: None,
-            workflow: Arc::clone(&workflow) as Arc<dyn ProductWorkflow>,
+            surface: Arc::clone(&workflow) as Arc<dyn ProductSurface>,
             observer: None,
         })
         .with_pairing(

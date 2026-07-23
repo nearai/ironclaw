@@ -1,4 +1,4 @@
-// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the RebornServicesApi domain-port split, plan #5985
+// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the ProductSurface domain-port split, plan #5985
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
@@ -263,6 +263,14 @@ pub struct RebornDeleteThreadResponse {
     pub deleted: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGlobalAutoApproveRequest {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGlobalAutoApproveResponse {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RebornSubmitTurnResponse {
@@ -371,7 +379,7 @@ pub struct RebornAttachmentRequest {
 }
 
 /// Raw bytes of one landed attachment plus the metadata a browser needs to
-/// render or download it. Returned by [`super::RebornServicesApi::read_attachment`].
+/// render or download it. Returned by [`super::ATTACHMENT_READ_OPERATION`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornAttachmentBytes {
     pub mime_type: String,
@@ -610,6 +618,18 @@ pub struct RebornAutomationMutationResponse {
     pub updated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<RebornAutomationInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRequest {
+    pub automation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRenameAutomationProductRequest {
+    pub automation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 fn default_scheduler_enabled() -> bool {
@@ -1377,6 +1397,11 @@ pub struct RebornVendorAuthAccounts {
     pub accounts: Vec<RebornAuthAccount>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornTraceHoldAuthorizeProductRequest {
+    pub submission_id: String,
+}
+
 /// One connected account for a vendor. `state` is the shared §6.3 auth-account
 /// state machine, exposed exactly — no vendor- or extension-specific state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1773,6 +1798,12 @@ impl Serialize for RebornOperatorConfigEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornOperatorConfigSetRequest {
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigSetProductRequest {
+    pub key: String,
     pub value: serde_json::Value,
 }
 

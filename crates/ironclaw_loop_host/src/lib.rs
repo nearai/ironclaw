@@ -1856,6 +1856,10 @@ pub enum HostManagedModelErrorKind {
     /// This is model-side bad output, not caller misuse.
     #[serde(alias = "invalid_output")]
     InvalidOutput,
+    /// The provider refused the completion because its content filter rejected
+    /// the request or response. Distinct from host/profile policy denial so the
+    /// loop can ask the model to rephrase exactly once.
+    ContentFiltered,
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
@@ -2269,6 +2273,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
         HostManagedModelErrorKind::StaleRequest => AgentLoopHostErrorKind::StaleSurface,
         HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::InvalidOutput,
+        HostManagedModelErrorKind::ContentFiltered => AgentLoopHostErrorKind::ContentFiltered,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -2291,6 +2296,7 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
         HostManagedModelErrorKind::StaleRequest => "model request surface is stale",
         HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
+        HostManagedModelErrorKind::ContentFiltered => "model completion was content filtered",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",

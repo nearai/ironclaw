@@ -95,12 +95,8 @@ pub fn nearai_mcp_bootstrap_config_from_env()
 }
 
 /// Env-shape parsing behind [`nearai_mcp_bootstrap_config_from_env`], with the
-/// variable lookup injected so tests stay hermetic. `env_or_override` consults
-/// the real process environment before the runtime overlay, so a developer
-/// shell exporting a real `NEARAI_API_KEY` cannot be masked by overlay
-/// mutation, and this `#![forbid(unsafe_code)]` crate cannot call
-/// `std::env::remove_var`. Tests therefore drive this function with an
-/// in-memory lookup instead of mutating process state.
+/// variable lookup injected so tests stay hermetic without mutating process
+/// state.
 fn nearai_mcp_bootstrap_config_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
@@ -470,8 +466,7 @@ mod tests {
 
     /// Hermetic stand-in for the env lookup injected into
     /// [`nearai_mcp_bootstrap_config_from_lookup`]: tests must not depend on
-    /// (or mutate) the process environment, where a developer shell may
-    /// legitimately export a real `NEARAI_API_KEY`.
+    /// or mutate the process environment.
     fn lookup_from<'a>(entries: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key| {
             entries

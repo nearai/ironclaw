@@ -26,7 +26,7 @@ use ironclaw_product_adapters::{
     ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
     ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason, ProductWorkflow,
+    ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason,
     ProductWorkflowRejectionKind, ProjectionCursor, ProjectionReadPayload,
     ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
     TrustedInboundContext, UserMessagePayload,
@@ -36,7 +36,7 @@ use ironclaw_product_workflow::{
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionScope, AuthInteractionService, AuthInteractionStatus, AuthRequestRef,
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
     InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
@@ -940,19 +940,19 @@ fn fingerprint_actor() -> ExternalActorRef {
 }
 
 fn build_workflow() -> (
-    DefaultProductWorkflow,
+    DefaultProductSurface,
     Arc<FakeInboundTurnService>,
     Arc<FakeIdempotencyLedger>,
 ) {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding);
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding);
     (workflow, inbound, ledger)
 }
 
 fn build_workflow_with_policy() -> (
-    DefaultProductWorkflow,
+    DefaultProductSurface,
     Arc<FakeInboundTurnService>,
     Arc<FakeIdempotencyLedger>,
     Arc<FakeBeforeInboundPolicy>,
@@ -961,13 +961,13 @@ fn build_workflow_with_policy() -> (
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
     let policy = Arc::new(FakeBeforeInboundPolicy::new());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_before_inbound_policy(policy.clone());
     (workflow, inbound, ledger, policy)
 }
 
 fn build_workflow_with_binding() -> (
-    DefaultProductWorkflow,
+    DefaultProductSurface,
     Arc<FakeInboundTurnService>,
     Arc<FakeIdempotencyLedger>,
     Arc<FakeConversationBindingService>,
@@ -975,7 +975,7 @@ fn build_workflow_with_binding() -> (
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding.clone());
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding.clone());
     (workflow, inbound, ledger, binding)
 }
 
@@ -1128,7 +1128,7 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
         gate_ref.clone(),
         run_id,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding)
         .with_approval_interaction_service(approval_service.clone());
     let envelope = sample_envelope_with_payload(
         "approval-resolution",
@@ -1171,7 +1171,7 @@ async fn concrete_approval_resolution_rejects_unknown_installation_via_product_b
         gate_ref.clone(),
         TurnRunId::new(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(InMemoryIdempotencyLedger::new()),
         binding,
@@ -1214,7 +1214,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
         gate_ref.clone(),
         run_id,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding)
         .with_auth_interaction_service(auth_service.clone());
     let envelope = sample_envelope_with_payload(
         "auth-resolution",
@@ -1274,7 +1274,7 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
             gate_ref.clone(),
             run_id,
         ));
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding)
             .with_auth_interaction_service(auth_service.clone());
         let envelope = sample_envelope_with_payload(
             event_suffix,
@@ -1336,7 +1336,7 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
         gate_ref.clone(),
         TurnRunId::new(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -1380,7 +1380,7 @@ async fn approval_resolution_idempotency_key_is_stable_for_same_external_event()
             gate_ref.clone(),
             TurnRunId::new(),
         ));
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding)
             .with_approval_interaction_service(approval_service.clone());
         (workflow, approval_service)
     };
@@ -1422,7 +1422,7 @@ async fn approval_resolution_idempotency_key_ignores_actor_display_name() {
             gate_ref.clone(),
             TurnRunId::new(),
         ));
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding)
             .with_approval_interaction_service(approval_service.clone());
         (workflow, approval_service)
     };
@@ -1467,7 +1467,7 @@ async fn approval_resolution_deny_routes_through_approval_interaction_service() 
         gate_ref.clone(),
         TurnRunId::new(),
     ));
-    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding)
         .with_approval_interaction_service(approval_service.clone());
     let envelope = sample_envelope_with_payload(
         "approval-deny",
@@ -1497,7 +1497,7 @@ async fn approval_resolution_always_allow_routes_through_approval_interaction_se
         gate_ref.clone(),
         TurnRunId::new(),
     ));
-    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding)
         .with_approval_interaction_service(approval_service.clone());
     let envelope = sample_envelope_with_payload(
         "approval-always-allow",
@@ -1531,7 +1531,7 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
         (first_gate, TurnRunId::new()),
         (second_gate, TurnRunId::new()),
     ]));
-    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding)
         .with_approval_interaction_service(approval_service.clone());
     let envelope = sample_envelope_with_payload(
         "scoped-approval-ambiguous",
@@ -1565,7 +1565,7 @@ async fn scoped_approval_resolves_via_conversation_route() {
     let (gate_ref, run_id, route_scope) =
         record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1608,7 +1608,7 @@ async fn scoped_approval_misses_if_route_expired() {
     )
     .await;
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1632,7 +1632,7 @@ async fn scoped_approval_misses_if_no_route() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1659,7 +1659,7 @@ async fn scoped_approval_delivered_route_store_error_propagates_as_transient() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(FailingRouteStore);
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1718,7 +1718,7 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
     binding_service.program_binding(thread_ref.conversation_fingerprint(), owner_binding);
     binding_service.program_binding(base_ref.conversation_fingerprint(), divergent_base_binding);
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         binding_service.clone(),
@@ -1764,7 +1764,7 @@ async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
         record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
             .await;
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1809,7 +1809,7 @@ async fn explicit_approval_delivered_route_requires_gate_ref_match() {
     )
     .await;
     let approval_service = Arc::new(MissingGateThenRecordingApprovalService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1845,7 +1845,7 @@ async fn explicit_auth_delivered_route_requires_gate_ref_match() {
     )
     .await;
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1913,7 +1913,7 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
             (newer_gate.clone(), newer_run),
         ],
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -1994,7 +1994,7 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
         route_thread,
         vec![(pending_gate.clone(), pending_run)],
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2055,7 +2055,7 @@ async fn scoped_approval_one_expired_one_live_resolves_live() {
     let (gate_ref, run_id, route_scope) =
         record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2128,7 +2128,7 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
         .expect("record route for other user");
 
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2166,7 +2166,7 @@ async fn explicit_approval_gate_ref_mismatch_leaves_original_rejection() {
     )
     .await;
     let approval_service = Arc::new(MissingGateThenRecordingApprovalService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2243,7 +2243,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
         make_record(TurnRunId::new()),
     ]));
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2331,7 +2331,7 @@ async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approva
     // was actually delivered with the auth prompt.
     let auth_gate_ref = GateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2480,7 +2480,7 @@ async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
     record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
         .await;
     let auth_service = Arc::new(StaleAuthReturningAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2535,7 +2535,7 @@ async fn explicit_approval_stale_gate_surfaces_without_fallback() {
     record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
         .await;
     let approval_service = Arc::new(StaleGateReturningApprovalService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2622,7 +2622,7 @@ async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filt
     // the second call (run_id_hint=Some) it returns Canceled (Deny path), which
     // maps to Accepted.
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2698,7 +2698,7 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
     )
     .await;
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2769,7 +2769,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
     // fallback fires → resolve_via_delivered_approval_route(None, …) →
     // kind filter runs → route is selected → GateRef::new fails → InvalidGateRef.
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(FakeConversationBindingService::new()),
@@ -2854,7 +2854,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     // expected_gate_ref=Some(invalid_gate_ref_str) → exact-ref match selects
     // the stored route → GateRef::new on the stored gate_ref fails → InvalidGateRef.
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(FakeIdempotencyLedger::new()),
         Arc::new(BindingRequiredThenSucceedingService::new(2)),
@@ -2895,7 +2895,7 @@ async fn approval_resolution_without_interaction_service_returns_retryable_unava
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding);
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding);
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     let envelope = sample_envelope_with_payload(
         "approval-unwired",
@@ -2974,7 +2974,7 @@ async fn before_inbound_policy_path_probes_replay_once() {
         UserMessagePayload::new("rewritten once", vec![], ProductTriggerReason::DirectChat)
             .expect("valid rewrite"),
     );
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_before_inbound_policy(policy.clone());
     let envelope = sample_envelope("policy-replay-once");
 
@@ -3163,7 +3163,7 @@ fn scoped_in_memory_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
 
 // PR #5653 review: earlier coverage only exercised the test-support in-memory
 // ledger fake, never the production CAS-backed `RebornFilesystemIdempotencyLedger`
-// through the `DefaultProductWorkflow` caller. This composes the real adapter
+// through the `DefaultProductSurface` caller. This composes the real adapter
 // (over an in-memory `ScopedFilesystem`) with the existing fake inbound service.
 #[tokio::test]
 async fn submit_inbound_duplicate_replay_uses_production_filesystem_ledger() {
@@ -3180,7 +3180,7 @@ async fn submit_inbound_duplicate_replay_uses_production_filesystem_ledger() {
     let ledger = Arc::new(RebornFilesystemIdempotencyLedger::new(filesystem, scope));
     let inbound = Arc::new(FakeInboundTurnService::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger, binding);
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger, binding);
     let envelope = sample_envelope("prod-ledger-replay");
 
     let first = workflow
@@ -3879,7 +3879,7 @@ async fn projection_subscription_requires_existing_conversation_binding() {
             Some("project:alpha"),
         )],
     );
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -3921,7 +3921,7 @@ async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -3969,7 +3969,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
         scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port.clone(), resolver);
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
             InMemorySessionThreadService::default(),
@@ -4011,7 +4011,7 @@ async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4079,7 +4079,7 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
         std::iter::empty::<(ExternalActorRef, UserId)>(),
     );
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
             InMemorySessionThreadService::default(),
@@ -4120,7 +4120,7 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
         actor_resolver.clone(),
     );
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
             InMemorySessionThreadService::default(),
@@ -4242,7 +4242,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
         Arc::new(FailingProductActorUserResolver),
     );
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
             InMemorySessionThreadService::default(),
@@ -4437,7 +4437,7 @@ async fn concrete_product_workflow_accepts_user_message_for_trusted_installation
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4514,7 +4514,7 @@ async fn concrete_product_workflow_accepts_shared_route_participant_on_existing_
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4595,7 +4595,7 @@ async fn concrete_product_workflow_persists_first_bind_default_scope() {
             Some("project:alpha"),
         )],
     );
-    let workflow_alpha = DefaultProductWorkflow::new(
+    let workflow_alpha = DefaultProductSurface::new(
         Arc::new(DefaultInboundTurnService::new(
             binding_alpha.clone(),
             InMemorySessionThreadService::default(),
@@ -4619,7 +4619,7 @@ async fn concrete_product_workflow_persists_first_bind_default_scope() {
             Some("project:beta"),
         )],
     );
-    let workflow_beta = DefaultProductWorkflow::new(
+    let workflow_beta = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding_beta),
@@ -4693,7 +4693,7 @@ async fn concrete_product_workflow_keeps_installations_tenant_isolated() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -5657,7 +5657,7 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         binding.clone(),
@@ -5710,7 +5710,7 @@ async fn concrete_product_workflow_reply_to_bot_requires_existing_binding() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -5768,7 +5768,7 @@ async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_poli
         UserMessagePayload::new("rewritten direct", vec![], ProductTriggerReason::DirectChat)
             .expect("message"),
     );
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         binding.clone(),
@@ -5818,7 +5818,7 @@ async fn concrete_product_workflow_recomputes_route_after_policy_rewrites_trigge
         UserMessagePayload::new("rewritten shared", vec![], ProductTriggerReason::BotMention)
             .expect("message"),
     );
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         binding.clone(),
@@ -5866,7 +5866,7 @@ async fn concrete_product_workflow_rejects_unknown_installation_as_terminal() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -5913,7 +5913,7 @@ async fn concrete_product_workflow_rejects_unpaired_actor_before_turn_submission
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -5970,7 +5970,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -6047,7 +6047,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -6110,7 +6110,7 @@ async fn concrete_product_workflow_replays_binding_access_denied_rejection() {
         InMemorySessionThreadService::default(),
         coordinator.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(
+    let workflow = DefaultProductSurface::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),

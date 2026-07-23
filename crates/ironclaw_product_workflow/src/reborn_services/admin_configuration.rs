@@ -2,13 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::RebornViewDescriptor;
+use super::{ProductCapabilityDescriptor, RebornViewDescriptor};
 
 pub const ADMIN_CONFIGURATION_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "admin_configuration",
     paginated: false,
 };
 pub const ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID: &str = "builtin.admin_configuration_replace";
+pub const ADMIN_CONFIGURATION_REPLACE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAdminConfigurationListResponse {

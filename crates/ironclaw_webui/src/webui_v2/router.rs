@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
-use ironclaw_product_workflow::RebornServicesApi;
+use ironclaw_product_workflow::ProductSurface;
 use serde::Serialize;
 
 use crate::webui_v2::descriptors::{
@@ -90,7 +90,7 @@ impl WebUiV2RouteOptions {
 /// handler invocations enforce one cap process-wide.
 #[derive(Clone)]
 pub struct WebUiV2State {
-    services: Arc<dyn RebornServicesApi>,
+    services: Arc<dyn ProductSurface>,
     sse_capacity: Arc<SseCapacity>,
     reborn_projects_enabled: bool,
 }
@@ -102,7 +102,7 @@ pub struct WebUiV2Capabilities {
 
 impl WebUiV2State {
     pub fn new(
-        services: Arc<dyn RebornServicesApi>,
+        services: Arc<dyn ProductSurface>,
         max_concurrent_streams_per_caller: usize,
     ) -> Self {
         Self {
@@ -126,7 +126,7 @@ impl WebUiV2State {
         self.reborn_projects_enabled
     }
 
-    pub fn services(&self) -> &Arc<dyn RebornServicesApi> {
+    pub fn services(&self) -> &Arc<dyn ProductSurface> {
         &self.services
     }
 

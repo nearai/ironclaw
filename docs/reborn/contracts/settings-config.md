@@ -133,6 +133,11 @@ Rules:
 - schema definitions are versioned with the owning domain;
 - projection write-back uses the same schemas.
 
+The LLM provider settings snapshot is exposed as the descriptor-backed
+ProductSurface query view `llm_config`. The legacy `get_llm_config` facade
+method is a compatibility wrapper over that view while `RebornServicesApi`
+shrinks toward the generic read conduit.
+
 ---
 
 ## 6. File projection contract

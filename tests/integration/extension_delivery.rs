@@ -4,7 +4,7 @@
 //! Both proofs drive the FULL production inbound→outbound pipeline over the
 //! composed runtime: a vendor-signed POST on the production ingress mount →
 //! host-side recipe verification → the real channel adapter's normalization →
-//! durable admission through the REAL `DefaultProductWorkflow` → a real turn
+//! durable admission through the REAL `DefaultProductSurface` → a real turn
 //! against a scripted model → the generic `RunDeliveryObserver` → the
 //! factory-built `DeliveryCoordinator` (sole delivery-state writer, §5.4) →
 //! the real adapter's `deliver` → the policy-enforced channel egress with
@@ -72,8 +72,8 @@ use ironclaw_product_adapters::{
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product_workflow::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ChannelConnectionNoticePolicy, ConversationBindingService, ProductSurface,
+    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -362,11 +362,12 @@ impl VendorIngress {
         harness: &RebornIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
     ) -> Self {
+        let surface = harness.product_workflow_for_test() as Arc<dyn ProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
             classifier: None,
-            workflow: harness.product_workflow_for_test(),
+            surface,
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
         }));
         parts.registry.register(

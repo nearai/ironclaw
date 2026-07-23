@@ -80,6 +80,10 @@ pub struct RebornFsMountsResponse {
     pub mounts: Vec<RebornFsMountInfo>,
 }
 
+/// Request to list browsable mounts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornFsMountsRequest {}
+
 /// Request to list a directory under a browsable mount.
 ///
 /// `path` is mount-relative (`""` or `"/"` for the mount root). The

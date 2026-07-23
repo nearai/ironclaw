@@ -1262,7 +1262,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/outbound/outbound_delivery_capability_surface.rs",
+        "crates/ironclaw_product_workflow/src/reborn_services/outbound_delivery_capability_surface.rs",
         "slack",
     ),
     (

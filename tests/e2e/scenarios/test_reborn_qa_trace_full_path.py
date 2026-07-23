@@ -1000,27 +1000,40 @@ async def _assert_slack_provider_outcome(
     slack_state: dict[str, str],
     trace: dict,
 ) -> None:
-    send = next(
-        (
-            call
-            for call in _recorded_provider_calls(trace)
-            if call["name"] == "slack__send_message"
-        ),
-        None,
-    )
-    if send is None:
+    sends = [
+        call
+        for call in _recorded_provider_calls(trace)
+        if call["name"] == "slack__send_message"
+    ]
+    if not sends:
         return
     async with httpx.AsyncClient(timeout=15) as client:
-        history = await slack_post(
-            client,
-            emulate_url,
-            "conversations.history",
-            {"channel": slack_state["channel_id"], "limit": 100},
-        )
-    assert any(
-        message.get("text") == send["arguments"]["text"]
-        for message in history["messages"]
-    ), history
+        for send in sends:
+            messages = await _slack_messages_for_send(
+                client, emulate_url, slack_state, send
+            )
+            assert any(
+                message.get("text") == send["arguments"]["text"]
+                for message in messages
+            ), messages
+
+
+async def _slack_messages_for_send(
+    client: httpx.AsyncClient,
+    emulate_url: str,
+    slack_state: dict[str, str],
+    send: dict,
+) -> list[dict]:
+    """Read a delivery from the Slack surface that can contain it."""
+    payload = {"channel": slack_state["channel_id"], "limit": 100}
+    thread_ts = send["arguments"].get("thread_ts")
+    if thread_ts is None:
+        method = "conversations.history"
+    else:
+        method = "conversations.replies"
+        payload["ts"] = thread_ts
+    page = await slack_post(client, emulate_url, method, payload)
+    return page.get("messages", [])
 
 
 async def _assert_slack_provider_baseline(
@@ -1030,27 +1043,58 @@ async def _assert_slack_provider_baseline(
     trace: dict,
 ) -> None:
     """Prove an earlier journey did not leave the expected Slack mutation."""
-    send = next(
-        (
-            call
-            for call in _recorded_provider_calls(trace)
-            if call["name"] == "slack__send_message"
-        ),
-        None,
-    )
-    if send is None:
+    sends = [
+        call
+        for call in _recorded_provider_calls(trace)
+        if call["name"] == "slack__send_message"
+    ]
+    if not sends:
         return
     async with httpx.AsyncClient(timeout=15) as client:
-        history = await slack_post(
-            client,
-            emulate_url,
-            "conversations.history",
-            {"channel": slack_state["channel_id"], "limit": 100},
-        )
-    assert not any(
-        message.get("text") == send["arguments"]["text"]
-        for message in history["messages"]
-    ), f"provider world for {case} already contains the expected Slack delivery"
+        for send in sends:
+            messages = await _slack_messages_for_send(
+                client, emulate_url, slack_state, send
+            )
+            assert not any(
+                message.get("text") == send["arguments"]["text"]
+                for message in messages
+            ), f"provider world for {case} already contains the expected Slack delivery"
+
+
+async def _cleanup_slack_provider_mutations_from_trace(
+    emulate_url: str,
+    slack_state: dict[str, str],
+    trace: dict,
+) -> None:
+    sends = [
+        call
+        for call in _recorded_provider_calls(trace)
+        if call["name"] == "slack__send_message"
+    ]
+    if not sends:
+        return
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        matches = {}
+        for send in sends:
+            messages = await _slack_messages_for_send(
+                client, emulate_url, slack_state, send
+            )
+            expected_text = send["arguments"]["text"]
+            matches.update(
+                {
+                    message["ts"]: message
+                    for message in messages
+                    if message.get("text") == expected_text
+                }
+            )
+        for message in matches.values():
+            await slack_post(
+                client,
+                emulate_url,
+                "chat.delete",
+                {"channel": slack_state["channel_id"], "ts": message["ts"]},
+            )
 
 
 async def _cleanup_slack_provider_mutations(
@@ -1061,33 +1105,85 @@ async def _cleanup_slack_provider_mutations(
     """Remove messages created by one journey without rotating OAuth state."""
     trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
     _normalize_slack_arguments(trace, slack_state, case)
-    expected_texts = {
-        call["arguments"]["text"]
-        for call in _recorded_provider_calls(trace)
-        if call["name"] == "slack__send_message"
-    }
-    if not expected_texts:
-        return
+    await _cleanup_slack_provider_mutations_from_trace(
+        emulate_url, slack_state, trace
+    )
 
+
+async def test_slack_mutation_cleanup_covers_thread_replies(
+    resettable_emulate_provider_world,
+) -> None:
+    """Threaded sends must be visible to baseline checks and cleanup."""
+    emulate_url = resettable_emulate_provider_world.servers["slack"]["url"]
     async with httpx.AsyncClient(timeout=15) as client:
-        history = await slack_post(
+        channels = await slack_post(
             client,
             emulate_url,
-            "conversations.history",
-            {"channel": slack_state["channel_id"], "limit": 100},
+            "conversations.list",
+            {"types": "public_channel", "exclude_archived": True},
         )
-        matches = [
-            message
-            for message in history["messages"]
-            if message.get("text") in expected_texts
+        channel = next(
+            item for item in channels["channels"] if item["name"] == "reborn-alerts"
+        )
+        root = await slack_post(
+            client,
+            emulate_url,
+            "chat.postMessage",
+            {"channel": channel["id"], "text": "thread cleanup contract root"},
+        )
+        reply = await slack_post(
+            client,
+            emulate_url,
+            "chat.postMessage",
+            {
+                "channel": channel["id"],
+                "thread_ts": root["ts"],
+                "text": "thread cleanup contract reply",
+            },
+        )
+
+    trace = {
+        "steps": [
+            {
+                "response": {
+                    "tool_calls": [
+                        {
+                            "name": "slack__send_message",
+                            "arguments": {
+                                "channel": channel["id"],
+                                "thread_ts": root["ts"],
+                                "text": reply["message"]["text"],
+                            },
+                        }
+                    ]
+                }
+            }
         ]
-        for message in matches:
-            await slack_post(
-                client,
-                emulate_url,
-                "chat.delete",
-                {"channel": slack_state["channel_id"], "ts": message["ts"]},
+    }
+    slack_state = {"channel_id": channel["id"]}
+    try:
+        await _assert_slack_provider_outcome(emulate_url, slack_state, trace)
+        with pytest.raises(AssertionError, match="already contains"):
+            await _assert_slack_provider_baseline(
+                emulate_url, slack_state, "thread-cleanup-contract", trace
             )
+
+        await _cleanup_slack_provider_mutations_from_trace(
+            emulate_url, slack_state, trace
+        )
+        await _assert_slack_provider_baseline(
+            emulate_url, slack_state, "thread-cleanup-contract", trace
+        )
+    finally:
+        async with httpx.AsyncClient(timeout=15) as client:
+            for message in (reply, root):
+                await slack_post(
+                    client,
+                    emulate_url,
+                    "chat.delete",
+                    {"channel": channel["id"], "ts": message["ts"]},
+                    expect_ok=False,
+                )
 
 
 @pytest.mark.parametrize(

@@ -104,7 +104,7 @@ pub enum InboundOutcome {
 }
 
 /// One normalized inbound message.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedInboundMessage {
     pub actor: ExternalActorRef,
     pub conversation: ExternalConversationRef,
@@ -127,7 +127,7 @@ pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 /// An attachment reference — the vendor URL/id plus a mime hint. Bytes are
 /// fetched host-side through restricted egress with the channel credential
 /// only when a consumer needs them, keeping `inbound` pure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentRef {
     pub descriptor: ProductAttachmentDescriptor,
     pub vendor_ref: String,
