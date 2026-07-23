@@ -142,3 +142,108 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn bs58_encode(bytes: &[u8]) -> String {
     bs58::encode(bytes).into_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_signing_provider::{
+        ActorId, ChainId, GateRef, KeyOrAccountId, RunId, ScopeId, TenantId, UserId,
+    };
+
+    /// A [`SigningContext`] whose only test-relevant field is `chain_id`; the
+    /// broadcaster routes purely on the chain-id family prefix.
+    fn ctx_for_chain(chain_id: &str) -> SigningContext {
+        SigningContext {
+            tenant: TenantId::new("tenant-a"),
+            user: UserId::new("user-1"),
+            scope: ScopeId::new("scope-x"),
+            actor: ActorId::new("actor-7"),
+            run_id: RunId::new("run-42"),
+            gate_ref: GateRef::new("gate:abc"),
+            chain_id: ChainId::new(chain_id),
+            key_or_account_id: KeyOrAccountId::new("0xabc"),
+        }
+    }
+
+    fn broadcast_reason(err: ContinuationError) -> String {
+        match err {
+            ContinuationError::Broadcast { reason } => reason,
+            other => panic!("expected Broadcast error, got {other:?}"),
+        }
+    }
+
+    /// With NO endpoints configured, every recognized chain family must fail
+    /// closed at broadcast time — never submit blind to a default RPC. This is
+    /// the security-critical missing-endpoint guard.
+    #[tokio::test]
+    async fn fails_closed_on_missing_endpoint_per_family() {
+        let broadcaster = MultiChainBroadcaster::from_endpoints(ChainRpcEndpoints::default())
+            .expect("constructing with no endpoints must succeed");
+        let signed = [0xAAu8; 8];
+
+        for (chain, expected) in [
+            ("eip155:1", "no EVM RPC endpoint configured"),
+            ("solana:mainnet", "no Solana RPC endpoint configured"),
+            ("near:mainnet", "no NEAR RPC endpoint configured"),
+        ] {
+            let err = broadcaster
+                .broadcast(&ctx_for_chain(chain), &signed)
+                .await
+                .expect_err("missing endpoint must fail closed");
+            assert_eq!(broadcast_reason(err), expected, "chain {chain}");
+        }
+    }
+
+    /// An unrecognized chain-id family must fail closed rather than route to any
+    /// configured broadcaster — even when every family IS configured.
+    #[tokio::test]
+    async fn fails_closed_on_unrecognized_chain() {
+        let broadcaster = MultiChainBroadcaster::from_endpoints(ChainRpcEndpoints {
+            evm: Some("https://rpc.example.com".to_string()),
+            solana: Some("https://rpc.example.com".to_string()),
+            near: Some("https://rpc.example.com".to_string()),
+        })
+        .expect("construct");
+
+        let err = broadcaster
+            .broadcast(&ctx_for_chain("bitcoin:mainnet"), &[0x01])
+            .await
+            .expect_err("unknown chain must fail closed");
+        let reason = broadcast_reason(err);
+        assert!(
+            reason.contains("unrecognized chain id"),
+            "reason was: {reason}"
+        );
+        assert!(reason.contains("bitcoin:mainnet"), "reason was: {reason}");
+    }
+
+    /// Routing is selected by chain-family prefix: an EVM chain id with the EVM
+    /// endpoint UNset still reports the EVM-specific missing-endpoint message,
+    /// proving the `eip155:` arm was selected (not Solana/NEAR) even when the
+    /// other families ARE configured. This pins the dispatch table without a
+    /// live RPC server.
+    #[tokio::test]
+    async fn routes_to_evm_arm_by_chain_family() {
+        let broadcaster = MultiChainBroadcaster::from_endpoints(ChainRpcEndpoints {
+            evm: None,
+            solana: Some("https://rpc.example.com".to_string()),
+            near: Some("https://rpc.example.com".to_string()),
+        })
+        .expect("construct");
+
+        let err = broadcaster
+            .broadcast(&ctx_for_chain("eip155:8453"), &[0x02; 4])
+            .await
+            .expect_err("EVM arm with no EVM endpoint fails closed");
+        assert_eq!(broadcast_reason(err), "no EVM RPC endpoint configured");
+    }
+
+    /// `submits()` is `true`: the driver advances the ledger to
+    /// `BroadcastSubmitted` only around a broadcaster that actually submits.
+    #[tokio::test]
+    async fn reports_it_submits() {
+        let broadcaster =
+            MultiChainBroadcaster::from_endpoints(ChainRpcEndpoints::default()).expect("construct");
+        assert!(broadcaster.submits());
+    }
+}

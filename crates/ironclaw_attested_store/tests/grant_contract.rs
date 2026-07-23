@@ -25,12 +25,14 @@ mod libsql_backend {
     use std::sync::Arc;
 
     use ironclaw_attested_store::LibSqlSealedGrantStore;
+    use tempfile::TempDir;
 
-    async fn fresh() -> LibSqlSealedGrantStore {
+    /// Returns the store alongside the owning [`TempDir`]; the caller must hold
+    /// the `TempDir` for the lifetime of the store so the on-disk db file is not
+    /// reaped (and is cleaned up on drop — no `mem::forget` leak).
+    async fn fresh() -> (LibSqlSealedGrantStore, TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("grants.db");
-        // Leak the tempdir for the test's lifetime: the store holds the db file.
-        std::mem::forget(dir);
         let db = Arc::new(
             libsql::Builder::new_local(path)
                 .build()
@@ -39,32 +41,38 @@ mod libsql_backend {
         );
         let store = LibSqlSealedGrantStore::new(db);
         store.run_migrations().await.expect("migrate");
-        store
+        (store, dir)
     }
 
     #[tokio::test]
     async fn seal_then_claim_succeeds() {
-        contract::seal_then_claim_succeeds(fresh().await).await;
+        let (store, _dir) = fresh().await;
+        contract::seal_then_claim_succeeds(store).await;
     }
     #[tokio::test]
     async fn second_claim_is_already_claimed() {
-        contract::second_claim_is_already_claimed(fresh().await).await;
+        let (store, _dir) = fresh().await;
+        contract::second_claim_is_already_claimed(store).await;
     }
     #[tokio::test]
     async fn claim_unsealed_is_not_found() {
-        contract::claim_unsealed_is_not_found(fresh().await).await;
+        let (store, _dir) = fresh().await;
+        contract::claim_unsealed_is_not_found(store).await;
     }
     #[tokio::test]
     async fn claim_mismatched_component_is_not_found() {
-        contract::claim_mismatched_component_is_not_found(fresh().await).await;
+        let (store, _dir) = fresh().await;
+        contract::claim_mismatched_component_is_not_found(store).await;
     }
     #[tokio::test]
     async fn double_seal_is_already_sealed() {
-        contract::double_seal_is_already_sealed(fresh().await).await;
+        let (store, _dir) = fresh().await;
+        contract::double_seal_is_already_sealed(store).await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_claims_yield_exactly_one_winner() {
-        contract::concurrent_claims_yield_exactly_one_winner(fresh().await).await;
+        let (store, _dir) = fresh().await;
+        contract::concurrent_claims_yield_exactly_one_winner(store).await;
     }
 }
 

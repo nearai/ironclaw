@@ -94,11 +94,14 @@ mod libsql_backend {
     use std::sync::Arc;
 
     use ironclaw_attested_store::LibSqlSigningLedger;
+    use tempfile::TempDir;
 
-    async fn fresh() -> LibSqlSigningLedger {
+    /// Returns the ledger alongside the owning [`TempDir`]; the caller must hold
+    /// the `TempDir` for the lifetime of the ledger so the on-disk db file is
+    /// not reaped (and is cleaned up on drop — no `mem::forget` leak).
+    async fn fresh() -> (LibSqlSigningLedger, TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ledger.db");
-        std::mem::forget(dir);
         let db = Arc::new(
             libsql::Builder::new_local(path)
                 .build()
@@ -107,40 +110,48 @@ mod libsql_backend {
         );
         let ledger = LibSqlSigningLedger::new(db);
         ledger.run_migrations().await.expect("migrate");
-        ledger
+        (ledger, dir)
     }
 
     #[tokio::test]
     async fn full_valid_sequence() {
-        contract::full_valid_sequence(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::full_valid_sequence(ledger).await;
     }
     #[tokio::test]
     async fn second_create_is_already_exists() {
-        contract::second_create_is_already_exists(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::second_create_is_already_exists(ledger).await;
     }
     #[tokio::test]
     async fn advance_missing_is_not_found() {
-        contract::advance_missing_is_not_found(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::advance_missing_is_not_found(ledger).await;
     }
     #[tokio::test]
     async fn skip_forward_is_invalid() {
-        contract::skip_forward_is_invalid(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::skip_forward_is_invalid(ledger).await;
     }
     #[tokio::test]
     async fn regression_is_invalid() {
-        contract::regression_is_invalid(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::regression_is_invalid(ledger).await;
     }
     #[tokio::test]
     async fn broadcast_idempotency_guard() {
-        contract::broadcast_idempotency_guard(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::broadcast_idempotency_guard(ledger).await;
     }
     #[tokio::test]
     async fn terminal_states_never_advance() {
-        contract::terminal_states_never_advance(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        contract::terminal_states_never_advance(ledger).await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_advance_to_broadcast_yields_one_winner() {
-        super::concurrent::advance_to_broadcast_yields_one_winner(fresh().await).await;
+        let (ledger, _dir) = fresh().await;
+        super::concurrent::advance_to_broadcast_yields_one_winner(ledger).await;
     }
 }
 
