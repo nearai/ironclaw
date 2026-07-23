@@ -1,7 +1,7 @@
 //! Stateless, HMAC-signed session login wiring.
 //!
 //! [`build_signed_session_login`] assembles the pieces the
-//! `ironclaw-reborn serve` binary needs to mount the OAuth login
+//! `ironclaw serve` binary needs to mount the OAuth login
 //! surface, so the CLI only supplies env/boot config (provider client
 //! ids/secrets, base URL, operator secret) plus a host-owned
 //! [`UserDirectory`] and calls the builder — it does not own the
@@ -164,7 +164,7 @@ impl SignedTokenSessionStore {
     /// minted for one tenant fails the HMAC check on the other.
     pub fn from_operator_secret(secret: &SecretString, tenant_id: &TenantId) -> Arc<Self> {
         let mut hasher = Sha256::new();
-        hasher.update(b"ironclaw-reborn-webui-session-v1::");
+        hasher.update(b"ironclaw-webui-session-v1::");
         // Length-prefix the tenant so its bytes can never be confused with
         // the secret bytes that follow (a tenant of `a` + secret `bc` must
         // not key-collide with tenant `ab` + secret `c`).
@@ -339,7 +339,7 @@ struct TokenPayload {
 /// keeps working while a browser SSO login mints a signed session token.
 ///
 /// Public so the CLI can compose the same env-OR-session pair on the **no-SSO**
-/// serve path: `ironclaw-reborn serve` always mints admin-API session tokens
+/// serve path: `ironclaw serve` always mints admin-API session tokens
 /// (the user-create bearer), so their `SessionAuthenticator` must be wired even
 /// when no SSO provider is configured, or those tokens would never validate.
 /// Operator-capability gating still follows the env token only (see

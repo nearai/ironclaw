@@ -1,4 +1,4 @@
-//! Strategy trait contracts for the Reborn agent loop.
+//! Strategy trait contracts for the IronClaw agent loop.
 //!
 //! Most strategies receive `&LoopExecutionState` and return an outcome enum
 //! that carries the new value of their own slot. Stop handling is split into

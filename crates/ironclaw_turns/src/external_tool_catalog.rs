@@ -418,7 +418,7 @@ struct RunEntry {
     pending_calls: Vec<PendingExternalCall>,
 }
 
-/// In-memory [`ExternalToolCatalog`] for local-dev / single-process Reborn.
+/// In-memory [`ExternalToolCatalog`] for local-dev / single-process IronClaw.
 #[derive(Default)]
 pub struct InMemoryExternalToolCatalog {
     runs: Mutex<HashMap<TurnRunId, RunEntry>>,

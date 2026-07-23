@@ -8,19 +8,19 @@ use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
     DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
     EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernor, FilesystemRunStateStore,
-    FilesystemTurnStateRowStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
-    NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore,
-    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
-    ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
-    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
-    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
-    RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress, RuntimeKind,
-    RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
-    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
-    WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
-    build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
-    set_tool_call_http_egress,
+    FilesystemTurnStateRowStore, FirstPartyCapabilityRegistry, HostRuntimeServices,
+    IronClawEventStoreConfig, IronClawEventStoreError, IronClawEventStores, IronClawProfile,
+    McpExecutor, NetworkHttpEgress, ProcessBackendKind, ProcessExecutor,
+    ProcessObligationLifecycleStore, ProcessResultStore, ProcessStore, ProductionComponentType,
+    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
+    ProductionWiringReport, ResourceGovernor, RootFilesystem, RunProfileResolver,
+    RunStateApprovalStore, RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver,
+    RuntimeHttpEgress, RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor,
+    SecretMode, SecretStore, SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort,
+    TrustPolicy, TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError,
+    WasmRuntimeAdapter, WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost,
+    WitToolRuntimeConfig, build_ironclaw_event_stores, production_wiring_report,
+    set_runtime_http_egress, set_tool_call_http_egress,
 };
 use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -563,31 +563,31 @@ where
         self
     }
 
-    /// Attaches a pre-built Reborn durable event/audit store pair to the host
+    /// Attaches a pre-built IronClaw durable event/audit store pair to the host
     /// runtime graph. This is the production composition seam for store
     /// selection: callers choose Postgres/libSQL/accepted-JSONL through
-    /// `ironclaw_reborn_event_store`, then this method adapts the durable logs
+    /// `ironclaw_event_store`, then this method adapts the durable logs
     /// into the live sink traits consumed by runtime services.
-    pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
-        self.with_reborn_event_stores_verified(stores, false)
+    pub fn with_ironclaw_event_stores(self, stores: IronClawEventStores) -> Self {
+        self.with_ironclaw_event_stores_verified(stores, false)
     }
 
-    /// Attaches pre-built Reborn durable event/audit stores after the caller
+    /// Attaches pre-built IronClaw durable event/audit stores after the caller
     /// has already enforced production profile restrictions.
-    pub fn with_production_reborn_event_stores(self, stores: RebornEventStores) -> Self {
-        self.with_reborn_event_stores_verified(stores, true)
+    pub fn with_production_ironclaw_event_stores(self, stores: IronClawEventStores) -> Self {
+        self.with_ironclaw_event_stores_verified(stores, true)
     }
 
-    fn with_reborn_event_stores_verified(
+    fn with_ironclaw_event_stores_verified(
         mut self,
-        stores: RebornEventStores,
+        stores: IronClawEventStores,
         production_verified: bool,
     ) -> Self {
         if production_verified {
             self.component_types.event_sink =
-                Some(ProductionComponentType::of::<RebornEventStores>());
+                Some(ProductionComponentType::of::<IronClawEventStores>());
             self.component_types.audit_sink =
-                Some(ProductionComponentType::of::<RebornEventStores>());
+                Some(ProductionComponentType::of::<IronClawEventStores>());
         } else {
             // Prebuilt/LocalDev/Test stores are useful for tests and lower-level
             // composition, but must not silently satisfy production guardrails.
@@ -609,16 +609,21 @@ where
         self
     }
 
-    /// Builds Reborn event/audit stores from profile/config and attaches them
+    /// Builds IronClaw event/audit stores from profile/config and attaches them
     /// to this service graph. Production JSONL/in-memory restrictions are
-    /// enforced by `build_reborn_event_stores` before sinks are installed.
-    pub async fn with_reborn_event_store_config(
+    /// enforced by `build_ironclaw_event_stores` before sinks are installed.
+    pub async fn with_ironclaw_event_store_config(
         self,
-        profile: RebornProfile,
-        config: RebornEventStoreConfig,
-    ) -> Result<Self, RebornEventStoreError> {
-        let stores = build_reborn_event_stores(profile, config).await?;
-        Ok(self.with_reborn_event_stores_verified(stores, profile == RebornProfile::Production))
+        profile: IronClawProfile,
+        config: IronClawEventStoreConfig,
+    ) -> Result<Self, IronClawEventStoreError> {
+        let stores = build_ironclaw_event_stores(profile, config).await?;
+        Ok(
+            self.with_ironclaw_event_stores_verified(
+                stores,
+                profile == IronClawProfile::Production,
+            ),
+        )
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self

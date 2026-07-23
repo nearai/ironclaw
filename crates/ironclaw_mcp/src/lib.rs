@@ -1,5 +1,5 @@
 // arch-exempt: large_file, targeted catalog parsing fix remains beside the existing MCP protocol parser pending the adapter module split, plan #4088
-//! MCP adapter contracts for IronClaw Reborn.
+//! MCP adapter contracts for IronClaw.
 //!
 //! `ironclaw_mcp` adapts manifest-declared MCP tools into IronClaw
 //! capabilities. It does not grant MCP servers ambient filesystem, secret, or
@@ -1061,7 +1061,7 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>
             let name = tool
                 .get("name")
                 .and_then(Value::as_str)
-                // Discovered tool names become Reborn capability suffixes, so
+                // Discovered tool names become IronClaw capability suffixes, so
                 // discovery rejects unsupported names instead of normalizing
                 // them into potentially colliding capability IDs.
                 .filter(|name| is_supported_mcp_tool_name(name, MAX_TOOL_NAME_BYTES))

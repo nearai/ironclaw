@@ -1,4 +1,4 @@
-//! Reborn integration test — secret store durability over LibSql.
+//! IronClaw integration test — secret store durability over LibSql.
 //!
 //! Store-level durability proof: writes a secret to a `FilesystemSecretStore`
 //! backed by a libSQL composite, then reopens a genuinely fresh store over the
@@ -7,24 +7,24 @@
 //!
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;
 
-use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
-use ironclaw_host_api::SecretHandle;
-use ironclaw_reborn_composition::test_support::{
+use ironclaw_composition::test_support::{
     LOCAL_DEV_DB_FILENAME, build_default_local_dev_database_roots_for_test,
     build_secret_store_for_test, mount_local_dev_database_roots_for_test,
 };
-use ironclaw_reborn_composition::wrap_scoped;
+use ironclaw_composition::wrap_scoped;
+use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
+use ironclaw_host_api::SecretHandle;
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
 
-use reborn_support::harness::test_product_scope;
+use ironclaw_support::harness::test_product_scope;
 
 /// Write a secret and verify it survives a libSQL connection close + reopen.
 ///

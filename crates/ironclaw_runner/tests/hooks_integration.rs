@@ -1,9 +1,9 @@
 // arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
-//! End-to-end integration tests proving that `RebornLoopDriverHostFactory`
+//! End-to-end integration tests proving that `IronClawLoopDriverHostFactory`
 //! wires the `HookDispatcher` into the capability port seam correctly.
 //!
 //! These tests drive `host.invoke_capability(...)` against a host built via
-//! `RebornLoopDriverHostFactory::build_text_only_host_with_capabilities`.
+//! `IronClawLoopDriverHostFactory::build_text_only_host_with_capabilities`.
 //! That exercises the same wrapping composition production code uses, so a
 //! regression in the factory's hook wiring will surface here, whereas a unit
 //! test against `HookedLoopCapabilityPort` alone (already present in
@@ -82,7 +82,7 @@ use ironclaw_runner::hook_gate_refs::{
     InMemoryHookGateRouter, RouterBackedHookGateRefFactory, hook_gate_arguments_digest,
 };
 use ironclaw_runner::loop_driver_host::{
-    EventTriggeredHookSubscription, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    EventTriggeredHookSubscription, IronClawLoopDriverHostFactory, IronClawLoopDriverHostRequest,
     TextOnlyLoopHostConfig,
 };
 use ironclaw_threads::{
@@ -688,7 +688,7 @@ fn predicate_deny_dispatcher() -> Arc<HookDispatcher> {
 /// pre-`build_arc` [`HookDispatcherBuilder`] so the host factory's
 /// builder-factory path can attach a security-audit sink before sealing. This
 /// is the only dispatcher-installation path that consumes
-/// `RebornLoopDriverHostFactory::with_hook_security_audit_sink`.
+/// `IronClawLoopDriverHostFactory::with_hook_security_audit_sink`.
 fn predicate_deny_builder() -> HookDispatcherBuilder {
     let hook_id = HookId::derive(
         &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
@@ -1145,8 +1145,10 @@ impl Fixture {
         }
     }
 
-    fn factory(&self) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, UnusedGateway> {
-        RebornLoopDriverHostFactory::new(
+    fn factory(
+        &self,
+    ) -> IronClawLoopDriverHostFactory<InMemorySessionThreadService, UnusedGateway> {
+        IronClawLoopDriverHostFactory::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
@@ -1162,8 +1164,8 @@ impl Fixture {
         )
     }
 
-    fn request(&self) -> RebornLoopDriverHostRequest {
-        RebornLoopDriverHostRequest {
+    fn request(&self) -> IronClawLoopDriverHostRequest {
+        IronClawLoopDriverHostRequest {
             claimed_run: self.claimed.clone(),
             loop_run_context: self.context.clone(),
         }
@@ -2346,7 +2348,7 @@ async fn predicate_deny_hook_short_circuits_inner_port() {
 }
 
 /// Caller-level regression for
-/// `RebornLoopDriverHostFactory::with_hook_security_audit_sink`. The
+/// `IronClawLoopDriverHostFactory::with_hook_security_audit_sink`. The
 /// dispatcher-level unit test in `ironclaw_hooks` proves a manually wired
 /// dispatcher records `HookDeny`, but it bypasses the factory and would not
 /// catch a regression where the factory forgets to attach the sink to the
@@ -3636,7 +3638,7 @@ async fn pause_approval_with_default_factory_fails_closed_as_denied() {
 
 // ─── Observer middleware integration tests ─────────────────────────────────
 //
-// These prove that `RebornLoopDriverHostFactory` wraps the model, transcript,
+// These prove that `IronClawLoopDriverHostFactory` wraps the model, transcript,
 // and checkpoint ports with the observer middleware from
 // `ironclaw_hooks::middleware::{model_port, transcript_port, checkpoint_port}`
 // when a `HookDispatcher` is configured. Unit tests on the observer wrappers
@@ -3917,7 +3919,7 @@ async fn observer_panic_does_not_fail_model_call() {
 
 /// Stub `LoopCapabilityInputResolver` that always returns the same JSON body
 /// for every input ref. The NumericSum predicate test wires this resolver
-/// through `RebornLoopDriverHostFactory::with_capability_input_resolver` so
+/// through `IronClawLoopDriverHostFactory::with_capability_input_resolver` so
 /// the hook framework sees real numeric input and the predicate can
 /// accumulate across invocations.
 struct ConstantJsonInputResolver {
@@ -4369,7 +4371,7 @@ async fn hook_telemetry_attribution_is_per_run_not_captured() {
 
 /// Drives the full path: install a `before_prompt` hook that emits an
 /// envelope-wrapped snippet, build the prompt bundle through
-/// `RebornLoopDriverHostFactory`, and verify that (a) the bundle includes
+/// `IronClawLoopDriverHostFactory`, and verify that (a) the bundle includes
 /// a synthetic `msg:hook.*` ref and (b) the build did NOT fail closed
 /// (which it would if the factory neglected to wire the materialization
 /// sink). The sink-wired path also writes the safe content into the

@@ -41,7 +41,7 @@ impl Default for EventCursor {
 
 /// Stream partition key.
 ///
-/// Reborn durable event/audit streams partition by (tenant, user, agent).
+/// IronClaw durable event/audit streams partition by (tenant, user, agent).
 /// Cursors are monotonic within a stream and must be validated against the
 /// requesting consumer's stream key. Deeper scope filtering (project,
 /// mission, thread, process, invocation) is applied as a read-side filter on

@@ -6,7 +6,7 @@ publish = false
 
 [package.metadata.ironclaw]
 layer = "substrates"
-description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
+description = "IronClaw loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
 
 [features]
 # The crate's dev-only seam. Two things live behind it:

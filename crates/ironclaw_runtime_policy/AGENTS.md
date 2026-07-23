@@ -4,10 +4,10 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/runtime-profiles.md`
-- `docs/reborn/contracts/runtime-selection.md`
-- `docs/reborn/contracts/runtime-workflows.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/runtime-profiles.md`
+- `docs/ironclaw/contracts/runtime-selection.md`
+- `docs/ironclaw/contracts/runtime-workflows.md`
 
 ## What This Crate Owns
 

@@ -1,0 +1,27 @@
+[package]
+name = "ironclaw_config"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Boot configuration contracts for the standalone IronClaw binary"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+# Boundary crate only. Release packaging belongs to the CLI/runtime slices after
+# `run`, docs, and `dist plan` are verified.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+fs4 = "1.1"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+toml = "1.1"
+toml_edit = "0.25"

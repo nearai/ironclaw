@@ -12,11 +12,11 @@
 //! setting had not crossed the thread boundary, `submit_turn` would time out
 //! waiting for `Completed` instead of returning.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: flip auto-approve ON (persists to the shared store) ────────
     let enabler = g.thread("conv-approve-always-enabler").build().await?;
     enabler.enable_auto_approve().await?;
@@ -26,11 +26,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let user = g
         .thread("conv-approve-always-user")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/auto.txt", "content": "auto-approved"}),
             ),
-            RebornScriptedReply::text("wrote without a gate"),
+            IronClawScriptedReply::text("wrote without a gate"),
         ])
         .build()
         .await?;

@@ -1,14 +1,14 @@
 # ironclaw_wasm
 
-Owns the Reborn WASM component runtime lane.
+Owns the IronClaw WASM component runtime lane.
 
 ## Responsibilities
 
-- Load, compile, validate, meter, and execute already-selected WASM components for Reborn.
+- Load, compile, validate, meter, and execute already-selected WASM components for IronClaw.
 - Use the canonical WIT/component-model ABI from `wit/tool.wit` and later `wit/channel.wit`.
 - Provide thin host-import adapters for workspace, time, logging, secret-existence checks, tool invocation, and HTTP egress.
 - Provide the folded `wasm_sandbox_core` module for domain-free Wasmtime/WASI sandbox primitives shared by runtime crates.
-- Fail closed by default for host capabilities that are not explicitly wired by the Reborn composition root.
+- Fail closed by default for host capabilities that are not explicitly wired by the IronClaw composition root.
 
 ## Non-responsibilities
 
@@ -20,7 +20,7 @@ Owns the Reborn WASM component runtime lane.
 
 ## Safety rules
 
-- No JSON pointer/length ABI (`invoke_json`, `alloc`, `output_ptr`, `output_len`) in Reborn WASM.
+- No JSON pointer/length ABI (`invoke_json`, `alloc`, `output_ptr`, `output_len`) in IronClaw WASM.
 - Instantiate fresh component instances per call.
 - Preserve fuel, epoch timeout, aggregate memory, and table/instance limits; multi-memory components must not multiply the per-execution `memory_bytes` budget.
 - Cap HTTP host-call timeouts to the remaining execution deadline, and require injected synchronous host implementations to honor that timeout.

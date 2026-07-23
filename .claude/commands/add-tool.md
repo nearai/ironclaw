@@ -5,7 +5,7 @@ argument-hint: <tool_name> [description]
 model: opus
 ---
 
-> **v1-maintenance only.** This scaffolds into the legacy `src/tools/` system. Per the repo's reborn-first rule, use it only to maintain existing v1 behavior — new capabilities belong Reborn-side (extension manifest + capability descriptor + runtime lane through `CapabilityHost`; start from the `reborn-feature` skill).
+> **v1-maintenance only.** This scaffolds into the legacy `src/tools/` system. Per the repo's IronClaw-first rule, use it only to maintain existing v1 behavior — new capabilities belong in the default IronClaw workspace (extension manifest + capability descriptor + runtime lane through `CapabilityHost`; start from the `ironclaw-feature` skill).
 
 Scaffold a new tool called `$ARGUMENTS` for the IronClaw agent. First, determine the tool type and then follow the appropriate path.
 

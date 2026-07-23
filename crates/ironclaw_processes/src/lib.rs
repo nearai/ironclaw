@@ -1,4 +1,4 @@
-//! Process lifecycle contracts for IronClaw Reborn.
+//! Process lifecycle contracts for IronClaw.
 //!
 //! `ironclaw_processes` stores and manages host-tracked background capability
 //! processes. It owns lifecycle mechanics, not capability authorization or

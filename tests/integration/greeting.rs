@@ -1,4 +1,4 @@
-//! Reborn integration-test framework — smoke test.
+//! IronClaw integration-test framework — smoke test.
 //!
 //! Proves the single LLM seam end-to-end: synthetic inbound → product workflow
 //! → scheduler → planned agent loop → real `LlmProviderModelGateway` → real
@@ -15,18 +15,18 @@
 // slice, so suppress dead-code warnings on the includes.
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 
 #[tokio::test]
 async fn replies_to_greeting() {
-    let harness = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("Hello! How can I help?")])
+    let harness = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("Hello! How can I help?")])
         .build()
         .await
         .expect("harness builds");

@@ -1,6 +1,6 @@
 //! Caller-level production-chain test for multi-user WebChat v2 SSO.
 //!
-//! This drives the REAL production session path the `ironclaw-reborn serve`
+//! This drives the REAL production session path the `ironclaw serve`
 //! binary wires: `build_signed_session_login` → `SignedTokenSessionStore`
 //! (stateless HMAC) → `CompositeAuthenticator` → composed `webui_v2_app`.
 //!
@@ -21,13 +21,13 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use ironclaw_composition::{IronClawReadiness, IronClawWebuiBundle};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
+    IronClawCreateThreadResponse, IronClawServicesError, ProductOperationId,
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, WebUiAuthenticatedCaller,
     WebUiCreateThreadRequest,
 };
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
     EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
@@ -55,7 +55,7 @@ impl RecordingServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<IronClawCreateThreadResponse, IronClawServicesError> {
         // Return a thread owned by the calling user, mirroring the real
         // facade's `owner = caller.user_id` rule.
         let owner = caller.user_id.clone();
@@ -63,7 +63,7 @@ impl RecordingServices {
             .lock()
             .expect("lock")
             .push(caller);
-        Ok(RebornCreateThreadResponse {
+        Ok(IronClawCreateThreadResponse {
             thread: SessionThreadRecord {
                 thread_id: ThreadId::new("thread.fake").expect("thread"),
                 scope: ThreadScope {
@@ -90,16 +90,16 @@ impl ProductSurface for RecordingServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
+            .ok_or_else(|| IronClawServicesError::internal_from("unsupported product operation"))?;
         match operation_id {
             ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(IronClawServicesError::internal_from)?;
                 ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(IronClawServicesError::internal_from(
                 "unsupported product operation",
             )),
         }
@@ -109,7 +109,7 @@ impl ProductSurface for RecordingServices {
 // ─── distinct-user directory: one user per provider subject ──────────────
 
 /// Maps each provider subject to its own `UserId`, mirroring the real
-/// reborn-owned store's distinct-user behavior without a database.
+/// IronClaw-owned store's distinct-user behavior without a database.
 struct DistinctUserDirectory;
 
 #[async_trait]
@@ -201,10 +201,10 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
     .expect("login wiring");
 
     let services = Arc::new(RecordingServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = IronClawWebuiBundle {
         api: services.clone(),
         product_auth: None,
-        readiness: RebornReadiness::disabled(),
+        readiness: IronClawReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),

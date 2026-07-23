@@ -1,10 +1,10 @@
 # ironclaw_product_workflow
 
-Product-facing surface orchestration for IronClaw Reborn (issue #3280).
+Product-facing surface orchestration for IronClaw (issue #3280).
 
 ## Purpose
 
-Sits between product adapters and host-layer Reborn services. Owns the product
+Sits between product adapters and host-layer IronClaw services. Owns the product
 action orchestration so adapters (Web, API, CLI, Telegram, etc.) do not each
 reimplement binding resolution, message staging, idempotency, busy/deferred
 handling, gate routing, mission routing, and redacted acknowledgements.
@@ -15,7 +15,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 |------|------|
 | `DefaultProductSurface` | Top-level orchestrator implementing the `ProductSurface` trait |
 | `InboundTurnService` / `DefaultInboundTurnService` | User-message turn submission path |
-| `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
+| `ConversationBindingService` | Resolves external adapter refs → canonical IronClaw identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
 | `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
 | `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes |
@@ -23,11 +23,11 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
 | `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
-| `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
+| `ProductCommandService` | IronClaw-native product command execution port for already-admitted typed commands |
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
 | `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
 | `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
-| `ProductSurface` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
+| `ProductSurface` / `IronClawServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
 
 ## Dependencies
 
@@ -104,7 +104,7 @@ Automation trigger-fired threads are stored by `record_trigger_prompt` with
 the WebUI caller's session user. The caller-scoped `SessionThreadService` probe
 therefore misses them.
 
-When a thread lookup misses under the caller's session scope, `RebornServices`
+When a thread lookup misses under the caller's session scope, `IronClawServices`
 falls back to `AutomationProductFacade::resolve_run_thread_scope`. That method
 is caller-scoped: it scans only the triggers owned by the authenticated caller
 (matched on tenant_id + creator_user_id + agent_id + project_id), so the
@@ -135,8 +135,8 @@ is explicitly forbidden.
 any caller-visible trigger) produces a 404 response.
 
 WebUI-facing facade errors must expose stable, sanitized taxonomy. Keep
-`RebornServicesErrorCode` aligned with coarse transport/status shape and
-`RebornServicesErrorKind` aligned with M1-renderable user-safe families such as
+`IronClawServicesErrorCode` aligned with coarse transport/status shape and
+`IronClawServicesErrorKind` aligned with M1-renderable user-safe families such as
 validation, duplicate, busy, participant denied, blocked approval/auth/resource,
 replay/timeline unavailable, service unavailable, conflict, not found, and
 internal. Do not surface backend strings, host paths, provider/runtime details,

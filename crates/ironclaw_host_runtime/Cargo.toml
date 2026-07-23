@@ -38,8 +38,8 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
-ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
-ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
+ironclaw_event_store = { path = "../ironclaw_event_store" }
+ironclaw_traces = { path = "../ironclaw_traces" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }

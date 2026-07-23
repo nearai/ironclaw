@@ -1,12 +1,12 @@
-//! Product-facing authentication contracts for IronClaw Reborn.
+//! Product-facing authentication contracts for IronClaw.
 //!
 //! This crate is the contract-first slice for #3289 / #3810 / #3883. It
 //! defines the typed auth-flow, secure interaction, credential-account,
 //! recovery/account-selection, provider exchange, continuation, and cleanup
-//! boundaries used by Reborn product surfaces.
+//! boundaries used by IronClaw product surfaces.
 //!
 //! Behavior may remain compatible with legacy product UX, but code paths must
-//! stay Reborn-native: this crate does not depend on V1 route handlers, V1
+//! stay IronClaw-native: this crate does not depend on V1 route handlers, V1
 //! pending maps, V1 extension manager authority, or V1 secret stores.
 
 mod account_state;

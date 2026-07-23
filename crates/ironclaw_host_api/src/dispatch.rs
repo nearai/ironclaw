@@ -42,7 +42,7 @@ pub struct CapabilityDisplayOutputPreview {
     pub output_summary: Option<String>,
     /// Raw, unsanitized content — callers MUST sanitize before display or logging.
     /// The canonical sanitization point is the projection layer in
-    /// `ironclaw_reborn_composition`. New consumers must not read this field
+    /// `ironclaw_composition`. New consumers must not read this field
     /// without sanitizing.
     pub output_preview: String,
     pub output_kind: String,

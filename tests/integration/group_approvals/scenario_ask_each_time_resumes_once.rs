@@ -13,21 +13,21 @@
 //! never reaches the `ask_each_time` branch, so this scenario installs the
 //! override explicitly via `set_ask_each_time_override_for_test`.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-ask-each-time")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/ask-each-time.txt", "content": "ask each time payload"}),
             ),
-            RebornScriptedReply::text("file written after ask-each-time approval"),
+            IronClawScriptedReply::text("file written after ask-each-time approval"),
         ])
         .build()
         .await?;

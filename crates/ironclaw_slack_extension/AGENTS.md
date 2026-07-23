@@ -12,7 +12,7 @@
 
 ## What This Crate Owns
 
-- Slack v2 ProductAdapter tracer-bullet implementation for Reborn issue #3857.
+- Slack v2 ProductAdapter tracer-bullet implementation for IronClaw issue #3857.
 - Slack Events API payload parsing and outbound `chat.postMessage` rendering.
 - Adapter-specific mapping between Slack shapes and shared ProductAdapter DTOs.
 
@@ -32,4 +32,4 @@
 
 - Keep Slack-specific parsing/rendering here; move reusable DTO concerns upstream.
 - Preserve adapter outputs as untrusted parsed DTOs until host/workflow stamps trusted context.
-- Approval/auth conversational handling is deferred to the owning Reborn service seam (#3094).
+- Approval/auth conversational handling is deferred to the owning IronClaw service seam (#3094).

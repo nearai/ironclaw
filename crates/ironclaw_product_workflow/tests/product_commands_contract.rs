@@ -1,4 +1,4 @@
-//! Contract tests for the Reborn-native product command model.
+//! Contract tests for the IronClaw-native product command model.
 
 use ironclaw_product_adapters::{
     InboundCommandPayload, ProductRejectionKind, ProductTriggerReason,

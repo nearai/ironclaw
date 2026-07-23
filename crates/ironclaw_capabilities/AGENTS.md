@@ -4,11 +4,11 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/capability-access.md`
-- `docs/reborn/contracts/capabilities.md`
-- `docs/reborn/contracts/approvals.md`
-- `docs/reborn/contracts/run-state.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/capability-access.md`
+- `docs/ironclaw/contracts/capabilities.md`
+- `docs/ironclaw/contracts/approvals.md`
+- `docs/ironclaw/contracts/run-state.md`
 
 ## What This Crate Owns
 

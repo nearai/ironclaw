@@ -152,15 +152,15 @@ Source builds require Rust 1.96+ and Node.js 22+ with Corepack/pnpm.
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 corepack enable pnpm
-cargo install --locked --path crates/ironclaw_reborn_cli
+cargo install --locked --path crates/ironclaw_cli
 ```
 
 </details>
 
 ## Configuration
 
-`ironclaw onboard` is the primary configuration path. It writes Reborn state
-under `$HOME/.ironclaw/reborn` by default, stores the selected LLM credential
+`ironclaw onboard` is the primary configuration path. It writes IronClaw state
+under `$HOME/.ironclaw` by default, stores the selected LLM credential
 in the encrypted local secret store, and preserves existing configuration when
 it is run again.
 

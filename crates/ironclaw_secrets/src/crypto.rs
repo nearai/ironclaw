@@ -1,7 +1,7 @@
 //! Port of IronClaw's battle-tested secret crypto.
 //!
 //! Uses AES-256-GCM with per-secret HKDF-SHA256 key derivation, matching the
-//! existing `src/secrets/crypto.rs` implementation so Reborn does not introduce
+//! existing `src/secrets/crypto.rs` implementation so IronClaw does not introduce
 //! a parallel encryption scheme.
 
 use aes_gcm::{
@@ -44,7 +44,7 @@ pub struct SecretsCrypto {
 /// file, the `SECRETS_MASTER_KEY` env var) use this to fail loud with a
 /// source-naming error instead of the opaque [`SecretError::InvalidMasterKey`]
 /// that surfaces when an already-wrapped key reaches `new` several layers
-/// deep. See `ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key`.
+/// deep. See `ironclaw_composition::factory::resolve_local_dev_secret_master_key`.
 pub fn validate_master_key_material(bytes: &[u8]) -> Result<(), SecretError> {
     if bytes.len() < KEY_SIZE {
         return Err(SecretError::InvalidMasterKey);
@@ -207,7 +207,7 @@ pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_rec
 /// Production storage code reaches this through the higher-level
 /// `SecretStore` / `SecretsStore` API and never needs to call it directly.
 /// It is `pub` so contract tests and integration fixtures that bypass the
-/// store and write directly to `reborn_secret_records` can construct
+/// store and write directly to `ironclaw_secret_records` can construct
 /// ciphertext the production code will accept.
 pub fn secret_record_aad(user_id: &str, name: &str) -> Vec<u8> {
     build_aad(

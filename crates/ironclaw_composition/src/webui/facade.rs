@@ -1,0 +1,861 @@
+// arch-exempt: large_file, WebUI bundle composition awaiting IronClaw composition helper extraction, plan #4471
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use chrono::Utc;
+
+use async_trait::async_trait;
+use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_product_adapters::ProjectionStream;
+use ironclaw_product_workflow::{
+    ChannelConnectionFacade, IronClawOperatorStatusCheck, IronClawOperatorStatusResponse,
+    IronClawOperatorStatusSeverity, IronClawOperatorStatusState,
+    IronClawServices as ProductIronClawServices, IronClawServicesError, IronClawServicesErrorCode,
+    IronClawServicesErrorKind, IronClawSkillContentResponse, IronClawSkillInfo,
+    IronClawSkillListResponse, IronClawSkillSearchResponse, IronClawSkillSourceKind,
+    IronClawSkillTrustLevel, OperatorStatusService, ProductSurface, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
+};
+
+use ironclaw_triggers::TriggerRepository;
+
+use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
+use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
+use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
+use crate::{
+    IronClawAutomationProductFacade, IronClawBuildError, IronClawProductAuthServices,
+    IronClawReadiness, IronClawReadinessDiagnostic, IronClawReadinessDiagnosticStatus,
+    IronClawRuntime,
+    extension_host::lifecycle::{
+        IronClawLocalLifecycleFacade, IronClawLocalSkillManagementError,
+        IronClawLocalSkillManagementPort,
+    },
+    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
+    observability::IronClawLocalServiceLifecycle,
+    outbound::{
+        IronClawOutboundPreferencesFacade, OutboundDeliveryTargetProvider,
+        OutboundDeliveryTargetRegistry, outbound_delivery_synthetic_provider,
+        outbound_delivery_target_set_operator_tool_info,
+    },
+    support::fs::{
+        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
+        ProjectScopedFilesystemReader,
+    },
+};
+
+/// WebUI-facing IronClaw service bundle for host composition.
+///
+/// This bundle deliberately exposes facade-shaped product handles consumed
+/// by WebChat v2 and the optional product-auth OAuth routes. HTTP routing, auth
+/// middleware, static assets, and SSE transport live in the `ironclaw_webui`
+/// crate (which folded up the former `ironclaw_webui_v2` route surface); only
+/// the host-supplied route-mount vocabulary stays in the
+/// [`crate::webui::route_mounts`] module here. Lower runtime handles stay behind
+/// the existing IronClaw runtime / composition services.
+#[derive(Clone)]
+pub struct IronClawWebuiBundle {
+    pub api: Arc<dyn ProductSurface>,
+    pub product_auth: Option<Arc<IronClawProductAuthServices>>,
+    pub readiness: IronClawReadiness,
+}
+
+impl std::fmt::Debug for IronClawWebuiBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IronClawWebuiBundle")
+            .field("api", &"Arc<dyn ProductSurface>")
+            .field("product_auth", &self.product_auth.is_some())
+            .field("readiness", &self.readiness)
+            .finish()
+    }
+}
+
+/// A trigger repository paired with the turn-run snapshot source from the
+/// SAME runtime. Local-dev and production graphs both carry these two
+/// separately; mixing runtimes would let active-hold projections read run
+/// state the poller of the *other* runtime writes, silently desyncing the
+/// automations panel (#5886).
+pub(crate) struct AutomationBacking {
+    pub(crate) repository: Arc<dyn TriggerRepository>,
+    pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+}
+
+/// Resolves the [`AutomationBacking`] pair for whichever runtime is wired:
+/// local-dev first, then production runtime as a fallback. Returns `None` when
+/// neither runtime is present.
+pub(crate) fn automation_backing(services: &crate::IronClawServices) -> Option<AutomationBacking> {
+    let from_local = services
+        .local_runtime
+        .as_ref()
+        .map(|local_runtime| AutomationBacking {
+            repository: Arc::clone(&local_runtime.trigger_repository),
+            snapshot_source: Arc::clone(&local_runtime.turn_state)
+                as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+        });
+    from_local.or_else(|| {
+        services
+            .production_runtime
+            .as_ref()
+            .map(|production_runtime| AutomationBacking {
+                repository: production_runtime.trigger_repository(),
+                snapshot_source: production_runtime.turn_run_snapshot_source(),
+            })
+    })
+}
+
+/// Compose the WebUI-facing product facade from an already-built IronClaw runtime.
+///
+/// This function does not create a second turn coordinator, thread service,
+/// host runtime or route server. It reuses the runtime's existing task-level
+/// composition and attaches the runtime-owned projection stream unless the
+/// caller supplies a custom stream.
+pub fn build_webui_services(
+    runtime: &IronClawRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+) -> Result<IronClawWebuiBundle, IronClawBuildError> {
+    // The generic per-user channel-connection facade (extension-runtime
+    // §6.3): channel extensions are discovered from the durable installation
+    // store; no per-vendor lane registers anything.
+    let channel_connection = runtime.generic_channel_connection_facade();
+    build_webui_services_with_channel_connection(
+        runtime,
+        event_stream,
+        channel_connection,
+        Vec::new(),
+    )
+}
+
+pub(crate) fn build_webui_services_with_channel_connection(
+    runtime: &IronClawRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+    channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
+    mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
+) -> Result<IronClawWebuiBundle, IronClawBuildError> {
+    let services = runtime.services();
+    if services.local_runtime.is_some()
+        && let Some(provider) = runtime.outbound_delivery_target_provider()
+    {
+        outbound_delivery_target_providers.push(provider);
+    }
+
+    let admin_configuration_view = services
+        .local_runtime
+        .as_ref()
+        .and_then(|local_runtime| {
+            Some(AdminConfigurationViewProvider::new(
+                local_runtime.admin_configuration.clone()?,
+                local_runtime.admin_configuration_uses.as_ref().clone(),
+                local_runtime
+                    .extension_management
+                    .as_ref()?
+                    .installation_store_handle(),
+            ))
+        })
+        .unwrap_or_default();
+    let mut api = ProductIronClawServices::new_with_product_ports(
+        runtime.webui_thread_service(),
+        runtime.webui_turn_coordinator(),
+        RuntimeProductCapabilityInvoker::from_services(services),
+        admin_configuration_view,
+    )
+    .with_approval_interactions(runtime.webui_approval_interaction_service())
+    .with_auth_interactions(runtime.webui_auth_interaction_service());
+    // Admin user-management surface: wired only when the identity directory,
+    // the admin secret provisioner, and a token minter are all available.
+    // Otherwise the fail-closed RejectingAdminUserService default stands and
+    // admin routes report the service unavailable.
+    if let (Some(directory), Some(provisioner), Some(minter)) = (
+        runtime.ironclaw_user_directory(),
+        runtime.ironclaw_admin_secret_provisioner(),
+        runtime.ironclaw_admin_token_minter(),
+    ) {
+        api = api.with_admin_user_service(Arc::new(
+            crate::admin_user_directory::IronClawAdminUserDirectory::new(
+                directory,
+                provisioner,
+                minter,
+            ),
+        ));
+    }
+    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
+        api = api
+            .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(
+                &workspace_filesystem,
+            ))))
+            // Read-only project filesystem backing directory listing and file
+            // download chips, over the same workspace mount.
+            .with_project_filesystem_reader(Arc::new(ProjectScopedFilesystemReader::new(
+                Arc::clone(&workspace_filesystem),
+            )))
+            // Read counterpart: serves landed attachment bytes back to the
+            // browser (image thumbnails) through the same workspace mount.
+            .with_inbound_attachment_reader(Arc::new(ProjectScopedAttachmentReader::new(
+                workspace_filesystem,
+            )));
+    }
+    // Standalone read-only filesystem viewer: browses memory + workspace over a
+    // dedicated read-only multi-mount view (not the read-write workspace handle
+    // above), so navigation can never become a write path.
+    if let Some(browse_filesystem) = runtime.webui_browse_filesystem() {
+        api = api.with_filesystem_browser(Arc::new(MountScopedFilesystemReader::new(
+            browse_filesystem,
+        )));
+    }
+    if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
+        let activation_recorder = Arc::clone(&skill_activation_source);
+        let activation_clearer = skill_activation_source;
+        api = api.with_skill_activation_hooks(
+            move |scope, accepted_message_ref, message| {
+                activation_recorder
+                    .record_user_message(scope.clone(), accepted_message_ref.clone(), message)
+                    .map_err(|_| IronClawServicesError {
+                        code: IronClawServicesErrorCode::Internal,
+                        kind: IronClawServicesErrorKind::Internal,
+                        status_code: 500,
+                        retryable: false,
+                        field: None,
+                        validation_code: None,
+                    })
+            },
+            move |scope, accepted_message_ref| {
+                activation_clearer
+                    .clear_accepted_message(scope, accepted_message_ref)
+                    .map_err(|_| IronClawServicesError {
+                        code: IronClawServicesErrorCode::Internal,
+                        kind: IronClawServicesErrorKind::Internal,
+                        status_code: 500,
+                        retryable: false,
+                        field: None,
+                        validation_code: None,
+                    })
+            },
+        );
+    }
+    if let Some(local_runtime) = &services.local_runtime {
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let persistent_approval_policies: Arc<
+            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        > = local_runtime.persistent_approval_policies.clone();
+        let tool_registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(SharedExtensionRegistry::new(
+                    local_runtime.extension_registry.as_ref().clone(),
+                ))
+            });
+        let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
+            Vec::new()
+        } else {
+            let provider = outbound_delivery_synthetic_provider().map_err(|error| {
+                IronClawBuildError::InvalidConfig {
+                    reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+                }
+            })?;
+            vec![
+                outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                    IronClawBuildError::InvalidConfig {
+                        reason: format!("outbound delivery operator tool is invalid: {error}"),
+                    }
+                })?,
+            ]
+        };
+        api = api.with_operator_approval_config(
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            Arc::new(ActiveRegistryOperatorToolCatalog::new(
+                tool_registry,
+                synthetic_operator_tools,
+                local_runtime.extension_management.clone(),
+            )),
+        );
+        let mut lifecycle_facade =
+            IronClawLocalLifecycleFacade::new(local_runtime.skill_management.clone());
+        if let Some(extension_management) = &local_runtime.extension_management {
+            lifecycle_facade =
+                lifecycle_facade.with_extension_management(extension_management.clone());
+        }
+        if let Some(channel_config) = &local_runtime.channel_config {
+            lifecycle_facade = lifecycle_facade.with_channel_config(channel_config.clone());
+        }
+        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+            lifecycle_facade =
+                lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+        }
+        if let Some(product_auth) = &services.product_auth {
+            lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
+        }
+        api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+    }
+    // The generic channel-config configure port: the setup facade renders
+    // manifest-declared channel-config fields and routes submitted values
+    // through it (extension-runtime §6.4).
+    if let Some(channel_config) = services.channel_config_facade() {
+        api = api.with_channel_config_facade(channel_config);
+    }
+    if let Some(skill_management) = &services.skill_management {
+        // Share the activation selector's live master switch so a Settings
+        // toggle here changes the next turn's selection. Only the local-dev
+        // runtime builds a selector that reads this flag, so it is wired only
+        // when `local_runtime` is present. When absent (e.g. the production
+        // assembly, which has no flag-reading selector), the facade gets `None`
+        // and the toggle reports unavailable rather than silently writing to an
+        // orphan flag that controls nothing.
+        let auto_activate_flag = services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.skill_auto_activate_learned));
+        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
+            Arc::clone(skill_management),
+            auto_activate_flag,
+        )));
+    }
+    if let Some(product_auth) = &services.product_auth {
+        api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
+            Arc::clone(product_auth),
+        )));
+    }
+    if let Some(backing) = automation_backing(services) {
+        let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
+            crate::automation::trigger_poller::SnapshotActiveRunLookup::new(
+                backing.snapshot_source,
+            ),
+        );
+        api = api.with_automation_product_facade(Arc::new(
+            IronClawAutomationProductFacade::new(backing.repository, active_run_lookup)
+                .with_scheduler_enabled(services.readiness.workers.trigger_poller),
+        ));
+    }
+    // First-class projects + membership (ACL). Built once per runtime over the
+    // scoped substrate — local-dev from `local_runtime`, production-shaped from
+    // the production store graph — via the shared `ironclaw_project_service`
+    // accessor so both build paths wire the same access-controlled facade.
+    if let Some(project_service) = runtime.ironclaw_project_service() {
+        api = api.with_project_service(project_service);
+    }
+    if let Some(local_runtime) = &services.local_runtime {
+        api =
+            api.with_outbound_preferences_facade(Arc::new(IronClawOutboundPreferencesFacade::new(
+                Arc::clone(&local_runtime.outbound_preferences),
+                Arc::new(OutboundDeliveryTargetRegistry::new(
+                    outbound_delivery_target_providers,
+                )),
+            )));
+    } else if !outbound_delivery_target_providers.is_empty() {
+        return Err(IronClawBuildError::InvalidConfig {
+            reason: "outbound delivery target providers require local runtime services".to_string(),
+        });
+    }
+    if let Some(channel_connection) = channel_connection {
+        api = api.with_channel_connection_facade(channel_connection);
+    }
+    api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+    api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
+        services.readiness.clone(),
+    )));
+    api = api.with_operator_logs_service(crate::operator_log_buffer());
+    if let Some(local_runtime) = &services.local_runtime {
+        let webui_boot_config = runtime.webui_boot_config();
+        api = api.with_operator_service_lifecycle_service(Arc::new(
+            IronClawLocalServiceLifecycle::new_for_operator_with_boot_config(
+                runtime.webui_tenant_id().clone(),
+                local_runtime.owner_user_id.clone(),
+                webui_boot_config,
+            ),
+        ));
+    }
+
+    // Compose the operator LLM-config settings service when the runtime was
+    // assembled with a boot config. The secret store stays private to this
+    // crate; the service is the only facade-shaped handle that leaves.
+    if let Some(llm_config) = build_llm_config_service(runtime) {
+        api = api.with_llm_config_service(llm_config);
+    }
+
+    // Wire the live active-model reader so a default-model run (no explicit
+    // `model`, hence no `resolved_model_route`) is still priced — against the
+    // model that actually ran, tracking operator model swaps.
+    if let Some(active_model_reader) = runtime.webui_active_model_reader() {
+        api = api.with_active_model_reader(active_model_reader);
+    }
+
+    Ok(IronClawWebuiBundle {
+        api: Arc::new(api),
+        product_auth: services.product_auth.clone(),
+        readiness: services.readiness.clone(),
+    })
+}
+
+/// Compose the operator LLM-config settings service from the runtime's boot
+/// config, secret store, and optional reload/session/login-state handles.
+///
+/// Returns `None` when the runtime was assembled without a boot config. Shared
+/// by `build_webui_services` (operator LLM routes) and the OpenAI-compatible
+/// `/v1/models` catalog so both read the same configured-model source.
+pub(crate) fn build_llm_config_service(
+    runtime: &IronClawRuntime,
+) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {
+    let boot = runtime.webui_boot_config()?;
+    let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
+    let mut llm_config = crate::IronClawLlmConfigService::new(boot.clone(), keys);
+    if let Some(reload) = runtime.webui_llm_reload_trigger() {
+        llm_config = llm_config.with_reload_trigger(reload);
+    }
+    if let Some(session) = runtime.webui_llm_session() {
+        llm_config = llm_config.with_nearai_session(session);
+    }
+    if let Some(states) = runtime.webui_nearai_login_states() {
+        llm_config = llm_config.with_nearai_login_states(states);
+    }
+    Some(Arc::new(llm_config))
+}
+
+struct ReadinessOperatorStatusService {
+    readiness: IronClawReadiness,
+}
+
+impl ReadinessOperatorStatusService {
+    fn new(readiness: IronClawReadiness) -> Self {
+        Self { readiness }
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for ReadinessOperatorStatusService {
+    async fn status(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<IronClawOperatorStatusResponse, IronClawServicesError> {
+        Ok(status_response_from_readiness(&self.readiness))
+    }
+}
+
+struct LocalSkillsProductFacade {
+    skill_management: Arc<IronClawLocalSkillManagementPort>,
+    // The skill activation selector's live master switch (see
+    // `IronClawRuntimeSubstrate::skill_auto_activate_learned`). The read facade
+    // reports it for the skills view; writes go through the first-party
+    // `builtin.skill_auto_activate_learned_set` capability.
+    //
+    // Process-global by design: this is a single-operator local-dev switch, so it
+    // is intentionally not scoped per caller. A future multi-user surface would
+    // need a per-tenant flag.
+    auto_activate_learned: Option<Arc<AtomicBool>>,
+}
+
+impl LocalSkillsProductFacade {
+    fn new(
+        skill_management: Arc<IronClawLocalSkillManagementPort>,
+        auto_activate_learned: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self {
+            skill_management,
+            auto_activate_learned,
+        }
+    }
+}
+
+#[async_trait]
+impl SkillsProductFacade for LocalSkillsProductFacade {
+    async fn list_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<IronClawSkillListResponse, IronClawServicesError> {
+        let scope = caller_skill_scope(caller);
+        let skills = self
+            .skill_management
+            .list_for_scope(scope)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(skill_list_response(
+            skills,
+            self.auto_activate_learned
+                .as_ref()
+                .map(|flag| flag.load(Ordering::Relaxed))
+                .unwrap_or(true),
+        ))
+    }
+
+    async fn search_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<IronClawSkillSearchResponse, IronClawServicesError> {
+        let scope = caller_skill_scope(caller);
+        let result = self
+            .skill_management
+            .search_for_scope(scope, &query, 50)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(IronClawSkillSearchResponse {
+            catalog: Vec::new(),
+            installed: result.skills.into_iter().map(skill_info).collect(),
+            registry_url: String::new(),
+            catalog_error: None,
+        })
+    }
+
+    async fn read_skill_content(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<IronClawSkillContentResponse, IronClawServicesError> {
+        let scope = caller_skill_scope(caller);
+        let content = self
+            .skill_management
+            .read_content_for_scope(scope, &name)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(IronClawSkillContentResponse {
+            name: content.name,
+            content: content.content,
+        })
+    }
+}
+
+fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id,
+        user_id: caller.user_id,
+        agent_id: caller.agent_id,
+        project_id: caller.project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+fn skill_list_response(
+    skills: Vec<ironclaw_skills::SkillSummary>,
+    auto_activate_learned: bool,
+) -> IronClawSkillListResponse {
+    let skills: Vec<_> = skills.into_iter().map(skill_info).collect();
+    IronClawSkillListResponse {
+        count: skills.len(),
+        skills,
+        auto_activate_learned,
+    }
+}
+
+fn skill_info(skill: ironclaw_skills::SkillSummary) -> IronClawSkillInfo {
+    let source_kind = match skill.source {
+        ironclaw_skills::ManagedSkillSource::System => IronClawSkillSourceKind::System,
+        ironclaw_skills::ManagedSkillSource::User => IronClawSkillSourceKind::User,
+        ironclaw_skills::ManagedSkillSource::Installed => IronClawSkillSourceKind::Installed,
+    };
+    let can_manage = matches!(
+        source_kind,
+        IronClawSkillSourceKind::User | IronClawSkillSourceKind::Installed
+    );
+    IronClawSkillInfo {
+        name: skill.name.clone(),
+        description: skill.description,
+        version: skill.version,
+        trust: if source_kind == IronClawSkillSourceKind::Installed {
+            IronClawSkillTrustLevel::Installed
+        } else {
+            IronClawSkillTrustLevel::Trusted
+        },
+        source: source_kind,
+        source_kind,
+        keywords: skill.keywords,
+        usage_hint: Some(format!(
+            "Type `/{}` in chat to force-activate this skill.",
+            skill.name
+        )),
+        setup_hint: None,
+        bundle_path: None,
+        install_source_url: None,
+        has_requirements: false,
+        has_scripts: false,
+        can_edit: can_manage,
+        can_delete: can_manage,
+        auto_activate: skill.auto_activate,
+    }
+}
+
+fn map_skill_management_error(error: IronClawLocalSkillManagementError) -> IronClawServicesError {
+    match error {
+        IronClawLocalSkillManagementError::InvalidContext { .. } => internal_skill_error(),
+        IronClawLocalSkillManagementError::Skill(error) => match error.kind() {
+            ironclaw_skills::SkillManagementErrorKind::NotFound => IronClawServicesError {
+                code: IronClawServicesErrorCode::NotFound,
+                kind: IronClawServicesErrorKind::NotFound,
+                status_code: 404,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::Conflict => IronClawServicesError {
+                code: IronClawServicesErrorCode::Conflict,
+                kind: IronClawServicesErrorKind::Conflict,
+                status_code: 409,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::Resource => IronClawServicesError {
+                code: IronClawServicesErrorCode::Unavailable,
+                kind: IronClawServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::FilesystemDenied => IronClawServicesError {
+                code: IronClawServicesErrorCode::Forbidden,
+                kind: IronClawServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            ironclaw_skills::SkillManagementErrorKind::InvalidInput
+            | ironclaw_skills::SkillManagementErrorKind::InvalidSkill => invalid_skill_request(),
+        },
+    }
+}
+
+fn invalid_skill_request() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::InvalidRequest,
+        kind: IronClawServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn internal_skill_error() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Internal,
+        kind: IronClawServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn status_response_from_readiness(readiness: &IronClawReadiness) -> IronClawOperatorStatusResponse {
+    let mut checks = Vec::new();
+    let (runtime_status, runtime_severity, runtime_remediation) = match readiness.state {
+        crate::IronClawReadinessState::Disabled => (
+            IronClawOperatorStatusState::NotConfigured,
+            IronClawOperatorStatusSeverity::Warning,
+            Some("finish IronClaw runtime setup before production use".to_string()),
+        ),
+        crate::IronClawReadinessState::DevOnly => (
+            IronClawOperatorStatusState::Degraded,
+            IronClawOperatorStatusSeverity::Warning,
+            Some("finish IronClaw runtime setup before production use".to_string()),
+        ),
+        crate::IronClawReadinessState::HostedSingleTenantValidated => (
+            IronClawOperatorStatusState::Ready,
+            IronClawOperatorStatusSeverity::Info,
+            None,
+        ),
+        crate::IronClawReadinessState::HostedSingleTenantVolumePreviewValidated => (
+            IronClawOperatorStatusState::Degraded,
+            IronClawOperatorStatusSeverity::Warning,
+            Some("mounted-volume hosted preview is ready for single-tenant validation but is not production storage".to_string()),
+        ),
+        crate::IronClawReadinessState::ProductionValidated => (
+            IronClawOperatorStatusState::Ready,
+            IronClawOperatorStatusSeverity::Info,
+            None,
+        ),
+        crate::IronClawReadinessState::MigrationDryRunValidated => (
+            IronClawOperatorStatusState::Ready,
+            IronClawOperatorStatusSeverity::Info,
+            None,
+        ),
+    };
+    checks.push(status_check(
+        "runtime",
+        runtime_status,
+        runtime_severity,
+        format!(
+            "IronClaw profile {:?} is {:?}",
+            readiness.profile, readiness.state
+        ),
+        runtime_remediation,
+    ));
+    checks.push(bool_check(
+        "storage",
+        readiness.facades.turn_coordinator,
+        "turn coordinator facade is ready",
+        "turn coordinator facade is not wired",
+    ));
+    checks.push(bool_check(
+        "secrets",
+        readiness.facades.product_auth,
+        "product auth and secret-backed flows are ready",
+        "product auth facade is not wired",
+    ));
+    checks.push(bool_check(
+        "provider_model",
+        readiness.facades.host_runtime,
+        "host runtime is ready for model-backed execution",
+        "host runtime is not wired",
+    ));
+    checks.push(status_check(
+        "webui",
+        IronClawOperatorStatusState::Ready,
+        IronClawOperatorStatusSeverity::Info,
+        "WebUI v2 route facade is mounted".to_string(),
+        None,
+    ));
+    checks.push(bool_check(
+        "trigger_poller",
+        readiness.workers.trigger_poller,
+        "trigger poller worker is ready",
+        "trigger poller worker is not running",
+    ));
+    checks.push(status_check(
+        "channels",
+        IronClawOperatorStatusState::Unsupported,
+        IronClawOperatorStatusSeverity::Info,
+        "channel-specific readiness probes are not wired yet".to_string(),
+        Some("consult channel setup diagnostics for adapter-specific status".to_string()),
+    ));
+    checks.push(status_check(
+        "extensions",
+        IronClawOperatorStatusState::Unsupported,
+        IronClawOperatorStatusSeverity::Info,
+        "extension readiness probes are not wired yet".to_string(),
+        Some("use extension inventory and setup endpoints for per-extension status".to_string()),
+    ));
+    checks.extend(
+        readiness
+            .diagnostics
+            .iter()
+            .map(status_check_from_readiness_diagnostic),
+    );
+    let overall = if checks
+        .iter()
+        .any(|check| check.status == IronClawOperatorStatusState::Blocked)
+    {
+        IronClawOperatorStatusState::Blocked
+    } else if checks.iter().any(|check| {
+        matches!(
+            check.status,
+            IronClawOperatorStatusState::Degraded | IronClawOperatorStatusState::NotConfigured
+        )
+    }) {
+        IronClawOperatorStatusState::Degraded
+    } else {
+        IronClawOperatorStatusState::Ready
+    };
+    IronClawOperatorStatusResponse {
+        generated_at: Utc::now(),
+        overall,
+        checks,
+    }
+}
+
+fn bool_check(
+    id: &str,
+    ready: bool,
+    ready_summary: &str,
+    missing_summary: &str,
+) -> IronClawOperatorStatusCheck {
+    status_check(
+        id,
+        if ready {
+            IronClawOperatorStatusState::Ready
+        } else {
+            IronClawOperatorStatusState::NotConfigured
+        },
+        if ready {
+            IronClawOperatorStatusSeverity::Info
+        } else {
+            IronClawOperatorStatusSeverity::Warning
+        },
+        if ready {
+            ready_summary
+        } else {
+            missing_summary
+        }
+        .to_string(),
+        (!ready).then(|| format!("wire the {id} subsystem in IronClaw composition")),
+    )
+}
+
+fn status_check_from_readiness_diagnostic(
+    diagnostic: &IronClawReadinessDiagnostic,
+) -> IronClawOperatorStatusCheck {
+    let component = readiness_diagnostic_component(diagnostic);
+    let reason = readiness_diagnostic_reason(diagnostic);
+    let id = format!("readiness_{component}");
+    let status = match diagnostic.status {
+        IronClawReadinessDiagnosticStatus::Blocking => IronClawOperatorStatusState::Blocked,
+        IronClawReadinessDiagnosticStatus::Warning
+        | IronClawReadinessDiagnosticStatus::Unknown(_) => IronClawOperatorStatusState::Degraded,
+        IronClawReadinessDiagnosticStatus::Info => IronClawOperatorStatusState::Ready,
+    };
+    let severity = match diagnostic.status {
+        IronClawReadinessDiagnosticStatus::Blocking => IronClawOperatorStatusSeverity::Critical,
+        IronClawReadinessDiagnosticStatus::Warning
+        | IronClawReadinessDiagnosticStatus::Unknown(_) => IronClawOperatorStatusSeverity::Warning,
+        IronClawReadinessDiagnosticStatus::Info => IronClawOperatorStatusSeverity::Info,
+    };
+    let remediation = if diagnostic.blocks_production {
+        "wire the required IronClaw production component before exposing live traffic"
+    } else {
+        "review the IronClaw readiness report for the component owner"
+    };
+    status_check(
+        &id,
+        status,
+        severity,
+        format!(
+            "readiness diagnostic: component={component}, reason={reason}, profile={:?}",
+            diagnostic.profile
+        ),
+        Some(remediation.to_string()),
+    )
+}
+
+fn readiness_diagnostic_component(diagnostic: &IronClawReadinessDiagnostic) -> String {
+    readiness_diagnostic_wire_string(&diagnostic.component)
+        .unwrap_or_else(|| "unknown_component".to_string())
+}
+
+fn readiness_diagnostic_reason(diagnostic: &IronClawReadinessDiagnostic) -> String {
+    readiness_diagnostic_wire_string(&diagnostic.reason)
+        .unwrap_or_else(|| "unknown_reason".to_string())
+}
+
+fn readiness_diagnostic_wire_string(value: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
+fn status_check(
+    id: &str,
+    status: IronClawOperatorStatusState,
+    severity: IronClawOperatorStatusSeverity,
+    summary: String,
+    remediation: Option<String>,
+) -> IronClawOperatorStatusCheck {
+    IronClawOperatorStatusCheck {
+        id: id.to_string(),
+        status,
+        severity,
+        summary,
+        remediation,
+    }
+}
+
+#[cfg(test)]
+mod tests;

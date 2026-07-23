@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// How external conversations map to IronClaw conversations
-/// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
+/// (`docs/ironclaw/extension-runtime/overview.md` §3). The host WebUI's
 /// internal channel uses the same enum, so the workflow reasons about every
 /// channel one way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

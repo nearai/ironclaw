@@ -1,7 +1,7 @@
 //! Backend-agnostic contract tests for [`ProjectRepository`].
 //!
 //! The sole implementation is `FilesystemProjectRepository`, which persists over
-//! the Reborn `ScopedFilesystem` substrate. These assertions run it against an
+//! the IronClaw `ScopedFilesystem` substrate. These assertions run it against an
 //! in-memory `RootFilesystem`; backend correctness (Postgres / libSQL / JSONL)
 //! is `ironclaw_filesystem`'s concern, so a single in-memory run exercises all
 //! repository logic with no per-backend duplication.

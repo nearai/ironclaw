@@ -1,4 +1,4 @@
-//! OIDC bearer-token authenticator for the Reborn WebChat v2 gateway.
+//! OIDC bearer-token authenticator for the IronClaw WebChat v2 gateway.
 //!
 //! The browser presents an OIDC ID-token (JWT) as the Authorization
 //! header; the host verifies it against the issuer's published JWKS,
@@ -10,7 +10,7 @@
 //! - **Not** a full OIDC client — there is no authorization-code
 //!   exchange, no PKCE, no token endpoint, no refresh handling. Those
 //!   live in whatever sign-in path the host binary owns (it can then
-//!   mint a Reborn session via [`crate::signed_session_store`]).
+//!   mint a IronClaw session via [`crate::signed_session_store`]).
 //! - **Not** an audience-discovery layer — the host config names a
 //!   fixed `audience` and `issuer`, and JWTs not matching both are
 //!   rejected.
@@ -69,7 +69,7 @@ impl OidcAuthenticatorConfig {
     }
 }
 
-/// Mapper from a verified ID-token claim set to a Reborn `UserId`.
+/// Mapper from a verified ID-token claim set to a IronClaw `UserId`.
 ///
 /// Host installations have policy on how OIDC subjects map to users
 /// (sub claim, email, custom claim, tenant-prefixed sub, …). This
@@ -361,7 +361,7 @@ impl OidcAuthenticator {
             && last_forced.elapsed() < JWKS_FORCED_REFRESH_MIN_INTERVAL
         {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_ingress::oidc",
+                target = "ironclaw::webui_ingress::oidc",
                 "forced JWKS refresh suppressed (within {}s backoff window)",
                 JWKS_FORCED_REFRESH_MIN_INTERVAL.as_secs(),
             );
@@ -412,7 +412,7 @@ impl OidcAuthenticator {
                 };
                 if !stale.is_empty() {
                     tracing::info!(
-                        target = "ironclaw::reborn::webui_ingress::oidc",
+                        target = "ironclaw::webui_ingress::oidc",
                         error = %err,
                         "JWKS refresh failed; serving stale cached keys (backoff started)",
                     );
@@ -454,7 +454,7 @@ impl OidcAuthenticator {
             Ok(header) => header,
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_ingress::oidc",
+                    target = "ironclaw::webui_ingress::oidc",
                     error = %error,
                     "JWT header decode failed",
                 );
@@ -469,7 +469,7 @@ impl OidcAuthenticator {
             | Algorithm::ES384 => header.alg,
             _ => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_ingress::oidc",
+                    target = "ironclaw::webui_ingress::oidc",
                     alg = ?header.alg,
                     "rejecting JWT signed with disallowed algorithm",
                 );
@@ -489,7 +489,7 @@ impl OidcAuthenticator {
         // refresh (the cached single key is either it or it isn't).
         if jwk.is_none() && kid.is_some() {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_ingress::oidc",
+                target = "ironclaw::webui_ingress::oidc",
                 "kid {kid:?} missing from cached JWKS; forcing refresh",
             );
             let refreshed = self.force_refresh_jwks().await?;
@@ -497,7 +497,7 @@ impl OidcAuthenticator {
         }
         let Some(jwk) = jwk else {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_ingress::oidc",
+                target = "ironclaw::webui_ingress::oidc",
                 "JWKS has no key matching the token's kid even after refresh",
             );
             return Ok(None);
@@ -515,7 +515,7 @@ impl OidcAuthenticator {
             Ok(data) => Ok(Some(data)),
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_ingress::oidc",
+                    target = "ironclaw::webui_ingress::oidc",
                     error = %error,
                     "JWT verification failed",
                 );
@@ -662,7 +662,7 @@ impl WebuiAuthenticator for OidcAuthenticator {
             Ok(None) => return None,
             Err(error) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::webui_ingress::oidc",
+                    target = "ironclaw::webui_ingress::oidc",
                     error = %error,
                     "OIDC JWKS unavailable; failing closed",
                 );

@@ -2,7 +2,7 @@
 name = "slack-user-tool"
 version = "0.1.0"
 edition = "2021"
-description = "Slack personal (user-token) tool for IronClaw Reborn (WASM component)"
+description = "Slack personal (user-token) tool for IronClaw (WASM component)"
 license = "MIT OR Apache-2.0"
 publish = false
 

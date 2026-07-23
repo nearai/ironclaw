@@ -8,7 +8,7 @@
 //! CORS allow / reject-with-configured-origin, descriptor body-limit 413
 //! and rate-limit 429 on the v2 facade routes, and WebSocket
 //! same-origin 403 all live in
-//! `ironclaw_reborn_composition/tests/webui_v2_serve.rs`; OAuth CSRF
+//! `ironclaw_composition/tests/webui_v2_serve.rs`; OAuth CSRF
 //! state single-use, cross-provider replay, and redirect sanitization
 //! live in `google_oauth_routes.rs` / `pending.rs`.
 //!
@@ -45,8 +45,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use ironclaw_composition::{IronClawReadiness, IronClawWebuiBundle};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
     EmailUserDirectory, OAuthError, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
     OAuthUserProfile, SessionAuthenticator, signed_session_store, webui_v2_auth_router,
@@ -120,10 +120,10 @@ fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
         "https://gateway.example",
     ));
 
-    let bundle = RebornWebuiBundle {
+    let bundle = IronClawWebuiBundle {
         api: Arc::new(StubServices::default()),
         product_auth: None,
-        readiness: RebornReadiness::disabled(),
+        readiness: IronClawReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),

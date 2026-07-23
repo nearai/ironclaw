@@ -5,7 +5,7 @@ use super::compaction::{
     CompactionDecision, CompactionStrategy, DefaultCompactionStrategy, is_eligible_user_boundary,
 };
 
-/// Compaction policy for Reborn runs that must preserve the live active task.
+/// Compaction policy for IronClaw runs that must preserve the live active task.
 ///
 /// The latest user message stays in the prompt tail so the next model turn can
 /// answer the current request directly. Older user boundaries are still

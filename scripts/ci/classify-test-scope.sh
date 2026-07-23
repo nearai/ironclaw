@@ -4,7 +4,7 @@ set -euo pipefail
 has_core_code=false
 docs_only=true
 has_legacy_tests=false
-has_reborn_tests=false
+has_ironclaw_tests=false
 
 is_docs_only_path() {
   local path="$1"
@@ -33,7 +33,7 @@ is_shared_test_path() {
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
       return 0
       ;;
-    .github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
+    .github/workflows/ironclaw-tests.yml|.github/workflows/ironclaw-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
     crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*)
@@ -63,16 +63,16 @@ is_shared_test_path() {
   esac
 }
 
-is_reborn_test_path() {
+is_ironclaw_test_path() {
   local path="$1"
   case "$path" in
-    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
+    docs/ironclaw/*|scripts/ironclaw-e2e-rust.sh|scripts/ci/run-ironclaw-root-partition.sh|scripts/ci/run-ironclaw-group-tests.sh|scripts/ci/check-ironclaw-responses-e2e-manifest.py|tests/ironclaw_*|tests/integration/*|tests/support/ironclaw_parity_qa/*|tests/fixtures/llm_traces/ironclaw_qa/*|tests/e2e/ironclaw_coverage_tests.txt|tests/e2e/ironclaw_responses_e2e_tests.txt|tests/e2e/scenarios/test_ironclaw_*)
       return 0
       ;;
     crates/ironclaw_architecture/*)
       return 0
       ;;
-    crates/ironclaw_runner/*|crates/ironclaw_reborn_*/*)
+    crates/ironclaw_runner/*|crates/ironclaw_*/*)
       return 0
       ;;
     crates/ironclaw_product_*/*|crates/ironclaw_slack_extension/*|crates/ironclaw_telegram_extension/*|crates/ironclaw_telegram_v2_adapter/*)
@@ -84,7 +84,7 @@ is_reborn_test_path() {
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
       return 0
       ;;
-    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+    scripts/ci/ironclaw-coverage-*.sh|scripts/ci/test-ironclaw-coverage.sh|scripts/ci/test-ironclaw-coverage-*.sh|scripts/ci/lib/ironclaw_coverage_lcov.py|scripts/ci/ironclaw-crate-test-buckets.sh|scripts/ci/test-ironclaw-crate-test-buckets.sh|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
       return 0
       ;;
     *)
@@ -102,7 +102,7 @@ is_code_path() {
     Cargo.toml|Cargo.lock|Dockerfile|providers.json)
       return 0
       ;;
-    scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
+    scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/ironclaw-e2e-rust.sh|scripts/ci/*)
       return 0
       ;;
     .github/workflows/*.yml|.github/actions/install-cargo-component/*|.github/dependabot.yml|.github/labeler.yml)
@@ -127,9 +127,9 @@ while IFS= read -r path || [ -n "$path" ]; do
 
   if is_shared_test_path "$path"; then
     has_legacy_tests=true
-    has_reborn_tests=true
-  elif is_reborn_test_path "$path"; then
-    has_reborn_tests=true
+    has_ironclaw_tests=true
+  elif is_ironclaw_test_path "$path"; then
+    has_ironclaw_tests=true
   elif is_code_path "$path"; then
     has_legacy_tests=true
   fi
@@ -139,5 +139,5 @@ cat <<EOF
 docs_only=${docs_only}
 has_core_code=${has_core_code}
 has_legacy_tests=${has_legacy_tests}
-has_reborn_tests=${has_reborn_tests}
+has_ironclaw_tests=${has_ironclaw_tests}
 EOF

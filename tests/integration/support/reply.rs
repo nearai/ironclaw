@@ -1,9 +1,9 @@
-//! `RebornScriptedReply` — terse façade for scripting one model turn in a
-//! Reborn integration test; each reply maps 1:1 to a `TraceStep`. Raw
+//! `IronClawScriptedReply` — terse façade for scripting one model turn in a
+//! IronClaw integration test; each reply maps 1:1 to a `TraceStep`. Raw
 //! `TraceStep`/`LlmTrace`/`TraceResponse` construction is forbidden in new
-//! Reborn integration tests (design §4.2) — use this.
+//! IronClaw integration tests (design §4.2) — use this.
 
-// dead_code: `support_unit_tests.rs` mounts `reborn_support` without
+// dead_code: `support_unit_tests.rs` mounts `ironclaw_support` without
 // consuming this module, so symbols read unused there under `-D warnings`
 // (matches sibling support modules).
 #![allow(dead_code)]
@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_TOOL_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One scripted model turn.
-pub struct RebornScriptedReply {
+pub struct IronClawScriptedReply {
     step: TraceStep,
 }
 
-impl RebornScriptedReply {
+impl IronClawScriptedReply {
     /// A plain assistant text reply.
     pub fn text(content: impl Into<String>) -> Self {
         Self {

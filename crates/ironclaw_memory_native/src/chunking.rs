@@ -7,7 +7,7 @@ pub use ironclaw_memory::{content_bytes_sha256, content_sha256};
 
 /// Configuration for document chunking.
 ///
-/// Ported from the current workspace chunker so Reborn memory indexing preserves
+/// Ported from the current workspace chunker so IronClaw memory indexing preserves
 /// existing search recall behavior.
 #[derive(Debug, Clone)]
 pub struct ChunkConfig {

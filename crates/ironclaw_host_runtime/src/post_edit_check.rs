@@ -105,7 +105,7 @@ impl PostEditCheckConfig {
     /// Resolve the config from the process environment.
     ///
     /// Module-owned factory intended to be called once from the composition
-    /// layer (see `ironclaw_reborn_composition::factory`); per-call handlers
+    /// layer (see `ironclaw_composition::factory`); per-call handlers
     /// must consume the already-resolved config instead of reading env.
     /// Returns `Ok(None)` when `IRONCLAW_POST_EDIT_CHECK` is unset or blank.
     pub fn from_env() -> Result<Option<Self>, PostEditCheckConfigError> {

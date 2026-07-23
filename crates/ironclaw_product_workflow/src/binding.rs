@@ -1,7 +1,7 @@
 //! Conversation binding resolution service contract.
 //!
 //! Maps external adapter references (external actor, external conversation) to
-//! canonical Reborn identifiers (tenant, user, thread, agent/project scope).
+//! canonical IronClaw identifiers (tenant, user, thread, agent/project scope).
 //! This replaces the ad-hoc session/thread resolution scattered across v1
 //! `Agent::handle_message` and the engine-v2 bridge.
 
@@ -36,7 +36,7 @@ pub struct ResolvedBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_user_id: Option<UserId>,
     pub thread_id: ThreadId,
-    /// Required for user-message turn submission because Reborn `ThreadScope`
+    /// Required for user-message turn submission because IronClaw `ThreadScope`
     /// and `TurnScope` are agent-scoped. Product bindings that are only
     /// user-scoped must be completed before entering `InboundTurnService`.
     pub agent_id: Option<AgentId>,
@@ -67,7 +67,7 @@ mod tests {
     }
 }
 
-/// Request to resolve external adapter refs into canonical Reborn bindings.
+/// Request to resolve external adapter refs into canonical IronClaw bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveBindingRequest {
     pub adapter_id: ProductAdapterId,
@@ -169,7 +169,7 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
 /// the tenant registry, user directory, and thread management services.
 #[async_trait]
 pub trait ConversationBindingService: Send + Sync {
-    /// Resolve external adapter references to canonical Reborn identifiers.
+    /// Resolve external adapter references to canonical IronClaw identifiers.
     /// Implementations must create or look up the thread as needed.
     async fn resolve_binding(
         &self,

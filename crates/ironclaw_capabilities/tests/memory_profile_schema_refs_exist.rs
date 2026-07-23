@@ -1,5 +1,5 @@
 //! Guard that draft memory profile schema refs documented in
-//! `docs/reborn/contracts/memory-profiles.md` resolve to real files on disk.
+//! `docs/ironclaw/contracts/memory-profiles.md` resolve to real files on disk.
 //!
 //! This is purely a drift guard; no runtime behavior depends on these files
 //! yet, but renames must not silently break the docs/contract layer.
@@ -24,9 +24,9 @@ fn memory_profile_schema_refs_exist_on_disk() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let contracts_dir = manifest_dir
         .ancestors()
-        .map(|ancestor| ancestor.join("docs/reborn/contracts"))
+        .map(|ancestor| ancestor.join("docs/ironclaw/contracts"))
         .find(|candidate| candidate.is_dir())
-        .expect("could not locate docs/reborn/contracts from crate manifest dir");
+        .expect("could not locate docs/ironclaw/contracts from crate manifest dir");
 
     for raw in REFS {
         // Every documented ref must pass the shared schema-ref validator.

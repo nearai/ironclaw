@@ -1,4 +1,4 @@
-//! Reborn trust-boundary primitives.
+//! IronClaw trust-boundary primitives.
 //!
 //! This module contains pure, low-level helpers for issue #3492. They do not
 //! grant authority. Callers still need crate-local witnesses, authorization,

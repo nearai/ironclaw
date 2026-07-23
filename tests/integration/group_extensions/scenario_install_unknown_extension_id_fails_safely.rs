@@ -20,20 +20,20 @@
 //! the credential-vocabulary scan `ironclaw_threads` applies to untrusted
 //! output.
 
-use super::reborn_support::assertions::ToolErrorClass;
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::assertions::ToolErrorClass;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("ext-install-unknown-id")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "not-a-real-bundled-extension"}),
             ),
-            RebornScriptedReply::text("could not install that extension"),
+            IronClawScriptedReply::text("could not install that extension"),
         ])
         .build()
         .await?;
@@ -71,16 +71,16 @@ const DEGRADED_PLACEHOLDER: &str = "capability summary unavailable";
 /// provenance and the attacker-influenced text reaches thread history intact —
 /// the defect this pins.
 async fn model_chosen_extension_id_is_not_labelled_host_authored(
-    g: &RebornIntegrationGroup,
+    g: &IronClawIntegrationGroup,
 ) -> HarnessResult<()> {
     let h = g
         .thread("ext-activate-adversarial-id")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "api_key"}),
             ),
-            RebornScriptedReply::text("no such extension"),
+            IronClawScriptedReply::text("no such extension"),
         ])
         .build()
         .await?;

@@ -13,17 +13,17 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::run_profile::{
     InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
 };
 use ironclaw_turns::{RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope};
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
 
 /// Build the `LoopRunContext` `resolve_user_profile` reads from, scoped to the
 /// same `(tenant, user)` the `profile_set` write dispatched under — the
@@ -48,13 +48,13 @@ async fn read_back_run_context(tenant_id: &str, user_id: &str) -> LoopRunContext
 
 #[tokio::test]
 async fn profile_set_write_is_readable_through_the_wired_profile_source() {
-    let group = RebornIntegrationGroup::profile_tools()
+    let group = IronClawIntegrationGroup::profile_tools()
         .await
         .expect("profile-tools group builds");
     let harness = group
         .thread("conv-profile-set")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.profile_set",
                 serde_json::json!({
                     "timezone": "America/Los_Angeles",
@@ -62,7 +62,7 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
                     "location": "Los Angeles, USA",
                 }),
             ),
-            RebornScriptedReply::text("saved your profile"),
+            IronClawScriptedReply::text("saved your profile"),
         ])
         .build()
         .await
@@ -114,7 +114,7 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
     // thread's fresh loop is needed to observe it in the model-visible prompt.
     let prompt_thread = group
         .thread("conv-profile-prompt")
-        .script([RebornScriptedReply::text("ok")])
+        .script([IronClawScriptedReply::text("ok")])
         .build()
         .await
         .expect("prompt thread builds");

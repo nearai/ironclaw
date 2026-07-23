@@ -1,5 +1,5 @@
-//! Per-capability preset constructors for [`RebornIntegrationGroup`] /
-//! [`RebornIntegrationGroupBuilder`] — one method per `HostRuntimeCapabilityHarness`
+//! Per-capability preset constructors for [`IronClawIntegrationGroup`] /
+//! [`IronClawIntegrationGroupBuilder`] — one method per `HostRuntimeCapabilityHarness`
 //! preset. Private child module of `group.rs` (owns the shared assembly
 //! mechanics: `build_base`/`into_group`), so it reaches those + `GroupBaseData`
 //! at module-private visibility instead of widening them to `pub(crate)` for
@@ -14,8 +14,8 @@ use std::sync::Arc;
 use super::super::harness::HostRuntimeCapabilityHarness;
 use super::super::harness::options::ToolsProfile;
 use super::{
-    GroupBaseData, GroupCapability, HarnessResult, RebornIntegrationGroup,
-    RebornIntegrationGroupBuilder,
+    GroupBaseData, GroupCapability, HarnessResult, IronClawIntegrationGroup,
+    IronClawIntegrationGroupBuilder,
 };
 
 /// Shared "align user to the group's canonical binding subject, then build"
@@ -36,7 +36,7 @@ async fn build_group_capability_with_base(
     Ok(harness.with_user_id(subject_user))
 }
 
-impl RebornIntegrationGroup {
+impl IronClawIntegrationGroup {
     /// Group with real file-tool approval stores (write_file/read_file at
     /// `PermissionMode::Ask`). Auto-approve is disabled for the group scope at
     /// construction so gated tool calls raise real `BlockedApproval` gates.
@@ -106,7 +106,7 @@ impl RebornIntegrationGroup {
     /// C-JOURNEY: surfaces BOTH an unseeded GitHub capability (`BlockedAuth`,
     /// resolve via `resolve_auth_gate`/`deny_auth_gate`) AND real file-tool
     /// approvals (`BlockedApproval`, via `approve_gate`/`deny_gate`) on ONE
-    /// `build_reborn_services` runtime. Unlike `live_auth_gate` (a hardcoded
+    /// `build_ironclaw_services` runtime. Unlike `live_auth_gate` (a hardcoded
     /// credential resolver, no run_state store), the auth gate here resolves
     /// through the REAL `ProductAuthRuntimeCredentialResolver`, so
     /// `resolve_auth_gate` actually completes. Auto-approve disabled at
@@ -181,8 +181,8 @@ impl RebornIntegrationGroup {
 
     /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
     /// **per-actor capability scoping**. A grant via
-    /// [`RebornIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
-    /// OFF via [`RebornIntegrationGroup::disable_auto_approve_for_owner`] each
+    /// [`IronClawIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
+    /// OFF via [`IronClawIntegrationGroup::disable_auto_approve_for_owner`] each
     /// apply to that owner ALONE. Drives
     /// `scenario_auto_approve_isolation_across_actors`: actor A's always-allow
     /// grant lets A's call complete gate-free while actor B (set OFF) still
@@ -222,20 +222,20 @@ impl RebornIntegrationGroup {
 
     /// Group with the attachment read port + inbound lander wired (C-ATTACH
     /// seam), no first-party capability dispatch. Use
-    /// [`RebornThreadBuilder::with_model_override`] to route a thread through a
+    /// [`IronClawThreadBuilder::with_model_override`] to route a thread through a
     /// vision-capable model id and
-    /// [`RebornIntegrationHarness::submit_turn_with_image_attachment`] to land
+    /// [`IronClawIntegrationHarness::submit_turn_with_image_attachment`] to land
     /// an image and submit it in one turn.
     pub async fn attachment_tools() -> HarnessResult<Self> {
         Self::builder().attachment_tools().await
     }
 }
 
-impl RebornIntegrationGroupBuilder {
-    /// Build a `RebornIntegrationGroup` for an already-selected `GroupCapability`.
+impl IronClawIntegrationGroupBuilder {
+    /// Build a `IronClawIntegrationGroup` for an already-selected `GroupCapability`.
     /// Shared tail of the constructors whose capability is independent of the
     /// resolved base (`builtin_tools`/`extension_lifecycle`) and the degenerate
-    /// single-shot path (`RebornIntegrationHarnessBuilder::build`).
+    /// single-shot path (`IronClawIntegrationHarnessBuilder::build`).
     /// `live_approvals` and `profile_tools` both resolve their capability's
     /// executor user FROM `base` (`canonical_subject_user()`), so they call
     /// `build_base` + `into_group` directly instead, reusing the SAME `base`
@@ -243,13 +243,13 @@ impl RebornIntegrationGroupBuilder {
     pub(crate) async fn build_with_capability(
         self,
         capability: GroupCapability,
-    ) -> HarnessResult<RebornIntegrationGroup> {
+    ) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         self.into_group(base, capability).await
     }
 
-    /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
-    pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build a live-approvals group. See [`IronClawIntegrationGroup::live_approvals`].
+    pub async fn live_approvals(self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         // Align capability execution to the run's CANONICAL binding subject user
         // (not the constructor's fixed test user) so dispatch, approval, auto-
@@ -276,16 +276,16 @@ impl RebornIntegrationGroupBuilder {
         Ok(group)
     }
 
-    /// Build a core built-in tools group. See [`RebornIntegrationGroup::builtin_tools`].
-    pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build a core built-in tools group. See [`IronClawIntegrationGroup::builtin_tools`].
+    pub async fn builtin_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
 
-    /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
-    pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build an extension-lifecycle group. See [`IronClawIntegrationGroup::extension_lifecycle`].
+    pub async fn extension_lifecycle(self) -> HarnessResult<IronClawIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
         )
@@ -299,10 +299,10 @@ impl RebornIntegrationGroupBuilder {
     /// group — a real `config
     /// set` + service restart is a new process, not a live flip, so a second
     /// `#[tokio::test]`-local build is the honest analog. See
-    /// [`RebornIntegrationGroup::extension_lifecycle_google_oauth_configured`].
+    /// [`IronClawIntegrationGroup::extension_lifecycle_google_oauth_configured`].
     pub async fn extension_lifecycle_google_oauth_configured(
         self,
-    ) -> HarnessResult<RebornIntegrationGroup> {
+    ) -> HarnessResult<IronClawIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured()?,
         )
@@ -316,26 +316,26 @@ impl RebornIntegrationGroupBuilder {
     async fn extension_lifecycle_with_profile(
         mut self,
         profile: ToolsProfile,
-    ) -> HarnessResult<RebornIntegrationGroup> {
+    ) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Align the shared capability
         // harness with the group's canonical binding subject so install and
         // remove execute under the same user scope as the turn.
         let host_runtime = build_group_capability_with_base(profile, &base).await?;
         // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
-        // channel-connection facade over this harness's own `RebornServices`,
-        // mirroring the production `build_reborn_runtime` slot fill — so
+        // channel-connection facade over this harness's own `IronClawServices`,
+        // mirroring the production `build_ironclaw_runtime` slot fill — so
         // `builtin.extension_remove` of a channel extension runs the real
         // per-caller disconnect instead of skipping it on an empty facade
         // slot. Identities come from the group's single-source dispatch scope
         // so the facade's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
-                    .reborn_services_for_test()
-                    .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    .ironclaw_services_for_test()
+                    .ok_or("extension_lifecycle harness is missing its IronClawServices bundle")?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -350,8 +350,8 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build the invented-vendor fixture group. See
-    /// [`RebornIntegrationGroup::extension_runtime_acme`].
-    pub async fn extension_runtime_acme(mut self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::extension_runtime_acme`].
+    pub async fn extension_runtime_acme(mut self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         let host_runtime =
             super::super::harness::profiles::extension::extension_runtime_acme_tools().await?;
@@ -360,14 +360,14 @@ impl RebornIntegrationGroupBuilder {
         // `builtin.extension_remove` fail-closes on an empty channel
         // disconnect slot once removal runs under an authenticated actor.
         // Wire the real generic facade over this harness's own
-        // `RebornServices`, keyed to the group's dispatch scope.
+        // `IronClawServices`, keyed to the group's dispatch scope.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
-                host_runtime
-                    .reborn_services_for_test()
-                    .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+            ironclaw_composition::test_support::build_channel_connection_for_test(
+                host_runtime.ironclaw_services_for_test().ok_or(
+                    "extension_runtime_acme harness is missing its IronClawServices bundle",
+                )?,
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -382,8 +382,8 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a delivery-proof group. See
-    /// [`RebornIntegrationGroup::extension_delivery`].
-    pub async fn extension_delivery(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::extension_delivery`].
+    pub async fn extension_delivery(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::extension::extension_delivery_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
@@ -391,20 +391,20 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a visibility-probe group. See
-    /// [`RebornIntegrationGroup::extension_visibility_probe`].
-    pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::extension_visibility_probe`].
+    pub async fn extension_visibility_probe(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
 
-    /// Build an auth-gate group. See [`RebornIntegrationGroup::live_auth_gate`].
+    /// Build an auth-gate group. See [`IronClawIntegrationGroup::live_auth_gate`].
     ///
     /// No auto-approve disable and no approval-gate evidence: auth gates are
     /// self-evidencing via the BeforeBlock checkpoint (loop_exit_applier.rs). Do
     /// NOT add approval-gate evidence here — that store is only for approval gates.
-    pub async fn live_auth_gate(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn live_auth_gate(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::github::github_issue_tools_auth_required().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
@@ -412,14 +412,14 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build an auth+approval convergence group. See
-    /// [`RebornIntegrationGroup::live_auth_and_approval`]. Cannot go through
+    /// [`IronClawIntegrationGroup::live_auth_and_approval`]. Cannot go through
     /// `build_with_capability` — like `live_approvals`, the capability's
     /// executor user must be aligned to `base`'s canonical binding subject
     /// user (`.with_user_id`) so dispatch-time capability resolution
     /// (approval persistence AND the seeded GitHub credential account's
     /// visibility scope) matches the run's actual `(tenant, user)`, not the
     /// constructor's fixed test user.
-    pub async fn live_auth_and_approval(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn live_auth_and_approval(self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         // `build_group_capability_with_base` (above) is the shared "build then
         // align user" core — see `live_approvals` above.
@@ -445,8 +445,8 @@ impl RebornIntegrationGroupBuilder {
         Ok(group)
     }
 
-    /// Build a project-lifecycle group. See [`RebornIntegrationGroup::project_lifecycle`].
-    pub async fn project_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build a project-lifecycle group. See [`IronClawIntegrationGroup::project_lifecycle`].
+    pub async fn project_lifecycle(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime = super::super::harness::profiles::project::project_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
@@ -454,16 +454,16 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build a project-lifecycle group with the `project_create`
     /// fault-injection arm wired. See
-    /// [`RebornIntegrationGroup::project_lifecycle_fault_injected`].
-    pub async fn project_lifecycle_fault_injected(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::project_lifecycle_fault_injected`].
+    pub async fn project_lifecycle_fault_injected(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::project::project_tools_with_fault_injection().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
 
-    /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
-    pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build a profile-tools group. See [`IronClawIntegrationGroup::profile_tools`].
+    pub async fn profile_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         // Align `builtin.profile_set`'s executor to the canonical subject user
         // (mirrors `live_approvals`) — otherwise a write and its read-back
@@ -478,8 +478,8 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
-    /// Build a trigger-management group. See [`RebornIntegrationGroup::triggers`].
-    pub async fn triggers(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build a trigger-management group. See [`IronClawIntegrationGroup::triggers`].
+    pub async fn triggers(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::trigger::trigger_management_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
@@ -487,8 +487,8 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a triggers-plus-gated-write group. See
-    /// [`RebornIntegrationGroup::triggers_with_gated_write`].
-    pub async fn triggers_with_gated_write(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::triggers_with_gated_write`].
+    pub async fn triggers_with_gated_write(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::trigger::trigger_management_with_gated_write().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
@@ -496,12 +496,12 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a skill-activation group. See
-    /// [`RebornIntegrationGroup::skill_activation_tools`]. Seeds a `greet` system
+    /// [`IronClawIntegrationGroup::skill_activation_tools`]. Seeds a `greet` system
     /// skill BEFORE `into_group` so the runtime's `skill_context_source` (and the
     /// `skill_activate` capability's `activate_skills_for_run`) resolve it at
     /// activation time. A system skill is used so resolution is independent of the
     /// run's scope owner — the seam only needs the skill to exist.
-    pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn skill_activation_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
         // above) rather than a separately hardcoded literal, so the E-SKILL
@@ -521,10 +521,10 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Per-actor-scoped memory group. See
-    /// [`RebornIntegrationGroup::multiuser_memory_tools`]. Same capability
+    /// [`IronClawIntegrationGroup::multiuser_memory_tools`]. Same capability
     /// surface as [`builtin_tools`] but with per-actor capability dispatch, so
     /// each actor's memory lands under its own owner subtree.
-    pub async fn multiuser_memory_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn multiuser_memory_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default()
                 .await?
@@ -534,14 +534,14 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Per-actor-scoped file-approval group. See
-    /// [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
+    /// [`IronClawIntegrationGroup::multiuser_approvals`]. Real approval stores
     /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch;
     /// auto-approve defaults ON per owner, so a test that needs an owner to
     /// GATE sets that owner OFF via `disable_auto_approve_for_owner` — the
     /// per-user setting is what isolation asserts. Dispatch user == turn owner,
     /// so the raised approval's gate-evidence lookup resolves under that same
     /// owner (verified, not masked to `Failed`).
-    pub async fn multiuser_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn multiuser_approvals(self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         let host_runtime = super::super::harness::profiles::file::file_tools_requiring_approval()
             .await?
@@ -551,12 +551,12 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Outbound-target-tools group. See
-    /// [`RebornIntegrationGroup::outbound_target_tools`]. Mirrors
+    /// [`IronClawIntegrationGroup::outbound_target_tools`]. Mirrors
     /// `live_approvals`/`profile_tools`: the synthetic `outbound_delivery_*`
     /// capabilities run under the run's canonical binding subject user, so the
     /// dispatch-time auto-approve scope aligns with tests' per-test disables.
     /// Auto-approve stays default-ON here; the gate arm disables it per-test.
-    pub async fn outbound_target_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn outbound_target_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let base = self.build_base().await?;
         // `build_group_capability_with_base` (above) is the shared "build then
         // align user" core — see `live_approvals` above.
@@ -570,24 +570,24 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a skill-management group. See
-    /// [`RebornIntegrationGroup::skill_management_tools`].
-    pub async fn skill_management_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::skill_management_tools`].
+    pub async fn skill_management_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime = super::super::harness::profiles::skill::skill_management_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
 
     /// Build a trace-commons group. See
-    /// [`RebornIntegrationGroup::trace_commons_tools`].
-    pub async fn trace_commons_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// [`IronClawIntegrationGroup::trace_commons_tools`].
+    pub async fn trace_commons_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::trace_commons::trace_commons_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
 
-    /// Build an attachment-tools group. See [`RebornIntegrationGroup::attachment_tools`].
-    pub async fn attachment_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+    /// Build an attachment-tools group. See [`IronClawIntegrationGroup::attachment_tools`].
+    pub async fn attachment_tools(self) -> HarnessResult<IronClawIntegrationGroup> {
         let host_runtime = super::super::harness::profiles::attachment::attachment_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await

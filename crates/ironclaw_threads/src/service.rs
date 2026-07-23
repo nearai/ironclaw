@@ -18,7 +18,7 @@ use crate::{
     UpdateThreadGoalRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
-/// Canonical Reborn session thread and transcript boundary.
+/// Canonical IronClaw session thread and transcript boundary.
 #[async_trait]
 pub trait SessionThreadService: Send + Sync {
     async fn ensure_thread(

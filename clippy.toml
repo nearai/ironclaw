@@ -9,4 +9,4 @@ type-complexity-threshold = 250     # default: 250 (keep default, avoids new vio
 
 [[disallowed-methods]]
 path = "ironclaw_outbound::FilesystemOutboundStateStore::new"
-reason = "outbound stores are composition-owned: take handles from RebornLocalRuntimeServices (built once in ironclaw_reborn_composition::factory). A second store over a different mount silently splits reads from writes (see docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md carry-forward)."
+reason = "outbound stores are composition-owned: take handles from IronClawLocalRuntimeServices (built once in ironclaw_composition::factory). A second store over a different mount silently splits reads from writes (see docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md carry-forward)."

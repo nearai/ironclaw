@@ -1,0 +1,69 @@
+{
+  "model_name": "ironclaw-qa-qa_10f_slack_mention_encoding",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Using my connected Slack account, post one message in the Slack conversation with ID SLACK_ID_REDACTED that @-mentions Canary Other so they actually get notified. The message text must include the exact marker MENTION_1784642911559. Then confirm you posted it and include the exact marker IRONCLAW_QA_10F_MENTION_ANSWER_1784642911559 in your reply."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, post one message in the Slack conversation wit",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ce41d66b430b49a0836ccfb4",
+            "name": "slack__get_conversation_info",
+            "arguments": {
+              "channel": "SLACK_ID_REDACTED"
+            }
+          }
+        ],
+        "input_tokens": 17454,
+        "output_tokens": 77
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, post one message in the Slack conversation wit",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_6cd5c23406a6412db3cfc31d",
+            "name": "slack__send_message",
+            "arguments": {
+              "channel": "SLACK_ID_REDACTED",
+              "text": "<@SLACK_ID_REDACTED> MENTION_1784642911559"
+            }
+          }
+        ],
+        "input_tokens": 17708,
+        "output_tokens": 126
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, post one message in the Slack conversation wit",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "text",
+        "content": "Done. I posted the message to the DM with Canary Other (conversation SLACK_ID_REDACTED) and it was delivered successfully (timestamp `1784642933.737659`).\n\nThe message sent: `<@SLACK_ID_REDACTED> MENTION_1784642911559`\n\nThis uses the raw user ID `SLACK_ID_REDACTED` (Canary Other's real Slack ID) in the mention syntax, so they were actually notified.\n\n**IRONCLAW_QA_10F_MENTION_ANSWER_1784642911559**",
+        "input_tokens": 17943,
+        "output_tokens": 127
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.send_message"
+    ]
+  }
+}

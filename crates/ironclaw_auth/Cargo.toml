@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 # Keep in sync with the workspace-level package.rust-version.
 rust-version.workspace = true
-description = "Product-facing Reborn auth contracts and fake services"
+description = "Product-facing IronClaw auth contracts and fake services"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"

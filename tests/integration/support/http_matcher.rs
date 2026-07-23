@@ -8,7 +8,7 @@
 //! `Recording*` structs are deliberately concrete, not generic, ahead of need.
 
 // Shared integration-test support: not every binary that mounts the
-// `reborn_support` tree consumes this module, so its symbols read as dead there
+// `ironclaw_support` tree consumes this module, so its symbols read as dead there
 // under `-D warnings`. Module-level allow matches the sibling support modules.
 #![allow(dead_code)]
 

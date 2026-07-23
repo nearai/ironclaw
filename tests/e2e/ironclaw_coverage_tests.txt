@@ -1,0 +1,34 @@
+# IronClaw E2E coverage gate.
+#
+# Keep this list limited to tests that exercise the standalone
+# `ironclaw serve` binary and its IronClaw WebChat v2 / OpenAI-compatible
+# API surface. Do not add legacy `ironclaw` gateway tests, even when they run
+# with ENGINE_V2=true; those belong in compatibility/runtime E2E jobs, not this
+# IronClaw coverage gate.
+#
+# Direct Emulate provider-contract tests are useful QA, but they mostly validate
+# the provider fixture layer. Full-path hosted OAuth tests currently start the
+# legacy gateway binary, so they are intentionally excluded here too.
+#
+# Pytest node IDs are allowed. Use them when a scenario file contains broader
+# provider-fixture or model-tool-choice coverage that should stay in the normal
+# E2E suite but not in this IronClaw binary coverage gate.
+tests/e2e/scenarios/test_ironclaw_webui_v2_smoke.py
+tests/e2e/scenarios/test_ironclaw_webui_v2_legacy_pending_messages.py::test_ironclaw_legacy_send_failure_renders_inline_error_not_toast
+tests/e2e/scenarios/test_ironclaw_webui_v2_legacy_tool_permissions.py::test_ironclaw_legacy_tool_permission_menu_persists_after_reload
+tests/e2e/scenarios/test_ironclaw_webui_v2_legacy_tool_permissions.py::test_ironclaw_legacy_tool_permission_retains_selection_while_saving
+tests/e2e/scenarios/test_ironclaw_webui_v2_legacy_extensions.py::test_ironclaw_v2_extension_registry_renders_while_installed_list_is_pending
+tests/e2e/scenarios/test_ironclaw_webui_v2_notifications.py::test_ironclaw_v2_error_toast_pauses_dismisses_and_stays_above_notifications
+tests/e2e/scenarios/test_ironclaw_v2_file_download.py
+# Responses-specific selectors live in ironclaw_responses_e2e_tests.txt so the
+# required PR gate and push-to-main coverage execute the same inventory.
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_chat_completions_non_streaming_served
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_chat_completions_idempotency_replay_and_conflict_served
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_chat_completions_streaming_raw_sse_served
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_chat_completions_auth_and_validation_served
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_models_v1_lists_configured_mock_model
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_models_api_v1_alias_matches_v1_models
+tests/e2e/scenarios/test_ironclaw_responses_api.py::test_ironclaw_models_requires_auth
+tests/e2e/scenarios/test_admin_api.py
+tests/e2e/scenarios/test_ironclaw_slack_channel_e2e.py
+tests/e2e/scenarios/test_ironclaw_private_tool_installs.py

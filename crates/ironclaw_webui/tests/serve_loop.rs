@@ -4,7 +4,7 @@
 //!
 //! The v2 gateway `Router` (auth / CORS / body-limit / rate-limit) is
 //! tested separately in
-//! `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`. This
+//! `crates/ironclaw_composition/tests/webui_v2_serve.rs`. This
 //! test focuses on the seam this crate owns — the listener-binding +
 //! serve-loop + graceful-shutdown behaviour — by handing the ingress a
 //! trivial axum `Router`.
@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{Router, extract::ConnectInfo, routing::get};
-use ironclaw_webui::{RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2};
+use ironclaw_webui::{IronClawWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2};
 use tokio::sync::oneshot;
 
 async fn build_test_router() -> Router {
@@ -42,7 +42,7 @@ async fn serve_webui_v2_binds_and_serves_until_graceful_shutdown() {
     let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
 
     let router = build_test_router().await;
-    let opts = RebornWebuiServeOptions {
+    let opts = IronClawWebuiServeOptions {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         router,
         shutdown: shutdown_rx,
@@ -102,7 +102,7 @@ async fn serve_webui_v2_returns_bind_error_when_address_unusable() {
     // `Bind { addr, source }` variant rather than panicking.
     let (_shutdown_tx, shutdown_rx) = oneshot::channel();
     let router = build_test_router().await;
-    let opts = RebornWebuiServeOptions {
+    let opts = IronClawWebuiServeOptions {
         addr: SocketAddr::from(([240, 0, 0, 1], 1)),
         router,
         shutdown: shutdown_rx,
@@ -128,7 +128,7 @@ async fn serve_webui_v2_shuts_down_when_shutdown_sender_drops() {
     let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
 
     let router = build_test_router().await;
-    let opts = RebornWebuiServeOptions {
+    let opts = IronClawWebuiServeOptions {
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         router,
         shutdown: shutdown_rx,
@@ -157,7 +157,7 @@ async fn deferred_startup_router_serves_health_then_delegates_when_ready() {
     let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
 
     let serve_handle = tokio::spawn(async move {
-        serve_webui_v2(RebornWebuiServeOptions {
+        serve_webui_v2(IronClawWebuiServeOptions {
             addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             router: startup_router,
             shutdown: shutdown_rx,

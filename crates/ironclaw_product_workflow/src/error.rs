@@ -72,7 +72,7 @@ pub enum ProductWorkflowError {
     /// dependency graph) carrying the exact remediation text (e.g. the
     /// `ironclaw config set` commands to run). Two independent consumers read
     /// this variant differently: the WebUI facade
-    /// (`reborn_services::map_lifecycle_error`) discards `reason` and maps
+    /// (`ironclaw_services::map_lifecycle_error`) discards `reason` and maps
     /// the DISCRIMINANT alone to a sanitized 400 (no free text crosses the
     /// wire contract); the LLM tool path
     /// (`extension_lifecycle_capabilities::lifecycle_error`) forwards

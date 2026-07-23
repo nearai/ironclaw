@@ -47,7 +47,7 @@ pub struct WasmHttpResponse {
 
 /// Host HTTP seam used by the WIT runtime.
 ///
-/// Production composition should wire this to the shared Reborn runtime egress
+/// Production composition should wire this to the shared IronClaw runtime egress
 /// service. Until that service exists, the default implementation denies every
 /// request so WASM cannot perform direct network I/O. The runtime caps
 /// `WasmHttpRequest::timeout_ms` to the smaller of the WIT HTTP default (when
@@ -110,7 +110,7 @@ impl WasmHostHttp for RecordingWasmHostHttp {
     }
 }
 
-/// Thin adapter from the WASM WIT HTTP import to the shared Reborn runtime
+/// Thin adapter from the WASM WIT HTTP import to the shared IronClaw runtime
 /// egress service.
 ///
 /// Host composition supplies scope, network policy, and a request-scoped

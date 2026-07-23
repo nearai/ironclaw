@@ -2831,8 +2831,8 @@ dependencies = [
  "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",
- "ironclaw_reborn_event_store",
- "ironclaw_reborn_traces",
+ "ironclaw_event_store",
+ "ironclaw_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
@@ -2873,8 +2873,8 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
- "ironclaw_reborn_composition",
- "ironclaw_reborn_event_store",
+ "ironclaw_composition",
+ "ironclaw_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_secrets",
@@ -3134,7 +3134,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_product_adapters",
  "ironclaw_product_context",
- "ironclaw_reborn_traces",
+ "ironclaw_traces",
  "ironclaw_run_state",
  "ironclaw_threads",
  "ironclaw_turns",
@@ -3173,7 +3173,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_composition"
+name = "ironclaw_composition"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3216,11 +3216,11 @@ dependencies = [
  "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_projects",
- "ironclaw_reborn_config",
- "ironclaw_reborn_event_store",
- "ironclaw_reborn_identity",
- "ironclaw_reborn_openai_compat",
- "ironclaw_reborn_traces",
+ "ironclaw_config",
+ "ironclaw_event_store",
+ "ironclaw_identity",
+ "ironclaw_openai_compat",
+ "ironclaw_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runner",
@@ -3260,7 +3260,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_config"
+name = "ironclaw_config"
 version = "0.1.0"
 dependencies = [
  "fs4",
@@ -3272,7 +3272,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_event_store"
+name = "ironclaw_event_store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3298,7 +3298,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_identity"
+name = "ironclaw_identity"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3314,7 +3314,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_openai_compat"
+name = "ironclaw_openai_compat"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -3339,7 +3339,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn_traces"
+name = "ironclaw_traces"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3713,8 +3713,8 @@ dependencies = [
  "hmac 0.13.0",
  "ironclaw_host_api",
  "ironclaw_product_workflow",
- "ironclaw_reborn_composition",
- "ironclaw_reborn_openai_compat",
+ "ironclaw_composition",
+ "ironclaw_openai_compat",
  "jsonwebtoken",
  "lru",
  "parking_lot",

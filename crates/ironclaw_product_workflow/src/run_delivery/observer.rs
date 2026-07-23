@@ -240,7 +240,7 @@ impl RunDeliveryObserver {
             match claim {
                 DeliveryClaim::AlreadyActive => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target = "ironclaw::run_delivery",
                         %run_id,
                         "skipping redundant delivery loop: a loop is already watching this run"
                     );
@@ -248,7 +248,7 @@ impl RunDeliveryObserver {
                 }
                 DeliveryClaim::AlreadyDelivered => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
+                        target = "ironclaw::run_delivery",
                         %run_id,
                         "skipping redundant delivery loop: this run's final reply was already delivered"
                     );
@@ -265,7 +265,7 @@ impl RunDeliveryObserver {
         };
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target = "ironclaw::run_delivery",
                 "final reply delivery skipped because the delivery semaphore was closed"
             );
             return;
@@ -274,7 +274,7 @@ impl RunDeliveryObserver {
         drop(_delivery_guard);
         if let Err(error) = delivery_result {
             tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
+                target = "ironclaw::run_delivery",
                 error = %error,
                 "final reply delivery failed after immediate ACK"
             );
@@ -390,7 +390,7 @@ impl RunDeliveryObserver {
                     && matches!(error.category(), TurnErrorCategory::ScopeNotFound) =>
             {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target = "ironclaw::run_delivery",
                     %run_id,
                     "skipping live delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
                 );
@@ -808,7 +808,7 @@ impl RunDeliveryObserver {
             Ok(binding) => binding,
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target = "ironclaw::run_delivery",
                     error = %error,
                     "skipped rejection hint because the originating conversation was not authorized"
                 );
@@ -957,7 +957,7 @@ impl RunDeliveryObserver {
         };
         if already_seen {
             tracing::debug!(
-                target = "ironclaw::reborn::run_delivery",
+                target = "ironclaw::run_delivery",
                 "busy-thread hint suppressed: already posted for this (conversation, event_id) pair (transport retry)"
             );
             return;
@@ -981,7 +981,7 @@ impl RunDeliveryObserver {
             }
             Err(error) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target = "ironclaw::run_delivery",
                     error = %error,
                     "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
                 );
@@ -1017,7 +1017,7 @@ impl RunDeliveryObserver {
             Ok(scope) => scope,
             Err(err) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target = "ironclaw::run_delivery",
                     error = %err,
                     "busy-thread hint scope derivation failed; using generic copy"
                 );
@@ -1078,7 +1078,7 @@ impl RunDeliveryObserver {
             },
             Err(err) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
+                    target = "ironclaw::run_delivery",
                     error = %err,
                     "busy-thread hint run-state lookup failed; using generic copy"
                 );

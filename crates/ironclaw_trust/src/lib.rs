@@ -1,4 +1,4 @@
-//! Host-controlled trust-class policy engine for IronClaw Reborn.
+//! Host-controlled trust-class policy engine for IronClaw.
 //!
 //! `ironclaw_trust` is the bridge between the *requested* trust an untrusted
 //! manifest declares and the *effective* trust ceiling that downstream
@@ -26,8 +26,8 @@
 //! See `crates/ironclaw_trust/CONTRACT.md` for the full cross-crate
 //! contract (evaluation matrix, `PackageIdentity` scope, mutation
 //! orchestration, built-in tool migration intent), `CLAUDE.md` for the
-//! per-file guardrails, and `docs/reborn/contracts/host-api.md` (in the
-//! staging-track docs) for the broader Reborn vocabulary.
+//! per-file guardrails, and `docs/ironclaw/contracts/host-api.md` (in the
+//! staging-track docs) for the broader IronClaw vocabulary.
 #![warn(unreachable_pub)]
 
 mod clock;

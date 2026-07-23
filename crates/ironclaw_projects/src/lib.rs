@@ -1,13 +1,13 @@
-//! First-class Project domain contracts for IronClaw Reborn.
+//! First-class Project domain contracts for IronClaw.
 //!
 //! This crate owns the Project entity, project membership / access-control
 //! records, and the [`ProjectRepository`] persistence contract. The single
 //! implementation, [`FilesystemProjectRepository`], persists records over the
-//! Reborn `ScopedFilesystem` substrate, so backend selection (Postgres / libSQL
+//! IronClaw `ScopedFilesystem` substrate, so backend selection (Postgres / libSQL
 //! / JSONL / in-memory) is the host's `RootFilesystem` concern — this crate
 //! contains no SQL.
 //!
-//! Projects scope threads, automations, and workspace memory. In the Reborn
+//! Projects scope threads, automations, and workspace memory. In the IronClaw
 //! stack a `project_id` already flows through `ThreadScope`,
 //! `ProductAgentBoundCaller`, and `TriggerRecord` as a scope identifier; this
 //! crate gives that identifier a durable, access-controlled entity.
@@ -311,7 +311,7 @@ impl ProjectMemberRecord {
 /// Persistence contract for projects and their membership grants.
 ///
 /// The sole implementation ([`FilesystemProjectRepository`]) persists over the
-/// Reborn `ScopedFilesystem` substrate, so it is backend-agnostic. Callers are
+/// IronClaw `ScopedFilesystem` substrate, so it is backend-agnostic. Callers are
 /// responsible for authorization *before* mutating writes;
 /// [`Self::resolve_access`] is the read primitive used to enforce that.
 #[async_trait]

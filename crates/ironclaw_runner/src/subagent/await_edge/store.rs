@@ -4,7 +4,7 @@
 //! `TurnScope`/axes as an explicit argument; the resolver recomputes the
 //! `MountView` for that scope on that call, exactly like
 //! `ironclaw_conversations::filesystem_store` and
-//! `ironclaw_reborn_composition::llm_admin::llm_key_store` already do.
+//! `ironclaw_composition::llm_admin::llm_key_store` already do.
 
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ pub struct CloseCrashHooks<'a> {
 }
 
 /// Thin CAS wrapper around one shared `Arc<ScopedFilesystem<F>>`. Generic
-/// over the backend, matching every other filesystem-backed reborn store
+/// over the backend, matching every other filesystem-backed IronClaw store
 /// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`) — never
 /// `Arc<dyn RootFilesystem>`.
 pub struct FilesystemAwaitEdgeStore<F: RootFilesystem + ?Sized> {

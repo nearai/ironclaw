@@ -188,7 +188,7 @@ impl RootFilesystem for DiskFilesystem {
     /// `CasExpectation::Absent`; record-shaped entries, populated indexed
     /// projections, and `Version(_)` are `Unsupported` because the local
     /// filesystem has no native metadata or version tracking (sidecar
-    /// metadata is a future addition; see the reborn storage rework plan).
+    /// metadata is a future addition; see the IronClaw storage rework plan).
     /// We implement `put` here rather than relying on a trait default so that
     /// the put/write_file pair is non-recursive even when downstream consumers
     /// route through `put`.

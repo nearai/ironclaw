@@ -418,7 +418,7 @@ async fn validate_thread_scope_rejects_owner_mismatch() {
         .expect_err("owner mismatch must be rejected");
     assert!(matches!(
         error,
-        super::RebornLoopDriverHostError::ScopeMismatch { .. }
+        super::IronClawLoopDriverHostError::ScopeMismatch { .. }
     ));
 }
 

@@ -5,7 +5,7 @@
 //! invisible to every integration test before this seam PR.
 //!
 //! Ground truth (verified against
-//! `crates/ironclaw_reborn_composition/src/runtime/local_dev/surface_disclosure.rs`,
+//! `crates/ironclaw_composition/src/runtime/local_dev/surface_disclosure.rs`,
 //! NOT the plan doc's "must deny rather than execute" framing, which does not
 //! match the code): `wrap_surface_disclosure` never hides or denies
 //! a capability. It is a description/schema ANNOTATION layer, disabled unless
@@ -16,7 +16,7 @@
 //! `glob`, `grep`, `apply_patch`) and a local-host-shell note to
 //! `builtin.shell` — so the model is told which host paths are genuinely
 //! mounted instead of guessing raw host paths. This test pins THAT behavior,
-//! end to end, through the TraceLlm seam (`RebornScriptedReply`).
+//! end to end, through the TraceLlm seam (`IronClawScriptedReply`).
 //!
 //! Every harness before this seam PR built its workspace mounts via
 //! `workspace_mounts()` (`/workspace` alias only, never `/host`), so no
@@ -26,17 +26,17 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 /// Flat wire name for `builtin.read_file` (`.` -> `__`, `reply.rs`'s
-/// `RebornScriptedReply::tool_call` encoding).
+/// `IronClawScriptedReply::tool_call` encoding).
 const FLAT_READ_FILE_TOOL_NAME: &str = "builtin__read_file";
 
 /// Flat wire name for `builtin.shell` (same `.` -> `__` encoding).
@@ -62,9 +62,9 @@ const SHELL_LOCAL_HOST_NOTE_NEEDLE: &str = "Runs on the local host with local-de
 /// the switch (not just the new mount backend) is what turns it GREEN.
 #[tokio::test]
 async fn confirmed_host_mount_adds_scoped_roots_note_to_read_file() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_confirmed_host_mount()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("confirmed-host-mount harness builds");
@@ -83,9 +83,9 @@ async fn confirmed_host_mount_adds_scoped_roots_note_to_read_file() {
 /// grant, not on `read_file` always carrying the note.
 #[tokio::test]
 async fn workspace_only_mount_excludes_scoped_roots_note() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("workspace-only harness builds");
@@ -108,9 +108,9 @@ async fn workspace_only_mount_excludes_scoped_roots_note() {
 /// pins the enabled case; the negative control below pins the disabled case.
 #[tokio::test]
 async fn confirmed_host_mount_adds_local_host_shell_note_to_shell() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_confirmed_host_mount()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("confirmed-host-mount harness builds");
@@ -127,9 +127,9 @@ async fn confirmed_host_mount_adds_local_host_shell_note_to_shell() {
 /// and `builtin.shell`'s description is never touched.
 #[tokio::test]
 async fn workspace_only_mount_excludes_local_host_shell_note() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("workspace-only harness builds");
@@ -152,11 +152,11 @@ async fn workspace_only_mount_excludes_local_host_shell_note() {
 /// merely diverge on assertions.
 #[tokio::test]
 async fn shared_capability_io_round_trips_input_and_result_refs() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.time", json!({})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.time", json!({})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await

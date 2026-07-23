@@ -12,7 +12,7 @@ export const SETTINGS_TABS = [
 ];
 
 // Inference settings use dedicated LLM endpoints. Keep this schema empty until
-// any operator-config-backed keys are accepted by the Reborn config API.
+// any operator-config-backed keys are accepted by the IronClaw config API.
 export const INFERENCE_FIELDS = [];
 
 export const AGENT_FIELDS = [

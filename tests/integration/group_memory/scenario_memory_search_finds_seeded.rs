@@ -8,18 +8,18 @@
 //! committed — exercising both the write→reindex path and the search-surface
 //! path end to end at int tier.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: writer ────────────────────────────────────────────────────
     // Seed a short, distinctive sentence so the FTS snippet returned by search
     // contains the marker token verbatim.
     let writer = g
         .thread("conv-memory-search-writer")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.memory_write",
                 json!({
                     "target": "memory",
@@ -27,7 +27,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "append": false
                 }),
             ),
-            RebornScriptedReply::text("seeded"),
+            IronClawScriptedReply::text("seeded"),
         ])
         .build()
         .await?;
@@ -40,11 +40,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let searcher = g
         .thread("conv-memory-searcher")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.memory_search",
                 json!({"query": "staging rollback codename", "limit": 5}),
             ),
-            RebornScriptedReply::text("found"),
+            IronClawScriptedReply::text("found"),
         ])
         .build()
         .await?;

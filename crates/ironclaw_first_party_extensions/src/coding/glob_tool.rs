@@ -1,4 +1,4 @@
-//! Reborn first-party port of the v1 glob coding tool.
+//! IronClaw first-party port of the v1 glob coding tool.
 
 use glob::Pattern;
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemOperation};

@@ -1,4 +1,4 @@
-//! Reborn integration test — mid-turn cancellation + related failure paths
+//! IronClaw integration test — mid-turn cancellation + related failure paths
 //! (E-GATEWAY seam, C-ERRORS).
 //!
 //! Proves the cancel path end-to-end: the model call parks at the vendor-SDK
@@ -13,7 +13,7 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
@@ -21,17 +21,17 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_product_adapters::ProductInboundAck;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
+use ironclaw_support::scripted_provider::ParkingModelGate;
 use ironclaw_turns::TurnStatus;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::ParkingModelGate;
 
 #[tokio::test]
 async fn cancels_a_parked_mid_turn_run() {
     let gate = ParkingModelGate::new();
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .park_model(gate.clone())
-        .script([RebornScriptedReply::text("should never be finalized")])
+        .script([IronClawScriptedReply::text("should never be finalized")])
         .build()
         .await
         .expect("harness builds");
@@ -63,11 +63,11 @@ async fn cancels_a_parked_mid_turn_run() {
 #[tokio::test]
 async fn cancelled_run_does_not_block_a_second_turn_on_the_same_thread() {
     let gate = ParkingModelGate::new();
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .park_model(gate.clone())
         .script([
-            RebornScriptedReply::text("should never be finalized"),
-            RebornScriptedReply::text("second turn done"),
+            IronClawScriptedReply::text("should never be finalized"),
+            IronClawScriptedReply::text("second turn done"),
         ])
         .build()
         .await
@@ -106,9 +106,9 @@ async fn cancelled_run_does_not_block_a_second_turn_on_the_same_thread() {
 #[tokio::test]
 async fn busy_reject_when_thread_already_has_an_active_run() {
     let gate = ParkingModelGate::new();
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .park_model(gate.clone())
-        .script([RebornScriptedReply::text("first turn done")])
+        .script([IronClawScriptedReply::text("first turn done")])
         .build()
         .await
         .expect("harness builds");
@@ -145,7 +145,7 @@ async fn busy_reject_when_thread_already_has_an_active_run() {
 /// forever.
 #[tokio::test]
 async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .fail_model()
         .build()
         .await
@@ -182,7 +182,7 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
 /// `model_stage_failure_category` -> persisted failure.
 #[tokio::test]
 async fn mid_turn_auth_provider_error_reaches_failed_with_credentials_category() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .fail_model_auth()
         .build()
         .await
@@ -232,7 +232,7 @@ async fn mid_turn_auth_provider_error_reaches_failed_with_credentials_category()
 /// lock was genuinely released.
 #[tokio::test]
 async fn failed_run_does_not_block_a_second_turn_on_the_same_thread() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .fail_model()
         .build()
         .await

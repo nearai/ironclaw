@@ -40,7 +40,9 @@ mod config;
 mod model_gateway;
 mod port_adapters;
 
-pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
+pub use config::{
+    IronClawLoopDriverHostError, IronClawLoopDriverHostRequest, TextOnlyLoopHostConfig,
+};
 use model_gateway::ThreadResolvingLoopModelGateway;
 use port_adapters::{
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
@@ -69,7 +71,7 @@ fn trace_host_factory_latency_ok(
     started_at: Option<Instant>,
 ) {
     ironclaw_observability::live_latency_trace_ok!(
-        "reborn_loop_host_factory",
+        "ironclaw_loop_host_factory",
         operation,
         started_at,
         tenant_id = %context.scope.tenant_id,
@@ -79,7 +81,7 @@ fn trace_host_factory_latency_ok(
         owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = %context.run_id,
         turn_id = %context.turn_id,
-        "reborn loop host factory operation completed",
+        "IronClaw loop host factory operation completed",
     );
 }
 
@@ -92,7 +94,7 @@ fn trace_host_factory_latency_error<E: ?Sized>(
     // Host errors can include backend-provided details. Keep latency traces
     // cardinality-bounded and non-sensitive; `operation` identifies the stage.
     ironclaw_observability::live_latency_trace_error!(
-        "reborn_loop_host_factory",
+        "ironclaw_loop_host_factory",
         operation,
         started_at,
         "host_factory_error",
@@ -103,7 +105,7 @@ fn trace_host_factory_latency_error<E: ?Sized>(
         owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
         run_id = %context.run_id,
         turn_id = %context.turn_id,
-        "reborn loop host factory operation failed",
+        "IronClaw loop host factory operation failed",
     );
 }
 
@@ -453,7 +455,7 @@ pub type HookDispatcherFactory = Arc<dyn Fn() -> Arc<HookDispatcher> + Send + Sy
 /// `Result` exists so a future regression surfaces as a build error rather than
 /// a panic (CLAUDE.md forbids `.expect()` in production code).
 pub type HookDispatcherBuilderFactory = Arc<
-    dyn Fn() -> Result<HookDispatcherBuilder, RebornLoopDriverHostError> + Send + Sync + 'static,
+    dyn Fn() -> Result<HookDispatcherBuilder, IronClawLoopDriverHostError> + Send + Sync + 'static,
 >;
 
 /// Default number of durable runtime events read per subscription poll.
@@ -980,7 +982,7 @@ impl Drop for EventTriggeredHookSubscriptionHandle {
     }
 }
 
-pub struct RebornLoopDriverHostFactory<S, G>
+pub struct IronClawLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
@@ -1013,7 +1015,7 @@ where
     /// tenant (a run-scoped rate limit would reset each run and enforce
     /// nothing). The composition root captures one `PredicateEvaluator` per
     /// tenant and shares it across the dispatchers this factory mints — see
-    /// `ironclaw_reborn_composition::hooks` ("Predicate counter scoping").
+    /// `ironclaw_composition::hooks` ("Predicate counter scoping").
     /// Default behavior (no factory) is unchanged from the pre-hooks shape.
     hook_dispatcher_factory: Option<HookDispatcherFactory>,
     /// Per-build builder factory. Preferred over `hook_dispatcher_factory`
@@ -1073,7 +1075,7 @@ pub type HookGateRefFactoryBuilder = Arc<
         + Sync,
 >;
 
-impl<S, G> RebornLoopDriverHostFactory<S, G>
+impl<S, G> IronClawLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -1142,7 +1144,7 @@ where
     /// in their own `owners/<user>` subtree (via
     /// [`ThreadScope::to_resource_scope`]), matching the owner the
     /// product facade already creates threads under
-    /// (`reborn_services::create_thread` scopes to `caller.user_id`).
+    /// (`ironclaw_services::create_thread` scopes to `caller.user_id`).
     ///
     /// The re-scoping applies only when the factory is owner-scoped (it
     /// declares an owner, as the serve path does by pinning the runtime
@@ -1251,7 +1253,10 @@ where
     /// inside the closure exactly as with the legacy factory.
     pub fn with_hook_dispatcher_builder_factory<F>(mut self, factory: F) -> Self
     where
-        F: Fn() -> Result<HookDispatcherBuilder, RebornLoopDriverHostError> + Send + Sync + 'static,
+        F: Fn() -> Result<HookDispatcherBuilder, IronClawLoopDriverHostError>
+            + Send
+            + Sync
+            + 'static,
     {
         self.hook_dispatcher_builder_factory = Some(Arc::new(factory));
         self
@@ -1349,7 +1354,7 @@ where
     /// dispatcher-local state (slot-poisoning, registry mutations) per run.
     /// Predicate counter state is the exception: it is tenant-scoped and shared
     /// across runs by design (see [`Self::with_hook_dispatcher_factory`] and
-    /// `ironclaw_reborn_composition::hooks`, "Predicate counter scoping").
+    /// `ironclaw_composition::hooks`, "Predicate counter scoping").
     pub fn with_hook_dispatcher(self, dispatcher: Arc<HookDispatcher>) -> Self {
         // Single-instance Arc cloning preserves the legacy shared-state shape
         // so existing call sites and tests behave identically. New code paths
@@ -1459,18 +1464,18 @@ where
 
     pub async fn build_text_only_host(
         &self,
-        request: RebornLoopDriverHostRequest,
-    ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
+        request: IronClawLoopDriverHostRequest,
+    ) -> Result<IronClawLoopDriverHost, IronClawLoopDriverHostError> {
         self.build_text_only_host_with_capabilities(request, Arc::new(EmptyLoopCapabilityPort))
             .await
     }
 
     pub async fn build_text_only_host_with_profiled_capabilities(
         &self,
-        request: RebornLoopDriverHostRequest,
+        request: IronClawLoopDriverHostRequest,
         capabilities: Arc<dyn LoopCapabilityPort>,
         surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
-    ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
+    ) -> Result<IronClawLoopDriverHost, IronClawLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
         validate_thread_scope(
             &self.effective_thread_scope(&request.loop_run_context),
@@ -1490,9 +1495,9 @@ where
 
     pub async fn build_text_only_host_with_capabilities(
         &self,
-        request: RebornLoopDriverHostRequest,
+        request: IronClawLoopDriverHostRequest,
         capabilities: Arc<dyn LoopCapabilityPort>,
-    ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
+    ) -> Result<IronClawLoopDriverHost, IronClawLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
         // Resolve the per-caller thread scope once; every thread read/write
         // port below uses it so a logged-in user's turn touches only their
@@ -1564,7 +1569,7 @@ where
         // factory. NOTE: predicate counter state is NOT localized here — the
         // evaluator/backend is captured once per tenant by the composition root
         // and shared across runs by design (tenant-scoped rate/value caps; see
-        // `ironclaw_reborn_composition::hooks`, "Predicate counter scoping").
+        // `ironclaw_composition::hooks`, "Predicate counter scoping").
         //
         // Builder-factory path (preferred): the factory hands back a
         // mutable builder; we attach a `RunScopedHookMilestoneSink` keyed
@@ -1611,7 +1616,7 @@ where
                 // in the shared stream — the caller's filter is not trusted.
                 let effective_read_scope = subscription
                     .effective_read_scope(&run_context.scope, &self.thread_scope)
-                    .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
+                    .map_err(|reason| IronClawLoopDriverHostError::ScopeMismatch { reason })?;
                 Some(
                     subscription
                         .clone_for_independent_spawn()
@@ -1687,7 +1692,7 @@ where
         let visible_surface_result = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
-            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+            .map_err(|error| IronClawLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             });
         let visible_surface = match visible_surface_result {
@@ -1802,7 +1807,7 @@ where
         trace_host_factory_latency_ok("prompt_ports", &run_context, prompt_ports_started_at);
         if is_subagent_planned_run_profile(&run_context) {
             let Some(composer) = self.subagent_prompt_composer.clone() else {
-                return Err(RebornLoopDriverHostError::InvalidRequest {
+                return Err(IronClawLoopDriverHostError::InvalidRequest {
                     reason: "subagent prompt composer is required for subagent run profile"
                         .to_string(),
                 });
@@ -1913,10 +1918,10 @@ where
         let cancellation_started_at = ironclaw_observability::live_latency_started_at();
         let cancellation_handle_result = cancellation_handle_fetch
             .await
-            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+            .map_err(|error| IronClawLoopDriverHostError::InvalidRequest {
                 reason: format!("cancellation handle task failed: {error}"),
             })?
-            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+            .map_err(|error| IronClawLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             });
         let cancellation_handle = match cancellation_handle_result {
@@ -1941,7 +1946,7 @@ where
         let cancellation: Arc<dyn LoopCancellationPort> =
             Arc::new(RunStateLoopCancellationPort::new(cancellation_handle));
 
-        Ok(RebornLoopDriverHost {
+        Ok(IronClawLoopDriverHost {
             run_context,
             context,
             prompt,
@@ -1961,11 +1966,11 @@ where
     fn attach_model_route_snapshot(
         &self,
         run_context: LoopRunContext,
-    ) -> Result<LoopRunContext, RebornLoopDriverHostError> {
+    ) -> Result<LoopRunContext, IronClawLoopDriverHostError> {
         if let Some(snapshot) = &run_context.resolved_model_route {
             snapshot
                 .validate()
-                .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
+                .map_err(|reason| IronClawLoopDriverHostError::InvalidRequest { reason })?;
             let Some(resolver) = &self.model_route_resolver else {
                 // No route resolver is wired (the default product runtime). An
                 // *advisory* snapshot is a caller-requested model hint, not an
@@ -1979,7 +1984,7 @@ where
                 if snapshot.is_advisory() {
                     return Ok(run_context);
                 }
-                return Err(RebornLoopDriverHostError::InvalidRequest {
+                return Err(IronClawLoopDriverHostError::InvalidRequest {
                     reason: "model route resolver is required for this host".to_string(),
                 });
             };
@@ -1996,7 +2001,7 @@ where
         }
         let Some(resolver) = &self.model_route_resolver else {
             if self.config.require_model_route_snapshot {
-                return Err(RebornLoopDriverHostError::InvalidRequest {
+                return Err(IronClawLoopDriverHostError::InvalidRequest {
                     reason: "model route resolver is required for this host".to_string(),
                 });
             }
@@ -2008,12 +2013,12 @@ where
             .map_err(model_route_error_to_host_error)?;
         let route_snapshot = snapshot
             .to_loop_model_route_snapshot()
-            .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
+            .map_err(|reason| IronClawLoopDriverHostError::InvalidRequest { reason })?;
         Ok(run_context.with_resolved_model_route(route_snapshot))
     }
 }
 
-impl<S, G> TurnRunWakeNotifier for RebornLoopDriverHostFactory<S, G>
+impl<S, G> TurnRunWakeNotifier for IronClawLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -2024,7 +2029,7 @@ where
     }
 }
 
-pub struct RebornLoopDriverHost {
+pub struct IronClawLoopDriverHost {
     run_context: LoopRunContext,
     context: Arc<dyn LoopContextPort>,
     prompt: Arc<dyn LoopPromptPort>,
@@ -2040,10 +2045,10 @@ pub struct RebornLoopDriverHost {
     _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
 
-impl fmt::Debug for RebornLoopDriverHost {
+impl fmt::Debug for IronClawLoopDriverHost {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("RebornLoopDriverHost")
+            .debug_struct("IronClawLoopDriverHost")
             .field("scope", &self.run_context.scope)
             .field("turn_id", &self.run_context.turn_id)
             .field("run_id", &self.run_context.run_id)
@@ -2052,14 +2057,14 @@ impl fmt::Debug for RebornLoopDriverHost {
     }
 }
 
-impl LoopRunInfoPort for RebornLoopDriverHost {
+impl LoopRunInfoPort for IronClawLoopDriverHost {
     fn run_context(&self) -> &LoopRunContext {
         &self.run_context
     }
 }
 
 #[async_trait]
-impl LoopCancellationPort for RebornLoopDriverHost {
+impl LoopCancellationPort for IronClawLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.observe_cancellation()
     }
@@ -2070,7 +2075,7 @@ impl LoopCancellationPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopContextPort for RebornLoopDriverHost {
+impl LoopContextPort for IronClawLoopDriverHost {
     async fn load_loop_context(
         &self,
         request: LoopContextRequest,
@@ -2080,7 +2085,7 @@ impl LoopContextPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopPromptPort for RebornLoopDriverHost {
+impl LoopPromptPort for IronClawLoopDriverHost {
     async fn build_prompt_bundle(
         &self,
         request: LoopPromptBundleRequest,
@@ -2090,7 +2095,7 @@ impl LoopPromptPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopInputPort for RebornLoopDriverHost {
+impl LoopInputPort for IronClawLoopDriverHost {
     async fn poll_inputs(
         &self,
         after: LoopInputCursor,
@@ -2105,7 +2110,7 @@ impl LoopInputPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopModelPort for RebornLoopDriverHost {
+impl LoopModelPort for IronClawLoopDriverHost {
     async fn stream_model(
         &self,
         request: LoopModelRequest,
@@ -2115,7 +2120,7 @@ impl LoopModelPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopCapabilityPort for RebornLoopDriverHost {
+impl LoopCapabilityPort for IronClawLoopDriverHost {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.capabilities.tool_definitions()
     }
@@ -2163,7 +2168,7 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopTranscriptPort for RebornLoopDriverHost {
+impl LoopTranscriptPort for IronClawLoopDriverHost {
     async fn begin_assistant_draft(
         &self,
         request: BeginAssistantDraft,
@@ -2194,7 +2199,7 @@ impl LoopTranscriptPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopCheckpointPort for RebornLoopDriverHost {
+impl LoopCheckpointPort for IronClawLoopDriverHost {
     async fn checkpoint(
         &self,
         request: LoopCheckpointRequest,
@@ -2218,14 +2223,14 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
 }
 
 #[async_trait]
-impl LoopProgressPort for RebornLoopDriverHost {
+impl LoopProgressPort for IronClawLoopDriverHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.progress.emit_loop_progress(event).await
     }
 }
 
 #[async_trait]
-impl LoopCompactionPort for RebornLoopDriverHost {
+impl LoopCompactionPort for IronClawLoopDriverHost {
     async fn compact_loop_context(
         &self,
         request: LoopCompactionRequest,
@@ -2237,9 +2242,9 @@ impl LoopCompactionPort for RebornLoopDriverHost {
 fn validate_claimed_run_context(
     claimed_run: &ClaimedTurnRun,
     run_context: &LoopRunContext,
-) -> Result<(), RebornLoopDriverHostError> {
+) -> Result<(), IronClawLoopDriverHostError> {
     if claimed_run.state.status != TurnStatus::Running {
-        return Err(RebornLoopDriverHostError::InvalidRequest {
+        return Err(IronClawLoopDriverHostError::InvalidRequest {
             reason: "claimed run must be running".to_string(),
         });
     }
@@ -2247,12 +2252,12 @@ fn validate_claimed_run_context(
         || claimed_run.state.turn_id != run_context.turn_id
         || claimed_run.state.run_id != run_context.run_id
     {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "claimed run state does not match loop run context".to_string(),
         });
     }
     if claimed_run.resolved_run_profile != run_context.resolved_run_profile {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "claimed run profile does not match loop run context".to_string(),
         });
     }
@@ -2261,17 +2266,17 @@ fn validate_claimed_run_context(
         &run_context.resolved_model_route,
     ) {
         (Some(expected), Some(actual)) if expected != actual => {
-            return Err(RebornLoopDriverHostError::ScopeMismatch {
+            return Err(IronClawLoopDriverHostError::ScopeMismatch {
                 reason: "loop run context model route does not match claimed run".to_string(),
             });
         }
         (Some(_), None) => {
-            return Err(RebornLoopDriverHostError::ScopeMismatch {
+            return Err(IronClawLoopDriverHostError::ScopeMismatch {
                 reason: "loop run context is missing claimed run model route".to_string(),
             });
         }
         (None, Some(_)) => {
-            return Err(RebornLoopDriverHostError::ScopeMismatch {
+            return Err(IronClawLoopDriverHostError::ScopeMismatch {
                 reason: "loop run context model route was not persisted on claimed run".to_string(),
             });
         }
@@ -2282,7 +2287,7 @@ fn validate_claimed_run_context(
         || claimed_run.state.resolved_run_profile_version
             != run_context.resolved_run_profile.profile_version
     {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "claimed run persisted profile identity does not match loop run context"
                 .to_string(),
         });
@@ -2290,12 +2295,12 @@ fn validate_claimed_run_context(
     if run_context.loop_driver_id != run_context.resolved_run_profile.loop_driver.id
         || run_context.loop_driver_version != run_context.resolved_run_profile.loop_driver.version
     {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "loop driver identity does not match resolved profile".to_string(),
         });
     }
     if run_context.thread_id != run_context.scope.thread_id {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "loop run context thread does not match scope thread".to_string(),
         });
     }
@@ -2303,7 +2308,7 @@ fn validate_claimed_run_context(
         || run_context.checkpoint_schema_version
             != run_context.resolved_run_profile.checkpoint_schema_version
     {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "loop run context checkpoint identity does not match resolved profile"
                 .to_string(),
         });
@@ -2312,7 +2317,7 @@ fn validate_claimed_run_context(
 }
 
 #[async_trait]
-impl<S, G> crate::turn_runner::HostFactory for RebornLoopDriverHostFactory<S, G>
+impl<S, G> crate::turn_runner::HostFactory for IronClawLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -2340,7 +2345,7 @@ where
         if let Some(product_context) = claimed.state.product_context.clone() {
             loop_run_context = loop_run_context.with_product_context(product_context);
         }
-        let request = RebornLoopDriverHostRequest {
+        let request = IronClawLoopDriverHostRequest {
             claimed_run: claimed.clone(),
             loop_run_context,
         };
@@ -2374,7 +2379,7 @@ where
     }
 }
 
-impl<S, G> RebornLoopDriverHostFactory<S, G>
+impl<S, G> IronClawLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -2425,10 +2430,10 @@ impl DriverCapabilityRequirement {
 }
 
 fn is_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
-    is_reborn_text_only_driver_key(key) || is_legacy_text_only_driver_key(key)
+    is_ironclaw_text_only_driver_key(key) || is_legacy_text_only_driver_key(key)
 }
 
-fn is_reborn_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
+fn is_ironclaw_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
     key.id.as_str() == TEXT_ONLY_DRIVER_ID
         && key.version.as_u64() == TEXT_ONLY_DRIVER_VERSION
         && key.checkpoint_schema_id.is_none()
@@ -2447,7 +2452,7 @@ fn is_legacy_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
             .is_some_and(|version| version.as_u64() == LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION)
 }
 
-fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
+fn model_route_error_to_host_error(error: ModelRouteError) -> IronClawLoopDriverHostError {
     tracing::warn!(
         component = "model_route",
         operation = "resolve_route",
@@ -2455,14 +2460,14 @@ fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHo
         error_debug = ?error,
         "model route error mapped to safe host error"
     );
-    RebornLoopDriverHostError::InvalidRequest {
+    IronClawLoopDriverHostError::InvalidRequest {
         reason: format!("model route resolution failed: {}", error.kind().as_str()),
     }
 }
 
 fn capability_resolve_error_to_host_error(
     error: CapabilityResolveError,
-) -> RebornLoopDriverHostError {
+) -> IronClawLoopDriverHostError {
     tracing::warn!(
         component = "capability_surface_profile",
         operation = "resolve_profile",
@@ -2477,16 +2482,16 @@ fn capability_resolve_error_to_host_error(
         }
         _ => "capability surface profile resolution failed",
     };
-    RebornLoopDriverHostError::InvalidRequest {
+    IronClawLoopDriverHostError::InvalidRequest {
         reason: reason.to_string(),
     }
 }
 
 fn slot_for_model_profile(
     run_context: &LoopRunContext,
-) -> Result<ModelSlot, RebornLoopDriverHostError> {
+) -> Result<ModelSlot, IronClawLoopDriverHostError> {
     ModelSlot::from_model_profile_id(&run_context.resolved_run_profile.model_profile_id).ok_or_else(
-        || RebornLoopDriverHostError::InvalidRequest {
+        || IronClawLoopDriverHostError::InvalidRequest {
             reason: "model profile is not supported by the model route resolver".to_string(),
         },
     )
@@ -2503,20 +2508,20 @@ fn persisted_profile_id(profile_id: &RunProfileId) -> RunProfileId {
 fn validate_thread_scope(
     thread_scope: &ThreadScope,
     run_context: &LoopRunContext,
-) -> Result<(), RebornLoopDriverHostError> {
-    // Reborn text-only hosts currently wrap `ironclaw_threads::ThreadScope`,
+) -> Result<(), IronClawLoopDriverHostError> {
+    // IronClaw text-only hosts currently wrap `ironclaw_threads::ThreadScope`,
     // whose production transcript boundary is agent-scoped. Agentless turn
     // scopes are rejected here until that lower thread boundary grows an
     // explicit agentless thread scope.
     if run_context.scope.agent_id.as_ref() != Some(&thread_scope.agent_id) {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "text-only loop host requires a matching agent-scoped thread".to_string(),
         });
     }
     if thread_scope.tenant_id != run_context.scope.tenant_id
         || thread_scope.project_id != run_context.scope.project_id
     {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "thread scope does not match loop run scope".to_string(),
         });
     }
@@ -2528,7 +2533,7 @@ fn validate_thread_scope(
     // routes, but the explicit subject must match the resolved thread owner.
     if run_context.scope.has_explicit_thread_owner() {
         if run_context.scope.explicit_owner_user_id() != thread_scope.owner_user_id.as_ref() {
-            return Err(RebornLoopDriverHostError::ScopeMismatch {
+            return Err(IronClawLoopDriverHostError::ScopeMismatch {
                 reason: "thread scope owner does not match the explicit loop run subject"
                     .to_string(),
             });
@@ -2537,7 +2542,7 @@ fn validate_thread_scope(
         (thread_scope.owner_user_id.as_ref(), run_context.actor())
         && thread_owner != &actor.user_id
     {
-        return Err(RebornLoopDriverHostError::ScopeMismatch {
+        return Err(IronClawLoopDriverHostError::ScopeMismatch {
             reason: "thread scope owner does not match the loop run actor".to_string(),
         });
     }
@@ -2627,7 +2632,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
 mod hook_resolver_adapter_tests {
     //! Unit coverage for [`HookCapabilityInputResolverAdapter`]. These tests
     //! drive the adapter directly (not through the factory) so they can
-    //! exercise every error branch without standing up a full Reborn host.
+    //! exercise every error branch without standing up a full IronClaw host.
 
     use super::*;
     use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};

@@ -1,6 +1,6 @@
-//! Per-capability permission overrides for the Reborn settings surface.
+//! Per-capability permission overrides for the IronClaw settings surface.
 //!
-//! Reborn already expresses an "always allow this capability" decision as a
+//! IronClaw already expresses an "always allow this capability" decision as a
 //! durable [`PersistentApprovalPolicy`](crate::PersistentApprovalPolicy) grant,
 //! which the dispatch approval gate honours through its existing
 //! grant-matching path. The two states that grant model *cannot* express are

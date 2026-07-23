@@ -3,7 +3,7 @@
 //! through the [`crate::kinds`] return types, never through mutating the
 //! context.
 //!
-//! Contexts are intentionally minimal in this first slice. As the Reborn
+//! Contexts are intentionally minimal in this first slice. As the IronClaw
 //! middleware wiring lands, additional read-only fields can be added (e.g.,
 //! `run_context: &LoopRunContext`, `iteration: u32`, capability surface
 //! version) without breaking existing hook authors because everything is

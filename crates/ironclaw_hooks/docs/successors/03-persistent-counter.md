@@ -131,7 +131,7 @@ id's uniqueness contract and was removed in this revision.
 
 - `PredicateEvaluator::new()` keeps the in-memory default.
 - `PredicateEvaluator::with_backend(backend)` opt-in for production.
-- The registrar / Reborn factory wires the backend per host.
+- The registrar / IronClaw factory wires the backend per host.
 
 ## Required tests
 

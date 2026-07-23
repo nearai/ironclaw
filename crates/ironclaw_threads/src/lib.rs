@@ -1,6 +1,6 @@
-//! Canonical session thread and transcript contracts for IronClaw Reborn.
+//! Canonical session thread and transcript contracts for IronClaw.
 //!
-//! This crate owns the contract-first boundary for canonical Reborn threads and
+//! This crate owns the contract-first boundary for canonical IronClaw threads and
 //! transcript history. It provides an in-memory service for semantic tests and
 //! a filesystem-backed durable service routed through `ironclaw_filesystem`.
 //! Backend selection (libSQL, PostgreSQL, in-memory, local-disk) is made at

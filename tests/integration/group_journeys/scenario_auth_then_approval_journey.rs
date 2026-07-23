@@ -6,35 +6,35 @@
 //! (approval → approval only): here gate classes chain WITHIN one capability
 //! call AND across turns, with history carried across the gate-class boundary.
 //!
-//! Requires `RebornIntegrationGroup::live_auth_and_approval()` — the converged
+//! Requires `IronClawIntegrationGroup::live_auth_and_approval()` — the converged
 //! group whose capability harness surfaces both an unseeded `github.get_repo`
 //! capability and real file-tool approval stores on the SAME runtime.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-journey-auth-then-approval")
         .script([
             // turn 1 (2 entries: approval+auth-gated call + post-resolve reply)
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 json!({"owner": "octocat", "repo": "hello-world"}),
             ),
-            RebornScriptedReply::text(
+            IronClawScriptedReply::text(
                 "AUTHJOURNEY_TURN1 repo info retrieved after connecting github",
             ),
             // turn 2 (2 entries: approval-gated call + post-resume reply)
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/auth-journey-approved.txt", "content": "AUTH_JOURNEY_PAYLOAD"}),
             ),
-            RebornScriptedReply::text("file written after approval"),
+            IronClawScriptedReply::text("file written after approval"),
             // turn 3 (1 entry: plain follow-up reply)
-            RebornScriptedReply::text("AUTH_JOURNEY_FINAL_REPLY summarizing the session"),
+            IronClawScriptedReply::text("AUTH_JOURNEY_FINAL_REPLY summarizing the session"),
         ])
         .build()
         .await?;

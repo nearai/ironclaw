@@ -9,7 +9,7 @@ use ironclaw_host_api::ResourceScope;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::{RuntimeProcessError, sandbox_process::RebornSandboxScopeKey};
+use crate::{RuntimeProcessError, sandbox_process::IronClawSandboxScopeKey};
 
 /// Maximum model-facing process output preview before middle truncation.
 ///
@@ -26,7 +26,7 @@ const COMMAND_OUTPUT_TEMP_PREFIX: &str = "ironclaw-command-output-";
 const COMMAND_OUTPUT_SCRATCH_PREFIX: &str = "ironclaw-command-output-scratch-";
 /// Root sub-directory under the OS temp dir that holds per-scope saved-output
 /// directories. Each principal gets its own immediate child directory (named
-/// by the [`RebornSandboxScopeKey`] digest) created with owner-only `0o700`
+/// by the [`IronClawSandboxScopeKey`] digest) created with owner-only `0o700`
 /// permissions, so saved output files from different tenants/users/projects
 /// live in disjoint, non-enumerable directories.
 const COMMAND_OUTPUT_ROOT_DIRNAME: &str = "ironclaw-command-outputs";
@@ -486,14 +486,14 @@ fn cleanup_stale_command_outputs(scope: &ResourceScope) {
 
 /// Return the tenant/user/(agent)/project-scoped directory that holds this
 /// scope's saved-output files. The path layout — `<tempdir>/ironclaw-command-
-/// outputs/<scope_digest>/` — matches the [`RebornSandboxScopeKey`] convention
-/// already used by `RebornScopedSandboxCommandTransport::prepare_workspace`
+/// outputs/<scope_digest>/` — matches the [`IronClawSandboxScopeKey`] convention
+/// already used by `IronClawScopedSandboxCommandTransport::prepare_workspace`
 /// for sandbox workspaces (`<root>/scopes/<digest>`), so isolation guarantees
 /// for two distinct (tenant, user, agent, project) tuples are inherited from
 /// the SHA-256 digest's collision properties: distinct scope tuples produce
 /// distinct digests and therefore disjoint, non-overlapping directories.
 pub(crate) fn scoped_output_dir_path(scope: &ResourceScope) -> PathBuf {
-    let digest = RebornSandboxScopeKey::from_scope(scope).workspace_path(Path::new(""));
+    let digest = IronClawSandboxScopeKey::from_scope(scope).workspace_path(Path::new(""));
     // `workspace_path` returns `scopes/<digest>`; the digest is the final
     // component. Pull it out directly to avoid leaking the `scopes/` prefix
     // into the unrelated saved-output namespace.

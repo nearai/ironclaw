@@ -214,14 +214,14 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             0.0
         };
         debug!(
-            target: "ironclaw::reborn::context_shadow",
+            target: "ironclaw::context_shadow",
             catalog_total_count,
             catalog_total_schema_tokens,
             advertised_tool_count = state.active.definitions.len(),
             advertised_tool_schema_tokens = state.active.advertised_tokens,
             deferred = state.active.deferred,
             reduction_pct,
-            "reborn live tool disclosure surface"
+            "IronClaw live tool disclosure surface"
         );
         Ok(state.active.definitions.clone())
     }
@@ -235,7 +235,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 debug!(
                     tool_name = tool_call.name.as_str(),
                     capability_id = target.definition.capability_id.as_str(),
-                    "reborn tool disclosure resolving direct deferred provider tool call"
+                    "IronClaw tool disclosure resolving direct deferred provider tool call"
                 );
                 // Resolve to the catalog's capability id directly. This is the
                 // resolvability gate for the gateway pre-check; it must NOT depend
@@ -277,7 +277,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 debug!(
                     tool_name = tool_call.name.as_str(),
                     capability_id = target.definition.capability_id.as_str(),
-                    "reborn tool disclosure validating direct deferred provider tool call"
+                    "IronClaw tool disclosure validating direct deferred provider tool call"
                 );
                 return self.inner.validate_provider_tool_call(&target.target_call);
             }
@@ -350,7 +350,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     tool_name = tool_call.name.as_str(),
                     replay_tool_name = replay_tool_name.as_str(),
                     capability_id = target.definition.capability_id.as_str(),
-                    "reborn tool disclosure registering direct deferred provider tool call"
+                    "IronClaw tool disclosure registering direct deferred provider tool call"
                 );
                 // Describe-first (see `should_describe_first`): a deferred tool
                 // called by name with arguments that fail pre-dispatch validation
@@ -1128,7 +1128,7 @@ impl ToolDisclosureCapabilityPort {
         let Some(state) = guard.as_ref() else {
             debug!(
                 tool_name = tool_call.name.as_str(),
-                "reborn tool disclosure direct-deferred miss: no turn state"
+                "IronClaw tool disclosure direct-deferred miss: no turn state"
             );
             return Ok(None);
         };
@@ -1160,7 +1160,7 @@ impl ToolDisclosureCapabilityPort {
                 catalog_len = state.catalog.len(),
                 prefix = prefix.as_str(),
                 prefix_matches = ?sample,
-                "reborn tool disclosure direct-deferred miss: not found in catalog by name"
+                "IronClaw tool disclosure direct-deferred miss: not found in catalog by name"
             );
             return Ok(None);
         };

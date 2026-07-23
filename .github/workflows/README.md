@@ -44,8 +44,8 @@ roll-up **job names**, never individual matrix jobs):
 | Check context (job name) | Workflow | Status |
 |---|---|---|
 | `Code Style (fmt + clippy)` | `code_style.yml` | required |
-| `Tests (Reborn)` | `reborn-tests.yml` | required |
-| `Reborn E2E` | `reborn-e2e.yml` | candidate — require once queue cost is confirmed |
+| `Tests (IronClaw)` | `ironclaw-tests.yml` | required |
+| `IronClaw E2E` | `ironclaw-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
 Rules for a roll-up job that is (or may become) required:
@@ -58,9 +58,9 @@ Rules for a roll-up job that is (or may become) required:
    merge-queue/push run's clippy matrix is missing any of the three feature
    lanes, so a "green but slim" regression cannot come back silently.
 
-## Reborn release and manual compile preflight
+## IronClaw release and manual compile preflight
 
-`ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping Reborn
+`ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping IronClaw
 `ironclaw` package and binary. Matching `ironclaw-v*` tags build the seven
 release targets, produce archives and checksums plus shell, PowerShell, and MSI
 installers, and create the tag's GitHub Release. cargo-dist derives the
@@ -81,7 +81,7 @@ cargo test -p ironclaw --test smoke release_ci_ -- --nocapture
 rg -n "permissions:|GH_TOKEN" .github/workflows/ironclaw-release.yml
 ```
 
-`reborn-release-compile.yml` remains an independent compile-and-smoke preflight
+`ironclaw-release-compile.yml` remains an independent compile-and-smoke preflight
 that runs only through `workflow_dispatch`. It uploads temporary evidence
 artifacts but does not publish a Release, and it is not called by the tag or
 pull-request workflows.
@@ -109,7 +109,7 @@ external services.
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
-`reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
+`ironclaw-tests.yml`, and `ironclaw-e2e.yml` via `workflow_call` at full scope.
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
 the configuration:
@@ -133,7 +133,7 @@ the configuration:
 ### Nightly alerting
 
 One path only: `nightly-watchdog.yml` (08:00 UTC) checks the latest scheduled
-run of each nightly — Nightly Deep CI, Reborn Playwright, IronClaw Stress. A
+run of each nightly — Nightly Deep CI, IronClaw Playwright, IronClaw Stress. A
 run that is missing, stale (>26h: the cron didn't fire),
 or concluded anything but success posts a failure line (workflow, conclusion,
 failed job names, run link) to the Slack channel behind
@@ -147,7 +147,7 @@ own run on a startup_failure and can never see a cron that didn't fire.
 ### Main branch alerting
 
 `main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
-current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
+current `push` to `main` workflows: Code Style, Tests (IronClaw), IronClaw E2E,
 Platform & Compat, Replay Snapshot Gate, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
 `failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
@@ -161,9 +161,9 @@ alerts can target dedicated channels.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
 
-## Reborn-only release policy
+## IronClaw-only release policy
 
-For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
+For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical IronClaw
 `ironclaw` package. The active tag DAG consists of cargo-dist planning, the
 seven target builds, universal installer generation, and GitHub Release
 hosting. Legacy v1 artifacts, independently published WASM extensions, Docker
@@ -171,11 +171,11 @@ images, and the old registry-checksum/announcement path are outside this DAG.
 The generated `announce` job remains as cargo-dist's final release step; it does
 not restore any of those retired products.
 
-`docker.yml` keeps its independent manual and hourly entry points; a Reborn
-version tag does not invoke them. The manual `reborn-release-compile.yml`
+`docker.yml` keeps its independent manual and hourly entry points; a IronClaw
+version tag does not invoke them. The manual `ironclaw-release-compile.yml`
 preflight is also independent from publishing. Restoring any retired release
 product requires adding it back explicitly instead of making it a dependency
-of the Reborn package by default.
+of the IronClaw package by default.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 
@@ -198,14 +198,14 @@ of the Reborn package by default.
   `deterministic-deep-tests` call in `nightly-deep-ci.yml` (and/or dispatch
   `e2e.yml` manually). Delete `test.yml` and `e2e.yml` together with `src/`.
 - **Broad full-path extension↔provider mutation coverage remains legacy-only**:
-  `test_reborn_emulate_full_path.py` still boots the legacy binary. The Reborn
+  `test_ironclaw_emulate_full_path.py` still boots the legacy binary. The IronClaw
   E2E job now replays every harvested live-QA model trace against Emulate's
-  supported provider operations and runs a Reborn-native Drive read path through
+  supported provider operations and runs a IronClaw-native Drive read path through
   `ironclaw serve`; equivalent standalone mutation paths for every provider are
   still follow-up work.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep
-  `reborn-e2e.yml`'s `changes` regex in sync with its `paths:` filters.
+  `ironclaw-e2e.yml`'s `changes` regex in sync with its `paths:` filters.
 - **Code Coverage**, **IronClaw Stress**, live canaries, Docker/release
   pipelines are informational or post-merge; they are not merge-gating.

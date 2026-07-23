@@ -32,6 +32,6 @@ assert_flags ironclaw_telegram_extension ""
 assert_flags ironclaw_runner ""
 
 # Guard the case-arm structure itself with one long-standing recipe.
-assert_flags ironclaw_reborn_composition "--features test-support"
+assert_flags ironclaw_composition "--features test-support"
 
 echo "PASS package-feature-flags recipes"

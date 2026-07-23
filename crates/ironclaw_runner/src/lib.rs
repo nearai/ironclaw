@@ -1,7 +1,7 @@
-//! Reborn loop drivers, host factory, and model-gateway bridge.
+//! IronClaw loop drivers, host factory, and model-gateway bridge.
 //!
 //! This crate is an **internal** assembly building block. The only sanctioned
-//! downstream consumer is `ironclaw_reborn_composition`, which composes the
+//! downstream consumer is `ironclaw_composition`, which composes the
 //! items declared here with substrate facades into a runnable agent and
 //! re-exposes a task-level handle. The dependency boundary tests in
 //! `ironclaw_architecture` enforce that nothing else takes a normal cargo
@@ -27,7 +27,7 @@ pub mod hook_gate_refs;
 pub mod retry_disposition;
 
 // Run-failure classification/summarization over `failure_categories` (moved from
-// ironclaw_reborn_composition; they classify runner-owned categories). Re-exported
+// ironclaw_composition; they classify runner-owned categories). Re-exported
 // at the crate root so intra-cluster `crate::FailureLane` refs resolve and
 // composition can re-export them through its facade for the CLI.
 pub mod loop_driver_host;

@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the capability result channels.
 //!
 //! Part of the capability-path result collapse
-//! (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` §3,
+//! (`docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md` §3,
 //! §5.3). Today a single overloaded ten-variant `CapabilityOutcome`
 //! (`ironclaw_turns`) carries every non-happy path, and a recoverable
 //! `Ok(Failed)` is structurally indistinguishable from a run-terminating `Err`

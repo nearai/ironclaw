@@ -1,6 +1,6 @@
 # ironclaw_process_sandbox guardrails
 
-- Own the Reborn process sandbox compatibility lane for arbitrary commands, generated code, repo-local code, and user-installed CLIs.
+- Own the IronClaw process sandbox compatibility lane for arbitrary commands, generated code, repo-local code, and user-installed CLIs.
 - Accept only typed `SandboxProcessPlan` input. Do not accept raw Docker flags, raw host paths, host environment inheritance, or raw secret material from plan JSON.
 - Keep physical Docker mount roots in trusted executor configuration, never in `ProcessExecutionRequest.input`.
 - Treat install and credentialed run phases separately: install may write scoped tool/cache state with no secrets; credentialed run uses brokered secrets and read-only tool/cache state.

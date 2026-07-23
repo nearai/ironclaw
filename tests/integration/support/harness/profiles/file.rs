@@ -23,15 +23,17 @@ fn file_tools_with_runtime_policy(
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             runtime_policy,
         ),
-        ..ToolsProfile::new("reborn-e2e-builtin-tools", "reborn-e2e-builtin-user")?
+        ..ToolsProfile::new("ironclaw-e2e-builtin-tools", "ironclaw-e2e-builtin-user")?
     })
 }
 
 pub(crate) fn file_tools_profile() -> HarnessResult<ToolsProfile> {
-    Ok(file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
-    ))?
-    .with_auto_approve_default(true))
+    Ok(
+        file_tools_with_runtime_policy(Some(ironclaw_composition::local_dev_yolo_runtime_policy(
+            true,
+        )?))?
+        .with_auto_approve_default(true),
+    )
 }
 
 pub(crate) async fn file_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
@@ -39,7 +41,7 @@ pub(crate) async fn file_tools() -> HarnessResult<HostRuntimeCapabilityHarness> 
 }
 
 pub(crate) fn file_tools_requiring_approval_profile() -> HarnessResult<ToolsProfile> {
-    file_tools_requiring_approval_profile_for_user("reborn-e2e-builtin-user")
+    file_tools_requiring_approval_profile_for_user("ironclaw-e2e-builtin-user")
 }
 
 /// Same profile as [`file_tools_requiring_approval_profile`], but disables
@@ -47,7 +49,7 @@ pub(crate) fn file_tools_requiring_approval_profile() -> HarnessResult<ToolsProf
 /// test constant. The production capability port resolves the dispatch scope
 /// owner-first from the turn's real binding subject, not from this harness's
 /// `user_id` field alone -- a caller whose turn runs as a different actor
-/// (e.g. `RebornBinaryE2EHarness::with_host_runtime_file_capabilities_requiring_approval`,
+/// (e.g. `IronClawBinaryE2EHarness::with_host_runtime_file_capabilities_requiring_approval`,
 /// which submits as a fixed `"alice"` actor) must build under that SAME
 /// resolved subject, mirroring `extension_lifecycle_tools_profile_for_user`,
 /// or `disable_global_auto_approve_for_product_and_harness_users` disables
@@ -74,7 +76,7 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 /// through it. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+        ironclaw_composition::local_dev_yolo_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
@@ -83,7 +85,7 @@ pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<T
     // port (mirrors `project_create`'s `PROJECT_CREATE_CAPABILITY_ID`
     // opt-in pattern -- see `profiles/project.rs`).
     profile.capability_ids.push(CapabilityId::new(
-        ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
+        ironclaw_composition::test_support::RESULT_READ_CAPABILITY_ID,
     )?);
     // `builtin.json` (`parse`) is the minimal granted capability whose output
     // is a top-level JSON array, needed to drive the truncated-array
@@ -110,7 +112,7 @@ pub(crate) fn write_only_profile() -> HarnessResult<ToolsProfile> {
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
         ),
-        ..ToolsProfile::new("reborn-e2e-write-only", "reborn-e2e-write-only-user")?
+        ..ToolsProfile::new("ironclaw-e2e-write-only", "ironclaw-e2e-write-only-user")?
     })
 }
 

@@ -12,13 +12,13 @@ use super::{
     DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
     FilesystemSecretStore, HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker,
     InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor,
-    NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    IronClawEventStoreError, NoopTurnRunWakeNotifier, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
 pub enum ProductionEventStoreWiringError {
     #[error("failed to build IronClaw event stores: {0}")]
-    EventStore(#[from] RebornEventStoreError),
+    EventStore(#[from] IronClawEventStoreError),
     #[error("host runtime production wiring failed")]
     ProductionWiring(ProductionWiringReport),
 }

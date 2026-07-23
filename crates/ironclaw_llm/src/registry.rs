@@ -418,9 +418,9 @@ impl ProviderRegistry {
     /// `tracing::warn`, preserving the v1 fail-open-with-log behavior
     /// so a malformed user file never breaks boot.
     ///
-    /// Reborn's standalone composition root supplies
+    /// IronClaw's standalone composition root supplies
     /// `$IRONCLAW_REBORN_HOME/providers.json` here so the two binaries
-    /// (v1 and Reborn-standalone) can have independent user catalogs
+    /// (v1 and IronClaw-standalone) can have independent user catalogs
     /// without colliding on `~/.ironclaw/providers.json`.
     pub fn load_from_path(user_path: Option<&std::path::Path>) -> Self {
         match Self::try_load_from_path(user_path) {
@@ -439,7 +439,7 @@ impl ProviderRegistry {
     /// Load the registry with a caller-supplied user-overlay path,
     /// failing if the explicit overlay exists but cannot be read/parsed.
     ///
-    /// Reborn uses this because operator boot config is fail-closed: if an
+    /// IronClaw uses this because operator boot config is fail-closed: if an
     /// explicit `$IRONCLAW_REBORN_HOME/providers.json` is present, a syntax
     /// error must not silently fall back to compiled-in defaults.
     pub fn try_load_from_path(

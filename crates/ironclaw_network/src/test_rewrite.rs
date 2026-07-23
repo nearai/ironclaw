@@ -5,8 +5,9 @@
 //! OAuth token exchanges) to land on local fake vendor APIs instead of the
 //! real internet. This module is the ONE seam that makes that possible:
 //! [`RewriteNetworkTransport`] wraps the production transport and — only when
-//! `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` is set — redirects the resolved
+//! `IRONCLAW_TEST_HTTP_REWRITE_MAP` is set — redirects the resolved
 //! connection target for the mapped hosts to a loopback address.
+//! `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` remains a compatibility fallback.
 //!
 //! Guard rails (mirrors the spirit of the v1 escape hatch in
 //! `src/tools/wasm/http_security.rs`):
@@ -44,7 +45,8 @@ use crate::{
 
 /// Environment variable carrying the test-only rewrite map:
 /// `host=127.0.0.1:PORT[,host2=127.0.0.1:PORT2...]`.
-pub const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP";
+pub const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
+const LEGACY_TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP";
 
 /// Construction-time failures for the rewrite seam. All fail-closed: the
 /// caller must treat any of these as fatal to process startup.
@@ -137,7 +139,9 @@ impl<T> RewriteNetworkTransport<T> {
     /// [`TEST_HTTP_REWRITE_MAP_ENV`] when set. Fail-closed: a set-but-invalid
     /// value (or a release build with the value set) is an error.
     pub fn from_env(inner: T) -> Result<Self, HostRewriteMapError> {
-        let value = std::env::var(TEST_HTTP_REWRITE_MAP_ENV).ok();
+        let value = std::env::var(TEST_HTTP_REWRITE_MAP_ENV)
+            .ok()
+            .or_else(|| std::env::var(LEGACY_TEST_HTTP_REWRITE_MAP_ENV).ok());
         Self::from_env_value(inner, value.as_deref())
     }
 

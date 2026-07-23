@@ -2,7 +2,7 @@
 import { apiFetch } from "../../../lib/api";
 import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
-// SCAFFOLDING: no Reborn backend mounts this route today. The only shipped
+// SCAFFOLDING: no IronClaw backend mounts this route today. The only shipped
 // inbound channel connects via OAuth (PR #5604 removed its channel-specific
 // pairing redeem), and no shipped proof-code channel reaches this UI — the
 // backend cannot emit a `pairing`/`pairing_required` onboarding state yet.

@@ -556,7 +556,7 @@ fn spawn_epoch_ticker(engine: Engine) -> Result<EpochTickerHandle, WasmHookRunti
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_ticker = Arc::clone(&shutdown);
     let join = std::thread::Builder::new()
-        .name("reborn-hook-wasm-epoch-ticker".into())
+        .name("ironclaw-hook-wasm-epoch-ticker".into())
         .spawn(move || {
             while !shutdown_ticker.load(Ordering::Acquire) {
                 std::thread::sleep(EPOCH_TICK_INTERVAL);

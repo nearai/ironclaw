@@ -4,7 +4,7 @@
 //! resolved by the host, compared constant-time, and never enter adapter
 //! scope. Recipes are pure data ([`IngressVerificationRecipe`]); this module
 //! is the one implementation of each verification *kind*
-//! (`docs/reborn/extension-runtime/overview.md` §3, §5.3).
+//! (`docs/ironclaw/extension-runtime/overview.md` §3, §5.3).
 //!
 //! Multi-candidate resolution: with several candidate installations on one
 //! route the verifier tries each within [`MAX_VERIFICATION_CANDIDATES`] and

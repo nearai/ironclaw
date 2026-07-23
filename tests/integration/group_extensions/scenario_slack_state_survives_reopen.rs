@@ -20,9 +20,9 @@
 //! Ordering: depends on scenario 6 (connected end state); driven after it in
 //! `main.rs`.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let slack = g
         .channel_connection()
         .ok_or("extension_lifecycle group must carry the generic channel-connection bundle")?;

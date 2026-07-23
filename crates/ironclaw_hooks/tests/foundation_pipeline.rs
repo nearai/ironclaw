@@ -4,7 +4,7 @@
 //! manifest's intent.
 //!
 //! This test does *not* cover predicate evaluation (no evaluator ships in
-//! this slice) and does *not* cover Reborn middleware composition (next
+//! this slice) and does *not* cover IronClaw middleware composition (next
 //! slice). It exists to prove the cross-module shapes fit together.
 
 use async_trait::async_trait;

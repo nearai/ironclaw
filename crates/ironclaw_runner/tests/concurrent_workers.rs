@@ -1,4 +1,4 @@
-//! Concurrency tests for `TurnRunScheduler` + `RebornTurnRunExecutor`.
+//! Concurrency tests for `TurnRunScheduler` + `IronClawTurnRunExecutor`.
 //!
 //! A barrier-blocking driver blocks inside `run()` until a `Barrier(2)` is
 //! reached, using a shared atomic entry counter to prove both runs are
@@ -21,10 +21,10 @@ use ironclaw_loop_host::{
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
     HostUserProfileSource,
 };
-use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
+use ironclaw_runner::turn_run_executor::IronClawTurnRunExecutor;
 use ironclaw_runner::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
-    loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
+    loop_driver_host::{IronClawLoopDriverHostFactory, TextOnlyLoopHostConfig},
     loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort},
     turn_runner::HostFactory,
     turn_scheduler::{TurnRunScheduler, TurnRunSchedulerConfig},
@@ -360,7 +360,7 @@ async fn submit_owned_run_on_thread(
 // Config wiring test: TurnRunnerSettings → TurnStateStoreLimits
 //
 // This is the caller-level C4 assertion. It directly verifies the mapping
-// inside build_reborn_runtime: build a turn state store with the limits
+// inside build_ironclaw_runtime: build a turn state store with the limits
 // that the composition would thread in, then exercise claim behavior to prove
 // the cap is applied.
 // ---------------------------------------------------------------------------
@@ -369,7 +369,7 @@ async fn submit_owned_run_on_thread(
 ///
 /// C3 wires `runner.max_concurrent_runs_per_user` into `TurnStateStoreLimits`
 /// when building the store. This test builds the store with `cap = 1` (the value
-/// `build_reborn_runtime` would set from `TurnRunnerSettings`) and directly probes
+/// `build_ironclaw_runtime` would set from `TurnRunnerSettings`) and directly probes
 /// claim behavior to prove:
 ///
 /// 1. Two runs (user_a_1 and user_b) are claimable — user_a at cap, user_b not capped.
@@ -387,7 +387,7 @@ async fn config_wiring_per_user_cap_enforced_via_store_limits() {
     let user_a = UserId::new("user-wiring-a").unwrap();
     let user_b = UserId::new("user-wiring-b").unwrap();
 
-    // Build the store with per-user cap = 1, mirroring what build_reborn_runtime
+    // Build the store with per-user cap = 1, mirroring what build_ironclaw_runtime
     // constructs from TurnRunnerSettings { max_concurrent_runs_per_user: NonZeroU32::new(1) }.
     let limits = TurnStateStoreLimits {
         max_concurrent_runs_per_user: NonZeroU32::new(1),
@@ -511,13 +511,13 @@ async fn config_wiring_per_user_cap_enforced_via_store_limits() {
 }
 
 // ---------------------------------------------------------------------------
-// TurnRunScheduler + RebornTurnRunExecutor tests
+// TurnRunScheduler + IronClawTurnRunExecutor tests
 //
 // These tests exercise the production concurrency path:
-//   TurnRunScheduler → RebornTurnRunExecutor → LoopExitApplier
+//   TurnRunScheduler → IronClawTurnRunExecutor → LoopExitApplier
 // ---------------------------------------------------------------------------
 
-/// Concurrency proof for TurnRunScheduler + RebornTurnRunExecutor.
+/// Concurrency proof for TurnRunScheduler + IronClawTurnRunExecutor.
 ///
 /// Two runs on distinct threads are submitted simultaneously. The `BarrierDriver`
 /// blocks inside `run()` until BOTH invocations arrive (a `tokio::sync::Barrier(2)`).
@@ -617,7 +617,7 @@ async fn scheduler_executor_two_runs_concurrently() {
     ));
 
     let host_factory = Arc::new(
-        RebornLoopDriverHostFactory::new(
+        IronClawLoopDriverHostFactory::new(
             Arc::clone(&thread_service),
             thread_scope.clone(),
             Arc::clone(&gateway),
@@ -639,7 +639,7 @@ async fn scheduler_executor_two_runs_concurrently() {
         ),
     );
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&registry),
         host_factory as Arc<dyn HostFactory>,
@@ -716,20 +716,20 @@ async fn scheduler_executor_two_runs_concurrently() {
     assert_eq!(
         entry_count.load(Ordering::SeqCst),
         2,
-        "both RebornTurnRunExecutor invocations should have entered run() concurrently"
+        "both IronClawTurnRunExecutor invocations should have entered run() concurrently"
     );
 
     scheduler_handle.shutdown().await;
 }
 
-/// End-to-end success path: TurnRunScheduler + RebornTurnRunExecutor applies a
+/// End-to-end success path: TurnRunScheduler + IronClawTurnRunExecutor applies a
 /// LoopExit::Failed through the applier, reaching a terminal Failed state.
 ///
 /// Unlike `scheduler_executor_two_runs_concurrently` (where the driver returns an
 /// `Err` and the scheduler itself records the failure via `record_runner_failure`),
 /// this test uses a driver that returns `Ok(LoopExit::Failed)`. In that path:
 ///
-///   1. `RebornTurnRunExecutor::execute_claimed_run` calls `invoke_driver` → `Ok(exit)`.
+///   1. `IronClawTurnRunExecutor::execute_claimed_run` calls `invoke_driver` → `Ok(exit)`.
 ///   2. It calls `apply_exit` → `LoopExitApplier::apply()` → `apply_validated_loop_exit`.
 ///   3. The `AcceptAllEvidencePort` returns `true` for every verification method.
 ///   4. `execute_claimed_run` returns `Ok(())` — the scheduler does NOT call
@@ -896,7 +896,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
     ));
 
     let host_factory = Arc::new(
-        RebornLoopDriverHostFactory::new(
+        IronClawLoopDriverHostFactory::new(
             Arc::clone(&thread_service),
             thread_scope.clone(),
             Arc::clone(&gateway),
@@ -918,7 +918,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
         ),
     );
 
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&registry),
         host_factory as Arc<dyn HostFactory>,

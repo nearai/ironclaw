@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::types::WasmLogRecord;
 
-/// Errors returned by the Reborn WASM runtime.
+/// Errors returned by the IronClaw WASM runtime.
 #[derive(Debug, Error)]
 pub enum WasmError {
     #[error("failed to create WASM engine: {0}")]

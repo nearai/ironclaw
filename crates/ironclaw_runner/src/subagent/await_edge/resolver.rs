@@ -45,7 +45,7 @@ pub struct AwaitEdgeResolver<
     turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
     // Deferred-bind, mirroring `coordinator` below: most callers have a
     // result writer in hand immediately (`new_unbound`, the common case),
-    // but `ironclaw_reborn_composition::runtime` constructs its result
+    // but `ironclaw_composition::runtime` constructs its result
     // writer *after* this resolver is assembled and erased into
     // `Arc<dyn AwaitEdgeSettler>` — `bind_result_writer` (also a trait
     // method, so it's reachable through the erased type) fills this in

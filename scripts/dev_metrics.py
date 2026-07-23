@@ -86,7 +86,7 @@ PRODUCT_CHANGE = {"feat", "fix", "refactor", "perf"}
 
 def classify_commit(subj: str) -> dict:
     """Pure classification of a commit subject (no git) — unit-testable."""
-    # strip scope + breaking marker: feat(reborn)! -> feat
+    # strip scope + breaking marker: feat(ironclaw)! -> feat
     head = subj.split(":", 1)[0] if ":" in subj else ""
     base = head.split("(", 1)[0].rstrip("!").strip().lower()
     typ = base if base in CONV_TYPES else None
@@ -231,7 +231,7 @@ def tier2(commits: list[dict], now: datetime) -> dict:
 # Tier 3 — codebase health
 # ----------------------------------------------------------------------------
 
-COMPOSITION = "crates/ironclaw_reborn_composition/src"
+COMPOSITION = "crates/ironclaw_composition/src"
 V1_SRC = "src"
 CRATES_SRC = "crates"
 
@@ -418,7 +418,7 @@ def _files_over(threshold: int) -> list:
 
 
 def _boundary_tests() -> int:
-    f = "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs"
+    f = "crates/ironclaw_architecture/tests/ironclaw_dependency_boundaries.rs"
     # grep -c exits 1 when zero matches — that is a valid 0, not a probe failure.
     out = sh(f"grep -cE '#\\[test\\]' {f} 2>/dev/null", ok=(0, 1))
     try:

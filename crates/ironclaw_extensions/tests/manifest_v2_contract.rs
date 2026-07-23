@@ -714,7 +714,7 @@ fn host_bundled_source_may_assert_first_party_and_reserved_id() {
         r#"
 schema_version = "{schema}"
 id = "ironclaw.memory.native"
-name = "Reborn Native Memory"
+name = "IronClaw Native Memory"
 version = "0.1.0"
 description = "host-bundled"
 trust = "first_party_requested"

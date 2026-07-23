@@ -1,11 +1,11 @@
-//! Reborn integration-test harness — mock-MCP scaffolding: the real `McpRuntime`
+//! IronClaw integration-test harness — mock-MCP scaffolding: the real `McpRuntime`
 //! built over a loopback HTTP egress, the test-only `RuntimeHttpEgress` that
 //! talks to the in-process `MockMcpServer`, the mock extension package/registry,
 //! and the MCP trust + network policies. Single entry point:
 //! `HostRuntimeCapabilityHarness::mock_mcp_tools` (`harness.rs`), which calls
 //! the `pub(super)` factories here. Test-only; never ships.
 
-#![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
+#![allow(dead_code)] // Shared by staged IronClaw binary-E2E validation ports.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

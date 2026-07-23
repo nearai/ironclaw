@@ -2,7 +2,7 @@
 //!
 //! These live under `tests/` (not an inline `#[cfg(test)]` module) on purpose:
 //! constructing an `Authorized` requires implementing `CapabilityAuthorizer`, and
-//! the `reborn_authorized_seal_ratchet` architecture test bans that impl anywhere
+//! the `ironclaw_authorized_seal_ratchet` architecture test bans that impl anywhere
 //! but the kernel crate. A test double under `tests/` is not inventoried by that
 //! ratchet, so this is where the seal's own test authorizer belongs.
 

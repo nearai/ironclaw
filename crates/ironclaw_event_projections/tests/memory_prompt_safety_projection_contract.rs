@@ -4,6 +4,9 @@ use ironclaw_event_projections::{
     AuditProjectionRequest, AuditProjectionService, DurableMemoryAuditSink, ProjectionScope,
     ReplayAuditProjectionService,
 };
+use ironclaw_event_store::{
+    IronClawEventStoreConfig, IronClawProfile, build_ironclaw_event_stores,
+};
 use ironclaw_events::{AuditSink, DurableAuditSink};
 use ironclaw_host_api::{
     AgentId, AuditStage, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope,
@@ -13,17 +16,14 @@ use ironclaw_memory_native::{
     InMemoryMemoryDocumentRepository, MemoryBackend, MemoryContext, MemoryDocumentPath,
     MemoryDocumentRepository, MemoryDocumentScope, RepositoryMemoryBackend, content_sha256,
 };
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
-};
 
 #[tokio::test]
 async fn memory_prompt_safety_rejection_projects_metadata_only_from_durable_audit_log() {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
         },
@@ -121,9 +121,9 @@ async fn memory_prompt_safety_rejection_projects_metadata_only_from_durable_audi
 #[tokio::test]
 async fn prompt_rejection_projects_under_thread_scoped_audit_context() {
     let temp = tempfile::tempdir().unwrap();
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: temp.path().join("reborn-event-store"),
             accept_single_node_durable: false,
         },

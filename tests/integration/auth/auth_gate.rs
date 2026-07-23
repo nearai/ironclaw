@@ -8,8 +8,8 @@
 //! (`state.pending_auth_resume` check) surfaces gate-declined instead of
 //! re-dispatching. Only the model is faked.
 //!
-//! DEFERRED here, COVERED by `tests/reborn_group_journeys/` (C-JOURNEY) via
-//! `RebornIntegrationGroup::live_auth_and_approval()`: the "submit credentials
+//! DEFERRED here, COVERED by `tests/ironclaw_group_journeys/` (C-JOURNEY) via
+//! `IronClawIntegrationGroup::live_auth_and_approval()`: the "submit credentials
 //! -> resume completes" arm, since this fixture's resolver is fixed
 //! `AuthRequired` with no `run_state` store to complete a real resume.
 //!
@@ -21,32 +21,32 @@
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
 
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::{GateRef, TurnStatus};
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
 
 #[tokio::test]
 async fn github_auth_gate_denied_resume_completes_without_loop() {
-    let group = RebornIntegrationGroup::live_auth_gate()
+    let group = IronClawIntegrationGroup::live_auth_gate()
         .await
         .expect("auth-gate group builds");
     let harness = group
         .thread("conv-auth-gate")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.create_issue",
                 serde_json::json!({"owner": "o", "repo": "r", "title": "t", "body": "b"}),
             ),
             // Consumed by the model call after the gate-declined observation;
             // its content is intentionally NOT asserted (see below).
-            RebornScriptedReply::text("could not file the issue"),
+            IronClawScriptedReply::text("could not file the issue"),
         ])
         .build()
         .await
@@ -109,14 +109,14 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
 /// `BlockedAuth` wire the WebUI depends on.
 #[tokio::test]
 async fn runtime_401_after_injection_populates_provider_credential_requirement() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_github_network_status(401)
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 serde_json::json!({"owner": "octocat", "repo": "hello-world"}),
             ),
-            RebornScriptedReply::text("could not authenticate to github"),
+            IronClawScriptedReply::text("could not authenticate to github"),
         ])
         .build()
         .await
@@ -192,9 +192,9 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
 /// cancel (closes the #5067/#4957 "gate stays live" class).
 #[tokio::test]
 async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_github_network_status(401)
-        .script([RebornScriptedReply::tool_call(
+        .script([IronClawScriptedReply::tool_call(
             "github.get_repo",
             serde_json::json!({"owner": "octocat", "repo": "hello-world"}),
         )])
@@ -252,9 +252,9 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
 /// not resume under a synthesized ref.
 #[tokio::test]
 async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_github_network_status(401)
-        .script([RebornScriptedReply::tool_call(
+        .script([IronClawScriptedReply::tool_call(
             "github.get_repo",
             serde_json::json!({"owner": "octocat", "repo": "hello-world"}),
         )])

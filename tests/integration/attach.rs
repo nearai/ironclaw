@@ -2,30 +2,30 @@
 //!
 //! Production wires `attachment_read_port` from the local-dev workspace
 //! filesystem (`ProjectScopedAttachmentReader`,
-//! `crates/ironclaw_reborn_composition/src/runtime.rs:3328-3334`) so the loop
+//! `crates/ironclaw_composition/src/runtime.rs:3328-3334`) so the loop
 //! model port reads landed attachment bytes back for the gateway
 //! (`convert_messages`) to build a `ContentPart::ImageUrl` for vision-capable
 //! models. Regression: this port was `None` everywhere pre-fix, so images
 //! silently degraded to the textual `<attachments>` pointer.
 //!
 //! Wires the read port + real `InboundAttachmentLander` via
-//! `RebornIntegrationGroup::attachment_tools()`, lands an image, routes
+//! `IronClawIntegrationGroup::attachment_tools()`, lands an image, routes
 //! through a vision-pattern model id, and asserts the model request carried
 //! the image as a `data:` URL.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
 use axum::http::StatusCode;
-use ironclaw_product_workflow::RebornServices;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
-use reborn_support::webui_mount::{get_raw, mount_webui_v2_router, webui_caller_for};
+use ironclaw_product_workflow::IronClawServices;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
+use ironclaw_support::webui_mount::{get_raw, mount_webui_v2_router, webui_caller_for};
 use std::sync::Arc;
 
 /// A vision-capable model id per `ironclaw_llm::vision_models::VISION_PATTERNS`.
@@ -35,13 +35,13 @@ const PNG_BYTES: &[u8] = &[0x89, b'P', b'N', b'G', 1, 2, 3, 4];
 
 #[tokio::test]
 async fn landed_image_attachment_reaches_the_model_as_a_multimodal_part() {
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let harness = group
         .thread("conv-attach")
         .with_model_override(VISION_MODEL)
-        .script([RebornScriptedReply::text("I see a diagram")])
+        .script([IronClawScriptedReply::text("I see a diagram")])
         .build()
         .await
         .expect("thread builds");
@@ -67,12 +67,12 @@ async fn landed_image_attachment_reaches_the_model_as_a_multimodal_part() {
 /// just the read port, is load-bearing.
 #[tokio::test]
 async fn non_vision_model_does_not_receive_a_multimodal_image_part() {
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let harness = group
         .thread("conv-attach-no-vision")
-        .script([RebornScriptedReply::text("got it")])
+        .script([IronClawScriptedReply::text("got it")])
         .build()
         .await
         .expect("thread builds");
@@ -103,8 +103,8 @@ async fn non_vision_model_does_not_receive_a_multimodal_image_part() {
 /// every other test in this file wires a lander.
 #[tokio::test]
 async fn submit_with_image_attachment_fails_fast_without_a_lander() {
-    let harness = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("unused")])
+    let harness = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("harness builds");
@@ -132,12 +132,12 @@ async fn submit_with_image_attachment_fails_fast_without_a_lander() {
 #[tokio::test]
 async fn doc_attachment_reaches_the_model_with_extracted_text() {
     const MARKER: &str = "ZAFFRE-DOCUMENT-MARKER-771";
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let harness = group
         .thread("conv-attach-doc")
-        .script([RebornScriptedReply::text("read it")])
+        .script([IronClawScriptedReply::text("read it")])
         .build()
         .await
         .expect("thread builds");
@@ -184,12 +184,12 @@ async fn doc_attachment_reaches_the_model_with_extracted_text() {
 async fn multiple_attachments_in_one_turn_all_reach_the_model() {
     const MARKER_ONE: &str = "TOPAZ-MARKER-ALPHA";
     const MARKER_TWO: &str = "TOPAZ-MARKER-BETA";
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let harness = group
         .thread("conv-attach-multi")
-        .script([RebornScriptedReply::text("read both")])
+        .script([IronClawScriptedReply::text("read both")])
         .build()
         .await
         .expect("thread builds");
@@ -238,12 +238,12 @@ async fn multiple_attachments_in_one_turn_all_reach_the_model() {
 #[tokio::test]
 async fn pdf_attachment_reaches_the_model_with_extracted_text() {
     const HELLO_PDF: &[u8] = include_bytes!("../fixtures/hello.pdf");
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let harness = group
         .thread("conv-attach-pdf")
-        .script([RebornScriptedReply::text("read it")])
+        .script([IronClawScriptedReply::text("read it")])
         .build()
         .await
         .expect("thread builds");
@@ -276,18 +276,18 @@ async fn pdf_attachment_reaches_the_model_with_extracted_text() {
 }
 
 /// W5-WEBUI-API-1: attachment bytes served via the real `webui_v2_router`
-/// GET-attachment route, over `RebornServices` wired with the production
+/// GET-attachment route, over `IronClawServices` wired with the production
 /// `InboundAttachmentReader` (Enabler C) — not the model-injection
 /// `LoopAttachmentReadPort` path above.
 #[tokio::test]
 async fn landed_attachment_reaches_webui_get_attachment_after_refresh() {
-    let group = RebornIntegrationGroup::attachment_tools()
+    let group = IronClawIntegrationGroup::attachment_tools()
         .await
         .expect("attachment-tools group builds");
     let h = group
         .thread("conv-attach-webui-get")
         .with_model_override(VISION_MODEL)
-        .script([RebornScriptedReply::text("I see a diagram")])
+        .script([IronClawScriptedReply::text("I see a diagram")])
         .build()
         .await
         .expect("thread builds");
@@ -322,7 +322,7 @@ async fn landed_attachment_reaches_webui_get_attachment_after_refresh() {
         .inbound_attachment_reader_for_test()
         .expect("local-dev inbound attachment reader wired");
 
-    let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+    let services = IronClawServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_inbound_attachment_reader(reader);
     let caller = webui_caller_for(&h.binding);
     let router = mount_webui_v2_router(Arc::new(services), caller);

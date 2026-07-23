@@ -1,4 +1,4 @@
-//! Golden-payload assertions for [`RebornIntegrationHarness`]: exact-match of
+//! Golden-payload assertions for [`IronClawIntegrationHarness`]: exact-match of
 //! the FULL model-visible inference payload (system prompt, turns, tool calls/
 //! results) per inference iteration, via `insta` snapshots (`cargo insta
 //! review` / `INSTA_UPDATE=always` to accept drift). Complements the substring
@@ -27,7 +27,7 @@
 
 use ironclaw_llm::{ChatMessage, ToolDefinition};
 
-use super::builder::RebornIntegrationHarness;
+use super::builder::IronClawIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -73,7 +73,7 @@ fn normalize_volatile(rendered: &str) -> String {
         .into_owned()
 }
 
-impl RebornIntegrationHarness {
+impl IronClawIntegrationHarness {
     /// Assert the FULL model-visible inference payload for this thread matches
     /// the committed golden snapshot `golden_payload__{name}`. Panics (like the
     /// sibling `assert_replay_snapshot!`) on mismatch; run `cargo insta review`

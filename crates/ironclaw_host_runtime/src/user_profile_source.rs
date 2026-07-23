@@ -6,7 +6,7 @@
 // here because `ironclaw_loop_host` (which owns the trait) already depends on
 // `ironclaw_host_runtime`, so a reverse dependency would be circular. The
 // `impl HostUserProfileSource for MemoryBackedUserProfileSource` is added by the
-// composition layer (`ironclaw_reborn_composition`) that can see both crates. This
+// composition layer (`ironclaw_composition`) that can see both crates. This
 // matches how `WorkspaceIdentityContextSource` implements `HostIdentityContextSource`:
 // the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_host`.
 

@@ -1,9 +1,9 @@
 # Agent Map — ironclaw_webui
 
-The **WebUI host stack** for Reborn WebChat v2: route surface + SPA bundle +
+The **WebUI host stack** for IronClaw WebChat v2: route surface + SPA bundle +
 gateway assembly/middleware + listener/serve loop + host authentication, all in
-one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
-`ironclaw` binary (`crates/ironclaw_reborn_cli`).
+one `products`-layer crate above `ironclaw_composition`. Driven by the
+`ironclaw` binary (`crates/ironclaw_cli`).
 
 ## Start here
 
@@ -28,7 +28,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    Vite SPA under `frontend/` (built by `build.rs`, served from
    `src/webui_v2/static_assets/`).
 2. **Gateway assembly + middleware** (`src/webui_serve.rs`, `src/webui_*.rs`,
-   folded from `ironclaw_reborn_composition::webui`): `webui_v2_app(bundle,
+   folded from `ironclaw_composition::webui`): `webui_v2_app(bundle,
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
@@ -44,7 +44,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 - **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
-  `ironclaw_product_workflow` / `ironclaw_reborn_composition`.
+  `ironclaw_product_workflow` / `ironclaw_composition`.
 - **A direct `ironclaw_product_adapters` dependency**, or any lower substrate /
   runtime / DB crate. Reach that surface through composition's public facade
   (e.g. `mark_bearer_token_verified_for_tenant` is re-exported from composition,
@@ -52,20 +52,20 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   edge.
 - **v1 anything** — no `src/` (monolith) import, no `ironclaw_engine`, no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
-  surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
+  surface (`docs/ironclaw/how-to-port-channel-to-ironclaw.md`).
 - **Business/durable state.** Everything the gateway needs flows through
   `ProductSurface`; this crate stores no threads, transcripts, or projections.
 
 ## Allowed dependencies
 
-`ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
+`ironclaw_composition` (the composed `IronClawWebuiBundle` + product-auth
 mount builders + `WebuiAuthenticator` trait + mount vocabulary),
 `ironclaw_product_workflow` (`ProductSurface` + wire DTOs), `ironclaw_host_api`
-(identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+(identity newtypes), and `ironclaw_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test
-update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
+update (`tests/ironclaw_dependency_boundaries.rs`) plus explicit PR rationale.
 
 ## Agent notes
 
@@ -96,5 +96,5 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
 ```bash
 cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
-cargo test  -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
+cargo test  -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold
 ```

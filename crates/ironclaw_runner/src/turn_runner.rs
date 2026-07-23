@@ -1,4 +1,4 @@
-//! Host-factory abstraction and shared failure helpers for the Reborn turn runner.
+//! Host-factory abstraction and shared failure helpers for the IronClaw turn runner.
 //!
 //! # Architecture boundary
 //!

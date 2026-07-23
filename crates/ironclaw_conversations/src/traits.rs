@@ -52,7 +52,7 @@ pub trait ConversationBindingService: Send + Sync {
 
 #[async_trait]
 pub trait ConversationActorPairingService: Send + Sync {
-    /// Pair an adapter-scoped external actor with a canonical Reborn user.
+    /// Pair an adapter-scoped external actor with a canonical IronClaw user.
     ///
     /// Callers must supply only host-trusted pairings. This is not a self-service
     /// code approval flow; it persists an already-authorized actor mapping for

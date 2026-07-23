@@ -8,7 +8,7 @@
   - `crates/ironclaw_turns/AGENTS.md`
   - `crates/ironclaw_threads/CLAUDE.md`
   - `crates/ironclaw_product_adapters/CLAUDE.md`
-  - `docs/reborn/contracts/events-projections.md`
+  - `docs/ironclaw/contracts/events-projections.md`
 
 ## What This Crate Owns
 

@@ -1,12 +1,12 @@
 //! Test inbound-injection for the integration harness.
 //!
-//! `RebornTestIngress` builds verified [`ProductInboundEnvelope`]s directly on
+//! `IronClawTestIngress` builds verified [`ProductInboundEnvelope`]s directly on
 //! the LIVE product-workflow inbound contract: it constructs a
 //! [`ParsedProductInbound`] and stamps it with a host-verified
 //! [`TrustedInboundContext`] via
 //! [`ProductInboundEnvelope::from_trusted_parse`] — the same path the
 //! production `ChannelAdapter` ingress bridge takes
-//! (`ironclaw_reborn_composition::extension_host::extension_ingress`).
+//! (`ironclaw_composition::extension_host::extension_ingress`).
 //!
 //! Ported in P7b (DEL-5): the retired `ProductAdapter` trait's `parse_inbound`
 //! used to produce the parsed value here. The harness never needed the trait —
@@ -33,12 +33,12 @@ use ironclaw_product_adapters::{
 /// [`ProductInboundEnvelope::from_trusted_parse`] path as the production
 /// `ChannelAdapter` ingress bridge, so nothing here forges trusted context.
 #[derive(Debug, Clone)]
-pub struct RebornTestIngress {
+pub struct IronClawTestIngress {
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
 }
 
-impl RebornTestIngress {
+impl IronClawTestIngress {
     pub fn new(
         adapter_id: impl Into<String>,
         installation_id: impl Into<String>,
@@ -59,7 +59,7 @@ impl RebornTestIngress {
 
     /// Directly construct the adapter-shaped `ParsedProductInbound` a real
     /// adapter would hand the host, using the harness's stable synthetic actor
-    /// (`reborn_test_user` / `user_id`) and conversation (`thread_id`).
+    /// (`ironclaw_test_user` / `user_id`) and conversation (`thread_id`).
     fn parsed_inbound(
         event_id: &str,
         user_id: &str,
@@ -68,7 +68,7 @@ impl RebornTestIngress {
     ) -> Result<ParsedProductInbound, ProductAdapterError> {
         ParsedProductInbound::new(
             ExternalEventId::new(event_id)?,
-            ExternalActorRef::new("reborn_test_user", user_id, Some(user_id.to_string()))?,
+            ExternalActorRef::new("ironclaw_test_user", user_id, Some(user_id.to_string()))?,
             ExternalConversationRef::new(None, thread_id.to_string(), None, None)?,
             payload,
         )

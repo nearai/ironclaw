@@ -1,4 +1,4 @@
-//! Workspace architecture contract tests for IronClaw Reborn.
+//! Workspace architecture contract tests for IronClaw.
 //!
 //! This crate intentionally has no production dependencies. Its tests inspect
-//! workspace metadata and fail when Reborn crate dependency boundaries drift.
+//! workspace metadata and fail when IronClaw crate dependency boundaries drift.

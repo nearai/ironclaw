@@ -18,6 +18,9 @@ use ironclaw_event_projections::{
     ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
     TimelineEntryKind,
 };
+use ironclaw_event_store::{
+    IronClawEventStoreConfig, IronClawEventStoreError, IronClawProfile, build_ironclaw_event_stores,
+};
 use ironclaw_events::{
     DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor, EventError,
     EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog,
@@ -36,9 +39,6 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::{
     BackgroundProcessManager, FilesystemProcessResultStore, FilesystemProcessStore, ProcessError,
     ProcessHost, ProcessManager, ProcessResultStore, ProcessStatus, ProcessStore,
-};
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
@@ -634,7 +634,7 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 //   - `libsql_run_state_store_selection_persists_runtime_approval_block`
 //
 // The equivalent guardrail surface for the filesystem-backed wiring is
-// exercised by `tests/reborn_durable_restart_integration.rs` (services
+// exercised by `tests/ironclaw_durable_restart_integration.rs` (services
 // graph restart over `DiskFilesystem`) and the `ironclaw_run_state`
 // contract suite.
 
@@ -844,9 +844,9 @@ async fn production_event_store_config_rejects_jsonl_without_single_node_accepta
     );
 
     let result = services
-        .with_reborn_event_store_config(
-            RebornProfile::Production,
-            RebornEventStoreConfig::Jsonl {
+        .with_ironclaw_event_store_config(
+            IronClawProfile::Production,
+            IronClawEventStoreConfig::Jsonl {
                 root: temp.path().join("reborn-event-store"),
                 accept_single_node_durable: false,
             },
@@ -855,12 +855,12 @@ async fn production_event_store_config_rejects_jsonl_without_single_node_accepta
 
     assert!(matches!(
         result,
-        Err(RebornEventStoreError::ProductionJsonlRequiresAcceptance)
+        Err(IronClawEventStoreError::ProductionJsonlRequiresAcceptance)
     ));
 }
 
 #[tokio::test]
-async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
+async fn local_ironclaw_event_store_config_does_not_satisfy_production_wiring() {
     let temp = tempfile::tempdir().unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -870,9 +870,9 @@ async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_reborn_event_store_config(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    .with_ironclaw_event_store_config(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: temp.path().join("local-reborn-event-store"),
             accept_single_node_durable: false,
         },
@@ -889,14 +889,14 @@ async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
             ProductionWiringComponent::EventSink,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "LocalDev Reborn event store must not satisfy production event sink guardrail: {report:?}"
+        "LocalDev IronClaw event store must not satisfy production event sink guardrail: {report:?}"
     );
     assert!(
         report.contains(
             ProductionWiringComponent::AuditSink,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "LocalDev Reborn audit store must not satisfy production audit sink guardrail: {report:?}"
+        "LocalDev IronClaw audit store must not satisfy production audit sink guardrail: {report:?}"
     );
 }
 
@@ -911,9 +911,9 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_reborn_event_store_config(
-        RebornProfile::Production,
-        RebornEventStoreConfig::Jsonl {
+    .with_ironclaw_event_store_config(
+        IronClawProfile::Production,
+        IronClawEventStoreConfig::Jsonl {
             root: temp.path().join("accepted-reborn-event-store"),
             accept_single_node_durable: true,
         },
@@ -930,28 +930,28 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
             ProductionWiringComponent::EventSink,
             ProductionWiringIssueKind::Missing
         ),
-        "event sink must be installed from Reborn event store config: {report:?}"
+        "event sink must be installed from IronClaw event store config: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::AuditSink,
             ProductionWiringIssueKind::Missing
         ),
-        "audit sink must be installed from Reborn event store config: {report:?}"
+        "audit sink must be installed from IronClaw event store config: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::EventSink,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "Reborn durable event store adapter must not be treated as erased unverified sink: {report:?}"
+        "IronClaw durable event store adapter must not be treated as erased unverified sink: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::AuditSink,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "Reborn durable audit store adapter must not be treated as erased unverified sink: {report:?}"
+        "IronClaw durable audit store adapter must not be treated as erased unverified sink: {report:?}"
     );
 }
 
@@ -1661,11 +1661,11 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
 }
 
 #[tokio::test]
-async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_composition() {
+async fn host_runtime_services_consumes_ironclaw_jsonl_event_store_without_v1_composition() {
     let temp = tempfile::tempdir().unwrap();
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: temp.path().join("reborn-event-store"),
             accept_single_node_durable: false,
         },
@@ -2014,9 +2014,9 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
 {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
         },
@@ -2206,9 +2206,9 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
  {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
         },
@@ -4483,9 +4483,9 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
 async fn host_runtime_services_projects_resource_network_secret_obligation_audit_metadata_only() {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
         },
@@ -5011,7 +5011,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
         ))
     );
     // The consumed-staged-secret one-shot invariant is covered by
-    // `reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once`.
+    // `ironclaw_e2e_gate_host_http_consumes_staged_policy_and_secret_once`.
 }
 
 #[tokio::test]

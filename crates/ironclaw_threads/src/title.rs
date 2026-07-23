@@ -1,7 +1,7 @@
 //! Derive a short sidebar title from a thread's first user message.
 //!
 //! `SessionThreadService::list_threads_for_scope` invokes this when
-//! `SessionThreadRecord.title` is `None` so the Reborn v2 WebUI
+//! `SessionThreadRecord.title` is `None` so the IronClaw v2 WebUI
 //! sidebar (and any other channel listing threads) can render a
 //! stable, human-readable label instead of falling back to the raw
 //! thread id. Derivation is read-time only — nothing is persisted

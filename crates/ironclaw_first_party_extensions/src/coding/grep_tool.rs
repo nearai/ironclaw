@@ -1,4 +1,4 @@
-//! Reborn first-party port of the v1 grep coding tool.
+//! IronClaw first-party port of the v1 grep coding tool.
 
 use std::{
     cmp::Reverse,

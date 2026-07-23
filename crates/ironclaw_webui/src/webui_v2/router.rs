@@ -92,7 +92,7 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn ProductSurface>,
     sse_capacity: Arc<SseCapacity>,
-    reborn_projects_enabled: bool,
+    ironclaw_projects_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -108,22 +108,22 @@ impl WebUiV2State {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
-            reborn_projects_enabled: false,
+            ironclaw_projects_enabled: false,
         }
     }
 
-    /// Deployment gate for the Reborn Projects WebUI surface (the sidebar
+    /// Deployment gate for the IronClaw Projects WebUI surface (the sidebar
     /// entry and the `/projects` route). Off by default while the surface
     /// is still being finished; host composition reads the
     /// `IRONCLAW_REBORN_PROJECTS` env flag and feeds it here, and the
-    /// browser learns it from `GET /session`'s `features.reborn_projects`.
-    pub fn with_reborn_projects_enabled(mut self, enabled: bool) -> Self {
-        self.reborn_projects_enabled = enabled;
+    /// browser learns it from `GET /session`'s `features.ironclaw_projects`.
+    pub fn with_ironclaw_projects_enabled(mut self, enabled: bool) -> Self {
+        self.ironclaw_projects_enabled = enabled;
         self
     }
 
-    pub fn reborn_projects_enabled(&self) -> bool {
-        self.reborn_projects_enabled
+    pub fn ironclaw_projects_enabled(&self) -> bool {
+        self.ironclaw_projects_enabled
     }
 
     pub fn services(&self) -> &Arc<dyn ProductSurface> {

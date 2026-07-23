@@ -30,7 +30,7 @@ pub const MEMORY_WRITE_CAPABILITY_ID: &str = "builtin.memory_write";
 pub const MEMORY_READ_CAPABILITY_ID: &str = "builtin.memory_read";
 pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
-const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
+const MEMORY_SEARCH_SCOPE: &str = "ironclaw_internal_persistent_memory";
 
 struct MemoryServices {
     invocation: MemoryInvocation,
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(result.output["result_count"], 1);
         assert_eq!(
             result.output["search_scope"],
-            "reborn_internal_persistent_memory"
+            "ironclaw_internal_persistent_memory"
         );
         assert_eq!(result.output["external_services_searched"], false);
         assert_eq!(

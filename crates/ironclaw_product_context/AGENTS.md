@@ -10,7 +10,7 @@
 ## What This Crate Owns
 
 - **Single resolver for turn-origin/surface/owner classification at ingress.**
-  Every inbound submission path (product workflow, web UI, Reborn local dev) must
+  Every inbound submission path (product workflow, web UI, IronClaw local dev) must
   call one of the resolvers here rather than constructing `ProductTurnContext`
   inline.
 - `resolve_inbound(classification: InboundClassification, adapter, surface_type, owner)` —
@@ -33,7 +33,7 @@
 - `resolve_web_ui(owner)` — always yields `TurnOriginKind::WebUi` with no adapter
   or surface and source channel `webui`; used by the WebUI gateway.
 - `resolve_cli(owner)` — uses the same first-party chat origin with no adapter
-  or surface and source channel `cli`; used by Reborn local runtime chat.
+  or surface and source channel `cli`; used by IronClaw local runtime chat.
 - `InboundClassification` — three-variant ingress enum (`TrustedTrigger`,
   `TrustedOther`, `Untrusted`). Replaces the former `TrustLevel + is_trigger_adapter`
   two-argument contract.
@@ -45,7 +45,7 @@ This crate depends only on `ironclaw_turns` and `ironclaw_host_api`.
 **Do not add** `ironclaw_conversations`, `ironclaw_product_adapters`,
 `ironclaw_product_workflow`, or any trigger/pipeline crate as dependencies.
 This crate must remain callable from every ingress layer — product workflow,
-web UI gateway, Reborn composition — without introducing import cycles.
+web UI gateway, IronClaw composition — without introducing import cycles.
 
 ## Do Not Move In Here
 
@@ -56,7 +56,7 @@ web UI gateway, Reborn composition — without introducing import cycles.
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_product_context`
-- After changing the resolver contract: `cargo test -p ironclaw_product_workflow -p ironclaw_reborn_composition`
+- After changing the resolver contract: `cargo test -p ironclaw_product_workflow -p ironclaw_composition`
 
 ## Agent Notes
 

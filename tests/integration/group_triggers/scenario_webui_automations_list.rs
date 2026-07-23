@@ -1,24 +1,24 @@
-//! W5-WEBUI-API-1: cold LIST over a real `RebornAutomationProductFacade`
+//! W5-WEBUI-API-1: cold LIST over a real `IronClawAutomationProductFacade`
 //! wired from this group's shared, live trigger repository (Enabler B).
 //! Reuses the group's ONE repository so the facade's real visibility-filter/
 //! run-history-join logic is under test, not a hand-rolled double.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
-use super::reborn_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
+use super::ironclaw_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
 use axum::http::StatusCode;
-use ironclaw_product_workflow::RebornServices;
+use ironclaw_product_workflow::IronClawServices;
 use serde_json::json;
 use std::sync::Arc;
 
 const ONCE_AT: &str = "2999-06-02T00:00:00";
 const TRIGGER_NAME: &str = "c-webui-automations-list-trigger";
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-webui-automations-list")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
@@ -26,7 +26,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
                 }),
             ),
-            RebornScriptedReply::text("created"),
+            IronClawScriptedReply::text("created"),
         ])
         .build()
         .await?;
@@ -44,13 +44,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let trigger_repository = capability_harness
         .trigger_repository_for_test()
         .ok_or("triggers group harness missing a captured trigger repository")?;
-    let facade =
-        ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
-            trigger_repository,
-            Arc::clone(&g.shared.turn_store),
-        );
+    let facade = ironclaw_composition::test_support::local_dev_automation_product_facade_for_test(
+        trigger_repository,
+        Arc::clone(&g.shared.turn_store),
+    );
 
-    let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+    let services = IronClawServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_automation_product_facade(facade);
     // The production capability port resolves the execution user from the
     // run's binding owner (owner → actor → fallback), so trigger

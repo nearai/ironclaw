@@ -1,6 +1,6 @@
-//! First-party Reborn GitHub WASM tool.
+//! First-party IronClaw GitHub WASM tool.
 //!
-//! Ports the v1 GitHub WASM capability surface to the Reborn product capability
+//! Ports the v1 GitHub WASM capability surface to the IronClaw product capability
 //! model. The host selects the operation via the invocation context capability id
 //! and mediates GitHub credentials through HTTP egress; this component never
 //! reads or constructs a GitHub token.
@@ -39,7 +39,7 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 
     fn description() -> String {
-        "First-party GitHub Reborn tool: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, forks, and webhook normalization. GitHub credentials are injected only by host HTTP egress."
+        "First-party GitHub IronClaw tool: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, forks, and webhook normalization. GitHub credentials are injected only by host HTTP egress."
             .to_string()
     }
 }
@@ -1637,7 +1637,7 @@ mod tests {
                     "state": "open",
                     "merged": false,
                     "draft": true,
-                    "base": {"ref": "reborn-integration"},
+                    "base": {"ref": "ironclaw-integration"},
                     "head": {"ref": "codex/reborn-github-capabilities"}
                 },
                 "sender": {"login": "reviewer"}
@@ -1653,7 +1653,7 @@ mod tests {
         assert_eq!(payload["pr_state"], json!("open"));
         assert_eq!(payload["pr_merged"], json!(false));
         assert_eq!(payload["pr_draft"], json!(true));
-        assert_eq!(payload["base_branch"], json!("reborn-integration"));
+        assert_eq!(payload["base_branch"], json!("ironclaw-integration"));
         assert_eq!(
             payload["head_branch"],
             json!("codex/reborn-github-capabilities")

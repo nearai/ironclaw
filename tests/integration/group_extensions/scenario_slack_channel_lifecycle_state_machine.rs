@@ -24,7 +24,7 @@
 //!   stale-binding carryover from before the removal.
 //!
 //! Uses the group's generic channel-connection bundle
-//! (`ironclaw_reborn_composition::test_support`), whose connect drives the
+//! (`ironclaw_composition::test_support`), whose connect drives the
 //! production OAuth-callback identity-binding hook
 //! (`bind_channel_identities_for_callback`) and whose facade is late-bound
 //! into the same cleanup slot `extension_remove` dispatches to.
@@ -48,8 +48,8 @@
 //! - **bindings are deleted, not tombstoned**: `has_any_active_identity_binding`
 //!   reads record absence rather than tombstone state.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_auth::OAuthProviderIdentity;
 use serde_json::json;
 
@@ -90,14 +90,14 @@ fn proven_slack_identity() -> Result<OAuthProviderIdentity, String> {
 
 /// Configure slack's `[channel.config]` connection-scoping values through
 /// the PRODUCTION configure port (`ChannelConfigService` via
-/// `RebornServices::channel_config_facade`) — the §6.5 configure step the
+/// `IronClawServices::channel_config_facade`) — the §6.5 configure step the
 /// generic identity bind fails closed without. Requires the extension to be
 /// installed, so this runs after every (re)install.
-async fn configure_slack_connection_scoping(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+async fn configure_slack_connection_scoping(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let services = g
         .capability_harness()
-        .and_then(|harness| harness.reborn_services_for_test())
-        .ok_or("extension_lifecycle group must expose its RebornServices bundle")?;
+        .and_then(|harness| harness.ironclaw_services_for_test())
+        .ok_or("extension_lifecycle group must expose its IronClawServices bundle")?;
     let channel_config = services
         .channel_config_facade()
         .ok_or("composed runtime must expose the channel-config configure port")?;
@@ -116,7 +116,7 @@ async fn configure_slack_connection_scoping(g: &RebornIntegrationGroup) -> Harne
     Ok(())
 }
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let slack = g
         .channel_connection()
         .ok_or("extension_lifecycle group must carry the channel-connection bundle")?;
@@ -140,15 +140,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lifecycle = g
         .thread("slack-lifecycle-install")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("slack ready"),
+            IronClawScriptedReply::text("slack ready"),
         ])
         .build()
         .await?;
@@ -207,21 +207,21 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let caller = g
         .thread("slack-lifecycle-caller")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "slack.search_messages",
                 json!({"query": "from:me lifecycle"}),
             ),
-            RebornScriptedReply::text("searched slack"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("searched slack"),
+            IronClawScriptedReply::tool_call(
                 "slack.send_message",
                 json!({"channel": "C-ITEST", "text": "hello after remove?"}),
             ),
-            RebornScriptedReply::text("slack unavailable"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("slack unavailable"),
+            IronClawScriptedReply::tool_call(
                 "slack.send_message",
                 json!({"channel": "C-ITEST", "text": "hello again"}),
             ),
-            RebornScriptedReply::text("sent slack message"),
+            IronClawScriptedReply::text("sent slack message"),
         ])
         .build()
         .await?;
@@ -234,11 +234,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let remover = g
         .thread("slack-lifecycle-remove")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_remove",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("slack removed"),
+            IronClawScriptedReply::text("slack removed"),
         ])
         .build()
         .await?;
@@ -268,8 +268,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let viewer = g
         .thread("slack-lifecycle-viewer-after-remove")
         .script([
-            RebornScriptedReply::tool_call("builtin.extension_search", json!({"query": "slack"})),
-            RebornScriptedReply::text("searched catalog"),
+            IronClawScriptedReply::tool_call("builtin.extension_search", json!({"query": "slack"})),
+            IronClawScriptedReply::text("searched catalog"),
         ])
         .build()
         .await?;
@@ -315,15 +315,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let restorer = g
         .thread("slack-lifecycle-restore")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("slack restored"),
+            IronClawScriptedReply::text("slack restored"),
         ])
         .build()
         .await?;

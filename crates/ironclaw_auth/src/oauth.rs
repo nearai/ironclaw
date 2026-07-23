@@ -1,4 +1,4 @@
-//! OAuth protocol helpers shared by the Reborn auth engine and product-auth
+//! OAuth protocol helpers shared by the IronClaw auth engine and product-auth
 //! services: PKCE challenge construction, validated OAuth value newtypes,
 //! callback-state encode/decode, and redacted provider token projections.
 //! Authorization URLs are constructed by the recipe-driven [`crate::AuthEngine`];
@@ -28,7 +28,7 @@ use crate::{
     PkceVerifierSecret, ProviderScope, ids::AuthFlowId, validate_public_text,
 };
 
-/// Reborn auth provider id for Google OAuth accounts.
+/// IronClaw auth provider id for Google OAuth accounts.
 pub const GOOGLE_PROVIDER_ID: &str = "google";
 
 /// Read-only access to Google Calendar calendars and events.

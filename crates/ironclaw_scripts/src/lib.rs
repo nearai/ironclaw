@@ -1,4 +1,4 @@
-//! Script runner contracts for IronClaw Reborn.
+//! Script runner contracts for IronClaw.
 //!
 //! `ironclaw_scripts` executes declared script/CLI capabilities through a
 //! host-selected backend. Extension manifests describe the command metadata, but

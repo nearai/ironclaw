@@ -5,6 +5,9 @@ use chrono::Utc;
 use ironclaw_event_projections::{
     AuditProjectionRequest, AuditProjectionService, ProjectionScope, ReplayAuditProjectionService,
 };
+use ironclaw_event_store::{
+    IronClawEventStoreConfig, IronClawProfile, build_ironclaw_event_stores,
+};
 use ironclaw_events::{AuditSink, DurableAuditSink, EventError};
 use ironclaw_extensions::{
     ExtensionError, ExtensionLifecycleEvent, ExtensionLifecycleEventSink,
@@ -16,17 +19,14 @@ use ironclaw_host_api::{
     DecisionSummary, EffectKind, ExtensionId, ExtensionLifecycleOperation, HostPortCatalog,
     InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, UserId, VirtualPath,
 };
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
-};
 
 #[tokio::test]
 async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
-    let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
-        RebornEventStoreConfig::Jsonl {
+    let stores = build_ironclaw_event_stores(
+        IronClawProfile::LocalDev,
+        IronClawEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
         },

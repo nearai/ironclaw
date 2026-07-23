@@ -8,7 +8,7 @@
 //! round-7), and the lazy-recovery admission contract (§5.3, P1.9
 //! extension).
 //!
-//! Drives the real `ironclaw_reborn_composition::{wrap_scoped,
+//! Drives the real `ironclaw_composition::{wrap_scoped,
 //! invocation_mount_view}` stack (not `ScopedFilesystem::with_fixed_view`,
 //! which the crate-tier unit tests use for pure CAS-logic isolation) —
 //! this is what actually exercises the tenant/user mount rewrite plus the
@@ -17,10 +17,10 @@
 
 use std::sync::Arc;
 
+use ironclaw_composition::wrap_scoped;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::AwaitEdgeWriter;
-use ironclaw_reborn_composition::wrap_scoped;
 use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver,
     resolver::AwaitEdgeResolver,

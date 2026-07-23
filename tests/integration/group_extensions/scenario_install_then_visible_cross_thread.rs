@@ -5,20 +5,20 @@
 //! already-installed extension. Different conversation IDs but the same
 //! `Arc<HostRuntimeCapabilityHarness>` prove cross-thread persistence.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: installer ─────────────────────────────────────────────────
     let installer = g
         .thread("ext-installer")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::text("installed"),
+            IronClawScriptedReply::text("installed"),
         ])
         .build()
         .await?;
@@ -37,8 +37,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let viewer = g
         .thread("ext-viewer")
         .script([
-            RebornScriptedReply::tool_call("builtin.extension_search", json!({"query": "github"})),
-            RebornScriptedReply::text("found"),
+            IronClawScriptedReply::tool_call(
+                "builtin.extension_search",
+                json!({"query": "github"}),
+            ),
+            IronClawScriptedReply::text("found"),
         ])
         .build()
         .await?;

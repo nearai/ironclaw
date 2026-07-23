@@ -3,7 +3,7 @@ name = "ironclaw_outbound"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Outbound egress and projection subscription policy storage for IronClaw Reborn"
+description = "Outbound egress and projection subscription policy storage for IronClaw"
 publish = false
 
 [package.metadata.ironclaw]

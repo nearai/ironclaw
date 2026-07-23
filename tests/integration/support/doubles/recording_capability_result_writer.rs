@@ -1,5 +1,5 @@
 /// Test double substituting the production `LoopCapabilityResultWriter` impl
-/// (`StagedCapabilityIo`, `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`).
+/// (`StagedCapabilityIo`, `crates/ironclaw_composition/src/runtime/local_dev.rs`).
 ///
 /// Also implements `LoopCapabilityInputResolver`, delegating straight to
 /// `input_resolver` (no recording — only result writes are recorded).

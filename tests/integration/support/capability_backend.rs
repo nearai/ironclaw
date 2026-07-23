@@ -1,4 +1,4 @@
-//! `RebornCapabilityBackend` — the capability-backend selector and its
+//! `IronClawCapabilityBackend` — the capability-backend selector and its
 //! `install` method, extracted from `builder.rs`'s `build()` to keep that
 //! file under the repo's 1000-line file-size guardrail.
 
@@ -18,7 +18,7 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(super) const MOCK_MCP_PROVIDER_ID: &str = "mock-mcp";
 
 /// Selects the capability backend the integration harness wires.
-pub(super) enum RebornCapabilityBackend {
+pub(super) enum IronClawCapabilityBackend {
     /// Echo recorder: records capability invocations, executes nothing. Default —
     /// a text-only turn invokes no tool.
     Echo,
@@ -78,7 +78,7 @@ pub(super) enum ShellMode {
     Scripted(ScriptedProcessResult),
 }
 
-/// Per-backend scripted inputs threaded into [`RebornCapabilityBackend::install`],
+/// Per-backend scripted inputs threaded into [`IronClawCapabilityBackend::install`],
 /// grouped by name instead of position. `web_access_response_bodies` and
 /// `real_egress_response_bodies` are both `Vec<Vec<u8>>` — as positional
 /// arguments, a swap between them would compile silently; naming the fields
@@ -91,12 +91,12 @@ pub(super) struct CapabilityScriptingInputs {
     pub(super) real_egress_response_bodies: Vec<Vec<u8>>,
 }
 
-impl RebornCapabilityBackend {
+impl IronClawCapabilityBackend {
     /// Install this capability backend, producing the `GroupCapability` the
     /// harness's group/thread builder wires. Echo by default (records, executes
     /// nothing — a text reply invokes no tool). Builtin/MCP swap in the real
     /// first-party runtime. (Live approval stores are a group-only backend; see
-    /// `RebornIntegrationGroup::live_approvals`.)
+    /// `IronClawIntegrationGroup::live_approvals`.)
     pub(super) async fn install(
         self,
         shell_mode: ShellMode,
@@ -108,10 +108,10 @@ impl RebornCapabilityBackend {
         // backend would otherwise dispatch un-parked with no signal to the
         // caller.
         if park_capability_gate.is_some()
-            && !matches!(self, RebornCapabilityBackend::BuiltinHttpTools)
+            && !matches!(self, IronClawCapabilityBackend::BuiltinHttpTools)
         {
             return Err(
-                "park_tool_dispatch is only supported by RebornCapabilityBackend::BuiltinHttpTools \
+                "park_tool_dispatch is only supported by IronClawCapabilityBackend::BuiltinHttpTools \
                  (select it via .with_builtin_http_tools())"
                     .into(),
             );
@@ -123,8 +123,8 @@ impl RebornCapabilityBackend {
             real_egress_response_bodies,
         } = scripting;
         Ok(match self {
-            RebornCapabilityBackend::Echo => GroupCapability::Recording,
-            RebornCapabilityBackend::BuiltinHttpTools => {
+            IronClawCapabilityBackend::Echo => GroupCapability::Recording,
+            IronClawCapabilityBackend::BuiltinHttpTools => {
                 // Slice 5: `.with_live_shell()` opts into the real HostProcessPort;
                 // `Inert`/`Scripted` both use the inert RecordingProcessPort (the
                 // latter with a canned result installed below).
@@ -152,7 +152,7 @@ impl RebornCapabilityBackend {
                 };
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::MockMcp { mcp_url } => {
+            IronClawCapabilityBackend::MockMcp { mcp_url } => {
                 let host_runtime = super::harness::profiles::mock_mcp::mock_mcp_tools(
                     &mcp_url,
                     MOCK_MCP_PROVIDER_ID,
@@ -161,7 +161,7 @@ impl RebornCapabilityBackend {
                 .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::GithubIssueTools => {
+            IronClawCapabilityBackend::GithubIssueTools => {
                 // T0-SECRET-INJECT (see the `GithubIssueTools` variant docs above):
                 // no approval gate / user alignment — the authorizer allows every
                 // dispatch outright.
@@ -174,7 +174,7 @@ impl RebornCapabilityBackend {
                 // The real github WASM HTTP call flows through the **network**
                 // egress lane, not the runtime-egress lane the matcher above
                 // scripts (`try_with_host_http_egress` overwrites the runtime
-                // port — see `reborn_integration_secret_injection.rs`'s module
+                // port — see `ironclaw_integration_secret_injection.rs`'s module
                 // doc), so a runtime-401-after-injection scenario scripts the
                 // status here instead. A no-op (empty vec) for existing callers.
                 for status in github_network_statuses {
@@ -182,13 +182,13 @@ impl RebornCapabilityBackend {
                 }
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::WebAccessTools => {
+            IronClawCapabilityBackend::WebAccessTools => {
                 // C-WEBACCESS — see the `WebAccessTools` variant docs above.
                 let host_runtime = super::harness::profiles::web_access::web_access_tools().await?;
                 host_runtime.install_web_access_responses(web_access_response_bodies)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::BuiltinHttpToolsRealEgress => {
+            IronClawCapabilityBackend::BuiltinHttpToolsRealEgress => {
                 // S1 — see the `BuiltinHttpToolsRealEgress` variant docs above.
                 let host_runtime = core_builtin::core_builtin_tools(
                     CoreBuiltinOptions::default().with_real_egress_pipeline(),
@@ -197,12 +197,12 @@ impl RebornCapabilityBackend {
                 host_runtime.install_real_egress_response_bodies(real_egress_response_bodies)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::FileToolsDurableIo => {
+            IronClawCapabilityBackend::FileToolsDurableIo => {
                 let host_runtime =
                     super::harness::profiles::file::file_tools_with_durable_capability_io().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount => {
+            IronClawCapabilityBackend::BuiltinHttpToolsConfirmedHostMount => {
                 let host_runtime =
                     core_builtin::core_builtin_tools_with_confirmed_host_mount().await?;
                 host_runtime.install_http_responses(keyed_http_responses)?;

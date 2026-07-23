@@ -1,4 +1,4 @@
-//! Host-owned input queue contract for Reborn loop input ports.
+//! Host-owned input queue contract for IronClaw loop input ports.
 
 use async_trait::async_trait;
 use ironclaw_turns::{

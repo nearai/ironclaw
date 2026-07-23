@@ -1,0 +1,107 @@
+{
+  "model_name": "ironclaw-qa-qa_10c_slack_thread_replies",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Using my connected Slack account, read the Slack conversation with ID D0CANARY and list the exact text of every message from the last ten minutes, including every reply in the thread under the message containing THREADROOT_1784640131932. Include the exact marker IRONCLAW_QA_10C_THREADS_1784640131932 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, read the Slack conversation with ID D0BDC6LR6J",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4a058401cc7f493e8fce1b3b",
+            "name": "slack__get_conversation_history",
+            "arguments": {
+              "channel": "D0CANARY",
+              "limit": 50
+            }
+          }
+        ],
+        "input_tokens": 17448,
+        "output_tokens": 87
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, read the Slack conversation with ID D0BDC6LR6J",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_8d8bf40035134bab8a0bdbc0",
+            "name": "builtin__time",
+            "arguments": {
+              "operation": "now"
+            }
+          }
+        ],
+        "input_tokens": 21085,
+        "output_tokens": 77
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_4a058401cc7f493e8fce1b3b",
+          "name": "slack__get_conversation_history",
+          "content": "{\"detail\":{\"byte_len\":8320,\"kind\":\"result_reference\",\"preview\":\"{\\\"current_user_id\\\":\\\"U0CANARY\\\",\\\"has_more\\\":true,\\\"messages\\\":[{\\\"is_current_user\\\":true,\\\"text\\\":\\\"TOPLEVEL_1784640131932\\\",\\\"ts\\\":\\\"1784640132.634979\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"reply_count\\\":3,\\\"text\\\":\\\"THREADROOT_1784640131932\\\",\\\"thread_ts\\\":\\\"1700000000.000000\\\",\\\"ts\\\":\\\"1700000000.000000\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_D_1784640084808\\\",\\\"ts\\\":\\\"1784640085.392219\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_C_1784640084808\\\",\\\"ts\\\":\\\"1784640085.233879\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_B_1784640084808\\\",\\\"ts\\\":\\\"1784640085.119039\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_A_1784640084808\\\",\\\"ts\\\":\\\"1784640085.017689\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"ENTITYMSG_1784638254158 please sync with @Canary User\\\",\\\"ts\\\":\\\"1784638254.940949\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_GLOBAL_1784638147141\\\",\\\"ts\\\":\\\"1784638147.334449\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_GLOBAL_1784638078036\\\",\\\"ts\\\":\\\"1784638078.515029\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_1784638060639\\\",\\\"ts\\\":\\\"1784638061.097979\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"@Canary Other This is a test mention message with the exact marker: MENTION_1784638015661\\\",\\\"ts\\\":\\\"1784638051.942609\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"TOPLEVEL_1784637895401\\\",\\\"ts\\\":\\\"1784637896.767979\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"reply_count\\\":3,\\\"text\\\":\\\"THREADROOT_1784637895401\\\",\\\"thread_ts\\\":\\\"1784637895.867299\\\",\\\"ts\\\":\\\"1784637895.867299\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_D_1784637821841\\\",\\\"ts\\\":\\\"1784637822.961509\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_C_1784637821841\\\",\\\"ts\\\":\\\"1784637822.733199\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_B_1784637821841\\\",\\\"ts\\\":\\\"1784637822.526679\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_A_1784637821841\\\",\\\"ts\\\":\\\"1784637822.334629\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"ENTITYMSG_1784628407378 please sync with @Canary User\\\",\\\"ts\\\":\\\"1784628407.877619\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"ENTITYMSG_1784628384776 please sync with @Canary User\\\",\\\"ts\\\":\\\"1784628385.569979\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_GLOBAL_1784628271014\\\",\\\"ts\\\":\\\"1784628271.481389\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_1784628249998\\\",\\\"ts\\\":\\\"1784628250.531679\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"@Canary Other Here is your mention with marker MENTION_1784628228929\\\",\\\"ts\\\":\\\"1784628243.208069\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"TOPLEVEL_1784628149996\\\",\\\"ts\\\":\\\"1784628151.347239\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"reply_count\\\":3,\\\"text\\\":\\\"THREADROOT_1784628149996\\\",\\\"thread_ts\\\":\\\"1784628150.495159\\\",\\\"ts\\\":\\\"1784628150.495159\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_D_1784627982892\\\",\\\"ts\\\":\\\"1784627983.734159\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_C_1784627982892\\\",\\\"ts\\\":\\\"1784627983.524399\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_B_1784627982892\\\",\\\"ts\\\":\\\"1784627983.317379\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_A_1784627982892\\\",\\\"ts\\\":\\\"1784627983.031229\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_D_1784627738640\\\",\\\"ts\\\":\\\"1784627739.825569\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_C_1784627738640\\\",\\\"ts\\\":\\\"1784627739.637899\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_B_1784627738640\\\",\\\"ts\\\":\\\"1784627739.411859\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_A_1784627738640\\\",\\\"ts\\\":\\\"1784627739.203639\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"ENTITYMSG_1784617625090 please sync with @Canary User\\\",\\\"ts\\\":\\\"1784617626.456639\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_GLOBAL_1784617524046\\\",\\\"ts\\\":\\\"1784617524.774159\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_1784617507855\\\",\\\"ts\\\":\\\"1784617508.560459\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"@Canary Other MENTION_1784617479417\\\",\\\"ts\\\":\\\"1784617500.385339\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"TOPLEVEL_1784617347128\\\",\\\"ts\\\":\\\"1784617349.302059\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"reply_count\\\":3,\\\"text\\\":\\\"THREADROOT_1784617347128\\\",\\\"thread_ts\\\":\\\"1784617347.922899\\\",\\\"ts\\\":\\\"1784617347.922899\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_D_1784617265271\\\",\\\"ts\\\":\\\"1784617267.087719\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_C_1784617265271\\\",\\\"ts\\\":\\\"1784617266.820259\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_B_1784617265271\\\",\\\"ts\\\":\\\"1784617266.461369\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"SELFMSG_A_1784617265271\\\",\\\"ts\\\":\\\"1784617266.100759\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"ENTITYMSG_1784607405239 please sync with @Canary User\\\",\\\"ts\\\":\\\"1784607405.613499\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_GLOBAL_1784607332073\\\",\\\"ts\\\":\\\"1784607332.270849\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"LASTSENT_1784607299438\\\",\\\"ts\\\":\\\"1784607299.661919\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"@Canary Other This is a test message with the exact marker MENTION_1784607281824\\\",\\\"ts\\\":\\\"1784607294.090119\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"text\\\":\\\"TOPLEVEL_1784607211457\\\",\\\"ts\\\":\\\"1784607212.334009\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":true,\\\"reply_count\\\":3,\\\"text\\\":\\\"THREADROOT_1784607211457\\\",\\\"thread_ts\\\":\\\"1784607211.741199\\\",\\\"ts\\\":\\\"1784607211.741199\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_D_1784607154929\\\",\\\"ts\\\":\\\"1784607155.510769\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"OTHERMSG_C_1784607154929\\\",\\\"ts\\\":\\\"1784607155.411189\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"}],\\\"ok\\\":true}\",\"result_ref\":\"result:21d757de-3505-41b0-b662-241411e7a6df.4a0091a1-6e70-4de9-9d3c-6eb09fda464b\",\"total_bytes\":8320},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, read the Slack conversation with ID D0BDC6LR6J",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ccdf5b9ac5d54056a1927568",
+            "name": "slack__get_thread_replies",
+            "arguments": {
+              "channel": "D0CANARY",
+              "limit": 10,
+              "thread_ts": "1700000000.000000"
+            }
+          }
+        ],
+        "input_tokens": 21320,
+        "output_tokens": 214
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_8d8bf40035134bab8a0bdbc0",
+          "name": "builtin__time",
+          "content": "{\"detail\":{\"byte_len\":139,\"kind\":\"result_reference\",\"preview\":\"{\\\"iso\\\":\\\"2026-07-21T13:22:26.320237710+00:00\\\",\\\"unix\\\":1784640146,\\\"unix_millis\\\":1784640146320,\\\"utc_iso\\\":\\\"2026-07-21T13:22:26.320237710+00:00\\\"}\",\"result_ref\":\"result:21d757de-3505-41b0-b662-241411e7a6df.92412719-da13-4a85-a294-d4a916d2956e\",\"total_bytes\":139},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, read the Slack conversation with ID D0BDC6LR6J",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "Now let me determine which messages fall within the last ten minutes (since `1784640146` — now — meaning messages with `ts` >= `1784640086`, i.e., newer than 10 minutes ago).\n\nTen minutes = 600 seconds. So cutoff = 1784640146 - 600 = **1784639546**.\n\nLet me check the ts values:\n\nFrom the history, the newest messages are:\n\n1. `1784640132.634979` → **TOPLEVEL_1784640131932** (Canary User)\n2. `1700000000.000000` → **THREADROOT_1784640131932** (Canary User) — thread parent\n3. `1784640085.392219` → **OTHERMSG_D_1784640084808** (Canary Other)\n4. `1784640085.233879` → **OTHERMSG_C_1784640084808** (Canary Other)\n5. `1784640085.119039` → **SELFMSG_B_1784640084808** (Canary User)\n6. `1784640085.017689` → **SELFMSG_A_1784640084808** (Canary User)\n7. `1784638254.940949` → 1784638254 < 1784639546 — outside window\n\nSo the last ten minutes (since ts ≈ 1784639546) includes messages with ts from **1784640085.017689** onward.\n\nThe thread replies under THREADROOT_1784640131932:\n- `1784640132.239009` → **REPLY_ONE_1784640131932** (Canary Other)\n- `1784640132.380899` → **REPLY_TWO_1784640131932** (Canary Other)\n- `1784640132.503979` → **REPLY_THREE_1784640131932** (Canary Other)\n\nAll thread replies are within the last 10 minutes too.\n\n---\n\nHere are all messages from **D0CANARY** in the last 10 minutes, with the full thread under `THREADROOT_1784640131932`:\n\n### Top-level messages (last 10 min)\n\n1. **Canary User**: `TOPLEVEL_1784640131932`\n2. **Canary User**: `THREADROOT_1784640131932` *(thread parent)*\n3. **Canary Other**: `OTHERMSG_D_1784640084808`\n4. **Canary Other**: `OTHERMSG_C_1784640084808`\n5. **Canary User**: `SELFMSG_B_1784640084808`\n6. **Canary User**: `SELFMSG_A_1784640084808`\n\n### Thread replies under `THREADROOT_1784640131932`\n\n7. **Canary Other**: `REPLY_ONE_1784640131932`\n8. **Canary Other**: `REPLY_TWO_1784640131932`\n9. **Canary Other**: `REPLY_THREE_1784640131932`\n\n---\n\nREBORN_QA_10C_THREADS_1784640131932",
+        "input_tokens": 21891,
+        "output_tokens": 697
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "call_ccdf5b9ac5d54056a1927568",
+          "name": "slack__get_thread_replies",
+          "content": "{\"detail\":{\"byte_len\":852,\"kind\":\"result_reference\",\"preview\":\"{\\\"current_user_id\\\":\\\"U0CANARY\\\",\\\"has_more\\\":false,\\\"messages\\\":[{\\\"is_current_user\\\":true,\\\"reply_count\\\":3,\\\"text\\\":\\\"THREADROOT_1784640131932\\\",\\\"thread_ts\\\":\\\"1700000000.000000\\\",\\\"ts\\\":\\\"1700000000.000000\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0CANARY\\\",\\\"user_display_name\\\":\\\"Canary User\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"REPLY_ONE_1784640131932\\\",\\\"thread_ts\\\":\\\"1700000000.000000\\\",\\\"ts\\\":\\\"1784640132.239009\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"REPLY_TWO_1784640131932\\\",\\\"thread_ts\\\":\\\"1700000000.000000\\\",\\\"ts\\\":\\\"1784640132.380899\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"},{\\\"is_current_user\\\":false,\\\"text\\\":\\\"REPLY_THREE_1784640131932\\\",\\\"thread_ts\\\":\\\"1700000000.000000\\\",\\\"ts\\\":\\\"1784640132.503979\\\",\\\"type\\\":\\\"message\\\",\\\"user\\\":\\\"U0OTHER\\\",\\\"user_display_name\\\":\\\"Canary Other\\\"}],\\\"ok\\\":true}\",\"result_ref\":\"result:21d757de-3505-41b0-b662-241411e7a6df.b86dacbf-b853-48ca-a2c2-77122a9fc388\",\"total_bytes\":852},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+        }
+      ]
+    }
+  ]
+}

@@ -23,26 +23,26 @@
 //! drive). Uses "notion" (installed+removed by scenario 2, so the install
 //! here is fresh; no other scenario touches its credential accounts).
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 1: activation with only a revoked credential opens the gate ───
     let activator = g
         .thread("notion-reauth-activate")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "notion"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "notion"}),
             ),
             // Consumed by the post-deny resume model call.
-            RebornScriptedReply::text("notion needs reauthorization"),
+            IronClawScriptedReply::text("notion needs reauthorization"),
         ])
         .build()
         .await?;
@@ -115,11 +115,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let retrier = g
         .thread("notion-reauth-retry")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "notion"}),
             ),
-            RebornScriptedReply::text("notion still needs reauthorization"),
+            IronClawScriptedReply::text("notion still needs reauthorization"),
         ])
         .build()
         .await?;
@@ -153,11 +153,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let restorer = g
         .thread("notion-reauth-restore")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "notion"}),
             ),
-            RebornScriptedReply::text("notion reauthorized"),
+            IronClawScriptedReply::text("notion reauthorized"),
         ])
         .build()
         .await?;

@@ -1,4 +1,4 @@
-//! Production registration helpers for the default planned Reborn loop.
+//! Production registration helpers for the default planned IronClaw loop.
 
 use std::{error::Error, fmt, sync::Arc};
 

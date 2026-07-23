@@ -1,6 +1,6 @@
-//! Concrete service graph for the Reborn [`HostRuntime`](crate::HostRuntime).
+//! Concrete service graph for the IronClaw [`HostRuntime`](crate::HostRuntime).
 //!
-//! This module is intentionally composition-only. It wires the owning Reborn
+//! This module is intentionally composition-only. It wires the owning IronClaw
 //! service crates together, adapts Script/MCP/WASM runtimes into the neutral
 //! dispatcher port, and hands upper services a single [`DefaultHostRuntime`]
 //! facade. Authorization, run-state transitions, approval leases, process
@@ -15,6 +15,10 @@ use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{RuntimeAdapterResult, RuntimeDispatcher, ToolResolver};
+use ironclaw_event_store::{
+    CoalescingEventSink, EventBatchConfig, IronClawEventStoreConfig, IronClawEventStoreError,
+    IronClawEventStores, IronClawProfile, build_ironclaw_event_stores,
+};
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
@@ -38,10 +42,6 @@ use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
     BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices,
     ProcessStore,
-};
-use ironclaw_reborn_event_store::{
-    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
-    RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
@@ -113,12 +113,12 @@ use extension_tool_binder::ServiceLanePackageBinder;
 pub use extension_tool_binder::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_dispatcher::ChainToolResolver;
 
-/// Concrete composition bundle for one Reborn host-runtime vertical slice.
+/// Concrete composition bundle for one IronClaw host-runtime vertical slice.
 ///
 /// The bundle owns shared `Arc` handles for the configured substrate services
 /// and can build the narrow caller-facing [`DefaultHostRuntime`] facade. Lower
 /// handles are available for setup/tests inside the host-runtime layer, but
-/// product/upper Reborn code should prefer [`Self::host_runtime`] and depend on
+/// product/upper IronClaw code should prefer [`Self::host_runtime`] and depend on
 /// `Arc<dyn crate::HostRuntime>` instead of reaching around the facade.
 pub struct HostRuntimeServices<F, G, S, R>
 where
@@ -140,7 +140,7 @@ where
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     // arch-exempt: optional_arc, service builders support minimal/test host runtime
-    // graphs while production Reborn wiring installs this store, plan #4539
+    // graphs while production IronClaw wiring installs this store, plan #4539
     persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,

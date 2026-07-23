@@ -7,7 +7,7 @@
 //! literal is bound to `parts` and before `build_default_planned_runtime`
 //! consumes it by value) — that is the only place the full, real value
 //! exists. `wiring_parity.rs` only reads the already-computed shape back off
-//! `GroupSharedStorage`/`RebornIntegrationHarness`.
+//! `GroupSharedStorage`/`IronClawIntegrationHarness`.
 //!
 //! Zero production-crate changes: `DefaultPlannedRuntimeParts` is already
 //! `pub` with `pub` fields and no `#[non_exhaustive]`

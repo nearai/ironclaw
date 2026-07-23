@@ -1,6 +1,6 @@
-//! Shared host API contracts for IronClaw Reborn.
+//! Shared host API contracts for IronClaw.
 //!
-//! `ironclaw_host_api` is the vocabulary every Reborn system-service crate uses
+//! `ironclaw_host_api` is the vocabulary every IronClaw system-service crate uses
 //! to describe authority: who is acting, which extension/runtime is acting, what
 //! filesystem mounts are visible, which capabilities were granted, what resources
 //! may be spent, what action is requested, and what decision/obligations the host
@@ -71,7 +71,7 @@ pub mod trust;
 mod credential_redaction;
 pub mod model_result_preview;
 
-// Flat re-exports are intentional: downstream Reborn service crates consume
+// Flat re-exports are intentional: downstream IronClaw service crates consume
 // `ironclaw_host_api` as a contract prelude, while module docs remain the
 // authoritative grouping for each vocabulary family.
 pub use action::*;

@@ -1,0 +1,127 @@
+{
+  "model_name": "ironclaw-qa-qa_6e_gmail_to_sheet_delivery",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect at most one recent Gmail inbox message. Create a new Google Sheet named `IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` and append exactly one row with columns Source, Summary, and QA Marker. The QA Marker cell must contain the exact marker IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263. If no Gmail message is available, still append a row with Source as Gmail, Summary as no recent message available, and QA Marker as IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263. In the final answer include the exact marker IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263, include the phrase Google Sheet, and include the created spreadsheet URL."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect at most one ",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_890ba379011a4429b0ecf81f",
+            "name": "gmail__list_messages",
+            "arguments": {
+              "max_results": 1
+            }
+          },
+          {
+            "id": "call_de4390a660db44df8acc0756",
+            "name": "google-sheets__create_spreadsheet",
+            "arguments": {
+              "sheet_names": [
+                "Sheet1"
+              ],
+              "title": "IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263"
+            }
+          }
+        ],
+        "input_tokens": 17178,
+        "output_tokens": 147
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect at most one ",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_2469ecb02da44c73b6766619",
+            "name": "gmail__get_message",
+            "arguments": {
+              "message_id": "19f84bbb00cb0b11"
+            }
+          }
+        ],
+        "input_tokens": 17777,
+        "output_tokens": 65
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect at most one ",
+        "min_message_count": 7
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_e03b07ab4c0a46ce8d7d90ca",
+            "name": "builtin__shell",
+            "arguments": {
+              "command": "echo \"UkVCT1JOX1FBXzJGX0NBTEVOREFSX1BSRVBfRU1BSUxfREVMSVZFUkVEXzE3ODQ2MzgyODYxOTUKClJlYm9ybiBXZWJVSXYyIGxpdmUgUUEgMkYgY2FsZW5kYXItcHJlcCBkZWxpdmVyeSBjaGVjay4gVGhpcyBtZXNzYWdlIGNvbmZpcm1zIHRoZSBHbWFpbCBzaWRlIGVmZmVjdCBhZnRlciBpbnNwZWN0aW5nIENhbGVuZGFyLg==\" | base64 -d"
+            }
+          }
+        ],
+        "input_tokens": 18623,
+        "output_tokens": 227
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect at most one ",
+        "min_message_count": 9
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_97e4b6b5d1a54522b6fc983a",
+            "name": "google-sheets__append_values",
+            "arguments": {
+              "range": "Sheet1!A1",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
+              "value_input_option": "USER_ENTERED",
+              "values": [
+                [
+                  "Gmail",
+                  "QA 2F calendar-prep delivery confirmation (IRONCLAW_QA_2F_CALENDAR_PREP_EMAIL_DELIVERED_1784638286195)",
+                  "IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263"
+                ]
+              ]
+            }
+          }
+        ],
+        "input_tokens": 19028,
+        "output_tokens": 211
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect at most one ",
+        "min_message_count": 11
+      },
+      "response": {
+        "type": "text",
+        "content": "**QA Case 6E complete.** Here's what happened:\n\n1. **Gmail inspection** — Retrieved the most recent inbox message, which is a previous QA delivery confirmation (QA 2F calendar-prep), sent to `EMAIL_REDACTED` on 2026-07-21 with subject *\"IronClaw QA 2F meeting prep 1784638286195\"*.\n\n2. **Google Sheet created** — `IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` was created at:\n   [https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit](https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit)\n\n3. **Row appended** — One row written with:\n   - **Source**: `Gmail`\n   - **Summary**: `QA 2F calendar-prep delivery confirmation (IRONCLAW_QA_2F_CALENDAR_PREP_EMAIL_DELIVERED_1784638286195)`\n   - **QA Marker**: `IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263`\n\n**QA Marker:** `IRONCLAW_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` — confirmed present in the Sheet.",
+        "input_tokens": 19389,
+        "output_tokens": 353
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "google-sheets.append_values"
+    ]
+  }
+}

@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_product_workflow::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectMemberInfo, RebornProjectResponse,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    IronClawAddMemberRequest, IronClawCreateProjectRequest, IronClawDeleteProjectRequest,
+    IronClawGetProjectRequest, IronClawListMembersRequest, IronClawListMembersResponse,
+    IronClawListProjectsRequest, IronClawListProjectsResponse, IronClawProjectMemberInfo,
+    IronClawProjectResponse, IronClawRemoveMemberRequest, IronClawUpdateMemberRoleRequest,
+    IronClawUpdateProjectRequest, ProjectCaller, ProjectService, ProjectServiceError,
 };
 
 /// Sentinel `create_project` name that triggers the injected fault; distinct
@@ -43,16 +43,16 @@ impl ProjectService for FaultInjectingProjectService {
     async fn list_projects(
         &self,
         caller: ProjectCaller,
-        request: RebornListProjectsRequest,
-    ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+        request: IronClawListProjectsRequest,
+    ) -> Result<IronClawListProjectsResponse, ProjectServiceError> {
         self.inner.list_projects(caller, request).await
     }
 
     async fn create_project(
         &self,
         caller: ProjectCaller,
-        request: RebornCreateProjectRequest,
-    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        request: IronClawCreateProjectRequest,
+    ) -> Result<IronClawProjectResponse, ProjectServiceError> {
         if request.name == FAULT_INJECT_DENIED_PROJECT_NAME {
             return Err(ProjectServiceError::Denied);
         }
@@ -62,23 +62,23 @@ impl ProjectService for FaultInjectingProjectService {
     async fn get_project(
         &self,
         caller: ProjectCaller,
-        request: RebornGetProjectRequest,
-    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        request: IronClawGetProjectRequest,
+    ) -> Result<IronClawProjectResponse, ProjectServiceError> {
         self.inner.get_project(caller, request).await
     }
 
     async fn update_project(
         &self,
         caller: ProjectCaller,
-        request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        request: IronClawUpdateProjectRequest,
+    ) -> Result<IronClawProjectResponse, ProjectServiceError> {
         self.inner.update_project(caller, request).await
     }
 
     async fn delete_project(
         &self,
         caller: ProjectCaller,
-        request: RebornDeleteProjectRequest,
+        request: IronClawDeleteProjectRequest,
     ) -> Result<(), ProjectServiceError> {
         self.inner.delete_project(caller, request).await
     }
@@ -86,31 +86,31 @@ impl ProjectService for FaultInjectingProjectService {
     async fn list_members(
         &self,
         caller: ProjectCaller,
-        request: RebornListMembersRequest,
-    ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+        request: IronClawListMembersRequest,
+    ) -> Result<IronClawListMembersResponse, ProjectServiceError> {
         self.inner.list_members(caller, request).await
     }
 
     async fn add_member(
         &self,
         caller: ProjectCaller,
-        request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        request: IronClawAddMemberRequest,
+    ) -> Result<IronClawProjectMemberInfo, ProjectServiceError> {
         self.inner.add_member(caller, request).await
     }
 
     async fn update_member_role(
         &self,
         caller: ProjectCaller,
-        request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        request: IronClawUpdateMemberRoleRequest,
+    ) -> Result<IronClawProjectMemberInfo, ProjectServiceError> {
         self.inner.update_member_role(caller, request).await
     }
 
     async fn remove_member(
         &self,
         caller: ProjectCaller,
-        request: RebornRemoveMemberRequest,
+        request: IronClawRemoveMemberRequest,
     ) -> Result<(), ProjectServiceError> {
         self.inner.remove_member(caller, request).await
     }

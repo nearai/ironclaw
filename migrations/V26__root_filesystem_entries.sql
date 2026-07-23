@@ -1,4 +1,4 @@
--- Reborn RootFilesystem database backend storage.
+-- IronClaw RootFilesystem database backend storage.
 -- Stores canonical virtual-path file contents; directories are inferred from path prefixes.
 
 CREATE TABLE IF NOT EXISTS root_filesystem_entries (

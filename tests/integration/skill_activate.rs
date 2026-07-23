@@ -1,4 +1,4 @@
-//! Reborn integration test — synthetic `skill_activate` capability + skill
+//! IronClaw integration test — synthetic `skill_activate` capability + skill
 //! context injection (E-SKILL seam).
 //!
 //! A `greet` system skill is seeded by `skill_activation_tools()`. The model
@@ -18,26 +18,26 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
 async fn skill_activate_dispatches_and_injects_skill_context() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
+    let group = IronClawIntegrationGroup::skill_activation_tools()
         .await
         .expect("skill-activation group builds");
     let harness = group
         .thread("conv-skill-activate")
         .script([
-            RebornScriptedReply::tool_call("builtin.skill_activate", json!({"names": ["greet"]})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.skill_activate", json!({"names": ["greet"]})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -79,17 +79,17 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
 // auto-activation) does not fire on the `TurnCoordinator`/agent-loop path —
 // disabled on purpose (product decision, closed issue #5530). It only runs
 // when `record_user_message` populates `take_message_for_run`, whose sole
-// caller is the legacy `RebornRuntime::submit_user_turn`; the coordinator
+// caller is the legacy `IronClawRuntime::submit_user_turn`; the coordinator
 // stack never records the message, so criteria selection stays inert here.
 // The explicit `builtin.skill_activate` path (proven above) is supported.
 #[tokio::test]
 async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
+    let group = IronClawIntegrationGroup::skill_activation_tools()
         .await
         .expect("skill-activation group builds");
     let harness = group
         .thread("conv-skill-criteria")
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("thread builds");
@@ -153,7 +153,7 @@ fn skill_activate_over_budget_surfaces_recoverable_failed() {
     run_async_test_with_stack(
         "skill_activate_over_budget_surfaces_recoverable_failed",
         || async {
-            let group = RebornIntegrationGroup::skill_activation_tools()
+            let group = IronClawIntegrationGroup::skill_activation_tools()
                 .await
                 .expect("skill-activation group builds");
             let capability_harness = group
@@ -167,11 +167,11 @@ fn skill_activate_over_budget_surfaces_recoverable_failed() {
             let harness = group
                 .thread("conv-skill-activate-over-budget")
                 .script([
-                    RebornScriptedReply::tool_call(
+                    IronClawScriptedReply::tool_call(
                         "builtin.skill_activate",
                         json!({"names": ["bloat"]}),
                     ),
-                    RebornScriptedReply::text("could not activate"),
+                    IronClawScriptedReply::text("could not activate"),
                 ])
                 .build()
                 .await
@@ -219,7 +219,7 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
     run_async_test_with_stack(
         "skill_activate_ambiguous_name_surfaces_recoverable_failed",
         || async {
-            let group = RebornIntegrationGroup::skill_activation_tools()
+            let group = IronClawIntegrationGroup::skill_activation_tools()
                 .await
                 .expect("skill-activation group builds");
             let capability_harness = group
@@ -236,11 +236,11 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
             let harness = group
                 .thread("conv-skill-activate-ambiguous")
                 .script([
-                    RebornScriptedReply::tool_call(
+                    IronClawScriptedReply::tool_call(
                         "builtin.skill_activate",
                         json!({"names": ["duplicate"]}),
                     ),
-                    RebornScriptedReply::text("that name is ambiguous"),
+                    IronClawScriptedReply::text("that name is ambiguous"),
                 ])
                 .build()
                 .await

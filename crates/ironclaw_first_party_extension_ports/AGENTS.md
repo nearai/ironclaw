@@ -6,7 +6,7 @@
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_first_party_extensions/AGENTS.md`
   - `crates/ironclaw_loop_host/AGENTS.md`
-  - `docs/reborn/contracts/skills-extension.md`
+  - `docs/ironclaw/contracts/skills-extension.md`
 
 ## What This Crate Owns
 
@@ -24,8 +24,8 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_first_party_extension_ports`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
-- Composition check when exposed ports change: `cargo test -p ironclaw_reborn_composition local_dev_runtime`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`
+- Composition check when exposed ports change: `cargo test -p ironclaw_composition local_dev_runtime`
 
 ## Agent Notes
 

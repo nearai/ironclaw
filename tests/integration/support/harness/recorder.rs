@@ -66,7 +66,7 @@ impl HarnessCapabilityRecorder {
     /// Echo backend and HostRuntime harnesses without a local-dev workspace filesystem.
     pub(crate) fn attachment_test_support(
         &self,
-    ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
+    ) -> Option<ironclaw_composition::AttachmentTestSupport> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.attachment_test_support_for_test(),

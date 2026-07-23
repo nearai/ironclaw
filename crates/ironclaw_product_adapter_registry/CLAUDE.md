@@ -1,6 +1,6 @@
 # ironclaw_product_adapter_registry guardrails
 
-Owns ProductAdapter host-api projection contracts for IronClaw Reborn.
+Owns ProductAdapter host-api projection contracts for IronClaw.
 
 - ProductAdapter declarations live in the single Extension Manifest v2 as
   `ironclaw.product_adapter/v1` host-api sections. This crate owns the typed
@@ -10,7 +10,7 @@ Owns ProductAdapter host-api projection contracts for IronClaw Reborn.
   TOML manifest format.
 - Do **not** load WASM components, perform HTTP egress, route webhooks,
   resolve secret material, or write durable database state from this crate.
-- Do **not** introduce an env-var adapter list (no `REBORN_PRODUCT_ADAPTERS`
+- Do **not** introduce an env-var adapter list (no `IRONCLAW_PRODUCT_ADAPTERS`
   primary declaration path). Registry state is the source of truth.
 - Do **not** depend on legacy `ChannelsConfig`, `ExtensionManager`,
   v1 WASM channel storage, or any runtime/dispatcher crate. The architecture
@@ -65,6 +65,6 @@ Owns ProductAdapter host-api projection contracts for IronClaw Reborn.
   projects a `channel` capability surface for `external_channel` sections
   (host-native `web`/`cli`/`synchronous_api` sections project none); pinned
   in `tests/manifest_ingestion.rs` through the real contract. The surface
-  vocabulary contract lives in `docs/reborn/contracts/extensions.md`.
-- `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+  vocabulary contract lives in `docs/ironclaw/contracts/extensions.md`.
+- `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`
   pins crate dependency boundary.

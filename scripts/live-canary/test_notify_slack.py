@@ -155,7 +155,7 @@ class GoogleOauthPreflightReportTests(unittest.TestCase):
                 "abcdef0123456789",
             ]
             stdout = io.StringIO()
-            env = {"REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS": "invalid_grant"}
+            env = {"IRONCLAW_GOOGLE_OAUTH_PREFLIGHT_STATUS": "invalid_grant"}
             with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
                 sys, "argv", argv
             ), mock.patch("sys.stdout", stdout):
@@ -228,11 +228,11 @@ class GoogleOauthPreflightReportTests(unittest.TestCase):
                 self.assertEqual(got, 0, f"variant not parsed: {variant!r}")
 
 
-class RebornQaSlackReportTests(unittest.TestCase):
+class IronClawQaSlackReportTests(unittest.TestCase):
     def test_case_outcome_centralizes_display_priority(self):
         cases = [
             (
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("10A",),
                     case="passed",
                     feature="passed",
@@ -243,7 +243,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 ("Passed", ":white_check_mark:"),
             ),
             (
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("10B",),
                     case="inconclusive",
                     feature="inconclusive",
@@ -254,7 +254,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 ("Inconclusive", ":grey_question:"),
             ),
             (
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("10C",),
                     case="warning",
                     feature="warning",
@@ -264,7 +264,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 ("Warning", ":warning:"),
             ),
             (
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("10D",),
                     case="failure",
                     feature="failure",
@@ -300,14 +300,14 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
     def test_collect_lane_populates_per_case_reports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            lane_dir = Path(tmpdir) / "reborn-webui-v2-live-qa" / "reborn-webui-v2" / "20260628T000000Z"
+            lane_dir = Path(tmpdir) / "ironclaw-webui-v2-live-qa" / "ironclaw-webui-v2" / "20260628T000000Z"
             lane_dir.mkdir(parents=True)
             (lane_dir / "results.json").write_text(
                 json.dumps(
                     {
                         "results": [
                             {
-                                "provider": "reborn-webui-v2",
+                                "provider": "ironclaw-webui-v2",
                                 "mode": "live:qa_2a_gmail_connect",
                                 "success": True,
                                 "latency_ms": 1200,
@@ -317,7 +317,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                                 },
                             },
                             {
-                                "provider": "reborn-webui-v2",
+                                "provider": "ironclaw-webui-v2",
                                 "mode": "live:qa_2d_calendar_prep_live_chat",
                                 "success": False,
                                 "latency_ms": 0,
@@ -372,29 +372,29 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.tests, 2)
         self.assertEqual(report.passed, 1)
         self.assertEqual(report.failed, 1)
-        self.assertEqual(len(report.reborn_qa_cases), 2)
-        self.assertEqual(report.reborn_qa_cases[0].rows, ("2A",))
-        self.assertEqual(report.reborn_qa_cases[0].feature, "Gmail connection flow")
-        self.assertEqual(report.reborn_qa_cases[0].message, "")
-        self.assertEqual(len(report.reborn_qa_cases[0].tool_calls), 1)
-        self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].name, "gmail.list_messages")
-        self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].args_hash, "1234567890123")
-        self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].output_digest, "9876543210987")
-        self.assertEqual(report.reborn_qa_cases[1].rows, ("2D",))
+        self.assertEqual(len(report.ironclaw_qa_cases), 2)
+        self.assertEqual(report.ironclaw_qa_cases[0].rows, ("2A",))
+        self.assertEqual(report.ironclaw_qa_cases[0].feature, "Gmail connection flow")
+        self.assertEqual(report.ironclaw_qa_cases[0].message, "")
+        self.assertEqual(len(report.ironclaw_qa_cases[0].tool_calls), 1)
+        self.assertEqual(report.ironclaw_qa_cases[0].tool_calls[0].name, "gmail.list_messages")
+        self.assertEqual(report.ironclaw_qa_cases[0].tool_calls[0].args_hash, "1234567890123")
+        self.assertEqual(report.ironclaw_qa_cases[0].tool_calls[0].output_digest, "9876543210987")
+        self.assertEqual(report.ironclaw_qa_cases[1].rows, ("2D",))
         self.assertEqual(
-            report.reborn_qa_cases[1].message,
+            report.ironclaw_qa_cases[1].message,
             "requires live Google runtime access",
         )
         self.assertEqual(
-            report.reborn_qa_cases[1].debug_paths,
+            report.ironclaw_qa_cases[1].debug_paths,
             [
-                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
-                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log",
-                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
-                "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json",
+                "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/results.json",
+                "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/test-output.log",
+                "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
+                "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/traces/index.json",
             ],
         )
-        self.assertEqual(report.reborn_qa_cases[0].debug_paths, [])
+        self.assertEqual(report.ironclaw_qa_cases[0].debug_paths, [])
 
     def test_manifest_cannot_weaken_missing_or_malformed_result_blocking(self):
         reports = []
@@ -402,8 +402,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
             with self.subTest(blocking=label), tempfile.TemporaryDirectory() as tmpdir:
                 lane_dir = (
                     Path(tmpdir)
-                    / "reborn-webui-v2-live-qa"
-                    / "reborn-webui-v2"
+                    / "ironclaw-webui-v2-live-qa"
+                    / "ironclaw-webui-v2"
                     / label
                 )
                 lane_dir.mkdir(parents=True)
@@ -420,7 +420,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                         {
                             "results": [
                                 {
-                                    "provider": "reborn-webui-v2",
+                                    "provider": "ironclaw-webui-v2",
                                     "mode": f"live:qa_10c_{label}_blocking",
                                     "success": False,
                                     "latency_ms": 1,
@@ -455,7 +455,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
             self.assertEqual(report.warnings, 0)
             self.assertEqual(report.status, "fail")
             self.assertTrue(notify._has_blocking_failure(report))
-            case = report.reborn_qa_cases[0]
+            case = report.ironclaw_qa_cases[0]
             self.assertEqual(case.case_tier, "contract")
             self.assertTrue(case.blocking)
             rendered = json.dumps(notify.slack_payload([report], None, None))
@@ -476,7 +476,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                                 {
                                     "category": "typed metadata missing",
                                     "jobs": [
-                                        "reborn-webui-v2-live-qa (reborn-webui-v2)"
+                                        "ironclaw-webui-v2-live-qa (ironclaw-webui-v2)"
                                     ],
                                     "fix": "emit valid result metadata",
                                 }
@@ -498,8 +498,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = (
                 Path(tmpdir)
-                / "reborn-webui-v2-live-qa"
-                / "reborn-webui-v2"
+                / "ironclaw-webui-v2-live-qa"
+                / "ironclaw-webui-v2"
                 / "20260712T000000Z"
             )
             lane_dir.mkdir(parents=True)
@@ -508,7 +508,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     {
                         "results": [
                             {
-                                "provider": "reborn-webui-v2",
+                                "provider": "ironclaw-webui-v2",
                                 "mode": "live:qa_10c_slack_thread_replies",
                                 "success": False,
                                 "latency_ms": 4321,
@@ -571,8 +571,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.warnings, 1)
         self.assertEqual(report.status, "warn")
         self.assertEqual(report.junit_failures, [])
-        self.assertEqual(len(report.reborn_qa_cases), 1)
-        case = report.reborn_qa_cases[0]
+        self.assertEqual(len(report.ironclaw_qa_cases), 1)
+        case = report.ironclaw_qa_cases[0]
         self.assertFalse(case.success)
         self.assertEqual(case.case_tier, "behavioral")
         self.assertFalse(case.blocking)
@@ -583,7 +583,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in case.tool_calls], ["slack.search_messages"])
         self.assertEqual(
             case.debug_paths[0],
-            "reborn-webui-v2-live-qa/reborn-webui-v2/20260712T000000Z/results.json",
+            "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260712T000000Z/results.json",
         )
 
         haiku_response = {
@@ -671,31 +671,31 @@ class RebornQaSlackReportTests(unittest.TestCase):
         post_json.assert_not_called()
         get_json.assert_not_called()
 
-    def test_slack_payload_renders_each_reborn_qa_row(self):
+    def test_slack_payload_renders_each_ironclaw_qa_row(self):
         report = notify.LaneReport(
-            lane="reborn-webui-v2-live-qa",
-            provider="reborn-webui-v2",
+            lane="ironclaw-webui-v2-live-qa",
+            provider="ironclaw-webui-v2",
             passed=1,
             failed=2,
             tests=3,
             duration_s=1.2,
             status="fail",
-            reborn_qa_cases=[
-                notify.RebornQaCaseReport(
+            ironclaw_qa_cases=[
+                notify.IronClawQaCaseReport(
                     rows=("2A",),
                     case="qa_2a_gmail_connect",
                     feature="Gmail connection flow",
                     success=True,
                     latency_ms=1200,
                     tool_calls=[
-                        notify.RebornQaToolCall(
+                        notify.IronClawQaToolCall(
                             name="gmail.list_messages",
                             args_hash="1234567890123",
                             output_digest="9876543210987",
                         )
                     ],
                 ),
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("2D",),
                     case="qa_2d_calendar_prep_live_chat",
                     feature="Calendar prep assistant using Google Docs and live news",
@@ -703,20 +703,20 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     latency_ms=0,
                     message="requires live Google runtime access",
                     debug_paths=[
-                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
-                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log",
-                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
-                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json",
+                        "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/results.json",
+                        "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/test-output.log",
+                        "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json",
+                        "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/traces/index.json",
                     ],
                     tool_calls=[
-                        notify.RebornQaToolCall(
+                        notify.IronClawQaToolCall(
                             name="google-calendar.list_events",
                             args_hash="2234567890123",
                             output_digest="8876543210987",
                         )
                     ],
                 ),
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("2E",),
                     case="qa_2e_calendar_prep_email_routine",
                     feature="Scheduled meeting-prep email routine",
@@ -724,7 +724,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     latency_ms=0,
                     message=(
                         "assistant returned success but routine scope "
-                        "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record"
+                        "'ironclaw-qa-2e-calendar-prep-email' did not add a trigger_record"
                     ),
                 ),
             ],
@@ -745,7 +745,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(len(qa_sections), 1)
         self.assertTrue(
             any(
-                "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/3 passed"
+                "*ironclaw-webui-v2-live-qa* (ironclaw-webui-v2) — 1/3 passed"
                 in text
                 for text in section_texts
             )
@@ -763,15 +763,15 @@ class RebornQaSlackReportTests(unittest.TestCase):
         )
         self.assertIn(
             "*Debug `2D`:* <https://github.com/nearai/ironclaw/actions/runs/123|GitHub run artifacts> → "
-            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json`, "
-            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/test-output.log`, "
-            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json`, "
-            "`reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/traces/index.json`",
+            "`ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/results.json`, "
+            "`ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/test-output.log`, "
+            "`ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/traces/qa_2d_calendar_prep_live_chat.json`, "
+            "`ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/traces/index.json`",
             qa_text,
         )
         self.assertIn(
             "*Failure `2E`:* assistant returned success but routine scope "
-            "'reborn-qa-2e-calendar-prep-email' did not add a trigger_record",
+            "'ironclaw-qa-2e-calendar-prep-email' did not add a trigger_record",
             qa_text,
         )
         self.assertNotIn("*Debug `2A`", qa_text)
@@ -781,8 +781,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
     def test_slack_payload_includes_pr_branch_context_when_present(self):
         report = notify.LaneReport(
-            lane="reborn-webui-v2-live-qa",
-            provider="reborn-webui-v2",
+            lane="ironclaw-webui-v2-live-qa",
+            provider="ironclaw-webui-v2",
             passed=1,
             failed=0,
             tests=1,
@@ -825,22 +825,22 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
     def test_github_comment_body_includes_pr_branch_and_case_results(self):
         report = notify.LaneReport(
-            lane="reborn-webui-v2-live-qa",
-            provider="reborn-webui-v2",
+            lane="ironclaw-webui-v2-live-qa",
+            provider="ironclaw-webui-v2",
             passed=1,
             failed=1,
             tests=2,
             duration_s=2.5,
             status="fail",
-            reborn_qa_cases=[
-                notify.RebornQaCaseReport(
+            ironclaw_qa_cases=[
+                notify.IronClawQaCaseReport(
                     rows=("2A",),
                     case="qa_2a_gmail_connect",
                     feature="Gmail connection flow",
                     success=True,
                     latency_ms=1200,
                 ),
-                notify.RebornQaCaseReport(
+                notify.IronClawQaCaseReport(
                     rows=("2D",),
                     case="qa_2d_calendar_prep_live_chat",
                     feature="Calendar prep assistant",
@@ -848,7 +848,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     latency_ms=1300,
                     message="requires live Google runtime access",
                     debug_paths=[
-                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
+                        "ironclaw-webui-v2-live-qa/ironclaw-webui-v2/20260628T000000Z/results.json",
                     ],
                 ),
             ],
@@ -874,7 +874,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertIn("- Commit: `abcdef0`", body)
         self.assertIn("/canary all PR #42 abcdef0123 comment 987 by @\u200bmaintainer", body)
         self.assertNotIn("mainsha", body)
-        self.assertIn("| `reborn-webui-v2-live-qa` | `reborn-webui-v2` |", body)
+        self.assertIn("| `ironclaw-webui-v2-live-qa` | `ironclaw-webui-v2` |", body)
         self.assertIn("#### QA 2: 1/2 passed", body)
         self.assertIn(":white_check_mark: `2A` Gmail connection flow", body)
         self.assertIn(":x: `2D` Calendar prep assistant", body)
@@ -958,8 +958,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
     def test_main_posts_pr_comment_without_slack_webhook(self):
         report = notify.LaneReport(
-            lane="reborn-webui-v2-live-qa",
-            provider="reborn-webui-v2",
+            lane="ironclaw-webui-v2-live-qa",
+            provider="ironclaw-webui-v2",
             passed=1,
             failed=0,
             tests=1,
@@ -979,7 +979,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
             mock.patch.object(
                 notify,
                 "discover_lane_dirs",
-                return_value=[Path("reborn-webui-v2-live-qa/reborn-webui-v2/run")],
+                return_value=[Path("ironclaw-webui-v2-live-qa/ironclaw-webui-v2/run")],
             ),
             mock.patch.object(notify, "collect_lane", return_value=report),
             mock.patch.object(notify, "post_json") as post_json,
@@ -997,8 +997,8 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
     def test_main_ignores_pr_comment_failure_without_slack_webhook(self):
         report = notify.LaneReport(
-            lane="reborn-webui-v2-live-qa",
-            provider="reborn-webui-v2",
+            lane="ironclaw-webui-v2-live-qa",
+            provider="ironclaw-webui-v2",
             passed=1,
             failed=0,
             tests=1,
@@ -1018,7 +1018,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
             mock.patch.object(
                 notify,
                 "discover_lane_dirs",
-                return_value=[Path("reborn-webui-v2-live-qa/reborn-webui-v2/run")],
+                return_value=[Path("ironclaw-webui-v2-live-qa/ironclaw-webui-v2/run")],
             ),
             mock.patch.object(notify, "collect_lane", return_value=report),
             mock.patch.object(notify, "post_json") as post_json,
@@ -1034,7 +1034,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         post_json.assert_not_called()
         post_pr_comment.assert_called_once()
 
-    def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
+    def test_ironclaw_rows_fit_with_scheduled_all_lane_report(self):
         case_rows = [
             f"{group}{suffix}"
             for group in range(2, 9)
@@ -1053,14 +1053,14 @@ class RebornQaSlackReportTests(unittest.TestCase):
         ]
         reports.append(
             notify.LaneReport(
-                lane="reborn-webui-v2-live-qa",
-                provider="reborn-webui-v2",
+                lane="ironclaw-webui-v2-live-qa",
+                provider="ironclaw-webui-v2",
                 passed=len(case_rows),
                 failed=0,
                 tests=len(case_rows),
                 status="pass",
-                reborn_qa_cases=[
-                    notify.RebornQaCaseReport(
+                ironclaw_qa_cases=[
+                    notify.IronClawQaCaseReport(
                         rows=(row,),
                         case=f"qa_case_{idx}",
                         feature=f"Feature {idx}",
@@ -1087,9 +1087,9 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertTrue(any("*QA 8*" in text for text in section_texts))
         self.assertFalse(any("*QA 2A" in text for text in section_texts))
 
-    def test_reborn_group_continuation_blocks_repeat_group_label(self):
+    def test_ironclaw_group_continuation_blocks_repeat_group_label(self):
         cases = [
-            notify.RebornQaCaseReport(
+            notify.IronClawQaCaseReport(
                 rows=("7A",),
                 case=f"qa_7a_failure_{idx}",
                 feature=f"Slack product channel connect {idx}",
@@ -1099,7 +1099,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
             for idx in range(8)
         ]
 
-        blocks = notify._format_reborn_qa_group("7", cases)
+        blocks = notify._format_ironclaw_qa_group("7", cases)
         section_texts = [
             block["text"]["text"]
             for block in blocks

@@ -4,9 +4,9 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts before changing behavior:
-  - `docs/reborn/contracts/events.md`
-  - `docs/reborn/contracts/events-projections.md`
+- Use these IronClaw contracts before changing behavior:
+  - `docs/ironclaw/contracts/events.md`
+  - `docs/ironclaw/contracts/events-projections.md`
   - `crates/ironclaw_events/AGENTS.md`
   - `crates/ironclaw_outbound/AGENTS.md`
 

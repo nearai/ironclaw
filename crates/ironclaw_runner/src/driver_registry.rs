@@ -1,7 +1,7 @@
-//! Reborn agent-loop driver registry and readiness validation.
+//! IronClaw agent-loop driver registry and readiness validation.
 //!
 //! `ironclaw_turns` owns the neutral driver/profile contracts. This module is
-//! the Reborn composition layer that stores concrete driver instances, freezes
+//! the IronClaw composition layer that stores concrete driver instances, freezes
 //! descriptor metadata at startup, and validates that configured and persisted
 //! run identities can be served before traffic is accepted.
 
@@ -59,7 +59,7 @@ pub enum RequirementLevel {
     Unsupported,
 }
 
-/// Static requirements Reborn checks before selecting a driver.
+/// Static requirements IronClaw checks before selecting a driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverRequirements {
     pub model: RequirementLevel,

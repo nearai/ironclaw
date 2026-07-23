@@ -1,4 +1,4 @@
-//! Reborn WebChat v2 static asset bundle.
+//! IronClaw WebChat v2 static asset bundle.
 //!
 //! Ships the browser-side SPA that drives the JSON route surface in this crate.
 //! The SPA targets only the `/api/webchat/v2/*` endpoints — no v1 gateway

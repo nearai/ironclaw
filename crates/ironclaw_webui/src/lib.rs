@@ -1,17 +1,17 @@
 #![forbid(unsafe_code)]
 
-//! Host-owned listener binding + serve loop for the Reborn WebChat v2
+//! Host-owned listener binding + serve loop for the IronClaw WebChat v2
 //! HTTP gateway.
 //!
-//! `ironclaw_reborn_composition::webui_v2_app` returns a fully composed
+//! `ironclaw_composition::webui_v2_app` returns a fully composed
 //! axum [`Router`] but deliberately stops at the
-//! `reborn_product_api_crates_do_not_bind_http_ingress` boundary — that
+//! `ironclaw_product_api_crates_do_not_bind_http_ingress` boundary — that
 //! crate must not bind sockets or call `axum::serve`. This crate is
 //! the host-owned counterpart: it accepts the `Router` from composition
 //! plus the listen address, binds a `TcpListener`, and runs the serve
 //! loop with graceful shutdown.
 //!
-//! Path A (`docs/reborn/how-to-port-channel-to-reborn.md`) native
+//! Path A (`docs/ironclaw/how-to-port-channel-to-ironclaw.md`) native
 //! host-surface invariants:
 //!
 //! - Host auth stays host-owned: `WebuiAuthenticator` implementations
@@ -31,8 +31,8 @@ mod signed_session_login;
 // composition's `#[cfg(test)]` unit tests, and downstream test crates can
 // reach the route/handler/descriptor items.
 pub mod webui_v2;
-// Reborn WebChat v2 HTTP gateway assembly + middleware, folded up from
-// `ironclaw_reborn_composition::webui`. `webui_v2_app` composes the fully
+// IronClaw WebChat v2 HTTP gateway assembly + middleware, folded up from
+// `ironclaw_composition::webui`. `webui_v2_app` composes the fully
 // wired axum Router (auth + rate/body limit + CORS + security headers + the
 // v2 route surface); the middleware modules back it.
 mod webui_body_limit;
@@ -43,7 +43,7 @@ mod webui_serve;
 mod webui_ws_origin;
 
 // WebChat v2 gateway assembly + the host-auth vocabulary it carries. Folded up
-// from `ironclaw_reborn_composition::webui::webui_serve`. The mount vocabulary
+// from `ironclaw_composition::webui::webui_serve`. The mount vocabulary
 // (`PublicRouteMount`, `ProtectedRouteMount`) stays in composition;
 // `PublicRouteMount` is already re-exported through the `auth` module above,
 // and `ProtectedRouteMount` callers import it from composition directly.
@@ -102,7 +102,7 @@ use tower::ServiceExt;
 
 /// Errors raised while running the host serve loop.
 #[derive(Debug, Error)]
-pub enum RebornWebuiServeError {
+pub enum IronClawWebuiServeError {
     #[error("failed to bind WebUI listener at {addr}: {source}")]
     Bind {
         addr: SocketAddr,
@@ -122,7 +122,7 @@ pub enum RebornWebuiServeError {
 /// `bound_addr_tx` channel that surfaces the actual bound port back to
 /// the caller — useful for tests that pass `0` as the port and need to
 /// learn which port the kernel picked.
-pub struct RebornWebuiServeOptions {
+pub struct IronClawWebuiServeOptions {
     pub addr: SocketAddr,
     pub router: Router,
     pub shutdown: tokio::sync::oneshot::Receiver<()>,
@@ -209,8 +209,10 @@ async fn deferred_webui_handler(
 /// the composed `Router`, and wait for `opts.shutdown` to fire before
 /// returning. Graceful shutdown gives in-flight requests a chance to
 /// complete before the listener closes.
-pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornWebuiServeError> {
-    let RebornWebuiServeOptions {
+pub async fn serve_webui_v2(
+    opts: IronClawWebuiServeOptions,
+) -> Result<(), IronClawWebuiServeError> {
+    let IronClawWebuiServeOptions {
         addr,
         router,
         shutdown,
@@ -219,13 +221,13 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
 
     let listener = TcpListener::bind(addr)
         .await
-        .map_err(|source| RebornWebuiServeError::Bind { addr, source })?;
+        .map_err(|source| IronClawWebuiServeError::Bind { addr, source })?;
 
     let bound = listener
         .local_addr()
-        .map_err(RebornWebuiServeError::LocalAddr)?;
+        .map_err(IronClawWebuiServeError::LocalAddr)?;
     tracing::info!(
-        target = "ironclaw::reborn::webui_ingress",
+        target = "ironclaw::webui_ingress",
         %bound,
         "WebChat v2 listener bound",
     );
@@ -245,17 +247,17 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         // cleanly rather than running forever.
         let _ = shutdown.await;
         tracing::info!(
-            target = "ironclaw::reborn::webui_ingress",
+            target = "ironclaw::webui_ingress",
             "WebChat v2 graceful shutdown signal received",
         );
     })
     .await
-    .map_err(RebornWebuiServeError::Serve)
+    .map_err(IronClawWebuiServeError::Serve)
 }
 
 /// Authenticator that compares the bearer token from the request
 /// against a single host-installation token loaded from an environment
-/// variable. Intended for the standalone `ironclaw-reborn` deployment
+/// variable. Intended for the standalone `ironclaw` deployment
 /// (single operator, single user) and for local dev.
 ///
 /// Production deployments with multiple users / sessions / OIDC should

@@ -1,4 +1,4 @@
-//! Transport-neutral Reborn projection streams.
+//! Transport-neutral IronClaw projection streams.
 //!
 //! This crate composes product-safe projection DTOs with access, admission,
 //! live-update, redaction, and outbound-candidate seams. It intentionally does

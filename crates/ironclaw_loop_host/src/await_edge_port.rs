@@ -10,7 +10,7 @@
 //! per the design's §4.1 crate-placement ruling (permanent seam, category 2
 //! of `.claude/rules/type-placement.md`, no `arch-exempt`).
 //!
-//! See `docs/reborn/subagent-spawn/thread-harness-design.md` §2-§5 for the
+//! See `docs/ironclaw/subagent-spawn/thread-harness-design.md` §2-§5 for the
 //! full CAS state machine these traits front.
 
 use std::{sync::Arc, time::Duration};
@@ -139,7 +139,7 @@ pub trait AwaitEdgeSettler: Send + Sync {
 
     /// Bind the capability result writer late, mirroring `bind_coordinator`'s
     /// deferred-binding pattern. Needed because some composition call sites
-    /// (`ironclaw_reborn_composition::runtime`) construct the result writer
+    /// (`ironclaw_composition::runtime`) construct the result writer
     /// *after* the await-edge resolver is assembled and erased into
     /// `Arc<dyn AwaitEdgeSettler>` (its own generic backend type parameter is
     /// no longer nameable at that point) — this lets construction and

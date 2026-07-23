@@ -7,12 +7,12 @@ use crate::RuntimeProcessError;
 use super::CONTAINER_WORKSPACE_ROOT;
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct RebornSandboxMountSources {
-    sources: Vec<RebornSandboxMountSource>,
+pub(super) struct IronClawSandboxMountSources {
+    sources: Vec<IronClawSandboxMountSource>,
 }
 
 #[derive(Debug, Clone)]
-struct RebornSandboxMountSource {
+struct IronClawSandboxMountSource {
     virtual_root: VirtualPath,
     host_root: PathBuf,
 }
@@ -30,7 +30,7 @@ enum DockerBindMode {
     ReadWrite,
 }
 
-impl RebornSandboxMountSources {
+impl IronClawSandboxMountSources {
     pub(super) fn add_local_source(
         &mut self,
         virtual_root: VirtualPath,
@@ -57,7 +57,7 @@ impl RebornSandboxMountSources {
             )));
         }
 
-        self.sources.push(RebornSandboxMountSource {
+        self.sources.push(IronClawSandboxMountSource {
             virtual_root,
             host_root,
         });
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn trusted_mount_source_validates_host_root_during_config() {
-        let mut sources = RebornSandboxMountSources::default();
+        let mut sources = IronClawSandboxMountSources::default();
         let error = sources
             .add_local_source(
                 VirtualPath::new("/projects").unwrap(),
@@ -315,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn none_mounts_use_default_workspace_bind() {
         let temp = tempfile::tempdir().unwrap();
-        let sources = RebornSandboxMountSources::default();
+        let sources = IronClawSandboxMountSources::default();
 
         let binds = sources
             .prepare_container_binds(temp.path(), None)
@@ -425,8 +425,8 @@ mod tests {
     fn sources_with(
         virtual_root: VirtualPath,
         host_root: impl Into<PathBuf>,
-    ) -> RebornSandboxMountSources {
-        let mut sources = RebornSandboxMountSources::default();
+    ) -> IronClawSandboxMountSources {
+        let mut sources = IronClawSandboxMountSources::default();
         sources
             .add_local_source(virtual_root, host_root.into())
             .unwrap();

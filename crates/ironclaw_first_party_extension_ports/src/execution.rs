@@ -12,7 +12,7 @@ use crate::{
     SkillBundleAssetReadError, SkillBundleAssetReader,
 };
 
-/// Prepares an activated skill for a Reborn loop run.
+/// Prepares an activated skill for a IronClaw loop run.
 ///
 /// This adapter performs deterministic activation selection and grants
 /// bundle-relative asset reads for selected skills only. It intentionally does
@@ -114,7 +114,7 @@ where
     }
 }
 
-/// Prepared skill execution inputs for a Reborn loop run.
+/// Prepared skill execution inputs for a IronClaw loop run.
 #[derive(Debug, Clone)]
 pub struct SkillExecutionPlan<S>
 where

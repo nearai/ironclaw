@@ -70,7 +70,7 @@ pub(super) fn completion_nudge_control_message() -> Result<LoopInlineMessage, Ag
 /// with no real assistant answer (empty/trailed-off reply, model-call budget
 /// exhausted, or no-progress detected), issue ONE extra **tool-free** model call
 /// asking the model to synthesize a closing answer from the work done, and return
-/// the finalized reply ref. This is the reborn equivalent of the legacy loop's
+/// the finalized reply ref. This is the IronClaw equivalent of the legacy loop's
 /// `on_tool_intent_nudge` / force-text-recovery.
 ///
 /// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production) and
@@ -125,7 +125,7 @@ pub(super) async fn try_final_answer_nudge(
 
     let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
     // An *empty* capability view (not `None`) is what actually forces a tool-free
-    // model call: the reborn gateway attaches tools whenever the loop port holds a
+    // model call: the IronClaw gateway attaches tools whenever the loop port holds a
     // capability port, filtered by this view — an empty visible set filters the
     // surface to zero tools, so the provider gets a text-only request and must
     // answer in prose. `surface_version: None` only strips tools from the prompt

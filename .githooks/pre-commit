@@ -23,7 +23,7 @@ if $NEEDS_CHECK; then
     fi
 fi
 
-# Reborn WebUI i18n parity (crates/ironclaw_webui/frontend/src/i18n/*.ts) is
+# IronClaw WebUI i18n parity (crates/ironclaw_webui/frontend/src/i18n/*.ts) is
 # enforced by the frontend's own tooling (`pnpm lint`/`pnpm test` in the
 # `webui-v2-js-lint` CI job), not by this shell hook — the v1 gateway's
 # `.js` language packs were deleted under Tier B.

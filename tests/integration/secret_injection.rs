@@ -1,4 +1,4 @@
-//! Reborn integration-test tier — T0-SECRET-INJECT.
+//! IronClaw integration-test tier — T0-SECRET-INJECT.
 //!
 //! Proves credential/secret injection reaches the wire: a scripted `github.*`
 //! call executes the real first-party GitHub WASM capability behind a
@@ -14,25 +14,25 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
 async fn injects_credential_onto_github_egress() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .with_github_issue_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "github.get_repo",
                 json!({"owner": "nearai", "repo": "ironclaw"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await

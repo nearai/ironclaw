@@ -24,8 +24,8 @@ pub(crate) fn coding_read_tools_profile() -> HarnessResult<ToolsProfile> {
         ),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
-            "reborn-e2e-coding-read-tools",
-            "reborn-e2e-coding-read-user",
+            "ironclaw-e2e-coding-read-tools",
+            "ironclaw-e2e-coding-read-user",
         )?
     })
 }

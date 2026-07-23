@@ -22,18 +22,18 @@
 //! never credentialed there) — no fresh install, mirroring how Scenario 7
 //! activates the same pre-existing install.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let activator = g
         .thread("github-normal-auth-gate")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 serde_json::json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::text("github needs a credential"),
+            IronClawScriptedReply::text("github needs a credential"),
         ])
         .build()
         .await?;

@@ -1,14 +1,14 @@
-//! [`ProjectRepository`] over the Reborn `ScopedFilesystem` substrate.
+//! [`ProjectRepository`] over the IronClaw `ScopedFilesystem` substrate.
 //!
 //! Records are JSON entries under a control-plane mount that the agent cannot
-//! reach (the same substrate the reborn-identity store rides). Backend
+//! reach (the same substrate the IronClaw-identity store rides). Backend
 //! selection — Postgres / libSQL / JSONL / in-memory — is the host's
 //! `RootFilesystem` concern, so this is the single backend-agnostic
 //! implementation; the crate carries no SQL.
 //!
 //! Layout (opaque key parts are base64url-encoded into their own segments so a
 //! delimiter-like id cannot collide with a path boundary, mirroring
-//! `ironclaw_reborn_identity`):
+//! `ironclaw_identity`):
 //!
 //! ```text
 //! /tenant-shared/reborn-projects/<tenant>/records/<project_id>.json

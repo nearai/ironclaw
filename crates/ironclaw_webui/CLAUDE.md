@@ -1,7 +1,7 @@
 # ironclaw_webui guardrails
 
-The **WebUI host stack** for Reborn WebChat v2 — the single `products`-layer
-crate, above `ironclaw_reborn_composition`, that turns composition's product/API
+The **WebUI host stack** for IronClaw WebChat v2 — the single `products`-layer
+crate, above `ironclaw_composition`, that turns composition's product/API
 surface into a running HTTP server a browser can talk to. It owns three
 subsystems that used to live apart (see `README.md` for the fold-in map):
 
@@ -10,7 +10,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE/WebSocket streaming, and the Vite SPA bundle.
 2. **Gateway assembly + middleware** (`src/webui_serve.rs`, `src/webui_*.rs`,
-   from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
+   from `ironclaw_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
    feature-gated OpenAI-compat mounts.
@@ -21,15 +21,15 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    sessions.
 
 Composition deliberately stops at the
-`reborn_product_api_crates_do_not_bind_http_ingress` boundary — it returns a
+`ironclaw_product_api_crates_do_not_bind_http_ingress` boundary — it returns a
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
+Path A of `docs/ironclaw/how-to-port-channel-to-ironclaw.md` rules apply: host auth
 stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
 / DB, and no direct `ironclaw_product_adapters` edge (reach it through
 composition's facade). Enforced by `ironclaw_architecture`
-(`tests/reborn_dependency_boundaries.rs`).
+(`tests/ironclaw_dependency_boundaries.rs`).
 
 ## Surface
 
@@ -41,7 +41,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `webui_v2_routes() -> Vec<IngressRouteDescriptor>` | The route descriptor table (id, method, pattern, auth, rate/body limit, streaming). Locked by `tests/webui_v2_descriptors_contract.rs`. |
 | `WebUiV2State` | Handler state: the `ProductSurface` facade + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
-| `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
+| `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `IronClawWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
 | `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
@@ -54,7 +54,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | Symbol | Role |
 |---|---|
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
-| `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
+| `IronClawWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
 | `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
@@ -166,7 +166,7 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
 
 The Vite/TypeScript frontend under `frontend/` is compiled by `build.rs` into
 Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
-`Dockerfile.reborn` installs `frontend/` deps before the `cargo build` so the
+`Dockerfile` installs `frontend/` deps before the `cargo build` so the
 release image bundles compiled assets; `frontend/README.md` covers the JS
 toolchain.
 
@@ -176,7 +176,7 @@ The crate already owns `WebuiAuthenticator` impls, `SignedTokenSessionStore`,
 and the session lifecycle types. The OAuth callback's job is exactly that
 — turn a provider profile into a signed session `create_session` call
 — so the login mint path belongs in the same host-owned crate, not
-behind the product/API seam in `ironclaw_reborn_composition`.
+behind the product/API seam in `ironclaw_composition`.
 
 SSO sessions are user identity only. They must not inherit operator
 WebUI configuration privileges from the deployment. When the CLI
@@ -285,7 +285,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - **Session transport** is one-time login ticket in the callback
   redirect (`?login_ticket=<ticket>`) followed by same-origin
   exchange for the bearer — see
-  `ironclaw_reborn_composition/CLAUDE.md` → "Session transport
+  `ironclaw_composition/CLAUDE.md` → "Session transport
   decision" for the rationale.
 
 ### What the SSO router deliberately does NOT do

@@ -13,19 +13,19 @@ tokens:
 github:
   users:
     - login: reborn-dev
-      name: Reborn Dev
+      name: IronClaw Dev
       email: reborn-dev@example.com
     - login: reborn-reviewer
-      name: Reborn Reviewer
+      name: IronClaw Reviewer
       email: reborn-reviewer@example.com
   orgs:
     - login: nearai
       name: NEAR AI
-      description: Emulated organization for Reborn QA.
+      description: Emulated organization for IronClaw QA.
   repos:
     - owner: nearai
       name: ironclaw
-      description: Emulated IronClaw repo for Reborn QA.
+      description: Emulated IronClaw repo for IronClaw QA.
       language: Rust
       topics:
         - reborn

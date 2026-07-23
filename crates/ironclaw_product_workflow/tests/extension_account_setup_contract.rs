@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
     ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
-    ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
+    ExtensionAccountSetupRegistry, IronClawChannelConnectStrategy,
 };
 
 fn extension_id(value: &str) -> ExtensionId {
@@ -31,7 +31,7 @@ fn descriptor_with_display_name(
     let connection_requirement = ChannelConnectionRequirement {
         channel: extension.to_string(),
         display_name: display_name.to_string(),
-        strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+        strategy: IronClawChannelConnectStrategy::WebGeneratedCode,
         instructions: "Connect the account.".to_string(),
         input_placeholder: String::new(),
         submit_label: "Connect".to_string(),

@@ -5,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Duration;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_product_workflow::RebornLibSqlIdempotencyLedger;
-use ironclaw_product_workflow::RebornPostgresIdempotencyLedger;
+use ironclaw_product_workflow::IronClawLibSqlIdempotencyLedger;
+use ironclaw_product_workflow::IronClawPostgresIdempotencyLedger;
 
 // Shared ledger test support was renamed on fold-in to avoid colliding with the
 // product_workflow crate's own `tests/support/` module.
@@ -40,8 +40,8 @@ async fn libsql_settled_action_survives_reopen_and_replays() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let db_path = db_path.display().to_string();
-    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
-    let reopened = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let ledger = IronClawLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let reopened = IronClawLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
 
     assert_settled_action_survives_reopen_and_replays(&ledger, &reopened, "libsql-settled-replay")
         .await;
@@ -50,7 +50,7 @@ async fn libsql_settled_action_survives_reopen_and_replays() {
 async fn libsql_in_flight_action_blocks_until_lease_expires() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
-    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(10),
     );
@@ -60,7 +60,7 @@ async fn libsql_in_flight_action_blocks_until_lease_expires() {
 async fn libsql_release_allows_retry_without_waiting_for_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
-    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(60),
     );
@@ -71,11 +71,11 @@ async fn libsql_duplicate_reservation_contention_serializes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let db_path = db_path.display().to_string();
-    let first = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let first = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path).await,
         Duration::seconds(10),
     );
-    let second = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let second = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path).await,
         Duration::seconds(10),
     );
@@ -86,7 +86,7 @@ async fn libsql_duplicate_reservation_contention_serializes() {
 async fn libsql_settled_entry_limit_prunes_oldest() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
-    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(10),
     )
@@ -98,7 +98,7 @@ async fn libsql_settled_entry_limit_prunes_oldest() {
 async fn libsql_settled_prune_interval_defers_until_interval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
-    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(10),
     )
@@ -111,7 +111,7 @@ async fn libsql_settled_prune_interval_defers_until_interval() {
 async fn libsql_superseded_reservation_cannot_settle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
-    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawLibSqlIdempotencyLedger::with_in_flight_lease(
         libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(10),
     );
@@ -122,8 +122,9 @@ async fn libsql_superseded_reservation_cannot_settle() {
 async fn libsql_settle_missing_reservation_returns_transient() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
-    let ledger =
-        RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path.display().to_string()).await);
+    let ledger = IronClawLibSqlIdempotencyLedger::new(
+        libsql_filesystem(&db_path.display().to_string()).await,
+    );
 
     assert_settle_missing_reservation_returns_transient(&ledger, "libsql-missing-settle").await;
 }
@@ -132,12 +133,12 @@ async fn libsql_custom_root_isolated_from_default_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let filesystem = libsql_filesystem(&db_path.display().to_string()).await;
-    let custom = RebornLibSqlIdempotencyLedger::with_root(
+    let custom = IronClawLibSqlIdempotencyLedger::with_root(
         Arc::clone(&filesystem),
         custom_root("libsql"),
         Duration::seconds(60),
     );
-    let default = RebornLibSqlIdempotencyLedger::new(filesystem);
+    let default = IronClawLibSqlIdempotencyLedger::new(filesystem);
 
     assert_custom_root_isolated_from_default_root(&custom, &default, "libsql-custom-root").await;
 }
@@ -146,7 +147,7 @@ async fn libsql_actor_identity_is_part_of_fingerprint_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let db_path = db_path.display().to_string();
-    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let ledger = IronClawLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
 
     assert_actor_identity_is_part_of_fingerprint_path(&ledger, "libsql-actor-isolation").await;
 }
@@ -155,8 +156,8 @@ async fn postgres_settled_action_survives_reopen_and_replays_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::new(Arc::clone(&filesystem));
-    let reopened = RebornPostgresIdempotencyLedger::new(filesystem);
+    let ledger = IronClawPostgresIdempotencyLedger::new(Arc::clone(&filesystem));
+    let reopened = IronClawPostgresIdempotencyLedger::new(filesystem);
 
     assert_settled_action_survives_reopen_and_replays(
         &ledger,
@@ -171,7 +172,7 @@ async fn postgres_in_flight_action_blocks_until_lease_expires_when_configured() 
         return;
     };
     let ledger =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
+        IronClawPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
 
     assert_in_flight_action_blocks_until_lease_expires(&ledger, &unique_suffix("postgres-lease"))
         .await;
@@ -182,7 +183,7 @@ async fn postgres_release_allows_retry_without_waiting_for_lease_when_configured
         return;
     };
     let ledger =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(60));
+        IronClawPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(60));
 
     assert_release_allows_retry_without_waiting_for_lease(
         &ledger,
@@ -195,12 +196,12 @@ async fn postgres_duplicate_reservation_contention_serializes_when_configured() 
     let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let first = RebornPostgresIdempotencyLedger::with_in_flight_lease(
+    let first = IronClawPostgresIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         Duration::seconds(10),
     );
     let second =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
+        IronClawPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
 
     assert_duplicate_reservation_contention_serializes(
         &first,
@@ -215,7 +216,7 @@ async fn postgres_settled_entry_limit_prunes_oldest_when_configured() {
         return;
     };
     let ledger =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10))
+        IronClawPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10))
             .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
 
     assert_settled_entry_limit_prunes_oldest(&ledger, &unique_suffix("postgres-retention")).await;
@@ -226,7 +227,7 @@ async fn postgres_settled_prune_interval_defers_until_interval_when_configured()
         return;
     };
     let ledger =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10))
+        IronClawPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10))
             .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
             .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
 
@@ -242,7 +243,7 @@ async fn postgres_superseded_reservation_cannot_settle_when_configured() {
         return;
     };
     let ledger =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
+        IronClawPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
 
     assert_superseded_reservation_cannot_settle(&ledger, &unique_suffix("postgres-superseded"))
         .await;
@@ -252,7 +253,7 @@ async fn postgres_settle_missing_reservation_returns_transient_when_configured()
     let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::new(filesystem);
+    let ledger = IronClawPostgresIdempotencyLedger::new(filesystem);
 
     assert_settle_missing_reservation_returns_transient(
         &ledger,
@@ -265,12 +266,12 @@ async fn postgres_custom_root_isolated_from_default_root_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let custom = RebornPostgresIdempotencyLedger::with_root(
+    let custom = IronClawPostgresIdempotencyLedger::with_root(
         Arc::clone(&filesystem),
         custom_root("postgres"),
         Duration::seconds(60),
     );
-    let default = RebornPostgresIdempotencyLedger::new(filesystem);
+    let default = IronClawPostgresIdempotencyLedger::new(filesystem);
 
     assert_custom_root_isolated_from_default_root(
         &custom,
@@ -284,7 +285,7 @@ async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::new(filesystem);
+    let ledger = IronClawPostgresIdempotencyLedger::new(filesystem);
 
     assert_actor_identity_is_part_of_fingerprint_path(
         &ledger,

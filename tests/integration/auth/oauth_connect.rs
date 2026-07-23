@@ -1,6 +1,6 @@
-//! Reborn integration-test framework — slice 7: OAuth connect-flow.
+//! IronClaw integration-test framework — slice 7: OAuth connect-flow.
 //!
-//! Drives a real OAuth connect flow through the Reborn product-auth boundary:
+//! Drives a real OAuth connect flow through the IronClaw product-auth boundary:
 //! `create_flow` → `handle_oauth_callback` → assert `CredentialAccount`
 //! persisted and readable.  The token-exchange HTTP is captured by a
 //! `ScriptedOAuthTokenEgress` (no real network); all other stores (flow +
@@ -21,7 +21,7 @@ use ironclaw_auth::{
     AuthErrorCode, AuthFlowId, AuthProviderId, AuthorizationCodeHash, CredentialAccountListRequest,
     CredentialAccountLookupRequest, OpaqueStateHash, PkceVerifierHash,
 };
-use ironclaw_reborn_composition::test_support::build_oauth_product_auth_for_test;
+use ironclaw_composition::test_support::build_oauth_product_auth_for_test;
 
 /// Core slice-7 scenario: a real OAuth connect flow produces a persisted
 /// `CredentialAccount` that reads back correctly, and exactly one

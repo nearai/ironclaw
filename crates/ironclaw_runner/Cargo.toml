@@ -3,7 +3,7 @@ name = "ironclaw_runner"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Reborn runner control plane and loop-driver adapters for IronClaw"
+description = "IronClaw runner control plane and loop-driver adapters for IronClaw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -62,7 +62,7 @@ ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0"
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
 ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", features = ["test-support"] }
-ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
+ironclaw_event_store = { path = "../ironclaw_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }

@@ -1,4 +1,4 @@
-//! Approval resolution service for IronClaw Reborn.
+//! Approval resolution service for IronClaw.
 //!
 //! `ironclaw_approvals` resolves durable approval requests and issues scoped
 //! authorization leases. It does not prompt users, execute capabilities, or

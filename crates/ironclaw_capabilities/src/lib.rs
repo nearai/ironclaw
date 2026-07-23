@@ -1,4 +1,4 @@
-//! Capability invocation host contracts for IronClaw Reborn.
+//! Capability invocation host contracts for IronClaw.
 //!
 //! `ironclaw_capabilities` is the caller-facing capability invocation service.
 //! It coordinates authorization, approval resume, run-state transitions, and

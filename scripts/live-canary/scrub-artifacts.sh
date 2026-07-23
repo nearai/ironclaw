@@ -12,7 +12,7 @@ BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
 FIRST_PARTY_EXTENSIONS_ROOT="${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT:-${REPO_ROOT}/crates/ironclaw_first_party_extensions/assets}"
 NEARAI_MANIFEST_TEMPLATE="${REPO_ROOT}/scripts/live-canary/fixtures/nearai-runtime-manifest.toml"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
-BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
+BUNDLED_SKILL_OWNER="ironclaw_composition_bundled_skill"
 
 if [[ ! -d "${ARTIFACT_DIR}" ]]; then
   echo "Artifact directory does not exist: ${ARTIFACT_DIR}" >&2
@@ -149,7 +149,7 @@ is_verified_first_party_extension_manifest() {
     "${manifest}" | cmp -s -- "${NEARAI_MANIFEST_TEMPLATE}" -
 }
 
-# Reborn live QA copies each case's full home into the artifact staging tree.
+# IronClaw live QA copies each case's full home into the artifact staging tree.
 # In strict mode, remove only managed system-skill installations whose marker,
 # stable content hash, file set, and bytes all match the source-controlled
 # bundle. Unverified and operator-owned skills remain in scope for scanning.
@@ -157,8 +157,8 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
   while IFS= read -r -d '' marker; do
     skill_dir="$(dirname "${marker}")"
     case "${skill_dir}" in
-      "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
-      "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
+      "${ARTIFACT_DIR}"/*/ironclaw-home/*/local-dev/system/skills/*|\
+      "${ARTIFACT_DIR}"/ironclaw-home/*/local-dev/system/skills/*)
         if is_verified_bundled_skill "${marker}" "${skill_dir}"; then
           rm -rf -- "${skill_dir}"
         fi
@@ -166,7 +166,7 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     esac
   done < <(
     find "${ARTIFACT_DIR}" -type f \
-      -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
+      -path '*/ironclaw-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
       -print0
   )
 
@@ -183,7 +183,7 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     fi
   done < <(
     find "${ARTIFACT_DIR}" -type f \
-      -path '*/reborn-home/*/local-dev/system/extensions/*/manifest.toml' \
+      -path '*/ironclaw-home/*/local-dev/system/extensions/*/manifest.toml' \
       -print0
   )
 fi
@@ -248,7 +248,7 @@ is_redactable_artifact() {
   local file="$1"
   local base
   base="$(basename "${file}")"
-  # Per-case LLM trace recordings (reborn-webui-v2-live-qa `llm-traces/*.json`)
+  # Per-case LLM trace recordings (ironclaw-webui-v2-live-qa `llm-traces/*.json`)
   # are captured LLM I/O harvested for fixture curation. Matched by their
   # `llm-traces/` directory (the basename is an arbitrary case name) so that
   # under strict scrub any token-shaped material is redacted in place rather

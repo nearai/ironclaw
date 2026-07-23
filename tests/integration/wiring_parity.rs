@@ -1,7 +1,7 @@
 //! W5-WIRING-PARITY (issue #5637): the harness's `DefaultPlannedRuntimeParts`
 //! construction (`support/group.rs`'s `into_group`) stays field-Some/None-
 //! identical to production's local-dev construction
-//! (`ironclaw_reborn_composition::runtime::build_reborn_runtime`), modulo a
+//! (`ironclaw_composition::runtime::build_ironclaw_runtime`), modulo a
 //! named allowlist of deliberate test-double substitutions — so a new
 //! port/field lands loud instead of silently drifting. Zero production-crate
 //! edits: the mechanism is entirely test-side.
@@ -25,7 +25,7 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
@@ -33,18 +33,18 @@ mod support;
 use std::collections::HashSet;
 
 use ironclaw_host_api::CapabilityId;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::harness::HarnessResult;
-use reborn_support::harness::options::ToolsProfile;
-use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::harness::HarnessResult;
+use ironclaw_support::harness::options::ToolsProfile;
+use ironclaw_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 
 // ---------------------------------------------------------------------------
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
 // ---------------------------------------------------------------------------
 
-/// Hand-derived from `crates/ironclaw_reborn_composition/src/runtime.rs`
-/// lines 3365-3459 (`build_reborn_runtime`, `LocalDev`/`LocalDevYolo`
+/// Hand-derived from `crates/ironclaw_composition/src/runtime.rs`
+/// lines 3365-3459 (`build_ironclaw_runtime`, `LocalDev`/`LocalDevYolo`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
 /// against this range 2026-07-04.) The smoke build below at least proves the
@@ -90,7 +90,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
 /// Deliberate test-double substitutions: `(field, reason)`. Every other field
 /// must match `EXPECTED_PRODUCTION_SHAPE` exactly, or the parity assertion
 /// fails naming the field. Re-derived by reading both `group.rs`'s
-/// `into_group` (harness) and `runtime.rs`'s `build_reborn_runtime`
+/// `into_group` (harness) and `runtime.rs`'s `build_ironclaw_runtime`
 /// (production) literals in full.
 const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
     (
@@ -182,46 +182,46 @@ fn assert_planned_runtime_parts_shape_parity(
 
 #[tokio::test]
 async fn test_default_planned_runtime_parts_shape_matches_production() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .build()
         .await
         .expect("test_default() harness builds");
     assert_planned_runtime_parts_shape_parity(
         harness.planned_runtime_parts_shape(),
-        "RebornIntegrationHarness::test_default()",
+        "IronClawIntegrationHarness::test_default()",
     );
 }
 
 #[tokio::test]
 async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
-    let group = RebornIntegrationGroup::builtin_tools()
+    let group = IronClawIntegrationGroup::builtin_tools()
         .await
         .expect("builtin_tools() group builds");
     assert_planned_runtime_parts_shape_parity(
         group.planned_runtime_parts_shape(),
-        "RebornIntegrationGroup::builtin_tools()",
+        "IronClawIntegrationGroup::builtin_tools()",
     );
 }
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
 /// referenced `LocalDev` literal still exists and the profile still builds.
-/// Mirrors `crates/ironclaw_reborn_composition/tests/runtime.rs:132-146`. The
+/// Mirrors `crates/ironclaw_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
-/// introspecting this built `RebornRuntime` (there is no production-side
+/// introspecting this built `IronClawRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted
 /// gap noted in the module doc).
 #[tokio::test]
 async fn local_dev_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
-    let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
+    let policy = ironclaw_composition::local_dev_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::RebornBuildInput::local_dev(
+    let input = ironclaw_composition::IronClawBuildInput::local_dev(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )
     .with_runtime_policy(policy);
-    let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-        ironclaw_reborn_composition::RebornRuntimeInput::from_services(input),
+    let runtime = ironclaw_composition::build_ironclaw_runtime(
+        ironclaw_composition::IronClawRuntimeInput::from_services(input),
     )
     .await
     .expect(
@@ -250,20 +250,20 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     (
         "project",
         "PROJECT_CREATE_CAPABILITY_ID (harness/profiles/project.rs) is a local-dev synthetic \
-         capability (E-PROJ, ironclaw_reborn_composition::test_support), not part of \
+         capability (E-PROJ, ironclaw_composition::test_support), not part of \
          builtin_first_party_package()",
     ),
     (
         "outbound",
         "OUTBOUND_DELIVERY_TARGETS_LIST/TARGET_SET_CAPABILITY_ID (harness/profiles/outbound.rs) \
          are local-dev synthetic capabilities (C-SYNTH outbound, \
-         ironclaw_reborn_composition::test_support), not part of builtin_first_party_package()",
+         ironclaw_composition::test_support), not part of builtin_first_party_package()",
     ),
     (
         "skill",
         "skill_activation_tools_profile()'s SKILL_ACTIVATE_CAPABILITY_ID \
          (harness/profiles/skill.rs) is a local-dev synthetic capability (E-SKILL, \
-         ironclaw_reborn_composition::test_support), not part of builtin_first_party_package(); \
+         ironclaw_composition::test_support), not part of builtin_first_party_package(); \
          skill_management_tools_profile()'s ids in the same file ARE checked below",
     ),
     (
@@ -288,7 +288,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// **Deliberately NOT unioned**: `extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS`
 /// (the four `builtin.extension_search`/`_install`/`_activate`/`_remove` ids).
 /// Their real values are defined in a production crate
-/// (`ironclaw_reborn_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
+/// (`ironclaw_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
 /// but as a `pub(crate)` constant with no public accessor — visibility-blocked
 /// from this test crate short of a `crates/` change, which is out of scope
 /// here. Unioning the test-support copy of this list back in would recreate
@@ -298,7 +298,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// these 4 ids from the check it runs for the same reason, and the PR that
 /// introduced this restructure (W5-WIRING-PARITY finding 1) for the tracked
 /// follow-up (export the list, or add a public accessor, from
-/// `ironclaw_reborn_composition`).
+/// `ironclaw_composition`).
 fn production_capability_surface() -> HashSet<String> {
     let mut surface: HashSet<String> = ironclaw_host_runtime::builtin_first_party_package()
         .expect("builtin first-party package parses")
@@ -308,13 +308,13 @@ fn production_capability_surface() -> HashSet<String> {
         .map(|capability| capability.id.as_str().to_string())
         .collect();
     surface.extend(
-        reborn_support::github::capability_ids()
+        ironclaw_support::github::capability_ids()
             .expect("github extension manifest parses")
             .iter()
             .map(|id| id.as_str().to_string()),
     );
     surface.extend(
-        reborn_support::extension_surface::bundled_extension_manifest_capability_ids()
+        ironclaw_support::extension_surface::bundled_extension_manifest_capability_ids()
             .expect("bundled extension manifests parse")
             .iter()
             .map(|id| id.as_str().to_string()),
@@ -336,7 +336,7 @@ fn production_capability_surface() -> HashSet<String> {
 /// `SYNTHETIC_CAPABILITY_SKIP_LIST` contribute an empty (trivially passing)
 /// list, documented via that table instead of here.
 fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<String>)>> {
-    use reborn_support::harness::profiles;
+    use ironclaw_support::harness::profiles;
 
     fn ids_of(profile: ToolsProfile) -> Vec<String> {
         profile
@@ -384,7 +384,7 @@ fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<St
                 .into_iter()
                 .map(CapabilityId::into_string)
                 .filter(|id| {
-                    !reborn_support::extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS
+                    !ironclaw_support::extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS
                         .contains(&id.as_str())
                 })
                 .collect()

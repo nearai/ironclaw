@@ -207,7 +207,7 @@ impl ResourceScope {
 /// can be tracked separately within the same user's daily budget.
 ///
 /// **Contract-only for now:** schedulers that pre-date this enum still
-/// open reservations through plain [`ResourceScope`]. As the Reborn
+/// open reservations through plain [`ResourceScope`]. As the IronClaw
 /// runtime grows native heartbeats/routines, those call sites will pass
 /// the kind through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

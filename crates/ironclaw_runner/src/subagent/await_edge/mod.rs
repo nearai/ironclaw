@@ -1,6 +1,6 @@
 //! Subagent await-edge delivery — the CAS'd filesystem replacement for the
 //! in-memory `BoundedSubagentGateResolutionStore` (deleted with this module's
-//! introduction). See `docs/reborn/subagent-spawn/thread-harness-design.md`
+//! introduction). See `docs/ironclaw/subagent-spawn/thread-harness-design.md`
 //! for the full design; `§13`'s P1.x rows are this module's scope (blocking
 //! mode only — background mode, the CLI `subagent edges` command, and
 //! `subagent_inspect`/`subagent_extend` are later PRs).

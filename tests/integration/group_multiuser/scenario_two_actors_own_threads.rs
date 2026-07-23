@@ -8,15 +8,15 @@
 //! the fix, any actor other than the group's canonical default actor failed
 //! deterministically with `driver_unavailable` / "unknown thread".
 
-use super::reborn_support::builder::RebornIntegrationHarness;
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::builder::IronClawIntegrationHarness;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // Thread A: the group's default actor (`HARNESS_ACTOR_ID`).
     let a = g
         .thread("conv-multiuser-a")
-        .script([RebornScriptedReply::text("reply-for-actor-a")])
+        .script([IronClawScriptedReply::text("reply-for-actor-a")])
         .build()
         .await?;
     a.submit_turn("hello from actor a")
@@ -32,7 +32,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let b = g
         .thread("conv-multiuser-b")
         .with_actor_id("reborn-actor-b")
-        .script([RebornScriptedReply::text("reply-for-actor-b")])
+        .script([IronClawScriptedReply::text("reply-for-actor-b")])
         .build()
         .await?;
     // Non-vacuity pin: the seam must resolve a genuinely DISTINCT owner for
@@ -64,9 +64,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 /// separate `/tenants/<tenant>/users/<user>/threads` subtree). Called once per
 /// direction so the symmetric check can't silently de-sync.
 async fn assert_cannot_read_other_actor(
-    reader: &RebornIntegrationHarness,
+    reader: &IronClawIntegrationHarness,
     reader_name: &str,
-    other: &RebornIntegrationHarness,
+    other: &IronClawIntegrationHarness,
     other_name: &str,
     other_reply: &str,
 ) -> HarnessResult<()> {

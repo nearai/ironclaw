@@ -28,7 +28,7 @@ use ironclaw_turns::run_profile::{
 /// Narrow seam for materializing hook-emitted `msg:hook.*` content refs so
 /// the downstream model resolver can find them. Production deployments
 /// adapter-wrap [`ironclaw_turns::run_profile::InstructionMaterializationStore`]
-/// (Reborn does this in `loop_driver_host.rs`); tests can supply a no-op
+/// (IronClaw does this in `loop_driver_host.rs`); tests can supply a no-op
 /// or in-memory recorder.
 ///
 /// The trait deliberately does **not** take `LoopRunContext` — the adapter
@@ -65,7 +65,7 @@ pub struct HookedLoopPromptPort {
     /// hook patches. Without this, the downstream model resolver cannot find
     /// the hook messages and the request fails with
     /// `model message reference is unavailable`. Required for production
-    /// wiring (Reborn's factory installs an adapter delegating to
+    /// wiring (IronClaw's factory installs an adapter delegating to
     /// [`ironclaw_turns::run_profile::InstructionMaterializationStore`]);
     /// tests can use any [`HookPromptMaterializationSink`] impl.
     materialization_sink: Option<Arc<dyn HookPromptMaterializationSink>>,

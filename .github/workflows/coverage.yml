@@ -217,16 +217,16 @@ jobs:
           cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
 
-      # Pre-build the reborn binary under the same llvm-cov env so the E2E
+      # Pre-build the IronClaw binary under the same llvm-cov env so the E2E
       # fixtures find it cached instead of doing a cold instrumented build
       # inside a pytest timeout. The WebChat v2 and OpenAI-compatible route
       # surfaces are both unconditional, so one binary covers every scenario
       # selected below.
-      - name: Build instrumented ironclaw-reborn
+      - name: Build instrumented IronClaw
         run: cargo build -p ironclaw --bin ironclaw
 
       - name: Mark OpenAI-compatible binary build
-        run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
+        run: touch target/debug/.ironclaw-openai-compat.stamp
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -249,24 +249,24 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
-      - name: Check Reborn Responses API E2E inventory
-        run: python3 scripts/ci/check-reborn-responses-e2e-manifest.py
+      - name: Check IronClaw Responses API E2E inventory
+        run: python3 scripts/ci/check-ironclaw-responses-e2e-manifest.py
 
-      - name: Run Reborn E2E coverage tests
+      - name: Run IronClaw E2E coverage tests
         run: |
-          mapfile -t reborn_e2e_tests < <(
+          mapfile -t ironclaw_e2e_tests < <(
             {
-              sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_coverage_tests.txt
-              sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_responses_e2e_tests.txt
+              sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/ironclaw_coverage_tests.txt
+              sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/ironclaw_responses_e2e_tests.txt
             } | sort -u
           )
-          if ((${#reborn_e2e_tests[@]} == 0)); then
-            echo "No Reborn coverage tests selected"
+          if ((${#ironclaw_e2e_tests[@]} == 0)); then
+            echo "No IronClaw coverage tests selected"
             exit 1
           fi
-          printf 'Selected Reborn E2E coverage tests:\n'
-          printf '  %s\n' "${reborn_e2e_tests[@]}"
-          pytest "${reborn_e2e_tests[@]}" -v --timeout=120
+          printf 'Selected IronClaw E2E coverage tests:\n'
+          printf '  %s\n' "${ironclaw_e2e_tests[@]}"
+          pytest "${ironclaw_e2e_tests[@]}" -v --timeout=120
         env:
           RUST_LOG: ironclaw=info
           RUST_BACKTRACE: "1"

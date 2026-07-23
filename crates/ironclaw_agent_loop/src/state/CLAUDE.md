@@ -21,7 +21,7 @@ Owns the typed, resumable state carried by the canonical loop executor.
   cursors, plan trees, and product state belong behind host/workspace context
   sources and are surfaced through prompt/context ports.
 - State types may depend on neutral `ironclaw_turns` refs and request types;
-  they must not depend on Reborn runtime, product, DB, or capability-host
+  they must not depend on IronClaw runtime, product, DB, or capability-host
   implementations.
 
 ## Adding code

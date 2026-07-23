@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v3"
 id = "google-calendar"
 name = "Google Calendar"
 version = "0.1.0"
-description = "First-party Google Calendar capabilities for Reborn."
+description = "First-party Google Calendar capabilities for IronClaw."
 trust = "first_party_requested"
 
 [runtime]

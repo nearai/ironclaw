@@ -8,7 +8,7 @@ use ironclaw_host_runtime::{
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, http_test_policy, skill_mounts};
 
-/// `pub(crate)`: also used by `RebornIntegrationGroupBuilder::skill_management_tools`
+/// `pub(crate)`: also used by `IronClawIntegrationGroupBuilder::skill_management_tools`
 /// (`group_constructors.rs`, C-SKILL) to wire the SAME preset onto the
 /// int-tier group, so the QA/trace-tier smoke test and the int-tier group
 /// never drift on capability ids / mounts / policy.
@@ -28,15 +28,13 @@ pub(crate) fn skill_management_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
-            "reborn-e2e-skill-management-tools",
-            "reborn-e2e-skill-management-user",
+            "ironclaw-e2e-skill-management-tools",
+            "ironclaw-e2e-skill-management-user",
         )?
     })
 }
@@ -53,12 +51,12 @@ pub(crate) async fn skill_management_tools() -> HarnessResult<HostRuntimeCapabil
 /// rather than re-hardcoded here — which `create_capability_port` wraps
 /// onto the port and `into_group` wires as the runtime's
 /// `skill_context_source`. The skill file the model activates is seeded as
-/// a system-scoped skill by `RebornIntegrationGroup::skill_activation_tools`.
+/// a system-scoped skill by `IronClawIntegrationGroup::skill_activation_tools`.
 /// Mirrors `skill_management_tools`/`project_tools`.
 pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![CapabilityId::new(
-            ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
+            ironclaw_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
         )?],
         effect_kinds: vec![
             EffectKind::DispatchCapability,
@@ -68,16 +66,14 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_composition::local_dev_yolo_runtime_policy(true)?),
         )
         .with_skill_activation_tenant(tenant.clone()),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
-            "reborn-e2e-skill-activation-tools",
-            "reborn-e2e-skill-activation-user",
+            "ironclaw-e2e-skill-activation-tools",
+            "ironclaw-e2e-skill-activation-user",
         )?
     })
 }

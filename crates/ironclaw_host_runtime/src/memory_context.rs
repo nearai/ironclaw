@@ -1,6 +1,6 @@
 //! Production [`MemoryPromptContextService`] adapter backed by IronClaw memory.
 //!
-//! This adapter bridges the Reborn memory service facade into the agent loop
+//! This adapter bridges the IronClaw memory service facade into the agent loop
 //! context pipeline. It derives the host-resolved IronClaw memory invocation
 //! scope from the request's [`TurnScope`] and [`TurnActor`], then delegates
 //! retrieval to [`MemoryService`]. The loop-facing adapter still owns final

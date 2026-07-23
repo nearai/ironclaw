@@ -98,7 +98,7 @@ emit_audit.summary = "polymarket hook failed"
 
 - **Subscription side**: a new dispatcher path
   `dispatch_event_triggered_at(EventCursor, RuntimeEvent)`. The
-  reborn factory wires it to `ironclaw_events`'s event-stream
+  IronClaw factory wires it to `ironclaw_events`'s event-stream
   consumer (`EventStreamSubscriber`-like trait).
 - **Backpressure**: event-stream consumers must not block the
   event-emit path. The hook dispatcher reads events at its own pace
@@ -121,7 +121,7 @@ emit_audit.summary = "polymarket hook failed"
 
 ### Phase 5 implementation notes
 
-- The Reborn wiring uses a pull-driven durable-log consumer rather than
+- The IronClaw wiring uses a pull-driven durable-log consumer rather than
   dispatching from the event emit path. The default poll interval is 50ms and
   the default replay batch is 64 events; callers can tune both on
   `EventTriggeredHookSubscription`.
@@ -134,7 +134,7 @@ emit_audit.summary = "polymarket hook failed"
   PR #3573 covered `ironclaw_runner`'s milestone wiring, but the hook crate
   itself did not gain the dep until the event-triggered consumer landed. The
   hook crate still does not depend on host runtime, dispatcher, secrets,
-  network, WASM, or Reborn internals; the `ironclaw_architecture` boundary
+  network, WASM, or IronClaw internals; the `ironclaw_architecture` boundary
   test enforces this.
 
 ## Cross-cutting constraints

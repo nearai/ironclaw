@@ -31,7 +31,7 @@ use ironclaw_turns::{
     },
 };
 
-/// Checkpoint payload schema for the default Reborn loop.
+/// Checkpoint payload schema for the default IronClaw loop.
 ///
 /// Required parked-activity ids are part of the v2 payload shape. Older v1
 /// checkpoints are intentionally not migrated by this refactor.

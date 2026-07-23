@@ -4,15 +4,15 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts before changing behavior:
-  - `docs/reborn/contracts/events.md`
-  - `docs/reborn/contracts/events-projections.md`
+- Use these IronClaw contracts before changing behavior:
+  - `docs/ironclaw/contracts/events.md`
+  - `docs/ironclaw/contracts/events-projections.md`
   - `crates/ironclaw_event_projections/AGENTS.md`
   - `crates/ironclaw_outbound/AGENTS.md`
 
 ## What This Crate Owns
 
-- Transport-neutral projection stream management for Reborn product-facing reads.
+- Transport-neutral projection stream management for IronClaw product-facing reads.
 - Access, admission, bounded subscription buffers, live-update forwarding, and explicit lag/rebase signals.
 - Stream-boundary redaction validation for product-safe projection DTOs.
 - Outbound push-candidate lookup through outbound policy, without performing transport sends.
@@ -27,7 +27,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_event_streams --locked`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn --locked`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture ironclaw --locked`
 - Run `cargo clippy -p ironclaw_event_streams --all-targets -- -D warnings` before requesting review.
 
 ## Agent Notes

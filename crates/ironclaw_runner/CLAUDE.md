@@ -1,12 +1,12 @@
 # ironclaw_runner
 
-Owns driver-side Reborn loop integration.
+Owns driver-side IronClaw loop integration.
 
 ## Main entry points
 
 - `planned_driver.rs` adapts `ironclaw_agent_loop` families and executor to the
   runner-facing `AgentLoopDriver` contract.
-- `text_loop_driver.rs` is the legacy text-only Reborn driver.
+- `text_loop_driver.rs` is the legacy text-only IronClaw driver.
 - `driver_registry.rs` owns driver registration and readiness metadata.
 - `planned_driver_factory.rs` wires the default planned driver and profile.
 - `loop_driver_host.rs` composes concrete loop host ports for claimed runs.
@@ -14,12 +14,12 @@ Owns driver-side Reborn loop integration.
 - `turn_scheduler.rs` owns scheduler-backed claiming, heartbeat, lease recovery,
   bounded concurrency, wake, and shutdown behavior next to the per-run executor.
 - `runtime.rs` builds default and product-live planned runtime compositions.
-- `production_readiness.rs` validates production readiness of the Reborn loop
+- `production_readiness.rs` validates production readiness of the IronClaw loop
   composition.
 
 ## Boundaries
 
-- This crate bridges neutral contracts to concrete Reborn composition. It does
+- This crate bridges neutral contracts to concrete IronClaw composition. It does
   not define strategy traits, loop state, or canonical executor mechanics.
 - `ironclaw_agent_loop` owns loop families and executor behavior.
 - `ironclaw_turns` owns runner and host contracts.
@@ -45,7 +45,7 @@ Owns driver-side Reborn loop integration.
 
 ## Common mistakes
 
-- Do not expose planner strategy slots through Reborn APIs.
+- Do not expose planner strategy slots through IronClaw APIs.
 - Do not duplicate neutral DTOs from `ironclaw_turns`.
 - Do not append product-live special cases to `PlannedDriver`.
 - Do not hide new readiness checks or product policy inside runtime/factory

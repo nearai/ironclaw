@@ -1,8 +1,8 @@
-//! Shared Google OAuth connect-flow helper for Reborn integration tests:
+//! Shared Google OAuth connect-flow helper for IronClaw integration tests:
 //! [`connect_google_account`] drives `create_flow` → `handle_oauth_callback` →
 //! `get_account` to produce a connected `CredentialAccount`.
 
-// Shared support module: not every test binary that mounts the `reborn_support`
+// Shared support module: not every test binary that mounts the `ironclaw_support`
 // tree calls into this helper (e.g. `support_unit_tests` exercises none of it),
 // so its symbols read as dead there under `-D warnings`. Module-level allow
 // matches `builder.rs`/`assertions.rs`.
@@ -15,8 +15,8 @@ use ironclaw_auth::{
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
-use ironclaw_reborn_composition::{
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+use ironclaw_composition::{
+    IronClawOAuthCallbackOutcome, IronClawOAuthCallbackRequest,
     test_support::OAuthProductAuthTestBundle,
 };
 use secrecy::SecretString;
@@ -65,11 +65,11 @@ pub async fn connect_google_account(
 
     let response = bundle
         .services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
+        .handle_oauth_callback(IronClawOAuthCallbackRequest {
             scope: scope.clone(),
             flow_id: flow.id,
             opaque_state_hash: state_hash,
-            outcome: RebornOAuthCallbackOutcome::Authorized {
+            outcome: IronClawOAuthCallbackOutcome::Authorized {
                 provider_request: OAuthProviderCallbackRequest {
                     provider: provider.clone(),
                     account_label: CredentialAccountLabel::new("Google Account").unwrap(),

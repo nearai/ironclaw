@@ -28,13 +28,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// when this harness surfaces the synthetic `outbound_delivery_*`
     /// capabilities (C-SYNTH outbound seam). Only `outbound_target_tools()` sets
     /// this. `new_with_options` pairs the facade with the local-dev settings
-    /// stores captured from `RebornServices` to build `OutboundTargetToolsParts`.
+    /// stores captured from `IronClawServices` to build `OutboundTargetToolsParts`.
     pub(crate) outbound_target_facade: Option<(
         Arc<super::super::outbound_preferences::FakeOutboundPreferencesFacade>,
         bool,
     )>,
     /// C-JOURNEY: override the local-dev host network HTTP egress
-    /// (`RebornBuildInput::with_network_http_egress_for_test`). Without this,
+    /// (`IronClawBuildInput::with_network_http_egress_for_test`). Without this,
     /// `build_local_runtime` defaults to a REAL `ReqwestNetworkTransport`
     /// (`factory.rs`), so any harness dispatching a bundled WASM capability
     /// that crosses HTTP (e.g. `github.*`) on the `new_with_options` path MUST
@@ -43,7 +43,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// C-JOURNEY: bundled first-party WASM packages (e.g. github) to publish
     /// directly into the local-dev active-extension registry at construction
-    /// time, via `RebornServices::publish_bundled_extension_for_test`
+    /// time, via `IronClawServices::publish_bundled_extension_for_test`
     /// (reaches the SAME `ActiveExtensionPublisher::publish` step
     /// `builtin.extension_activate` calls). Without this, a bundled package's
     /// capabilities are granted/trusted at the harness-authority layer
@@ -61,17 +61,16 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// (the invented-vendor fixture, overview §8).
     pub(crate) fixture_extension_dirs: Vec<(std::path::PathBuf, String)>,
     /// `first_party` extension factories the harness assembles into the
-    /// composition input (`RebornBuildInput::with_native_extension_factories`
+    /// composition input (`IronClawBuildInput::with_native_extension_factories`
     /// — the same seam the binary uses).
     pub(crate) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     /// Channel-adapter bindings for non-`first_party`-runtime channel
-    /// extensions (`RebornBuildInput::with_channel_extension_bindings` — the
+    /// extensions (`IronClawBuildInput::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
-    pub(crate) channel_extension_bindings:
-        Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
+    pub(crate) channel_extension_bindings: Vec<ironclaw_composition::ChannelExtensionBinding>,
     /// Binary-parity account-setup declarations (extension-runtime §5.5),
-    /// the `RebornBuildInput::with_account_setup_descriptors` seam.
+    /// the `IronClawBuildInput::with_account_setup_descriptors` seam.
     pub(crate) account_setup_descriptors:
         Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
     /// Typed handle for the recording network egress when the profile wants
@@ -90,7 +89,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) project_service_fault_injection: bool,
     /// Durable tool-result projection seam (issue #5838): when `true`, the
     /// harness backs its capability io with the REAL `StagedCapabilityIo`
-    /// (via `ironclaw_reborn_composition::test_support::staged_capability_io_for_test`,
+    /// (via `ironclaw_composition::test_support::staged_capability_io_for_test`,
     /// wired over this harness's own local-dev `thread_service`) instead of
     /// the ephemeral `ProductLiveCapabilityIo` test double. Opt-in and
     /// explicit rather than a profile default, so the ~100 other
@@ -106,9 +105,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Opt-in; every other harness stays byte-identical.
     pub(crate) trigger_active_run_lookup_requested: bool,
     /// Provider-instance readiness map, "config set" + restart arm: when
-    /// `true`, registers a dummy Google OAuth backend on the `RebornBuildInput`
+    /// `true`, registers a dummy Google OAuth backend on the `IronClawBuildInput`
     /// via the SAME generic production builder
-    /// (`RebornBuildInput::with_vendor_oauth_client`)
+    /// (`IronClawBuildInput::with_vendor_oauth_client`)
     /// that `ironclaw config set google.client_id`/`client_secret` feeds in
     /// production — proving the readiness-map check clears once an operator
     /// configures the instance, with no test-only bypass. `false` (the
@@ -208,20 +207,20 @@ impl HostRuntimeHarnessOptions {
 
     /// Binary-parity channel-adapter binding for channel extensions whose
     /// runtime is NOT `first_party` (extension-runtime P6): mirrors
-    /// `RebornBuildInput::with_channel_extension_bindings` the same way the
+    /// `IronClawBuildInput::with_channel_extension_bindings` the same way the
     /// native factories mirror the CLI assembly. Without it, composition
     /// binds the transitional `HostServedChannelBridge`, whose `inbound`
     /// rejects every verified request with `ChannelError::Unsupported`.
     pub(crate) fn with_channel_extension_binding(
         mut self,
-        binding: ironclaw_reborn_composition::ChannelExtensionBinding,
+        binding: ironclaw_composition::ChannelExtensionBinding,
     ) -> Self {
         self.channel_extension_bindings.push(binding);
         self
     }
 
     /// Binary-parity account-setup declaration (extension-runtime §5.5):
-    /// mirrors `RebornBuildInput::with_account_setup_descriptors` the same
+    /// mirrors `IronClawBuildInput::with_account_setup_descriptors` the same
     /// way the native factories mirror the CLI assembly.
     pub(crate) fn with_account_setup_descriptor(
         mut self,

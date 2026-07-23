@@ -33,13 +33,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
-      has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
+      has_ironclaw_cli: ${{ steps.non_pr.outputs.has_ironclaw_cli || steps.diff.outputs.has_ironclaw_cli }}
     steps:
       - id: non_pr
         if: github.event_name == 'push'
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
-          echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
+          echo "has_ironclaw_cli=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -60,10 +60,10 @@ jobs:
             echo "No code changes — style checks will be skipped"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
-            echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_cli/|crates/ironclaw_config/|crates/ironclaw_architecture/tests/ironclaw_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|ironclaw-release-compile)\.yml$)'; then
+            echo "has_ironclaw_cli=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
+            echo "has_ironclaw_cli=false" >> "$GITHUB_OUTPUT"
           fi
 
   clippy-matrix:
@@ -219,7 +219,7 @@ jobs:
           scripts/ci/test-check-hermetic-env.sh
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-package-feature-flags.sh
-          scripts/ci/test-reborn-crate-test-buckets.sh
+          scripts/ci/test-ironclaw-crate-test-buckets.sh
           bash .github/scripts/test-pr-labeler.sh
 
   clippy:
@@ -321,10 +321,10 @@ jobs:
       - name: Check lints
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
-  reborn-cli-smoke:
-    name: Reborn CLI smoke tests
+  ironclaw-cli-smoke:
+    name: IronClaw CLI smoke tests
     needs: changes
-    if: needs.changes.outputs.has_reborn_cli == 'true'
+    if: needs.changes.outputs.has_ironclaw_cli == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -335,7 +335,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: reborn-cli-smoke
+          shared-key: ironclaw-cli-smoke
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -351,18 +351,18 @@ jobs:
           cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Test Reborn boot config crate
-        run: cargo test -p ironclaw_reborn_config
-      - name: Test Reborn CLI binary crate
+      - name: Test IronClaw boot config crate
+        run: cargo test -p ironclaw_config
+      - name: Test IronClaw CLI binary crate
         run: cargo test -p ironclaw
-      - name: Test Reborn libSQL restart integration
+      - name: Test IronClaw libSQL restart integration
         run: |
           cargo test -p ironclaw_runner \
             --test loop_driver_host \
             turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
             -- --nocapture
-      - name: Test Reborn architecture boundaries
-        run: cargo test -p ironclaw_architecture reborn
+      - name: Test IronClaw architecture boundaries
+        run: cargo test -p ironclaw_architecture ironclaw
 
   no-panics:
     name: No panics in production code
@@ -393,7 +393,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      # Gate: ironclaw_reborn_composition's share of production crate code must
+      # Gate: ironclaw_composition's share of production crate code must
       # not grow past the committed ceiling (scripts/ci/composition-budget.toml).
       # Pure bash over the working tree — no compile, seconds to run.
       - name: Check composition mass budget
@@ -420,7 +420,7 @@ jobs:
       - deny-check
       - tracked-ignored-files
       - static-checks
-      - reborn-cli-smoke
+      - ironclaw-cli-smoke
       - no-panics
       - composition-budget
       - webui-v2-js-lint
@@ -431,8 +431,8 @@ jobs:
           persist-credentials: false
       - run: |
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
-            if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
-              echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"
+            if [[ "${{ needs.changes.outputs.has_ironclaw_cli }}" == "true" && "${{ needs.ironclaw-cli-smoke.result }}" != "success" ]]; then
+              echo "IronClaw CLI smoke failed: ${{ needs.ironclaw-cli-smoke.result }}"
               exit 1
             fi
             echo "No code changes — style checks skipped correctly"
@@ -463,7 +463,7 @@ jobs:
 
           for job_result in \
             "no-panics=${{ needs.no-panics.result }}" \
-            "reborn-cli-smoke=${{ needs.reborn-cli-smoke.result }}" \
+            "ironclaw-cli-smoke=${{ needs.ironclaw-cli-smoke.result }}" \
             "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"

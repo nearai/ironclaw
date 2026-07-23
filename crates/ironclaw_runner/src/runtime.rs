@@ -1,4 +1,4 @@
-//! Default Reborn runtime-loop composition.
+//! Default IronClaw runtime-loop composition.
 
 use std::{error::Error, fmt, sync::Arc};
 
@@ -35,7 +35,7 @@ use crate::{
     app_loop_family::build_loop_family_registry_with_overrides,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
-        HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
+        HookDispatcherBuilderFactory, IronClawLoopDriverHostFactory, TextOnlyLoopHostConfig,
     },
     loop_exit_applier::{
         AwaitDependentRunEvidenceStore, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
@@ -52,7 +52,7 @@ use crate::{
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
-    turn_run_executor::RebornTurnRunExecutor,
+    turn_run_executor::IronClawTurnRunExecutor,
     turn_scheduler::{
         SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig,
         TurnRunSchedulerHandle, TurnRunWakeChannel,
@@ -93,7 +93,8 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
-pub const REBORN_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
+pub const IRONCLAW_TOOL_DISCLOSURE_ENV: &str = "IRONCLAW_TOOL_DISCLOSURE";
+const LEGACY_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolDisclosureMode {
@@ -104,7 +105,15 @@ pub enum ToolDisclosureMode {
 
 impl ToolDisclosureMode {
     pub fn from_env() -> Self {
-        match std::env::var(REBORN_TOOL_DISCLOSURE_ENV) {
+        let (env_name, value) = match std::env::var(IRONCLAW_TOOL_DISCLOSURE_ENV) {
+            Ok(value) => (IRONCLAW_TOOL_DISCLOSURE_ENV, Ok(value)),
+            Err(std::env::VarError::NotPresent) => (
+                LEGACY_TOOL_DISCLOSURE_ENV,
+                std::env::var(LEGACY_TOOL_DISCLOSURE_ENV),
+            ),
+            Err(error) => (IRONCLAW_TOOL_DISCLOSURE_ENV, Err(error)),
+        };
+        match value {
             Ok(value) => Self::from_raw(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::from_raw(None),
             // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
@@ -112,10 +121,10 @@ impl ToolDisclosureMode {
             // unset default.
             Err(error @ std::env::VarError::NotUnicode(_)) => {
                 tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_TOOL_DISCLOSURE_ENV,
+                    target: "ironclaw::runtime",
+                    env = env_name,
                     error = %error,
-                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; using default"
+                    "tool disclosure environment variable is not valid UTF-8; using default"
                 );
                 Self::from_raw(None)
             }
@@ -123,18 +132,18 @@ impl ToolDisclosureMode {
     }
 
     /// Progressive tool disclosure defaults **off** — an unset, empty, or
-    /// unrecognized `REBORN_TOOL_DISCLOSURE` leaves the request path
+    /// unrecognized `IRONCLAW_TOOL_DISCLOSURE` leaves the request path
     /// byte-identical to the pre-disclosure behavior. Only an explicit
-    /// `REBORN_TOOL_DISCLOSURE=bridged` opts into the bridged path.
+    /// `IRONCLAW_TOOL_DISCLOSURE=bridged` opts into the bridged path.
     fn from_raw(raw: Option<&str>) -> Self {
         match raw {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
             Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
             Some(value) if !value.is_empty() => {
                 tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
+                    target: "ironclaw::runtime",
                     value,
-                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
+                    "unrecognized IRONCLAW_TOOL_DISCLOSURE value; falling back to default Off"
                 );
                 Self::Off
             }
@@ -247,7 +256,7 @@ impl<T> RuntimeTurnStateStore for T where
 /// pre-mint the pair before building the coordinator (breaking the
 /// coordinator↔scheduler build-order cycle).
 ///
-/// The struct is `pub` so `ironclaw_reborn_composition` (the sanctioned downstream
+/// The struct is `pub` so `ironclaw_composition` (the sanctioned downstream
 /// consumer) can carry it through [`DefaultPlannedRuntimeParts`].  The raw
 /// substrate types are not re-exposed: constructors and accessors only hand
 /// back typed handles, never the bare fields.
@@ -338,7 +347,7 @@ where
     /// `EmptyUserProfileSource` (always `None`) is acceptable for compositions
     /// that do not yet wire a profile backend.
     pub user_profile_source: Arc<dyn HostUserProfileSource>,
-    /// Product-live readiness extensions. `RebornLoopDriverHostFactory`
+    /// Product-live readiness extensions. `IronClawLoopDriverHostFactory`
     /// defaults these to no-op implementations so helper tests keep compiling.
     /// `build_product_live_planned_runtime` fails closed when any of them is
     /// `None`, matching the cancellation/identity contract.
@@ -374,7 +383,7 @@ impl<T> RuntimeSubagentGoalStore for T where
 {
 }
 
-pub struct RebornRuntimeLoopComposition<S, G>
+pub struct IronClawRuntimeLoopComposition<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -382,7 +391,7 @@ where
     pub driver_registry: Arc<DriverRegistry>,
     pub run_profile_resolver: Arc<dyn RunProfileResolver>,
     pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
+    pub host_factory: Arc<IronClawLoopDriverHostFactory<S, G>>,
     pub scheduler_handle: TurnRunSchedulerHandle,
 }
 
@@ -499,7 +508,7 @@ impl Error for ProductLiveRuntimeBuildError {
 
 pub fn build_product_live_planned_runtime<G>(
     mut parts: DefaultPlannedRuntimeParts<G>,
-) -> Result<RebornRuntimeLoopComposition<dyn SessionThreadService, G>, ProductLiveRuntimeBuildError>
+) -> Result<IronClawRuntimeLoopComposition<dyn SessionThreadService, G>, ProductLiveRuntimeBuildError>
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
@@ -572,7 +581,7 @@ fn local_development_noop_safety_context() -> InstructionSafetyContext {
 pub fn build_default_planned_runtime<G>(
     parts: DefaultPlannedRuntimeParts<G>,
 ) -> Result<
-    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    IronClawRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
 >
 where
@@ -584,7 +593,7 @@ where
 fn build_default_planned_runtime_inner<G>(
     parts: DefaultPlannedRuntimeParts<G>,
 ) -> Result<
-    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    IronClawRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
 >
 where
@@ -697,8 +706,8 @@ where
             .with_decorator(spawn_decorator);
     if parts.config.tool_disclosure.is_bridged() {
         tracing::debug!(
-            target: "ironclaw::reborn::runtime",
-            "reborn tool disclosure decorator wired (bridged)"
+            target: "ironclaw::runtime",
+            "IronClaw tool disclosure decorator wired (bridged)"
         );
         capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
             ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
@@ -754,7 +763,7 @@ where
     let safety_context = parts
         .safety_context
         .unwrap_or_else(local_development_noop_safety_context);
-    let mut host_factory = RebornLoopDriverHostFactory::new(
+    let mut host_factory = IronClawLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
         Arc::clone(&parts.model_gateway),
@@ -807,7 +816,7 @@ where
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
     ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let executor = Arc::new(IronClawTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
@@ -822,7 +831,7 @@ where
     let scheduler_handle = wake_wiring.start(scheduler);
 
     Ok(
-        RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {
+        IronClawRuntimeLoopComposition::<dyn SessionThreadService, G> {
             driver_registry,
             run_profile_resolver,
             coordinator,
@@ -950,7 +959,7 @@ mod tests {
         assert!(ToolDisclosureMode::from_raw(Some("BRIDGED")).is_bridged());
         assert!(
             !ToolDisclosureMode::from_raw(Some("off")).is_bridged(),
-            "explicit REBORN_TOOL_DISCLOSURE=off disables disclosure"
+            "explicit IRONCLAW_TOOL_DISCLOSURE=off disables disclosure"
         );
         // Per-variant gating is unchanged.
         assert!(!ToolDisclosureMode::Off.is_bridged());

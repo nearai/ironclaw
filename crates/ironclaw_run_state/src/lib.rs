@@ -1,4 +1,4 @@
-//! Run-state contracts for IronClaw Reborn.
+//! Run-state contracts for IronClaw.
 //!
 //! `ironclaw_run_state` stores the current lifecycle state for host-managed
 //! invocations. It is separate from runtime events: events are append-only

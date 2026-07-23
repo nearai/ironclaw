@@ -1,4 +1,4 @@
-//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`].
+//! Egress + tool-result + model-prompt assertions for [`IronClawIntegrationHarness`].
 //!
 //! Read the captured Tier-2 `RuntimeHttpEgressRequest`s and recorded
 //! capability results through the harness's `pub(super)` accessors rather than
@@ -12,18 +12,18 @@
 //! reads yet another source — the scripted `TraceLlm`'s captured requests.
 
 // Shared integration-test support: not every binary that mounts the
-// `reborn_support` tree consumes this module (e.g. `support_unit_tests.rs`), so
+// `ironclaw_support` tree consumes this module (e.g. `support_unit_tests.rs`), so
 // its symbols read as dead there under the all-features `-D warnings` lane.
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
+use ironclaw_config::BudgetDefaults;
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
-use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
-use super::builder::RebornIntegrationHarness;
+use super::builder::IronClawIntegrationHarness;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -31,7 +31,7 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// (`CapabilityOutcome::Failed` vs `Denied`). A `Failed` and a `Denied` outcome
 /// can render the SAME reason token (e.g. `policy_denied` is both
 /// `CapabilityFailureKind::PolicyDenied` and the `Denied` reason), so
-/// [`assert_tool_error`](RebornIntegrationHarness::assert_tool_error) takes the
+/// [`assert_tool_error`](IronClawIntegrationHarness::assert_tool_error) takes the
 /// class as a typed argument rather than trusting a needle prefix — the class is
 /// then discriminated structurally, not by convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl ToolErrorClass {
     }
 }
 
-impl RebornIntegrationHarness {
+impl IronClawIntegrationHarness {
     /// Assert exactly `expected` Tier-2 HTTP egress requests were captured.
     pub async fn assert_egress_count(&self, expected: usize) -> HarnessResult<()> {
         let actual = self.captured_egress_requests().len();
@@ -588,7 +588,7 @@ impl RebornIntegrationHarness {
     /// Assert a `LoopHostMilestoneKind::CompactionFailed` milestone was
     /// recorded whose `reason_kind` equals `reason_kind`, scoped to the
     /// milestones recorded SINCE `baseline` (a value from
-    /// [`RebornIntegrationHarness::milestone_len`] captured at the start of
+    /// [`IronClawIntegrationHarness::milestone_len`] captured at the start of
     /// the turn under test) — proves forced compaction failed safety
     /// validation for that turn specifically, not a stale milestone from an
     /// earlier turn on a multi-turn harness (mirrors the `_since` pattern
@@ -1026,7 +1026,7 @@ fn redact_data_url(url: &str) -> String {
 /// the same `[baseline..]` slice idiom as the egress assertions, but over
 /// thread-history message COUNT: capture [`history_len`] at the start of a
 /// turn, then assert `*_since(baseline, ..)` after it.
-impl RebornIntegrationHarness {
+impl IronClawIntegrationHarness {
     /// Full persisted thread-history for this harness's thread, in sequence
     /// order. The baseline-sliced `*_since` assertions read this; kept private
     /// so tests assert through the typed helpers rather than raw records.

@@ -1,4 +1,4 @@
-//! Reborn-local copy of v1 shell input validation and parsing.
+//! IronClaw-local copy of v1 shell input validation and parsing.
 //!
 //! The command execution effect lives behind [`crate::RuntimeProcessPort`]; this
 //! module stays placement-neutral.

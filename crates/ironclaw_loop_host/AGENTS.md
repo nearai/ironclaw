@@ -22,7 +22,7 @@
 ## Do Not Move In Here
 
 - Core loop strategy or runner state transitions.
-- Product workflow composition, runtime lane execution, or Reborn app wiring.
+- Product workflow composition, runtime lane execution, or IronClaw app wiring.
 - Bypasses around `CapabilityHost` or dispatcher authority paths.
 - Full prompt content where safe summaries/refs are required.
 

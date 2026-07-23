@@ -159,7 +159,7 @@ const MEMORY_BACKEND_DETAIL_MARKERS: &[&str] = &[
     "timeout",
     "host=",
     "port=",
-    "reborn_memory_",
+    "ironclaw_memory_",
     "/tmp/",
     "/var/folders/",
     "/private/",

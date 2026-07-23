@@ -1,27 +1,27 @@
-//! `ironclaw_reborn_identity` on the int-tier coverage lane (enabler (a)).
+//! `ironclaw_identity` on the int-tier coverage lane (enabler (a)).
 //!
 //! First scenario crossing an enumerated `--test` binary into the canonical
 //! identity crate: the crate's own 790-line inline suite never runs under the
 //! coverage-lane invocation (which passes only suite names, never `--lib`).
 //!
 //! Reaches the crate through the composition facade only —
-//! `open_reborn_identity_resolver` (the existing `test-support` gated
+//! `open_ironclaw_identity_resolver` (the existing `test-support` gated
 //! factory mirroring production's
-//! `RebornRuntime::open_reborn_identity_resolver`) plus the re-exported
+//! `IronClawRuntime::open_ironclaw_identity_resolver`) plus the re-exported
 //! resolver vocabulary. Composition deliberately keeps the concrete
-//! `FilesystemRebornIdentityStore` private ("keep lower substrate handles
-//! private"), so this suite takes no direct `ironclaw_reborn_identity`
+//! `FilesystemIronClawIdentityStore` private ("keep lower substrate handles
+//! private"), so this suite takes no direct `ironclaw_identity`
 //! dependency. The factory's in-memory host filesystem replaces the plan's
 //! "tempdir" wording — same store code path, no on-disk state.
 //!
 //! Flat suite, no harness mounts: identity resolution is a standalone store
-//! round trip, not an agent turn (`RebornIntegrationHarness` models the
+//! round trip, not an agent turn (`IronClawIntegrationHarness` models the
 //! latter).
 
-use ironclaw_reborn_composition::host_api::TenantId;
-use ironclaw_reborn_composition::{
+use ironclaw_composition::host_api::TenantId;
+use ironclaw_composition::{
     ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
-    open_reborn_identity_resolver,
+    open_ironclaw_identity_resolver,
 };
 
 fn oauth_identity(tenant: &TenantId, subject: &str) -> ResolveExternalIdentity {
@@ -45,7 +45,7 @@ fn oauth_identity(tenant: &TenantId, subject: &str) -> ResolveExternalIdentity {
 #[tokio::test]
 async fn oauth_identity_resolves_to_stable_user_id() {
     let tenant = TenantId::new("tenant-identity-smoke").expect("tenant");
-    let resolver = open_reborn_identity_resolver(&tenant);
+    let resolver = open_ironclaw_identity_resolver(&tenant);
 
     let minted = resolver
         .resolve_or_create(oauth_identity(&tenant, "google-sub-1"))

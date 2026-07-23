@@ -24,9 +24,9 @@ function that writes/defines it, or the trait method — not a doc's framing.
 
 ## Why this rule exists
 
-While planning the Reborn admin-user API (2026-07), a broad "map the whole
-stack" exploration reported that Reborn *has no user store* — "UserId minting is
-the only trace a user leaves." That was wrong: `ironclaw_reborn_identity`
+While planning the IronClaw admin-user API (2026-07), a broad "map the whole
+stack" exploration reported that IronClaw *has no user store* — "UserId minting is
+the only trace a user leaves." That was wrong: `ironclaw_identity`
 persists a `StoredUser` record (email, display_name, timestamps) on every SSO
 login (`filesystem_store.rs` `resolve_or_create`). The miss flipped the intended
 architecture (build a new store) until a targeted re-check corrected it. Three

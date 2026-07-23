@@ -1,4 +1,4 @@
-//! Reborn-native tenant sandbox command transport.
+//! IronClaw-native tenant sandbox command transport.
 //!
 //! The transport derives host workspace and container identity from the full
 //! [`ResourceScope`]. It deliberately avoids the legacy project-only sandbox
@@ -34,11 +34,11 @@ mod container_identity;
 mod mounts;
 mod scope_key;
 
-use mounts::RebornSandboxMountSources;
+use mounts::IronClawSandboxMountSources;
 
-pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
-pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
-pub use scope_key::RebornSandboxScopeKey;
+pub use broker::{IronClawSandboxNetworkBroker, IronClawSandboxSecretBroker};
+pub use container_identity::{IronClawSandboxContainerIdentity, IronClawSandboxWorkspaceMode};
+pub use scope_key::IronClawSandboxScopeKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -72,25 +72,25 @@ impl ContainerWorkdir {
 }
 
 #[derive(Debug, Clone)]
-pub struct RebornSandboxConfig {
+pub struct IronClawSandboxConfig {
     workspace_root: PathBuf,
-    mount_sources: RebornSandboxMountSources,
+    mount_sources: IronClawSandboxMountSources,
     image: String,
     default_timeout: Duration,
     memory_bytes: u64,
     cpu_shares: u32,
     max_output_bytes: usize,
     disable_network: bool,
-    network_broker: Option<RebornSandboxNetworkBroker>,
-    secret_broker: Option<RebornSandboxSecretBroker>,
-    container_identity: RebornSandboxContainerIdentity,
+    network_broker: Option<IronClawSandboxNetworkBroker>,
+    secret_broker: Option<IronClawSandboxSecretBroker>,
+    container_identity: IronClawSandboxContainerIdentity,
 }
 
-impl RebornSandboxConfig {
+impl IronClawSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
-            mount_sources: RebornSandboxMountSources::default(),
+            mount_sources: IronClawSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
@@ -101,7 +101,7 @@ impl RebornSandboxConfig {
             disable_network: true,
             network_broker: None,
             secret_broker: None,
-            container_identity: RebornSandboxContainerIdentity::image_default(),
+            container_identity: IronClawSandboxContainerIdentity::image_default(),
         }
     }
 
@@ -124,12 +124,12 @@ impl RebornSandboxConfig {
         mut self,
         proxy_url: impl Into<String>,
     ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::new(proxy_url)?);
+        self.network_broker = Some(IronClawSandboxNetworkBroker::new(proxy_url)?);
         Ok(self)
     }
 
     pub fn with_network_broker_port(mut self, port: u16) -> Self {
-        self.network_broker = Some(RebornSandboxNetworkBroker::from_port(port));
+        self.network_broker = Some(IronClawSandboxNetworkBroker::from_port(port));
         self
     }
 
@@ -137,7 +137,7 @@ impl RebornSandboxConfig {
         mut self,
         host_socket: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::unix_socket(host_socket)?);
+        self.network_broker = Some(IronClawSandboxNetworkBroker::unix_socket(host_socket)?);
         Ok(self)
     }
 
@@ -145,7 +145,7 @@ impl RebornSandboxConfig {
         mut self,
         broker_url: impl Into<String>,
     ) -> Result<Self, RuntimeProcessError> {
-        self.secret_broker = Some(RebornSandboxSecretBroker::new(broker_url)?);
+        self.secret_broker = Some(IronClawSandboxSecretBroker::new(broker_url)?);
         Ok(self)
     }
 
@@ -153,7 +153,7 @@ impl RebornSandboxConfig {
         mut self,
         host_socket: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
-        self.secret_broker = Some(RebornSandboxSecretBroker::unix_socket(host_socket)?);
+        self.secret_broker = Some(IronClawSandboxSecretBroker::unix_socket(host_socket)?);
         Ok(self)
     }
 
@@ -167,7 +167,7 @@ impl RebornSandboxConfig {
         Ok(self)
     }
 
-    pub fn with_container_identity(mut self, identity: RebornSandboxContainerIdentity) -> Self {
+    pub fn with_container_identity(mut self, identity: IronClawSandboxContainerIdentity) -> Self {
         self.container_identity = identity;
         self
     }
@@ -175,10 +175,10 @@ impl RebornSandboxConfig {
     pub fn with_container_user(
         mut self,
         user: impl Into<String>,
-        workspace_mode: RebornSandboxWorkspaceMode,
+        workspace_mode: IronClawSandboxWorkspaceMode,
     ) -> Self {
         self.container_identity =
-            RebornSandboxContainerIdentity::configured_user(user, workspace_mode);
+            IronClawSandboxContainerIdentity::configured_user(user, workspace_mode);
         self
     }
 
@@ -187,7 +187,7 @@ impl RebornSandboxConfig {
             && !self
                 .network_broker
                 .as_ref()
-                .is_some_and(RebornSandboxNetworkBroker::requires_docker_network)
+                .is_some_and(IronClawSandboxNetworkBroker::requires_docker_network)
         {
             Some("none".to_string())
         } else {
@@ -218,15 +218,15 @@ impl RebornSandboxConfig {
 }
 
 #[derive(Clone)]
-pub struct RebornScopedSandboxCommandTransport {
+pub struct IronClawScopedSandboxCommandTransport {
     docker: Docker,
-    config: RebornSandboxConfig,
+    config: IronClawSandboxConfig,
 }
 
-impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
+impl std::fmt::Debug for IronClawScopedSandboxCommandTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornScopedSandboxCommandTransport")
+            .debug_struct("IronClawScopedSandboxCommandTransport")
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
             .field("disable_network", &self.config.disable_network)
@@ -237,13 +237,13 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
     }
 }
 
-impl RebornScopedSandboxCommandTransport {
-    pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
+impl IronClawScopedSandboxCommandTransport {
+    pub async fn connect(config: IronClawSandboxConfig) -> Result<Self, RuntimeProcessError> {
         let docker = connect_docker().await?;
         Ok(Self::new(docker, config))
     }
 
-    pub fn new(docker: Docker, config: RebornSandboxConfig) -> Self {
+    pub fn new(docker: Docker, config: IronClawSandboxConfig) -> Self {
         Self { docker, config }
     }
 
@@ -255,7 +255,7 @@ impl RebornScopedSandboxCommandTransport {
         &self,
         scope: &ResourceScope,
     ) -> Result<PathBuf, RuntimeProcessError> {
-        let key = RebornSandboxScopeKey::from_scope(scope);
+        let key = IronClawSandboxScopeKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
         tokio::fs::create_dir_all(&workspace)
             .await
@@ -319,7 +319,7 @@ impl RebornScopedSandboxCommandTransport {
         workdir: ContainerWorkdir,
         timeout: Duration,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let scope_key = RebornSandboxScopeKey::from_scope(&request.scope);
+        let scope_key = IronClawSandboxScopeKey::from_scope(&request.scope);
         let container_name = format!(
             "{}-{}",
             scope_key.container_name_prefix(),
@@ -438,7 +438,7 @@ impl RebornScopedSandboxCommandTransport {
 }
 
 #[async_trait]
-impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
+impl SandboxCommandTransport for IronClawScopedSandboxCommandTransport {
     async fn run_command(
         &self,
         request: CommandExecutionRequest,
@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn relative_workdir_rejects_escape() {
-        let error = RebornScopedSandboxCommandTransport::resolve_container_workdir(Some("../x"))
+        let error = IronClawScopedSandboxCommandTransport::resolve_container_workdir(Some("../x"))
             .unwrap_err();
 
         assert!(format!("{error}").contains("scoped workspace"));
@@ -636,8 +636,8 @@ mod tests {
 
     #[test]
     fn container_workdir_rejects_host_absolute_paths() {
-        let error = RebornScopedSandboxCommandTransport::resolve_container_workdir(Some(
-            "/tmp/reborn-sandbox/tenant/user/app",
+        let error = IronClawScopedSandboxCommandTransport::resolve_container_workdir(Some(
+            "/tmp/ironclaw-sandbox/tenant/user/app",
         ))
         .unwrap_err();
 
@@ -646,19 +646,20 @@ mod tests {
 
     #[test]
     fn container_workdir_accepts_typed_container_paths() {
-        let workdir =
-            RebornScopedSandboxCommandTransport::resolve_container_workdir(Some("/workspace/app"))
-                .unwrap();
+        let workdir = IronClawScopedSandboxCommandTransport::resolve_container_workdir(Some(
+            "/workspace/app",
+        ))
+        .unwrap();
 
         assert_eq!(workdir.into_string(), "/workspace/app");
     }
 
     #[test]
     fn configured_workspace_modes_are_explicit_shapes() {
-        let private = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_container_user("1000:1000", RebornSandboxWorkspaceMode::Private);
-        let group_shared = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_container_user("1000:1000", RebornSandboxWorkspaceMode::GroupShared);
+        let private = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
+            .with_container_user("1000:1000", IronClawSandboxWorkspaceMode::Private);
+        let group_shared = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
+            .with_container_user("1000:1000", IronClawSandboxWorkspaceMode::GroupShared);
 
         assert_eq!(private.container_identity.workspace_mode(), 0o700);
         assert_eq!(group_shared.container_identity.workspace_mode(), 0o770);
@@ -666,7 +667,7 @@ mod tests {
 
     #[test]
     fn default_sandbox_disables_ambient_network_and_secret_affordance() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
+        let config = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox");
         let env = config.command_env(HashMap::new()).unwrap();
 
         assert_eq!(config.container_network_mode(), Some("none".to_string()));
@@ -690,7 +691,7 @@ mod tests {
 
     #[test]
     fn network_broker_exposes_proxy_env_without_none_network_mode() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+        let config = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
         let env = config.command_env(HashMap::new()).unwrap();
@@ -708,7 +709,8 @@ mod tests {
 
     #[test]
     fn network_broker_port_uses_docker_host_gateway_proxy_url() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
+        let config =
+            IronClawSandboxConfig::new("/tmp/ironclaw-sandbox").with_network_broker_port(8181);
         let env = config.command_env(HashMap::new()).unwrap();
         let proxy_url = format!("http://{}:8181", broker::docker_host_gateway());
 
@@ -718,8 +720,8 @@ mod tests {
 
     #[test]
     fn unix_socket_network_broker_preserves_none_network_mode_and_mounts_socket() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
+        let config = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
+            .with_network_broker_unix_socket("/tmp/ironclaw-http-broker.sock")
             .unwrap();
         let env = config.command_env(HashMap::new()).unwrap();
         let mut binds = Vec::new();
@@ -735,13 +737,13 @@ mod tests {
         );
         assert_eq!(
             binds,
-            vec!["/tmp/reborn-http-broker.sock:/tmp/ironclaw-http-broker.sock:rw".to_string()]
+            vec!["/tmp/ironclaw-http-broker.sock:/tmp/ironclaw-http-broker.sock:rw".to_string()]
         );
     }
 
     #[test]
     fn secret_broker_exposes_endpoint_without_secret_material() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+        let config = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
             .with_secret_broker_url("https://broker.internal/secrets")
             .unwrap();
         let env = config.command_env(HashMap::new()).unwrap();
@@ -758,8 +760,8 @@ mod tests {
 
     #[test]
     fn unix_socket_secret_broker_exposes_socket_without_secret_material() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_secret_broker_unix_socket("/tmp/reborn-secret-broker.sock")
+        let config = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
+            .with_secret_broker_unix_socket("/tmp/ironclaw-secret-broker.sock")
             .unwrap();
         let env = config.command_env(HashMap::new()).unwrap();
         let mut binds = Vec::new();
@@ -775,13 +777,15 @@ mod tests {
         );
         assert_eq!(
             binds,
-            vec!["/tmp/reborn-secret-broker.sock:/tmp/ironclaw-secret-broker.sock:rw".to_string()]
+            vec![
+                "/tmp/ironclaw-secret-broker.sock:/tmp/ironclaw-secret-broker.sock:rw".to_string()
+            ]
         );
     }
 
     #[test]
     fn broker_env_rejects_all_reserved_user_overrides() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+        let config = IronClawSandboxConfig::new("/tmp/ironclaw-sandbox")
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap()
             .with_secret_broker_url("https://broker.internal/secrets")
@@ -800,17 +804,17 @@ mod tests {
 
     #[test]
     fn broker_urls_reject_credentials_fragments_control_characters_and_non_http_schemes() {
-        assert!(RebornSandboxNetworkBroker::new("unix:///tmp/broker.sock").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://broker.internal/\nsecrets").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://token@broker.internal/secrets").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://broker.internal/secrets#token").is_err());
+        assert!(IronClawSandboxNetworkBroker::new("unix:///tmp/broker.sock").is_err());
+        assert!(IronClawSandboxSecretBroker::new("https://broker.internal/\nsecrets").is_err());
+        assert!(IronClawSandboxSecretBroker::new("https://token@broker.internal/secrets").is_err());
+        assert!(IronClawSandboxSecretBroker::new("https://broker.internal/secrets#token").is_err());
         assert!(
-            RebornSandboxSecretBroker::new("https://broker.internal/secrets?token=abc").is_err()
+            IronClawSandboxSecretBroker::new("https://broker.internal/secrets?token=abc").is_err()
         );
-        assert!(RebornSandboxNetworkBroker::unix_socket("relative.sock").is_err());
-        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad:path.sock").is_err());
-        assert!(RebornSandboxNetworkBroker::unix_socket("/tmp/bad\npath.sock").is_err());
-        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad\tpath.sock").is_err());
+        assert!(IronClawSandboxNetworkBroker::unix_socket("relative.sock").is_err());
+        assert!(IronClawSandboxSecretBroker::unix_socket("/tmp/bad:path.sock").is_err());
+        assert!(IronClawSandboxNetworkBroker::unix_socket("/tmp/bad\npath.sock").is_err());
+        assert!(IronClawSandboxSecretBroker::unix_socket("/tmp/bad\tpath.sock").is_err());
     }
 
     #[tokio::test]
@@ -820,12 +824,12 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let network_socket = temp.path().join("network-broker.sock");
         let secret_socket = temp.path().join("secret-broker.sock");
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+        let config = IronClawSandboxConfig::new(temp.path().join("workspaces"))
             .with_network_broker_unix_socket(&network_socket)
             .unwrap()
             .with_secret_broker_unix_socket(&secret_socket)
             .unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let transport = IronClawScopedSandboxCommandTransport::new(
             Docker::connect_with_local_defaults().unwrap(),
             config,
         );
@@ -871,10 +875,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+        let config = IronClawSandboxConfig::new(temp.path().join("workspaces"))
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let transport = IronClawScopedSandboxCommandTransport::new(
             Docker::connect_with_local_defaults().unwrap(),
             config,
         );
@@ -913,9 +917,9 @@ mod tests {
     async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
         let docker = Docker::connect_with_local_defaults().unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let transport = IronClawScopedSandboxCommandTransport::new(
             docker,
-            RebornSandboxConfig::new(temp.path().join("workspaces")),
+            IronClawSandboxConfig::new(temp.path().join("workspaces")),
         );
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),

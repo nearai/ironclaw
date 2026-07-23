@@ -1,9 +1,9 @@
-"""E2E tests: Notion MCP OAuth flow via Reborn product-auth routes (issue #4112).
+"""E2E tests: Notion MCP OAuth flow via IronClaw product-auth routes (issue #4112).
 
 Tests the MCP + OAuth integration path:
 1. Notion MCP server is configured as an extension
 2. MCP server advertises OAuth ``auth`` capability in ``initialize``
-3. Reborn MCP adapter raises ``AuthChallenge::OAuthUrl`` → product-auth flow
+3. IronClaw MCP adapter raises ``AuthChallenge::OAuthUrl`` → product-auth flow
 4. OAuth callback completes → Bearer injected into subsequent ``tools/call``
 5. ``auth_required`` SSE carries ``challenge_kind: "oauth_url"``,
    ``provider: "notion"``, ``authorization_url``
@@ -11,10 +11,10 @@ Tests the MCP + OAuth integration path:
 
 Browser tests are skipped until an E2E browser binary is available.
 
-Note: The Notion MCP OAuth path requires the Reborn composition's MCP adapter
-(``ironclaw_reborn_composition::nearai_mcp``) to be active. Tests that
+Note: The Notion MCP OAuth path requires the IronClaw composition's MCP adapter
+(``ironclaw_composition::nearai_mcp``) to be active. Tests that
 exercise the HTTP API prove the route surface; the MCP OAuth trigger is
-exercised in ``crates/ironclaw_reborn_composition`` Rust integration tests.
+exercised in ``crates/ironclaw_composition`` Rust integration tests.
 """
 
 import asyncio
@@ -190,7 +190,7 @@ class TestMockNotionMcpFixture:
 
 
 class TestNotionMcpOAuthRoutes:
-    """Verify Reborn product-auth OAuth routes are reachable for MCP auth flows."""
+    """Verify IronClaw product-auth OAuth routes are reachable for MCP auth flows."""
 
     async def test_oauth_start_route_accepts_notion_provider(self, v2_notion_server):
         """OAuth start route is mounted and accepts a Notion-provider request."""
@@ -216,8 +216,8 @@ class TestNotionMcpOAuthRoutes:
         )
         if r.status_code == 404:
             pytest.skip(
-                "Reborn product-auth routes not mounted; "
-                "need the Reborn binary"
+                "IronClaw product-auth routes not mounted; "
+                "need the IronClaw binary"
             )
         assert r.status_code != 405, "405 means route is not mounted"
         assert r.status_code in (200, 400, 422)

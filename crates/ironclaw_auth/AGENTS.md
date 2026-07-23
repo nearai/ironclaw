@@ -4,18 +4,18 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for dependencies and feature shape.
-- Use `docs/reborn/contracts/auth-product.md` and issues #3289 / #3810 / #3883 / #3884 as the source of truth.
+- Use `docs/ironclaw/contracts/auth-product.md` and issues #3289 / #3810 / #3883 / #3884 as the source of truth.
 
 ## What This Crate Owns
 
-- Product-facing Reborn auth setup contracts: auth flows, secure manual-token interactions, credential accounts, recovery/account-selection projections, provider exchange/refresh, continuations, and cleanup.
+- Product-facing IronClaw auth setup contracts: auth flows, secure manual-token interactions, credential accounts, recovery/account-selection projections, provider exchange/refresh, continuations, and cleanup.
 - Temporary v1 loopback OAuth callback transport in `loopback_oauth`, re-exported through `oauth`, folded from `ironclaw_oauth` in W2.1 and deleted with v1.
 - Fake in-memory services for contract tests and downstream caller tests.
 - Redacted DTOs safe for WebUI, CLI, chat, API, and projection rendering.
 
 ## Do Not Move In Here
 
-- New V1 route handlers, V1 pending maps, V1 extension manager authority, or V1 `SecretsStore` access. The existing `loopback_oauth` transport is legacy-only and must not gain Reborn consumers.
+- New V1 route handlers, V1 pending maps, V1 extension manager authority, or V1 `SecretsStore` access. The existing `loopback_oauth` transport is legacy-only and must not gain IronClaw consumers.
 - Durable encrypted secret storage, secret leases, raw HTTP clients, runtime credential injection, extension lifecycle mutation, or turn replay/resume.
 - Raw OAuth codes, PKCE verifiers, access tokens, refresh tokens, backend provider bodies, host paths, or raw secret values in serializable records, errors, logs, docs, or projections. Tests may use sentinel values only to prove redaction.
 
@@ -23,10 +23,10 @@
 
 - Fast local check: `cargo test -p ironclaw_auth`
 - Lint check: `cargo clippy -p ironclaw_auth --all-targets -- -D warnings`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 
-- Behavior may be compatible with V1, but Reborn code paths must remain separate from V1 code paths.
+- Behavior may be compatible with V1, but IronClaw code paths must remain separate from V1 code paths.
 - V1 behavior inventory is documentation and compatibility evidence only.
 - Prefer caller/service-level tests when auth flows consume callback state, submit secrets, create accounts, emit continuations, or clean up grants.

@@ -218,7 +218,7 @@ def is_test_only_path(path: str) -> bool:
     ``#[cfg(feature = "test-support")] pub mod test_support;`` module
     (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
     ``ironclaw_product_adapters``, ``ironclaw_product_workflow``,
-    ``ironclaw_reborn_composition``). The ``test-support`` feature is enabled
+    ``ironclaw_composition``). The ``test-support`` feature is enabled
     only via ``[dev-dependencies]``, so these modules ship zero bytes in
     production binaries — the same "never compiled in production" rationale that
     exempts ``tests.rs``. Their fixtures legitimately ``.unwrap()`` constant
@@ -420,7 +420,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # `#[cfg(feature = "test-support")] pub mod test_support;` — dev-dep
         # gated, ships zero bytes in production. Exempt by exact filename only.
         self.assertTrue(
-            is_test_only_path("crates/ironclaw_reborn_composition/src/test_support.rs")
+            is_test_only_path("crates/ironclaw_composition/src/test_support.rs")
         )
         # Directory-module form: src/test_support/**.rs is also exempt, so
         # growing a test_support module never needs another change here.

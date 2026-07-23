@@ -1,4 +1,4 @@
-//! Memory document filesystem adapters for IronClaw Reborn.
+//! Memory document filesystem adapters for IronClaw.
 //!
 //! This crate owns memory-specific path grammar and repository seams. The
 //! generic filesystem crate owns only virtual path authority, scoped mounts,

@@ -26,15 +26,15 @@
 //! constructor Scenario 4.5's Phase 2 uses — is the honest fix rather than a
 //! readiness-map carve-out.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_auth::{
     GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
 };
 use serde_json::json;
 
-pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
-    let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
+pub async fn run(_g: &IronClawIntegrationGroup) -> HarnessResult<()> {
+    let g = IronClawIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let g = &g;
     // One conversation, two turns. Turn 1's rejected tool call consumes script
     // entry 1; the recovery retry consumes entry 2 as the reply. Turn 2's
@@ -42,10 +42,10 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let caller = g
         .thread("ext-uninstalled-gmail-caller")
         .script([
-            RebornScriptedReply::tool_call("gmail.list_messages", json!({})),
-            RebornScriptedReply::text("gmail unavailable"),
-            RebornScriptedReply::tool_call("gmail.list_messages", json!({})),
-            RebornScriptedReply::text("gmail dispatched"),
+            IronClawScriptedReply::tool_call("gmail.list_messages", json!({})),
+            IronClawScriptedReply::text("gmail unavailable"),
+            IronClawScriptedReply::tool_call("gmail.list_messages", json!({})),
+            IronClawScriptedReply::text("gmail dispatched"),
         ])
         .build()
         .await?;
@@ -68,15 +68,15 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lifecycle = g
         .thread("ext-uninstalled-gmail-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "gmail"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "gmail"}),
             ),
-            RebornScriptedReply::text("gmail ready"),
+            IronClawScriptedReply::text("gmail ready"),
         ])
         .build()
         .await?;

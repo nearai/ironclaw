@@ -19,7 +19,7 @@ A new `[features]` entry is justified by exactly one of:
    qualify. The win must be a real dependency you can name, not "less
    code."
 2. **A genuinely shipped build shape.** Some artifact this repo produces
-   builds it OFF. If `Dockerfile`, `reborn-release-compile.yml`,
+   builds it OFF. If `Dockerfile`, `ironclaw-release-compile.yml`,
    and `scripts/ci/package-feature-flags.sh` all turn it ON, it is not a
    build shape — it is the product.
 3. **A CI lane selector** that gates test *targets*, not production code

@@ -1,7 +1,7 @@
 //! Route-independent WebUI inbound DTO contract.
 //!
 //! These DTOs normalize authenticated WebUI callers plus browser request bodies
-//! into canonical Reborn commands without depending on WebUI route handlers,
+//! into canonical IronClaw commands without depending on WebUI route handlers,
 //! product adapters, protocol auth evidence, WASM, or adapter registries.
 
 use ironclaw_attachments::InboundAttachment;
@@ -350,7 +350,7 @@ pub struct WebUiRenameAutomationRequest {
 /// The native facade exposes the route surface so callers can
 /// inventory the API without v1 dependency. Concrete implementations return a
 /// product-safe lifecycle projection; auth, approval, and pairing requirements
-/// remain blockers owned by their dedicated Reborn services, not lifecycle
+/// remain blockers owned by their dedicated IronClaw services, not lifecycle
 /// phases.
 ///
 /// The package id is not part of the body — it is bound from the route

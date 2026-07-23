@@ -23,6 +23,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
+use ironclaw_composition::PublicRouteMount;
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::TenantId;
 use ironclaw_host_api::ingress::{
@@ -30,7 +31,6 @@ use ironclaw_host_api::ingress::{
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_reborn_composition::PublicRouteMount;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -382,7 +382,7 @@ async fn login_handler(
         redirect_after.as_deref(),
     ) {
         tracing::warn!(
-            target = "ironclaw::reborn::webui_ingress::auth",
+            target = "ironclaw::webui_ingress::auth",
             provider = %provider_name,
             base_url = %state.base_url,
             request_host = ?request_host(&headers),
@@ -436,7 +436,7 @@ async fn callback_handler(
     // description verbatim.
     if let Some(error) = params.error {
         tracing::debug!(
-            target = "ironclaw::reborn::webui_ingress::auth",
+            target = "ironclaw::webui_ingress::auth",
             provider = %provider_name,
             error = %error,
             description = ?params.error_description,
@@ -488,7 +488,7 @@ async fn callback_handler(
         Ok(uid) => uid,
         Err(UserDirectoryError::Unknown) => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_ingress::auth",
+                target = "ironclaw::webui_ingress::auth",
                 provider = %provider_name,
                 email = ?profile.email,
                 "user directory rejected unknown profile",
@@ -497,7 +497,7 @@ async fn callback_handler(
         }
         Err(UserDirectoryError::Backend(reason)) => {
             tracing::warn!(
-                target = "ironclaw::reborn::webui_ingress::auth",
+                target = "ironclaw::webui_ingress::auth",
                 provider = %provider_name,
                 error = %reason,
                 "user directory backend failure",
@@ -523,7 +523,7 @@ async fn callback_handler(
         Ok(token) => token,
         Err(err) => {
             tracing::error!(
-                target = "ironclaw::reborn::webui_ingress::auth",
+                target = "ironclaw::webui_ingress::auth",
                 provider = %provider_name,
                 error = %err,
                 "session store create_session failed",
@@ -703,7 +703,7 @@ fn log_oauth_error(provider_name: &OAuthProviderName, err: &OAuthError) {
     // appear in production logs without spamming `info!` on every
     // user-cancelled login.
     tracing::warn!(
-        target = "ironclaw::reborn::webui_ingress::auth",
+        target = "ironclaw::webui_ingress::auth",
         provider = %provider_name,
         error_kind = error_kind_for(err),
         error = %err,

@@ -1,0 +1,173 @@
+{
+  "model_name": "ironclaw-qa-qa_7e_slack_bug_sheet_delivery",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "QA case 7E sheet preparation: create a new Google Sheet named `IRONCLAW_QA_7E_BUG_TRACKER_SHEET_1784642821163` with exactly one header row and no bug data rows. The header columns must be Summary, Reporter, Slack Timestamp, Status, and QA Marker. In the final answer include the exact marker IRONCLAW_QA_7E_BUG_TRACKER_SHEET_1784642821163, include the phrase Google Sheet, and include the created spreadsheet URL."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 7E sheet preparation: create a new Google Sheet named `IRONCLAW_QA_7E_BUG_",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_fd2e80eb814e4f0089c674d0",
+            "name": "google-sheets__create_spreadsheet",
+            "arguments": {
+              "title": "IRONCLAW_QA_7E_BUG_TRACKER_SHEET_1784642821163"
+            }
+          }
+        ],
+        "input_tokens": 15850,
+        "output_tokens": 78
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 7E sheet preparation: create a new Google Sheet named `IRONCLAW_QA_7E_BUG_",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a618bc1afc5e4931b03dd6e8",
+            "name": "google-sheets__rename_sheet",
+            "arguments": {
+              "sheet_id": 1561201913,
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
+              "title": "Bugs"
+            }
+          }
+        ],
+        "input_tokens": 16198,
+        "output_tokens": 120
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 7E sheet preparation: create a new Google Sheet named `IRONCLAW_QA_7E_BUG_",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_c02f1e4add7c4cb2a269e60f",
+            "name": "google-sheets__write_values",
+            "arguments": {
+              "range": "Bugs!A1:E1",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
+              "value_input_option": "USER_ENTERED",
+              "values": [
+                [
+                  "Summary",
+                  "Reporter",
+                  "Slack Timestamp",
+                  "Status",
+                  "QA Marker"
+                ]
+              ]
+            }
+          }
+        ],
+        "input_tokens": 16483,
+        "output_tokens": 162
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 7E sheet preparation: create a new Google Sheet named `IRONCLAW_QA_7E_BUG_",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "Done. Here's the summary:\n\n**Google Sheet** created: **IRONCLAW_QA_7E_BUG_TRACKER_SHEET_1784642821163**\n\n- Sheet tab renamed to **Bugs**\n- Header row written: Summary, Reporter, Slack Timestamp, Status, QA Marker\n- No bug data rows — just the header\n\n**Spreadsheet URL:** https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit\n\nMarker: **IRONCLAW_QA_7E_BUG_TRACKER_SHEET_1784642821163**",
+        "input_tokens": 16795,
+        "output_tokens": 150
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "bug: live QA signed Slack bug row side effect 1784642821163. Append this bug to ",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_44b7e8a25ca54957af8c8722",
+            "name": "google-sheets__get_spreadsheet",
+            "arguments": {
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
+            }
+          }
+        ],
+        "input_tokens": 15926,
+        "output_tokens": 101
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "bug: live QA signed Slack bug row side effect 1784642821163. Append this bug to ",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_240730199933416889d377be",
+            "name": "google-sheets__read_values",
+            "arguments": {
+              "range": "Bugs!A1:E1",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
+            }
+          }
+        ],
+        "input_tokens": 16285,
+        "output_tokens": 104
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "bug: live QA signed Slack bug row side effect 1784642821163. Append this bug to ",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_08497219f66a4593914a4c10",
+            "name": "google-sheets__append_values",
+            "arguments": {
+              "range": "Bugs!A:E",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
+              "value_input_option": "USER_ENTERED",
+              "values": [
+                [
+                  "live QA signed Slack bug row side effect 1784642821163",
+                  "Slack user",
+                  "1784642821163",
+                  "New",
+                  "IRONCLAW_QA_7E_BUG_ROW_1784642821163"
+                ]
+              ]
+            }
+          }
+        ],
+        "input_tokens": 16548,
+        "output_tokens": 216
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "google-sheets.append_values"
+    ]
+  }
+}

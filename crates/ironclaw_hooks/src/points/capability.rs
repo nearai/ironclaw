@@ -17,7 +17,7 @@ const MAX_DEPTH: usize = 8;
 /// Marked `#[non_exhaustive]` so additional fields can be added (capability
 /// arguments digest, run id, iteration, surface version, etc.) without
 /// breaking existing hook authors when this crate composes with the rest of
-/// the Reborn loop wiring.
+/// the IronClaw loop wiring.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BeforeCapabilityHookContext {
@@ -203,7 +203,7 @@ impl SanitizedArguments {
     /// only**, applying the same sanitization (depth + size bounds) as
     /// the production path. Exposed under the `test-support` feature so
     /// hook authors can TDD `NumericSum`-style predicates without
-    /// standing up the full Reborn resolver wiring.
+    /// standing up the full IronClaw resolver wiring.
     ///
     /// Production builds must NOT enable `test-support`; the constructor
     /// it exposes lets callers bypass the path that the production

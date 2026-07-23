@@ -1,4 +1,4 @@
-//! Reborn loop hook framework.
+//! IronClaw loop hook framework.
 //!
 //! See `CLAUDE.md` in this crate for the trust model, dependency direction, and
 //! non-negotiable invariants. The short version:
@@ -7,9 +7,9 @@
 //!   enforced at the type level via the [`sink`] traits.
 //! - Decision and patch types in [`kinds`] are sealed: only this crate can mint
 //!   them, so an extension cannot forge a trusted policy through `pub` fields.
-//! - The framework owns the contract, but Reborn host composition is now wired:
+//! - The framework owns the contract, but IronClaw host composition is now wired:
 //!   `HookedLoopCapabilityPort`, `HookedLoopPromptPort`, and the other
-//!   middleware in [`middleware`] wrap the corresponding Reborn loop ports and
+//!   middleware in [`middleware`] wrap the corresponding IronClaw loop ports and
 //!   are installed by `ironclaw_runner`'s loop driver host.
 
 pub mod dispatch;

@@ -42,7 +42,7 @@ const GITHUB_EMAILS_URL: &str = "https://api.github.com/user/emails";
 ///
 /// This is the DEFAULT; operators on a slow / cross-border path to
 /// `github.com` can override it via `GitHubOAuthConfig::http_timeout`
-/// (the reborn CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
+/// (the IronClaw CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
 /// The overall `exchange_budget` is derived from the effective per-call
 /// timeout at construction so the "budget >= sum of calls" invariant
 /// holds for any value.

@@ -1194,7 +1194,7 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     let get_issue_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 200,
         headers_json: "{}".to_string(),
-        body: br#"{"number":2,"title":"Reborn GitHub issue","state":"open","html_url":"https://github.com/nearai/ironclaw/issues/2"}"#.to_vec(),
+        body: br#"{"number":2,"title":"IronClaw GitHub issue","state":"open","html_url":"https://github.com/nearai/ironclaw/issues/2"}"#.to_vec(),
     }));
     let get_issue = execute_bundled_github_wasm(
         "github.get_issue",
@@ -1217,7 +1217,7 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     let comment_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 201,
         headers_json: "{}".to_string(),
-        body: br##"{"id":44,"html_url":"https://github.com/nearai/ironclaw/issues/2#issuecomment-44","body":"Reborn WASM comment"}"##.to_vec(),
+        body: br##"{"id":44,"html_url":"https://github.com/nearai/ironclaw/issues/2#issuecomment-44","body":"IronClaw WASM comment"}"##.to_vec(),
     }));
     let comment = execute_bundled_github_wasm(
         "github.comment_issue",
@@ -1225,7 +1225,7 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
             "owner": "nearai",
             "repo": "ironclaw",
             "issue_number": 2,
-            "body": "Reborn WASM comment",
+            "body": "IronClaw WASM comment",
         }),
         Arc::clone(&comment_http),
     );
@@ -1233,13 +1233,13 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(comment.output_json.as_deref().unwrap()).unwrap()
             ["body"],
-        json!("Reborn WASM comment")
+        json!("IronClaw WASM comment")
     );
     assert_single_wasm_request(
         &comment_http,
         "POST",
         "https://api.github.com/repos/nearai/ironclaw/issues/2/comments",
-        Some(br#"{"body":"Reborn WASM comment"}"#),
+        Some(br#"{"body":"IronClaw WASM comment"}"#),
     );
 }
 
@@ -1276,7 +1276,7 @@ async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
     let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 201,
         headers_json: "{}".to_string(),
-        body: br##"{"id":45,"body":"Reply from Reborn"}"##.to_vec(),
+        body: br##"{"id":45,"body":"Reply from IronClaw"}"##.to_vec(),
     }));
 
     let reply = execute_bundled_github_wasm(
@@ -1286,7 +1286,7 @@ async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
             "repo": "ironclaw",
             "pr_number": 4280,
             "comment_id": 123456789_u64,
-            "body": "Reply from Reborn",
+            "body": "Reply from IronClaw",
         }),
         Arc::clone(&http),
     );
@@ -1294,13 +1294,13 @@ async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
     assert_eq!(reply.error, None);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(reply.output_json.as_deref().unwrap()).unwrap()["body"],
-        json!("Reply from Reborn")
+        json!("Reply from IronClaw")
     );
     assert_single_wasm_request(
         &http,
         "POST",
         "https://api.github.com/repos/nearai/ironclaw/pulls/4280/comments/123456789/replies",
-        Some(br#"{"body":"Reply from Reborn"}"#),
+        Some(br#"{"body":"Reply from IronClaw"}"#),
     );
 }
 
@@ -2417,7 +2417,7 @@ fn assert_single_wasm_request(
     assert_eq!(request.body.as_deref(), expected_body);
 
     let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
-    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
+    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-IronClaw-WASM");
     assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
 }
 
@@ -2439,7 +2439,7 @@ fn assert_single_wasm_request_json_body(
     );
 
     let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
-    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
+    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-IronClaw-WASM");
     assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
 }
 

@@ -50,7 +50,7 @@ impl HookGateRefFactory for RouterBackedHookGateRefFactory {
 }
 ```
 
-Wired into `RebornLoopDriverHostFactory::with_hook_gate_ref_factory(...)`
+Wired into `IronClawLoopDriverHostFactory::with_hook_gate_ref_factory(...)`
 per-build (so `LoopRunContext` is the current run's).
 
 ## Threat model considerations
@@ -70,7 +70,7 @@ per-build (so `LoopRunContext` is the current run's).
 
 ## Required tests (caller level)
 
-All through `RebornLoopDriverHostFactory` with the production factory
+All through `IronClawLoopDriverHostFactory` with the production factory
 installed:
 
 1. **Happy path**: `PauseApproval` hook → outcome is `ApprovalRequired

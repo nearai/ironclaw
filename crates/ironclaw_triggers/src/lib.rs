@@ -1,4 +1,4 @@
-//! Scheduled trigger domain contracts for IronClaw Reborn.
+//! Scheduled trigger domain contracts for IronClaw.
 //!
 //! This crate owns trigger records, source-provider evaluation, deterministic
 //! fire identity, trusted poller call sites, and in-memory test behavior. Poller

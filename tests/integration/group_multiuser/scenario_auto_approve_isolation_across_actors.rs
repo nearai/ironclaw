@@ -10,25 +10,25 @@
 //! auto-approve store — issues the IDENTICAL call and still raises a real
 //! `BlockedApproval` gate, because A's grant is scoped to A's owner alone.
 //!
-//! Seam: `RebornIntegrationGroup::multiuser_approvals` builds the file-approval
+//! Seam: `IronClawIntegrationGroup::multiuser_approvals` builds the file-approval
 //! backend with `with_run_owner_scoped_capability_dispatch`, keying dispatch
 //! (auto-approve lookup, approval request, gate evidence) on each actor's OWN
 //! owner — matching production, where the run owner IS the capability user.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Actor A (default actor): grant always-allow for A's owner, then write ─
     let a = g
         .thread("conv-approve-iso-a")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/actor_a.txt", "content": "actor-a-write"}),
             ),
-            RebornScriptedReply::text("wrote without a gate"),
+            IronClawScriptedReply::text("wrote without a gate"),
         ])
         .build()
         .await?;
@@ -63,14 +63,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-approve-iso-b")
         .with_actor_id("reborn-actor-b")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/actor_b.txt", "content": "actor-b-write"}),
             ),
             // Trailing reply so a LEAK (B wrongly inheriting A's grant) surfaces
             // as a clean `Completed` status mismatch in `submit_turn_until_blocked`
             // rather than a script-exhausted model error.
-            RebornScriptedReply::text("this should never be reached — B must gate"),
+            IronClawScriptedReply::text("this should never be reached — B must gate"),
         ])
         .build()
         .await?;

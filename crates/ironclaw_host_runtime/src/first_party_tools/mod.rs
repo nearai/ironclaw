@@ -1,7 +1,7 @@
 //! Built-in first-party capability handlers.
 //!
 //! These are host-owned capabilities, not extension-declared tools. They keep
-//! pure tool logic behind the Reborn capability path so callers still pass
+//! pure tool logic behind the IronClaw capability path so callers still pass
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 

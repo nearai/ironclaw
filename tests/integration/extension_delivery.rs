@@ -1,4 +1,4 @@
-//! Reborn integration test — generic outbound delivery through the REAL
+//! IronClaw integration test — generic outbound delivery through the REAL
 //! coordinator (extension-runtime P5, §5.4 / OUT + DEL-10).
 //!
 //! Both proofs drive the FULL production inbound→outbound pipeline over the
@@ -41,7 +41,7 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
@@ -54,6 +54,12 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_composition::{
+    ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
+    ChannelIngressRegistration, ExtensionIngressParts, GenericChannelHostAssembly,
+    GenericChannelInboundSink, IronClawServices, PostAdmissionObserver, StaticIngressSecrets,
+    VerifiedEvidenceMint, extension_ingress_route_mount,
+};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, InvocationId, InvocationOrigin, MountView,
@@ -75,16 +81,10 @@ use ironclaw_product_workflow::{
     ChannelConnectionNoticePolicy, ConversationBindingService, ProductSurface,
     ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
-use ironclaw_reborn_composition::{
-    ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
-    ChannelIngressRegistration, ExtensionIngressParts, GenericChannelHostAssembly,
-    GenericChannelInboundSink, PostAdmissionObserver, RebornServices, StaticIngressSecrets,
-    VerifiedEvidenceMint, extension_ingress_route_mount,
-};
+use ironclaw_support::builder::{IronClawIntegrationHarness, StorageMode};
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnScope;
-use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
 use rstest::rstest;
 use serde_json::json;
 use sha2::Sha256;
@@ -236,8 +236,8 @@ impl PostAdmissionObserver for RecordingForwardObserver {
 /// instances the factory wired — observer and coordinator share one
 /// delivery ledger).
 fn delivery_run_services(
-    harness: &RebornIntegrationHarness,
-    services: &RebornServices,
+    harness: &IronClawIntegrationHarness,
+    services: &IronClawServices,
     extension_id: &str,
 ) -> RunDeliveryServices {
     let (outbound_store, route_store, communication_preferences) = services
@@ -346,7 +346,7 @@ async fn preresolve_vendor_turn_scope(
 
 struct VendorIngress {
     parts: ExtensionIngressParts,
-    mount: ironclaw_reborn_composition::PublicRouteMount,
+    mount: ironclaw_composition::PublicRouteMount,
 }
 
 impl VendorIngress {
@@ -359,7 +359,7 @@ impl VendorIngress {
         installation_id: &str,
         secret: &[u8],
         evidence: VerifiedEvidenceMint,
-        harness: &RebornIntegrationHarness,
+        harness: &IronClawIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
     ) -> Self {
         let surface = harness.product_workflow_for_test() as Arc<dyn ProductSurface>;
@@ -380,7 +380,7 @@ impl VendorIngress {
                     },
                 ])),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
-                drain: Some(sink as Arc<dyn ironclaw_reborn_composition::ChannelIngressDrain>),
+                drain: Some(sink as Arc<dyn ironclaw_composition::ChannelIngressDrain>),
             },
         );
         let mount = extension_ingress_route_mount(&parts).expect("production mount builds");
@@ -443,20 +443,20 @@ impl VendorIngress {
 /// lifecycle tools (the same handshake `extension_runtime.rs` pins for
 /// TOOL-7), so the coordinator's snapshot resolver sees an active slack
 /// channel binding.
-async fn activate_slack(group: &RebornIntegrationGroup) {
+async fn activate_slack(group: &IronClawIntegrationGroup) {
     let lifecycle = group
         .thread("conv-slack-delivery-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("installed"),
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await
@@ -502,7 +502,7 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
 /// Assert the coordinator's ledger for `scope`: at least one attempt reached
 /// terminal `Delivered`, and none is stranded mid-lifecycle
 /// (`Prepared`/`Sending` — persist-before-egress must settle terminally).
-async fn assert_delivered_attempt(services: &RebornServices, scope: &TurnScope) {
+async fn assert_delivered_attempt(services: &IronClawServices, scope: &TurnScope) {
     let (outbound_store, _, _) = services
         .outbound_delivery_stores_for_test()
         .expect("outbound stores");
@@ -541,7 +541,7 @@ async fn assert_delivered_attempt(services: &RebornServices, scope: &TurnScope) 
 /// registration is a test failure, never a hang.
 async fn wait_for_production_registration(
     assembly: &Arc<GenericChannelHostAssembly>,
-    services: &RebornServices,
+    services: &IronClawServices,
     extension_id: &str,
 ) -> Arc<dyn ConversationBindingService> {
     let registry = services
@@ -563,25 +563,25 @@ async fn wait_for_production_registration(
     }
 }
 
-fn reborn_services(group: &RebornIntegrationGroup) -> &RebornServices {
+fn ironclaw_services(group: &IronClawIntegrationGroup) -> &IronClawServices {
     group
         .capability_harness()
         .expect("host-runtime capability harness")
-        .reborn_services_for_test()
+        .ironclaw_services_for_test()
         .expect("composed reborn services")
 }
 
 async fn configure_admin_group(
-    group: &RebornIntegrationGroup,
+    group: &IronClawIntegrationGroup,
     group_id: &str,
     values: serde_json::Value,
 ) {
-    let services = reborn_services(group);
+    let services = ironclaw_services(group);
     // `extension_delivery()` composes its local runtime with this service
     // label as the tenant operator. Its ordinary capability executor uses a
     // distinct user to prove caller scoping, so admin ingress must deliberately
     // use the composition owner rather than that executor identity.
-    let operator_user_id = ironclaw_host_api::UserId::new("reborn-e2e-extension-lifecycle-tools")
+    let operator_user_id = ironclaw_host_api::UserId::new("ironclaw-e2e-extension-lifecycle-tools")
         .expect("delivery profile operator user id");
     let capability_id = CapabilityId::new("builtin.admin_configuration_replace")
         .expect("admin configuration capability id");
@@ -589,7 +589,7 @@ async fn configure_admin_group(
     let invocation_id = InvocationId::new();
     let scope = ResourceScope {
         // Admin configuration is deployment/tenant shared. The delivery
-        // profile uses the default Reborn runtime identity; the separate
+        // profile uses the default IronClaw runtime identity; the separate
         // scripted turn harness intentionally lives under `tenant-itest` and
         // must not select which deployment receives operator configuration.
         tenant_id: ironclaw_host_api::TenantId::new("reborn-cli")
@@ -673,7 +673,10 @@ async fn configure_admin_group(
     );
 }
 
-async fn assert_extension_has_no_user_installation(services: &RebornServices, extension_id: &str) {
+async fn assert_extension_has_no_user_installation(
+    services: &IronClawServices,
+    extension_id: &str,
+) {
     let installations = services
         .extension_installation_store_for_test()
         .expect("local extension installation store")
@@ -689,8 +692,8 @@ async fn assert_extension_has_no_user_installation(services: &RebornServices, ex
 }
 
 fn start_channel_host_assembly(
-    services: &RebornServices,
-    inbound: &RebornIntegrationHarness,
+    services: &IronClawServices,
+    inbound: &IronClawIntegrationHarness,
 ) -> Arc<GenericChannelHostAssembly> {
     services
         .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
@@ -715,13 +718,13 @@ fn start_channel_host_assembly(
 
 #[tokio::test]
 async fn admin_configured_slack_unconnected_dm_gets_connect_notice_without_installation_or_turn() {
-    let group = RebornIntegrationGroup::extension_delivery()
+    let group = IronClawIntegrationGroup::extension_delivery()
         .await
         .expect("delivery group builds");
-    let services = reborn_services(&group);
+    let services = ironclaw_services(&group);
     let inbound = group
         .thread("conv-admin-slack-unconnected")
-        .script([RebornScriptedReply::text("must stay unused")])
+        .script([IronClawScriptedReply::text("must stay unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -827,13 +830,13 @@ async fn admin_configured_slack_unconnected_dm_gets_connect_notice_without_insta
 #[tokio::test]
 async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_installation_or_turn()
 {
-    let group = RebornIntegrationGroup::extension_delivery()
+    let group = IronClawIntegrationGroup::extension_delivery()
         .await
         .expect("delivery group builds");
-    let services = reborn_services(&group);
+    let services = ironclaw_services(&group);
     let inbound = group
         .thread("conv-admin-telegram-unconnected")
-        .script([RebornScriptedReply::text("must stay unused")])
+        .script([IronClawScriptedReply::text("must stay unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -936,13 +939,13 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
 async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     #[case] storage: StorageMode,
 ) {
-    let group = RebornIntegrationGroup::builder()
+    let group = IronClawIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()
         .await
         .expect("delivery group builds on this backend");
     activate_slack(&group).await;
-    let services = reborn_services(&group);
+    let services = ironclaw_services(&group);
     assert!(
         services.register_static_channel_egress_credentials_for_test(vec![(
             "slack".to_string(),
@@ -954,7 +957,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 
     let inbound = group
         .thread("conv-slack-delivery-inbound")
-        .script([RebornScriptedReply::text("unused")])
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -1084,18 +1087,18 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 #[case::postgres(StorageMode::Postgres)]
 #[tokio::test]
 async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage: StorageMode) {
-    let group = RebornIntegrationGroup::builder()
+    let group = IronClawIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()
         .await
         .expect("delivery group builds on this backend");
-    let services = reborn_services(&group);
+    let services = ironclaw_services(&group);
 
     // The inbound thread first: its wire baseline precedes activation, so
     // `captured_network_requests_for_test` sees the setWebhook call too.
     let inbound = group
         .thread("conv-telegram-delivery-inbound")
-        .script([RebornScriptedReply::text("unused")])
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -1133,16 +1136,16 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
     let lifecycle = group
         .thread("conv-telegram-delivery-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "telegram"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("installed"),
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "telegram"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await
@@ -1555,16 +1558,16 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
 async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user(
     #[case] storage: StorageMode,
 ) {
-    let group = RebornIntegrationGroup::builder()
+    let group = IronClawIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()
         .await
         .expect("delivery group builds on this backend");
-    let services = reborn_services(&group);
+    let services = ironclaw_services(&group);
 
     let inbound = group
         .thread("conv-telegram-pairing-inbound")
-        .script([RebornScriptedReply::text("unused")])
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -1592,16 +1595,16 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let lifecycle = group
         .thread("conv-telegram-pairing-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "telegram"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("installed"),
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "telegram"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await

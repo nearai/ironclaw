@@ -14,8 +14,8 @@
 //! here would be test-only wiring for a path production wires via
 //! `build_slack_host_beta_mounts` — so the int tier owns the fail-closed arm.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
@@ -23,11 +23,11 @@ use serde_json::json;
 /// concern (this group shares one trigger repository).
 const ROUTED_TRIGGER_NAME: &str = "delivery-target-fail-closed-should-not-exist";
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g
         .thread("conv-trigger-delivery-target-fail-closed")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_create",
                 json!({
                     "name": ROUTED_TRIGGER_NAME,
@@ -36,9 +36,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "delivery_target_id": "slack:personal-dm:T123:someone",
                 }),
             ),
-            RebornScriptedReply::text("that delivery target is not available here"),
-            RebornScriptedReply::tool_call("builtin.trigger_list", json!({})),
-            RebornScriptedReply::text("listed"),
+            IronClawScriptedReply::text("that delivery target is not available here"),
+            IronClawScriptedReply::tool_call("builtin.trigger_list", json!({})),
+            IronClawScriptedReply::text("listed"),
         ])
         .build()
         .await?;

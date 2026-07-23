@@ -110,7 +110,7 @@ jobs:
         run: |
           gh api "/repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -F content=rocket
 
-      - name: Dispatch Reborn WebUI v2 live canary
+      - name: Dispatch IronClaw WebUI v2 live canary
         if: steps.parse.outputs.head_sha != ''
         env:
           CASES: ${{ steps.parse.outputs.cases }}
@@ -126,7 +126,7 @@ jobs:
           gh workflow run live-canary.yml \
             --repo "$REPO" \
             --ref main \
-            -f lane=reborn-webui-v2-live-qa \
+            -f lane=ironclaw-webui-v2-live-qa \
             -f cases="$CASES" \
             -f target_ref="$HEAD_SHA" \
             -f target_branch="$HEAD_REF" \
@@ -167,4 +167,4 @@ jobs:
           fi
 
           gh pr comment "$PR" --repo "$REPO" --body \
-            "Started Reborn WebUI v2 live canary for \`${HEAD_REF}\` at \`${SHORT_SHA}\` with cases \`${CASES}\`: ${run_url}"
+            "Started IronClaw WebUI v2 live canary for \`${HEAD_REF}\` at \`${SHORT_SHA}\` with cases \`${CASES}\`: ${run_url}"

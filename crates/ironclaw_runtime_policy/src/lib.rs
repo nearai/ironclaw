@@ -1,4 +1,4 @@
-//! Runtime profile resolver for IronClaw Reborn.
+//! Runtime profile resolver for IronClaw.
 //!
 //! This crate is a pure-logic layer that turns the operator's *request*
 //! (`DeploymentMode` + `RuntimeProfile` + tenant/org policy) into the resolved
@@ -38,7 +38,7 @@
 //! the *resolved* profile, so a tenant/org ceiling narrowing authority reaches
 //! them for free. They exist so no consumer past the composition edge branches
 //! on a deployment mode — §4.4 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`.
+//! `docs/ironclaw/2026-07-17-architecture-simplification-dto-dyn-local.md`.
 //!
 //! ## Determinism and audit
 //!

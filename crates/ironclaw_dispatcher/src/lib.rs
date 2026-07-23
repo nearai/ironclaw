@@ -1,4 +1,4 @@
-//! Composition-only runtime dispatch contracts for IronClaw Reborn.
+//! Composition-only runtime dispatch contracts for IronClaw.
 //!
 //! `ironclaw_dispatcher` routes already-authorized capability invocations to
 //! prebound adapters resolved by capability id through the injected

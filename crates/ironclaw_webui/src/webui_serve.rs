@@ -1,33 +1,33 @@
-//! HTTP gateway composition for the Reborn WebChat v2 native surface.
+//! HTTP gateway composition for the IronClaw WebChat v2 native surface.
 //!
 //! The `ironclaw_webui_v2` crate ships handlers that dispatch through
 //! `ProductSurface` but is deliberately unaware of bearer tokens,
 //! OIDC, CORS, body limits, and static security headers — its CLAUDE.md
 //! lists these as "host composition still owes". This module is the
-//! Reborn-side home for that work: it exposes [`webui_v2_app`], the
+//! IronClaw-side home for that work: it exposes [`webui_v2_app`], the
 //! fully-composed axum [`Router`] (auth + rate limit + CORS + body
 //! limit + security headers + v2 route surface). Tests drive it
 //! through `tower::ServiceExt::oneshot`; the standalone
-//! `ironclaw-reborn serve` subcommand (on a follow-up PR) consumes the
+//! `ironclaw serve` subcommand (on a follow-up PR) consumes the
 //! same `Router` and owns the listener lifecycle on the host side.
 //!
 //! ### Why no serve-and-bind helper here
 //!
-//! `ironclaw_reborn_composition` sits in the Reborn product/API
+//! `ironclaw_composition` sits in the IronClaw product/API
 //! boundary enforced by
-//! `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::
-//! reborn_product_api_crates_do_not_bind_http_ingress`. Product/API
+//! `crates/ironclaw_architecture/tests/ironclaw_dependency_boundaries.rs::
+//! ironclaw_product_api_crates_do_not_bind_http_ingress`. Product/API
 //! crates may expose `Router` / `IngressRouteDescriptor`, but they may
 //! NOT bind `TcpListener`s, drive the axum `serve` future, or
 //! otherwise own server lifecycle — that responsibility lives in
 //! host-owned code. So the seam this PR provides is the `Router`; the
 //! consuming host binary writes the listener-binding line itself.
 //!
-//! The composition is intentionally Reborn-owned and does **not** share
+//! The composition is intentionally IronClaw-owned and does **not** share
 //! middleware with the v1 gateway under `/src/channels/web/`. Path A in
-//! `docs/reborn/how-to-port-channel-to-reborn.md` requires native
+//! `docs/ironclaw/how-to-port-channel-to-ironclaw.md` requires native
 //! surfaces to keep host auth host-owned and route/body/CORS security
-//! in gateway-owned code; the Reborn binary owns this stack itself.
+//! in gateway-owned code; the IronClaw binary owns this stack itself.
 
 use std::sync::Arc;
 
@@ -50,9 +50,9 @@ use crate::webui_v2::{
     is_webui_v2_operator_webui_config_route_id, static_router_with_config,
     webui_v2_router_with_options,
 };
-use ironclaw_reborn_composition::{
-    ChannelIdentityBindingConfig, ProductAuthRouteState, ProtectedRouteMount, PublicRouteDrains,
-    PublicRouteMount, RebornWebuiBundle, channel_identity_binding_hook_factory,
+use ironclaw_composition::{
+    ChannelIdentityBindingConfig, IronClawWebuiBundle, ProductAuthRouteState, ProtectedRouteMount,
+    PublicRouteDrains, PublicRouteMount, channel_identity_binding_hook_factory,
     product_auth_route_mount,
 };
 use tower_http::catch_panic::CatchPanicLayer;
@@ -82,9 +82,9 @@ pub(crate) const DEFAULT_WEBUI_MAX_BODY_BYTES: usize = 14 * 1024 * 1024;
 pub(crate) const DEFAULT_WEBUI_CSP: &str =
     "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
 
-const REBORN_HEALTH_PATH: &str = "/api/health";
+const IRONCLAW_HEALTH_PATH: &str = "/api/health";
 
-/// Authentication contract the Reborn binary supplies. The composition
+/// Authentication contract the IronClaw binary supplies. The composition
 /// layer is intentionally agnostic about WHERE bearer tokens come from
 /// — env vars, the host's `SecretStore`, OIDC JWTs verified by the
 /// caller — so the same `webui_v2_app` works for the CLI binary and
@@ -93,7 +93,7 @@ const REBORN_HEALTH_PATH: &str = "/api/health";
 /// Implementations return `Some(UserId)` on success and `None` to
 /// reject. Concrete failure reasons stay inside the implementation
 /// (the gateway emits a generic 401), per the
-/// `docs/reborn/how-to-port-channel-to-reborn.md` Path A guidance that
+/// `docs/ironclaw/how-to-port-channel-to-ironclaw.md` Path A guidance that
 /// auth evidence is host-owned and never leaks to clients.
 #[async_trait::async_trait]
 pub trait WebuiAuthenticator: Send + Sync + 'static {
@@ -157,19 +157,19 @@ impl WebuiAuthentication {
     }
 }
 
-/// Deployment gate for the Reborn Projects WebUI surface. Read once here
+/// Deployment gate for the IronClaw Projects WebUI surface. Read once here
 /// (host-owned config — per the composition crate guardrails, env reads
 /// live in composition and feed builders, not in route handlers) and
-/// delivered to the browser via the `/session` `features.reborn_projects`
+/// delivered to the browser via the `/session` `features.ironclaw_projects`
 /// field. Hidden by default while the surface is still being finished.
-fn reborn_projects_enabled() -> bool {
+fn ironclaw_projects_enabled() -> bool {
     std::env::var("IRONCLAW_REBORN_PROJECTS")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
 }
 
-/// Host-installation composition the Reborn HTTP gateway needs in
-/// addition to the [`RebornWebuiBundle`] it serves over.
+/// Host-installation composition the IronClaw HTTP gateway needs in
+/// addition to the [`IronClawWebuiBundle`] it serves over.
 ///
 /// Fields are `pub(crate)` so the public surface is the typed builder
 /// methods only. This routes every host through `new` /
@@ -243,13 +243,13 @@ pub struct WebuiServeConfig {
     /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
     pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
     /// Optional host hook that binds a successful channel-extension OAuth
-    /// identity to the authenticated Reborn user (the generic post-exchange
+    /// identity to the authenticated IronClaw user (the generic post-exchange
     /// identity binding; extension-runtime §5.5).
     pub(crate) channel_identity_binding: Option<ChannelIdentityBindingConfig>,
 }
 
 // `PublicRouteDrain`, `PublicRouteMount`, `ProtectedRouteMount`, and
-// `PublicRouteDrains` are defined in `ironclaw_reborn_composition`
+// `PublicRouteDrains` are defined in `ironclaw_composition`
 // (`webui::route_mounts`) because composition's own route builders
 // (nearai login, OpenAI-compat) construct them; they are imported above.
 
@@ -304,7 +304,7 @@ impl WebuiServeConfig {
     /// the public surface rides on the canonical policy stack —
     /// no descriptor-less side door. Multiple public mounts are
     /// allowed so OAuth/login routes and protocol webhooks can coexist
-    /// on the same Reborn listener.
+    /// on the same IronClaw listener.
     ///
     /// Today this is the seam
     /// `ironclaw_webui::webui_v2_auth_router` plugs
@@ -410,7 +410,7 @@ pub enum WebuiServeConfigError {
 
 /// Errors raised while composing the WebChat v2 gateway `Router`.
 ///
-/// No I/O variant: this crate sits in the Reborn product/API boundary
+/// No I/O variant: this crate sits in the IronClaw product/API boundary
 /// and never binds a listener or drives the axum serve loop. Host
 /// composition owns the I/O lifecycle and surfaces its own errors
 /// there.
@@ -481,7 +481,7 @@ fn static_router_config_from_descriptors(
     Ok(config)
 }
 
-/// Build the fully-composed Reborn WebChat v2 axum app:
+/// Build the fully-composed IronClaw WebChat v2 axum app:
 ///
 /// - panic catch (outer)
 /// - static security headers (`X-Content-Type-Options`, `X-Frame-Options`, CSP)
@@ -502,21 +502,21 @@ fn static_router_config_from_descriptors(
 ///
 /// The returned [`Router`] is the seam between this composition crate
 /// and host-owned ingress code: tests drive it via
-/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw-reborn
+/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw
 /// serve` subcommand on a follow-up PR will hand it to axum's serve
 /// loop from a host-owned listener. This crate intentionally never
 /// binds a socket or drives the serve loop itself — that boundary is
-/// enforced by `reborn_product_api_crates_do_not_bind_http_ingress`
+/// enforced by `ironclaw_product_api_crates_do_not_bind_http_ingress`
 /// in `ironclaw_architecture`.
 pub fn webui_v2_app(
-    bundle: RebornWebuiBundle,
+    bundle: IronClawWebuiBundle,
     config: WebuiServeConfig,
 ) -> Result<Router, WebuiServeError> {
     Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
 }
 
 pub fn webui_v2_app_with_lifecycle(
-    bundle: RebornWebuiBundle,
+    bundle: IronClawWebuiBundle,
     config: WebuiServeConfig,
 ) -> Result<WebuiV2App, WebuiServeError> {
     let csp_value = config.csp_header.clone().map(Ok).unwrap_or_else(|| {
@@ -612,7 +612,7 @@ pub fn webui_v2_app_with_lifecycle(
         WebUiV2RouteOptions::without_operator_routes()
     };
     let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-        .with_reborn_projects_enabled(reborn_projects_enabled());
+        .with_ironclaw_projects_enabled(ironclaw_projects_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -684,7 +684,7 @@ pub fn webui_v2_app_with_lifecycle(
         // It performs no state read/write, exposes no tenant data, and must
         // remain reachable even when the descriptor-driven public route stack
         // is unavailable or misconfigured.
-        .route(REBORN_HEALTH_PATH, get(reborn_health_handler))
+        .route(IRONCLAW_HEALTH_PATH, get(ironclaw_health_handler))
         // SPA static assets served from the embedded
         // `ironclaw_webui_v2` bundle. Routed AFTER the
         // route_layer stack above so the SPA does not require bearer
@@ -736,13 +736,13 @@ pub fn webui_v2_app_with_lifecycle(
 }
 
 #[derive(Serialize)]
-struct RebornHealthResponse {
+struct IronClawHealthResponse {
     status: &'static str,
     channel: &'static str,
 }
 
-async fn reborn_health_handler() -> Json<RebornHealthResponse> {
-    Json(RebornHealthResponse {
+async fn ironclaw_health_handler() -> Json<IronClawHealthResponse> {
+    Json(IronClawHealthResponse {
         status: "healthy",
         channel: "ironclaw",
     })
@@ -806,17 +806,17 @@ async fn authenticate_request(
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     {
-        let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
+        let scope = ironclaw_openai_compat::OpenAiCompatActorScope::new(
             state.tenant_id.clone(),
             openai_user_id.clone(),
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence = ironclaw_reborn_composition::mark_bearer_token_verified_for_tenant(
+        let auth_evidence = ironclaw_composition::mark_bearer_token_verified_for_tenant(
             openai_user_id.as_str(),
             state.tenant_id.clone(),
         );
-        let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
+        let caller = match ironclaw_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,
         ) {
@@ -978,7 +978,7 @@ fn panic_handler(
         detail
     };
     tracing::error!(
-        target = "ironclaw::reborn::webui_serve",
+        target = "ironclaw::webui_serve",
         "Handler panicked: {safe_detail}"
     );
     axum::http::Response::builder()

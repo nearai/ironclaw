@@ -15,31 +15,31 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 
 const KNOWN_TARGET_ID: &str = "slack:dm:alpha";
 const UNKNOWN_TARGET_ID: &str = "slack:unknown:zzz";
 
 #[tokio::test]
 async fn targets_list_capability_dispatches_and_returns_targets() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
+    let group = IronClawIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
     let harness = group
         .thread("conv-outbound-list")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.outbound_delivery_targets_list",
                 serde_json::json!({}),
             ),
-            RebornScriptedReply::text("here are your delivery targets"),
+            IronClawScriptedReply::text("here are your delivery targets"),
         ])
         .build()
         .await
@@ -91,17 +91,17 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
 
 #[tokio::test]
 async fn target_set_capability_applies_preference_through_facade() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
+    let group = IronClawIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
     let harness = group
         .thread("conv-outbound-set")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.outbound_delivery_target_set",
                 serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
             ),
-            RebornScriptedReply::text("updated your delivery target"),
+            IronClawScriptedReply::text("updated your delivery target"),
         ])
         .build()
         .await
@@ -147,17 +147,17 @@ async fn target_set_capability_applies_preference_through_facade() {
 
 #[tokio::test]
 async fn target_set_unknown_target_routes_to_invalid_input() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
+    let group = IronClawIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
     let harness = group
         .thread("conv-outbound-set-notfound")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.outbound_delivery_target_set",
                 serde_json::json!({ "target_id": UNKNOWN_TARGET_ID }),
             ),
-            RebornScriptedReply::text("that target isn't available"),
+            IronClawScriptedReply::text("that target isn't available"),
         ])
         .build()
         .await
@@ -183,17 +183,17 @@ fn target_set_disabled_by_settings_routes_to_policy_denied() {
     run_async_test_with_stack(
         "target_set_disabled_by_settings_routes_to_policy_denied",
         || async {
-            let group = RebornIntegrationGroup::outbound_target_tools()
+            let group = IronClawIntegrationGroup::outbound_target_tools()
                 .await
                 .expect("outbound-target-tools group builds");
             let harness = group
                 .thread("conv-outbound-set-denied")
                 .script([
-                    RebornScriptedReply::tool_call(
+                    IronClawScriptedReply::tool_call(
                         "builtin.outbound_delivery_target_set",
                         serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
                     ),
-                    RebornScriptedReply::text("that tool is disabled"),
+                    IronClawScriptedReply::text("that tool is disabled"),
                 ])
                 .build()
                 .await
@@ -242,17 +242,17 @@ fn target_set_disabled_by_settings_routes_to_policy_denied() {
 
 #[tokio::test]
 async fn target_set_approval_gate_approve_applies_preference() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
+    let group = IronClawIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
     let harness = group
         .thread("conv-outbound-gate-approve")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.outbound_delivery_target_set",
                 serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
             ),
-            RebornScriptedReply::text("updated after approval"),
+            IronClawScriptedReply::text("updated after approval"),
         ])
         .build()
         .await
@@ -298,17 +298,17 @@ async fn target_set_approval_gate_approve_applies_preference() {
 
 #[tokio::test]
 async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
+    let group = IronClawIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
     let harness = group
         .thread("conv-outbound-gate-deny")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.outbound_delivery_target_set",
                 serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
             ),
-            RebornScriptedReply::text("okay, leaving it as-is"),
+            IronClawScriptedReply::text("okay, leaving it as-is"),
         ])
         .build()
         .await
@@ -336,7 +336,7 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
     // surfaces this as a fixed host-authored planner summary, NOT the
     // `capability_denied_summary`/`capability_failed_summary` prefix wrapper
     // (those apply only when a capability itself returns Denied/Failed).
-    // Mirrors the analogous assertion in `reborn_integration_auth_gate.rs`.
+    // Mirrors the analogous assertion in `ironclaw_integration_auth_gate.rs`.
     harness
         .assert_tool_error_summary_contains("approval gate denied by user")
         .await

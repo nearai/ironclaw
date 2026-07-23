@@ -1,10 +1,10 @@
-//! Reborn integration test — the generic extension runtime (P2, TEST-4).
+//! IronClaw integration test — the generic extension runtime (P2, TEST-4).
 //!
 //! Drives the invented-vendor fixture through the REAL production pipeline:
 //! model tool calls hit `builtin.extension_install` / `extension_activate`,
 //! the lifecycle facade mirrors the activation into the generic extension
 //! host, the fixture's `first_party` native factory (assembled through the
-//! same `RebornBuildInput` seam the binary uses) binds its adapters, and the
+//! same `IronClawBuildInput` seam the binary uses) binds its adapters, and the
 //! fixture tool dispatches from the ACTIVE SNAPSHOT — the registry lane
 //! serves built-ins only, so a passing dispatch here proves the snapshot
 //! path end to end (resolve → policy → credentials → invoke → record).
@@ -16,14 +16,14 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::{IronClawIntegrationHarness, StorageMode};
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use rstest::rstest;
 use serde_json::json;
 
@@ -42,7 +42,9 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     };
 
     run_channel_adapter_conformance(ChannelAdapterConformance {
-        adapter: Arc::new(reborn_support::harness::profiles::extension::AcmeFixtureChannelAdapter),
+        adapter: Arc::new(
+            ironclaw_support::harness::profiles::extension::AcmeFixtureChannelAdapter,
+        ),
         extension_id: "acme-messenger".to_string(),
         installation_id: "acme-install-1".to_string(),
         message_inbound: ConformanceInbound {
@@ -96,7 +98,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
 #[case(StorageMode::Postgres)]
 #[tokio::test]
 async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] storage: StorageMode) {
-    let group = RebornIntegrationGroup::builder()
+    let group = IronClawIntegrationGroup::builder()
         .storage(storage)
         .extension_runtime_acme()
         .await
@@ -106,11 +108,11 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
     let lifecycle = group
         .thread("conv-acme-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "acme-messenger"}),
             ),
-            RebornScriptedReply::text("installed"),
+            IronClawScriptedReply::text("installed"),
         ])
         .build()
         .await
@@ -135,11 +137,11 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
     let activate = group
         .thread("conv-acme-activate")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "acme-messenger"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await
@@ -158,14 +160,14 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
     let invoke = group
         .thread("conv-acme-invoke")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "acme-messenger.send_note",
                 json!({
                     "conversation_id": "C-ACME-1",
                     "text": "hello from the generic runtime"
                 }),
             ),
-            RebornScriptedReply::text("note sent"),
+            IronClawScriptedReply::text("note sent"),
         ])
         .build()
         .await
@@ -188,11 +190,11 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
     let remove = group
         .thread("conv-acme-remove")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_remove",
                 json!({"extension_id": "acme-messenger"}),
             ),
-            RebornScriptedReply::text("removed"),
+            IronClawScriptedReply::text("removed"),
         ])
         .build()
         .await
@@ -227,9 +229,9 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
 #[case(StorageMode::Postgres)]
 #[tokio::test]
 async fn extension_install_persists_across_storage_backends(#[case] storage: StorageMode) {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .storage(storage)
-        .script([RebornScriptedReply::text("Hello from the runtime!")])
+        .script([IronClawScriptedReply::text("Hello from the runtime!")])
         .build()
         .await
         .expect("harness builds");
@@ -260,23 +262,23 @@ async fn slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress(
         "slack.send_message",
     ];
 
-    let group = RebornIntegrationGroup::extension_runtime_acme()
+    let group = IronClawIntegrationGroup::extension_runtime_acme()
         .await
         .expect("extension-runtime group builds");
 
     let lifecycle = group
         .thread("conv-slack-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("installed"),
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await
@@ -335,8 +337,8 @@ async fn slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress(
         let harness = group
             .thread(format!("conv-slack-tool-{index}"))
             .script([
-                RebornScriptedReply::tool_call(tool, arguments),
-                RebornScriptedReply::text("done"),
+                IronClawScriptedReply::tool_call(tool, arguments),
+                IronClawScriptedReply::text("done"),
             ])
             .build()
             .await

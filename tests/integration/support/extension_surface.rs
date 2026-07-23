@@ -1,4 +1,4 @@
-//! Static Reborn extension capability surface used by binary-E2E tests.
+//! Static IronClaw extension capability surface used by binary-E2E tests.
 //!
 //! **Not production truth.** `EXTENSION_LIFECYCLE_CAPABILITY_IDS` and
 //! `BUNDLED_EXTENSION_CAPABILITY_IDS` below are hand-transcribed test-support
@@ -8,7 +8,7 @@
 //! longer unions either constant into its production-surface RHS; see that
 //! file's module doc for why (W5-WIRING-PARITY finding 1). They remain here
 //! for the unrelated QA-smoke scripted-scenario assertions
-//! (`tests/reborn_qa_smoke_scenarios_e2e.rs`) that still use them as fixed
+//! (`tests/ironclaw_qa_smoke_scenarios_e2e.rs`) that still use them as fixed
 //! literals to script a harness's own declared surface, not to verify it
 //! against production.
 //!

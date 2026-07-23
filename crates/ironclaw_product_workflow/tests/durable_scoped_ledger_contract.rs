@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_adapters::ProductInboundAck;
-use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
+use ironclaw_product_workflow::IronClawFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductWorkflowError,
 };
@@ -140,12 +140,12 @@ async fn write_scoped_prune_lease(
 #[tokio::test]
 async fn scoped_filesystem_settled_action_replays() {
     let filesystem = scoped_filesystem();
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         resource_scope("user:scoped-replay"),
         Duration::seconds(10),
     );
-    let reopened = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let reopened = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         filesystem,
         resource_scope("user:scoped-replay"),
         Duration::seconds(10),
@@ -157,12 +157,12 @@ async fn scoped_filesystem_settled_action_replays() {
 #[tokio::test]
 async fn scoped_filesystem_settled_action_isolated_across_scopes() {
     let filesystem = scoped_filesystem();
-    let alpha = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let alpha = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         resource_scope("user:scope-alpha"),
         Duration::seconds(10),
     );
-    let beta = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let beta = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         filesystem,
         resource_scope("user:scope-beta"),
         Duration::seconds(10),
@@ -189,7 +189,7 @@ async fn scoped_filesystem_settled_action_isolated_across_scopes() {
 
 #[tokio::test]
 async fn scoped_filesystem_in_flight_action_blocks_until_lease_expires() {
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         scoped_filesystem(),
         resource_scope("user:scoped-lease"),
         Duration::seconds(10),
@@ -202,7 +202,7 @@ async fn scoped_filesystem_in_flight_action_blocks_until_lease_expires() {
 async fn scoped_filesystem_fresh_prune_lease_skips_retention() {
     let filesystem = scoped_filesystem();
     let scope = resource_scope("user:scoped-fresh-prune-lease");
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         scope.clone(),
         Duration::seconds(10),
@@ -235,7 +235,7 @@ async fn scoped_filesystem_fresh_prune_lease_skips_retention() {
 async fn scoped_filesystem_expired_prune_lease_allows_retention() {
     let filesystem = scoped_filesystem();
     let scope = resource_scope("user:scoped-expired-prune-lease");
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         scope.clone(),
         Duration::seconds(10),
@@ -275,7 +275,7 @@ async fn scoped_filesystem_expired_prune_lease_allows_retention() {
 async fn scoped_filesystem_prunes_terminal_replay() {
     let filesystem = scoped_filesystem();
     let scope = resource_scope("user:scoped-terminal-and-stale-prune");
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         scope.clone(),
         Duration::seconds(10),
@@ -319,7 +319,7 @@ async fn scoped_filesystem_prunes_terminal_replay() {
 async fn scoped_filesystem_corrupt_action_record_returns_transient() {
     let filesystem = scoped_filesystem();
     let scope = resource_scope("user:scoped-corrupt-action");
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         scope.clone(),
         Duration::seconds(10),
@@ -346,12 +346,12 @@ async fn scoped_filesystem_corrupt_action_record_returns_transient() {
 #[tokio::test]
 async fn scoped_filesystem_duplicate_reservation_contention_serializes() {
     let filesystem = scoped_filesystem();
-    let first = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let first = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         Arc::clone(&filesystem),
         resource_scope("user:scoped-contention"),
         Duration::seconds(10),
     );
-    let second = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let second = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         filesystem,
         resource_scope("user:scoped-contention"),
         Duration::seconds(10),
@@ -362,7 +362,7 @@ async fn scoped_filesystem_duplicate_reservation_contention_serializes() {
 
 #[tokio::test]
 async fn scoped_filesystem_settled_entry_limit_prunes_oldest() {
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         scoped_filesystem(),
         resource_scope("user:scoped-retention"),
         Duration::seconds(10),
@@ -374,7 +374,7 @@ async fn scoped_filesystem_settled_entry_limit_prunes_oldest() {
 
 #[tokio::test]
 async fn scoped_filesystem_settled_prune_interval_defers_until_interval() {
-    let ledger = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let ledger = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         scoped_filesystem(),
         resource_scope("user:scoped-prune-interval"),
         Duration::seconds(10),
@@ -389,13 +389,13 @@ async fn scoped_filesystem_settled_prune_interval_defers_until_interval() {
 async fn scoped_filesystem_custom_root_isolated_from_default_root() {
     let filesystem = scoped_filesystem();
     let scope = resource_scope("user:scoped-custom-root");
-    let custom = RebornFilesystemIdempotencyLedger::with_root(
+    let custom = IronClawFilesystemIdempotencyLedger::with_root(
         Arc::clone(&filesystem),
         scope.clone(),
         scoped_custom_root("scoped"),
         Duration::seconds(60),
     );
-    let default = RebornFilesystemIdempotencyLedger::with_in_flight_lease(
+    let default = IronClawFilesystemIdempotencyLedger::with_in_flight_lease(
         filesystem,
         scope,
         Duration::seconds(60),

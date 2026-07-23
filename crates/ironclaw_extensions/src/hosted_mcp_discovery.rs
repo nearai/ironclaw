@@ -157,7 +157,7 @@ fn discovered_capability_manifest(
     let capability_id =
         CapabilityId::new(format!("{}.{}", package.id.as_str(), tool.name)).map_err(|error| {
             invalid_hosted_mcp_manifest(format!(
-                "discovered MCP tool {} from {} cannot be published as a Reborn capability: {error}",
+                "discovered MCP tool {} from {} cannot be published as a IronClaw capability: {error}",
                 tool.name, package.id
             ))
         })?;

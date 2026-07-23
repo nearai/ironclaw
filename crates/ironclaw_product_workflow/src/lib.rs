@@ -1,7 +1,7 @@
-//! Product-facing workflow facade for IronClaw Reborn.
+//! Product-facing workflow facade for IronClaw.
 //!
 //! `ironclaw_product_workflow` sits between product adapters and host-layer
-//! Reborn services. It owns the product action orchestration so that adapters
+//! IronClaw services. It owns the product action orchestration so that adapters
 //! (Web, API, CLI, Telegram, etc.) do not each reimplement binding resolution,
 //! message staging, idempotency, busy/deferred handling, gate routing, mission
 //! routing, and redacted acknowledgements.
@@ -13,7 +13,7 @@
 //! - [`InboundTurnService`] / [`DefaultInboundTurnService`] — the narrower
 //!   user-message path that coordinates binding + turn submission.
 //! - [`ConversationBindingService`] — resolves external adapter refs to
-//!   canonical Reborn identifiers.
+//!   canonical IronClaw identifiers.
 //! - [`ProductConversationBindingService`] — bridges product adapter bindings to
 //!   `ironclaw_conversations` using trusted installation configuration for
 //!   tenant/default scope selection.
@@ -47,11 +47,11 @@ mod filesystem_ledger;
 mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
+mod ironclaw_services;
 mod ledger;
 mod lifecycle;
 mod outbound_delivery;
 mod policy;
-mod reborn_services;
 mod run_delivery;
 mod webui_inbound;
 mod workflow;
@@ -75,7 +75,7 @@ pub use approval_prompt::{
     ApprovalPromptLookup, ApprovalPromptLookupError, approval_prompt_context_view,
     approval_prompt_lookup,
 };
-/// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
+/// Concrete turn-gate resume dispatcher used by the IronClaw composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
 pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
 pub use auth_interaction::{
@@ -121,11 +121,11 @@ pub use extension_account_setup::{
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, rejecting_reborn_services_error,
+    FakeInboundTurnService, rejecting_ironclaw_services_error,
 };
-pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
-pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
-pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
+pub use filesystem_ledger::IronClawFilesystemIdempotencyLedger;
+pub use filesystem_ledger::IronClawLibSqlIdempotencyLedger;
+pub use filesystem_ledger::IronClawPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
@@ -174,7 +174,7 @@ pub use ironclaw_product_adapters::{
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
-pub use reborn_services::{
+pub use ironclaw_services::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_OPERATION, ADMIN_USER_DELETE_CAPABILITY,
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY,
@@ -203,18 +203,82 @@ pub use reborn_services::{
     EXTENSIONS_VIEW, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_OPERATION,
     FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
-    InboundAttachmentLander, InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CODEX_LOGIN_OPERATION, LLM_CONFIG_VIEW,
-    LLM_LIST_MODELS_OPERATION, LLM_NEARAI_LOGIN_OPERATION, LLM_NEARAI_WALLET_LOGIN_OPERATION,
-    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
-    LLM_TEST_CONNECTION_OPERATION, LOGS_VIEW, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_SET_KEY_OPERATION,
-    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY,
+    InboundAttachmentLander, InboundAttachmentReader, IronClawAccountBindingSource,
+    IronClawAccountLoginLinkResponse, IronClawAccountTrace, IronClawAccountTracesResponse,
+    IronClawAddMemberRequest, IronClawAdminConfigurationField, IronClawAdminConfigurationGroup,
+    IronClawAdminConfigurationListResponse, IronClawAdminConfigurationUse,
+    IronClawAdminCreateUserRequest, IronClawAdminDeleteSecretProductRequest,
+    IronClawAdminPutSecretProductRequest, IronClawAdminPutSecretRequest,
+    IronClawAdminSecretDeletedResponse, IronClawAdminSecretResponse,
+    IronClawAdminSetRoleProductRequest, IronClawAdminSetRoleRequest,
+    IronClawAdminSetStatusProductRequest, IronClawAdminSetStatusRequest,
+    IronClawAdminUpdateUserProductRequest, IronClawAdminUpdateUserRequest,
+    IronClawAdminUserCreatedResponse, IronClawAdminUserDeletedResponse, IronClawAdminUserListQuery,
+    IronClawAdminUserListResponse, IronClawAdminUserRequest, IronClawAdminUserResponse,
+    IronClawAdminUserSecretsListResponse, IronClawAttachmentBytes, IronClawAttachmentRequest,
+    IronClawAuthAccount, IronClawAutomationActiveHold, IronClawAutomationHoldReason,
+    IronClawAutomationInfo, IronClawAutomationMutationResponse, IronClawAutomationRecentRunInfo,
+    IronClawAutomationRecentRunStatus, IronClawAutomationRequest, IronClawAutomationRunStatus,
+    IronClawAutomationSource, IronClawAutomationState, IronClawCancelRunResponse,
+    IronClawChannelConfigField, IronClawChannelConnectAction, IronClawChannelConnectStrategy,
+    IronClawCreateProjectRequest, IronClawCreateThreadResponse, IronClawDeleteProjectRequest,
+    IronClawDeleteThreadRequest, IronClawDeleteThreadResponse, IronClawExtensionActionResponse,
+    IronClawExtensionCredentialSetup, IronClawExtensionInfo, IronClawExtensionListResponse,
+    IronClawExtensionOnboardingPayload, IronClawExtensionOnboardingState,
+    IronClawExtensionRegistryEntry, IronClawExtensionRegistryResponse, IronClawExtensionSetupField,
+    IronClawExtensionSetupSecret, IronClawExtensionSurface, IronClawFsListRequest,
+    IronClawFsListResponse, IronClawFsMountInfo, IronClawFsMountsRequest, IronClawFsMountsResponse,
+    IronClawFsReadRequest, IronClawFsStatRequest, IronClawFsStatResponse,
+    IronClawGetProjectRequest, IronClawGetRunStateRequest, IronClawGetRunStateResponse,
+    IronClawGlobalAutoApproveRequest, IronClawGlobalAutoApproveResponse,
+    IronClawListAutomationsResponse, IronClawListMembersRequest, IronClawListMembersResponse,
+    IronClawListProjectsRequest, IronClawListProjectsResponse, IronClawListThreadsResponse,
+    IronClawLogEntry, IronClawLogLevel, IronClawLogQueryRequest, IronClawLogQueryResponse,
+    IronClawOperatorArea, IronClawOperatorCommandPlaneResponse, IronClawOperatorConfigDiagnostic,
+    IronClawOperatorConfigDiagnosticSeverity, IronClawOperatorConfigEntry,
+    IronClawOperatorConfigGetResponse, IronClawOperatorConfigListResponse,
+    IronClawOperatorConfigSetProductRequest, IronClawOperatorConfigSetRequest,
+    IronClawOperatorConfigValidateRequest, IronClawOperatorConfigValidateResponse,
+    IronClawOperatorLogsQuery, IronClawOperatorServiceLifecycleAction,
+    IronClawOperatorServiceLifecycleRequest, IronClawOperatorSetupRequest,
+    IronClawOperatorSetupResponse, IronClawOperatorSetupStatus, IronClawOperatorSetupStep,
+    IronClawOperatorSetupStepStatus, IronClawOperatorStatusCheck, IronClawOperatorStatusResponse,
+    IronClawOperatorStatusSeverity, IronClawOperatorStatusState, IronClawOperatorSurfaceStatus,
+    IronClawOperatorToolCatalog, IronClawOperatorToolInfo, IronClawOutboundDeliveryModality,
+    IronClawOutboundDeliveryTargetCapabilities, IronClawOutboundDeliveryTargetChannel,
+    IronClawOutboundDeliveryTargetDescription, IronClawOutboundDeliveryTargetDisplayName,
+    IronClawOutboundDeliveryTargetId, IronClawOutboundDeliveryTargetListResponse,
+    IronClawOutboundDeliveryTargetOption, IronClawOutboundDeliveryTargetStatus,
+    IronClawOutboundDeliveryTargetSummary, IronClawOutboundPreferencesFacade,
+    IronClawOutboundPreferencesResponse, IronClawProjectFsListRequest,
+    IronClawProjectFsListResponse, IronClawProjectFsReadRequest, IronClawProjectFsStatRequest,
+    IronClawProjectFsStatResponse, IronClawProjectInfo, IronClawProjectMemberInfo,
+    IronClawProjectMemberStatus, IronClawProjectResponse, IronClawProjectRole,
+    IronClawProjectState, IronClawRemoveMemberRequest, IronClawRenameAutomationProductRequest,
+    IronClawResolveGateResponse, IronClawResumeGateResponse, IronClawRetryRunResponse,
+    IronClawRunArtifact, IronClawRunArtifactRequest, IronClawServiceLifecycleAction,
+    IronClawServiceLifecycleRequest, IronClawServiceLifecycleResponse,
+    IronClawServiceLifecycleState, IronClawServices, IronClawServicesError,
+    IronClawServicesErrorCode, IronClawServicesErrorKind, IronClawSetOutboundPreferencesRequest,
+    IronClawSetupExtensionResponse, IronClawSkillActionResponse, IronClawSkillContentResponse,
+    IronClawSkillInfo, IronClawSkillListResponse, IronClawSkillSearchResponse,
+    IronClawSkillSourceKind, IronClawSkillTrustLevel, IronClawStreamEventsRequest,
+    IronClawStreamEventsResponse, IronClawStreamEventsSubscription, IronClawSubmitTurnResponse,
+    IronClawTimelineRequest, IronClawTimelineResponse, IronClawTraceCreditsResponse,
+    IronClawTraceHoldAuthorizeProductRequest, IronClawTraceHoldAuthorizeResponse,
+    IronClawUpdateMemberRoleRequest, IronClawUpdateProjectRequest, IronClawVendorAuthAccounts,
+    IronClawViewDescriptor, IronClawViewPage, IronClawViewProvider, IronClawViewQuery,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CODEX_LOGIN_OPERATION,
+    LLM_CONFIG_VIEW, LLM_LIST_MODELS_OPERATION, LLM_NEARAI_LOGIN_OPERATION,
+    LLM_NEARAI_WALLET_LOGIN_OPERATION, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LLM_TEST_CONNECTION_OPERATION, LOGS_VIEW,
+    LlmActiveSelection, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiAuthProvider,
+    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_SET_KEY_OPERATION, OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_OPERATION,
     OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW,
@@ -237,85 +301,25 @@ pub use reborn_services::{
     ProductOperationTypedInput, ProductSurface, ProductView, ProjectCaller,
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, ProjectService, ProjectServiceError, RESOLVE_GATE_OPERATION,
-    RETRY_RUN_OPERATION, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountBindingSource,
-    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
-    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
-    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
-    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
-    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
-    RebornAuthAccount, RebornAutomationActiveHold, RebornAutomationHoldReason,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesFacade,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectInfo, RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse,
-    RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornVendorAuthAccounts, RebornViewDescriptor, RebornViewPage, RebornViewProvider,
-    RebornViewQuery, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction,
-    RunArtifactToolCall, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SUBMIT_TURN_OPERATION, SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID,
-    THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_OPERATION, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_OPERATION, TriggerRunThreadScope,
-    UnavailableRebornViewProvider, UnsupportedAutomationProductFacade,
-    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
-    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, list_outbound_delivery_targets_for_model,
-    normalize_operator_log_context_value, outbound_delivery_synthetic_provider,
-    outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,
-    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
-    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+    RETRY_RUN_OPERATION, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RunArtifactLogs,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
+    SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SUBMIT_TURN_OPERATION, SetActiveLlmRequest,
+    SettingsToolPermissionState, SkillsProductFacade, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_LOGIN_LINK_OPERATION, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_OPERATION, TriggerRunThreadScope, UnavailableIronClawViewProvider,
+    UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
+    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
+    list_outbound_delivery_targets_for_model, normalize_operator_log_context_value,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model,
 };
 
 pub use webui_inbound::{

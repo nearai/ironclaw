@@ -1,4 +1,4 @@
-//! Scoped filesystem service for IronClaw Reborn.
+//! Scoped filesystem service for IronClaw.
 //!
 //! `ironclaw_filesystem` is the first service crate above
 //! `ironclaw_host_api`. It resolves runtime-visible [`ScopedPath`] values

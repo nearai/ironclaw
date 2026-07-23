@@ -175,7 +175,7 @@ pub(crate) enum HostProcessEnvMode {
 /// (no tenant-scoped mount containment). The name states the trust boundary plainly
 /// — renamed from `LocalHostProcessPort` because `Host` describes the boundary
 /// (host process vs sandboxed process) where `Local` obscured it (arch-simplification
-/// §4.4 Bucket 2; `docs/reborn/2026-05-11-trust-boundary-stack-note.md`). Composition
+/// §4.4 Bucket 2; `docs/ironclaw/2026-05-11-trust-boundary-stack-note.md`). Composition
 /// must select this only for a genuinely single-user/local deployment; a multi-user
 /// served boot must route to the sandboxed process port instead (§6, issue #6170).
 #[derive(Debug, Clone, Default)]

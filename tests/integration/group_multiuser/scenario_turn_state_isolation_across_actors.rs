@@ -1,7 +1,7 @@
 //! C-MULTIUSER scenario: per-actor TURN/RUN-STATE isolation on the shared
 //! `FilesystemTurnStateRowStore`. Unlike the thread/memory/approval stores, the
 //! group's turn_store is built with a construction-time-fixed mount view
-//! (`owner_turn_state_filesystem` in `ironclaw_reborn_composition::factory`,
+//! (`owner_turn_state_filesystem` in `ironclaw_composition::factory`,
 //! mirroring production's `HostedSingleTenant`/local-dev composition), so ALL
 //! actors' run records physically share ONE snapshot file. The only thing
 //! keeping one actor's run
@@ -13,15 +13,15 @@
 //! distinct and gate refs don't cross, but never call `get_run_state` with a
 //! MISMATCHED actor's scope against another actor's real `run_id`.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::{GetRunStateRequest, TurnError, TurnRunId, TurnScope, TurnStateStore};
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // ── Actor A (default actor): complete a turn over the shared turn_store ──
     let a = g
         .thread("conv-turnstate-iso-a")
-        .script([RebornScriptedReply::text("reply-for-actor-a")])
+        .script([IronClawScriptedReply::text("reply-for-actor-a")])
         .build()
         .await?;
     let run_a = a
@@ -33,7 +33,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let b = g
         .thread("conv-turnstate-iso-b")
         .with_actor_id("reborn-actor-b")
-        .script([RebornScriptedReply::text("reply-for-actor-b")])
+        .script([IronClawScriptedReply::text("reply-for-actor-b")])
         .build()
         .await?;
     // Non-vacuity: if `with_actor_id` regressed to a no-op, both scopes would

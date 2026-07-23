@@ -4,8 +4,8 @@ on:
   workflow_run:
     workflows:
       - Code Style
-      - Tests (Reborn)
-      - Reborn E2E
+      - Tests (IronClaw)
+      - IronClaw E2E
       - Platform & Compat
       - Replay Snapshot Gate
       - Code Coverage

@@ -7,9 +7,9 @@
 
 use ironclaw_product_workflow::{
     AuthPromptView, CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView,
-    GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState,
-    ProgressKind, ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse,
-    RebornGetRunStateResponse, RebornSubmitTurnResponse,
+    GatePromptView, IronClawCancelRunResponse, IronClawGetRunStateResponse,
+    IronClawSubmitTurnResponse, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +52,7 @@ impl From<ProductOutboundEnvelope> for WebChatV2EventFrame {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebChatV2Event {
     Accepted {
-        ack: RebornSubmitTurnResponse,
+        ack: IronClawSubmitTurnResponse,
     },
     Running {
         progress: ProgressUpdateView,
@@ -76,10 +76,10 @@ pub enum WebChatV2Event {
         reply: FinalReplyView,
     },
     Cancelled {
-        response: RebornCancelRunResponse,
+        response: IronClawCancelRunResponse,
     },
     Failed {
-        run_state: RebornGetRunStateResponse,
+        run_state: IronClawGetRunStateResponse,
     },
     ProjectionSnapshot {
         state: ProductProjectionState,

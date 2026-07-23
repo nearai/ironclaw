@@ -26,7 +26,7 @@ pub(crate) fn process_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(MountView::default(), None),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-process-tools", "reborn-e2e-process-user")?
+        ..ToolsProfile::new("ironclaw-e2e-process-tools", "ironclaw-e2e-process-user")?
     })
 }
 

@@ -6,10 +6,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use ironclaw_host_api::{ActivityId, CapabilityId, Resolution};
 use ironclaw_product_workflow::{
-    ProductCapabilityInput, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
-    RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
+    IronClawGetRunStateRequest, IronClawGetRunStateResponse, IronClawServicesError,
+    IronClawStreamEventsRequest, IronClawStreamEventsResponse, IronClawStreamEventsSubscription,
+    IronClawViewPage, IronClawViewQuery, ProductCapabilityInput, ProductOperationRequest,
+    ProductOperationResponse, ProductSurface, WebUiAuthenticatedCaller,
 };
 
 type InvokeHandler = dyn Fn(
@@ -17,22 +17,25 @@ type InvokeHandler = dyn Fn(
         CapabilityId,
         ProductCapabilityInput,
         ActivityId,
-    ) -> Result<Resolution, RebornServicesError>
+    ) -> Result<Resolution, IronClawServicesError>
     + Send
     + Sync;
-type QueryHandler = dyn Fn(WebUiAuthenticatedCaller, RebornViewQuery) -> Result<RebornViewPage, RebornServicesError>
+type QueryHandler = dyn Fn(
+        WebUiAuthenticatedCaller,
+        IronClawViewQuery,
+    ) -> Result<IronClawViewPage, IronClawServicesError>
     + Send
     + Sync;
 type CommandHandler = dyn Fn(
         WebUiAuthenticatedCaller,
         ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError>
+    ) -> Result<ProductOperationResponse, IronClawServicesError>
     + Send
     + Sync;
 type StreamHandler = dyn Fn(
         WebUiAuthenticatedCaller,
-        RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError>
+        IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsResponse, IronClawServicesError>
     + Send
     + Sync;
 
@@ -46,7 +49,7 @@ pub struct InvokeCall {
 #[derive(Debug, Clone)]
 pub struct QueryCall {
     pub caller: WebUiAuthenticatedCaller,
-    pub query: RebornViewQuery,
+    pub query: IronClawViewQuery,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +61,7 @@ pub struct CommandCall {
 #[derive(Debug, Clone)]
 pub struct StreamCall {
     pub caller: WebUiAuthenticatedCaller,
-    pub request: RebornStreamEventsRequest,
+    pub request: IronClawStreamEventsRequest,
 }
 
 #[derive(Default)]
@@ -67,12 +70,12 @@ pub struct ProgrammableProductSurface {
     query_calls: Mutex<Vec<QueryCall>>,
     command_calls: Mutex<Vec<CommandCall>>,
     stream_calls: Mutex<Vec<StreamCall>>,
-    run_state_calls: Mutex<Vec<(WebUiAuthenticatedCaller, RebornGetRunStateRequest)>>,
+    run_state_calls: Mutex<Vec<(WebUiAuthenticatedCaller, IronClawGetRunStateRequest)>>,
     invoke_handler: Mutex<Option<Box<InvokeHandler>>>,
     query_handler: Mutex<Option<Box<QueryHandler>>>,
     command_handler: Mutex<Option<Box<CommandHandler>>>,
     stream_handler: Mutex<Option<Box<StreamHandler>>>,
-    stream_responses: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
+    stream_responses: Mutex<VecDeque<Result<IronClawStreamEventsResponse, IronClawServicesError>>>,
     stall_stream_events: Mutex<bool>,
 }
 
@@ -84,7 +87,7 @@ impl ProgrammableProductSurface {
             CapabilityId,
             ProductCapabilityInput,
             ActivityId,
-        ) -> Result<Resolution, RebornServicesError>
+        ) -> Result<Resolution, IronClawServicesError>
         + Send
         + Sync
         + 'static,
@@ -96,8 +99,8 @@ impl ProgrammableProductSurface {
         &self,
         handler: impl Fn(
             WebUiAuthenticatedCaller,
-            RebornViewQuery,
-        ) -> Result<RebornViewPage, RebornServicesError>
+            IronClawViewQuery,
+        ) -> Result<IronClawViewPage, IronClawServicesError>
         + Send
         + Sync
         + 'static,
@@ -110,7 +113,7 @@ impl ProgrammableProductSurface {
         handler: impl Fn(
             WebUiAuthenticatedCaller,
             ProductOperationRequest,
-        ) -> Result<ProductOperationResponse, RebornServicesError>
+        ) -> Result<ProductOperationResponse, IronClawServicesError>
         + Send
         + Sync
         + 'static,
@@ -122,8 +125,8 @@ impl ProgrammableProductSurface {
         &self,
         handler: impl Fn(
             WebUiAuthenticatedCaller,
-            RebornStreamEventsRequest,
-        ) -> Result<RebornStreamEventsResponse, RebornServicesError>
+            IronClawStreamEventsRequest,
+        ) -> Result<IronClawStreamEventsResponse, IronClawServicesError>
         + Send
         + Sync
         + 'static,
@@ -133,7 +136,7 @@ impl ProgrammableProductSurface {
 
     pub fn enqueue_stream_response(
         &self,
-        response: Result<RebornStreamEventsResponse, RebornServicesError>,
+        response: Result<IronClawStreamEventsResponse, IronClawServicesError>,
     ) {
         self.stream_responses
             .lock()
@@ -161,8 +164,8 @@ impl ProgrammableProductSurface {
         self.stream_calls.lock().expect("lock").clone()
     }
 
-    fn unavailable() -> RebornServicesError {
-        RebornServicesError::internal_from("programmable product surface response not configured")
+    fn unavailable() -> IronClawServicesError {
+        IronClawServicesError::internal_from("programmable product surface response not configured")
     }
 }
 
@@ -174,7 +177,7 @@ impl ProductSurface for ProgrammableProductSurface {
         capability: CapabilityId,
         input: ProductCapabilityInput,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, IronClawServicesError> {
         self.invoke_calls.lock().expect("lock").push(InvokeCall {
             caller: caller.clone(),
             capability: capability.clone(),
@@ -189,8 +192,8 @@ impl ProductSurface for ProgrammableProductSurface {
     async fn query(
         &self,
         caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+        query: IronClawViewQuery,
+    ) -> Result<IronClawViewPage, IronClawServicesError> {
         self.query_calls.lock().expect("lock").push(QueryCall {
             caller: caller.clone(),
             query: query.clone(),
@@ -204,8 +207,8 @@ impl ProductSurface for ProgrammableProductSurface {
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsResponse, IronClawServicesError> {
         self.stream_calls.lock().expect("lock").push(StreamCall {
             caller: caller.clone(),
             request: request.clone(),
@@ -219,22 +222,22 @@ impl ProductSurface for ProgrammableProductSurface {
         if let Some(handler) = self.stream_handler.lock().expect("lock").as_ref() {
             return handler(caller, request);
         }
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
+        Ok(IronClawStreamEventsResponse { events: Vec::new() })
     }
 
     async fn subscribe_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        _request: IronClawStreamEventsRequest,
+    ) -> Result<IronClawStreamEventsSubscription, IronClawServicesError> {
         Err(Self::unavailable())
     }
 
     async fn get_run_state(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        request: IronClawGetRunStateRequest,
+    ) -> Result<IronClawGetRunStateResponse, IronClawServicesError> {
         self.run_state_calls
             .lock()
             .expect("lock")
@@ -246,7 +249,7 @@ impl ProductSurface for ProgrammableProductSurface {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         self.command_calls.lock().expect("lock").push(CommandCall {
             caller: caller.clone(),
             request: request.clone(),

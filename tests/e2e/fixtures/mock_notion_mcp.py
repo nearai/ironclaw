@@ -1,12 +1,12 @@
 """Minimal mock Notion MCP server for product-auth E2E tests.
 
-Implements the MCP protocol surface needed to exercise the Reborn host's
+Implements the MCP protocol surface needed to exercise the IronClaw host's
 Notion MCP OAuth flow:
 
   - POST /mcp  (JSON-RPC 2.0, ``initialize`` / ``tools/list`` / ``tools/call``)
   - Bearer-gated ``tools/call`` — returns 401 JSON-RPC error without auth
   - OAuth auth_required metadata injected in ``initialize`` response so the
-    Reborn MCP adapter knows to trigger a product-auth OAuth flow. Tests can
+    IronClaw MCP adapter knows to trigger a product-auth OAuth flow. Tests can
     inject a mock IDP's authorization/token URLs when starting the server.
 
 Recorded calls are exposed for assertion::
@@ -73,7 +73,7 @@ async def start_mock_notion_mcp(
         req_id = body.get("id")
 
         if method == "initialize":
-            # Advertise OAuth auth_required so the Reborn MCP adapter
+            # Advertise OAuth auth_required so the IronClaw MCP adapter
             # raises an AuthChallenge::OAuthUrl and creates a product-auth flow.
             return web.json_response(_json_rpc_ok(req_id, {
                 "protocolVersion": "2024-11-05",

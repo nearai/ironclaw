@@ -1,10 +1,10 @@
 slack:
   team:
-    name: Reborn E2E Workspace
-    domain: reborn-e2e
+    name: IronClaw E2E Workspace
+    domain: ironclaw-e2e
   users:
     - name: reborn-user
-      real_name: Reborn E2E User
+      real_name: IronClaw E2E User
       email: reborn-user@example.com
       presence: active
     - name: qa-reviewer
@@ -20,8 +20,8 @@ slack:
       presence: away
   channels:
     - name: reborn-alerts
-      topic: Reborn alert delivery
-      purpose: Delivery target for Reborn E2E Slack assertions.
+      topic: IronClaw alert delivery
+      purpose: Delivery target for IronClaw E2E Slack assertions.
   bots:
     - name: reborn-bot
   tokens:

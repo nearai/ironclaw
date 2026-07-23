@@ -101,7 +101,7 @@ fn assets() -> Vec<super::PackageAsset> {
     // activation but kills every post-activation turn
     // (`host_stage_unavailable_capability`). Pinned catalog-wide by
     // `bundled_first_party_manifest_asset_refs_are_packaged` in
-    // `ironclaw_reborn_composition::extension_host::available_extensions`.
+    // `ironclaw_composition::extension_host::available_extensions`.
     vec![
         bytes_asset("manifest.toml", MANIFEST.as_bytes()),
         slack_schema_asset!("raw_output.v1.json"),

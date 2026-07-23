@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use super::{
-    DefaultHostRuntime, DefaultTurnCoordinator, HostRuntimeServices, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionEventStoreWiringError,
-    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
-    RebornEventStoreConfig, RebornProfile, ResourceGovernor, RootFilesystem, RuntimeKind,
-    TurnRunTransitionPort, TurnStateStore, component_name, local_only_runtime_policy_reason,
-    production_wiring_report, runtime_http_egress_is_configured,
+    DefaultHostRuntime, DefaultTurnCoordinator, HostRuntimeServices, IronClawEventStoreConfig,
+    IronClawProfile, ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionComponentType,
+    ProductionEventStoreWiringError, ProductionImplementationReadiness, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, ResourceGovernor, RootFilesystem, RuntimeKind, TurnRunTransitionPort,
+    TurnStateStore, component_name, local_only_runtime_policy_reason, production_wiring_report,
+    runtime_http_egress_is_configured,
 };
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
@@ -523,15 +523,15 @@ where
         }
     }
 
-    /// Builds and attaches the configured Reborn durable event/audit stores,
+    /// Builds and attaches the configured IronClaw durable event/audit stores,
     /// validates production wiring, and returns the host runtime facade.
     pub async fn host_runtime_for_production_with_event_store_config(
         self,
-        event_store_config: RebornEventStoreConfig,
+        event_store_config: IronClawEventStoreConfig,
         production_config: &ProductionWiringConfig,
     ) -> Result<DefaultHostRuntime, ProductionEventStoreWiringError> {
         let services = self
-            .with_reborn_event_store_config(RebornProfile::Production, event_store_config)
+            .with_ironclaw_event_store_config(IronClawProfile::Production, event_store_config)
             .await?;
         Ok(services.host_runtime_for_production(production_config)?)
     }

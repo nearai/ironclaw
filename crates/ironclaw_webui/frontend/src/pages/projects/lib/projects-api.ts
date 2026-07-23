@@ -16,7 +16,7 @@ import {
   listThreads as apiListThreads,
 } from "../../../lib/api";
 
-// Map a wire `RebornProjectInfo` to the shape the Projects page components
+// Map a wire `IronClawProjectInfo` to the shape the Projects page components
 // expect. Mission/spend/gate metrics default to 0 in the components (`|| 0`),
 // so they render cleanly before those endpoints exist. `goals` is read from the
 // extensible `metadata` bag.

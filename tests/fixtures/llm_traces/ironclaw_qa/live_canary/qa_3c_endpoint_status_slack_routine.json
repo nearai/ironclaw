@@ -1,0 +1,129 @@
+{
+  "model_name": "ironclaw-qa-qa_3c_endpoint_status_slack_routine",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it returns a 200 status and send result in a DM in slack.\"\nExpected result: Routine created"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it re",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_03b269d83ee44474a4f7b8f4",
+            "name": "builtin__skill_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 13415,
+        "output_tokens": 46
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it re",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_c12dde5cfe624fe895f59559",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 17932,
+        "output_tokens": 69
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it re",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_3a33e656f9ad49ad9883da8e",
+            "name": "builtin__extension_search",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 18031,
+        "output_tokens": 39
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it re",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ec69e43ec77e48bbad48e0b4",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 18113,
+        "output_tokens": 51
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it re",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4331588ab7444506805c1ca0",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "delivery_target_id": "slack:personal-dm:SLACK_ID_REDACTED:ironclaw-webui-v2-live-qa-user",
+              "name": "Ping near.ai every 5 minutes",
+              "prompt": "Ping https://near.ai and check if it returns an HTTP 200 status. Make an HTTP GET request to https://near.ai. If the response status is 200, report back \"✅ near.ai is UP (HTTP 200)\". If the status is anything else or the request fails, report back \"❌ near.ai is DOWN — status: <actual status or error>\".",
+              "schedule": {
+                "expression": "*/5 * * * *",
+                "kind": "cron",
+                "timezone": "UTC"
+              }
+            }
+          }
+        ],
+        "input_tokens": 18369,
+        "output_tokens": 247
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 5 minutes, ping https://near.ai checking if it re",
+        "min_message_count": 12
+      },
+      "response": {
+        "type": "text",
+        "content": "Routine created successfully. Here's what was set up:\n\n| Detail | Value |\n|---|---|\n| **Name** | Ping near.ai every 5 minutes |\n| **Schedule** | `*/5 * * * *` (every 5 minutes) |\n| **Task** | HTTP GET `https://near.ai` → report 200 (UP) or other/error (DOWN) |\n| **Delivery** | Slack DM |\n| **Next run** | 2026-07-21T14:10:00 UTC |\n\nThe trigger is active and will start checking the site at the next 5-minute mark, sending results directly to your Slack DM.",
+        "input_tokens": 18935,
+        "output_tokens": 136
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.trigger_create"
+    ]
+  }
+}

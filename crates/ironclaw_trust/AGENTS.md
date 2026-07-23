@@ -5,10 +5,10 @@
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `CONTRACT.md` — the co-located cross-crate contract (evaluation matrix, requested-vs-effective split, mutation/invalidation orchestration).
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/kernel-boundary.md`
-- `docs/reborn/contracts/extensions.md`
-- `docs/reborn/contracts/host-api.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/kernel-boundary.md`
+- `docs/ironclaw/contracts/extensions.md`
+- `docs/ironclaw/contracts/host-api.md`
 
 ## What This Crate Owns
 

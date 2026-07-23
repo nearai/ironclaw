@@ -30,9 +30,9 @@ class RunShDispatchTests(unittest.TestCase):
                 **os.environ,
                 "ARTIFACT_ROOT": tmpdir,
                 "CASES": cases,
-                "LANE": "reborn-webui-v2-live-qa",
+                "LANE": "ironclaw-webui-v2-live-qa",
                 "PLAYWRIGHT_INSTALL": "skip",
-                "PROVIDER": "reborn-webui-v2",
+                "PROVIDER": "ironclaw-webui-v2",
                 "PYTHON_BIN": "echo",
                 "TIMESTAMP": "dispatch-test",
             }
@@ -46,15 +46,15 @@ class RunShDispatchTests(unittest.TestCase):
                 check=True,
             )
 
-    def test_reborn_all_cases_dispatches_non_telegram_qa_flag(self):
+    def test_ironclaw_all_cases_dispatches_non_telegram_qa_flag(self):
         result = self.run_dispatch(cases="all")
 
-        self.assertIn("scripts/reborn_webui_v2_live_qa/run_live_qa.py", result.stdout)
+        self.assertIn("scripts/ironclaw_webui_v2_live_qa/run_live_qa.py", result.stdout)
         self.assertIn("--non-telegram-qa-cases", result.stdout)
         self.assertNotIn("--all-cases", result.stdout)
         self.assertNotIn("--case all", result.stdout)
 
-    def test_reborn_specific_cases_dispatch_as_repeated_case_flags(self):
+    def test_ironclaw_specific_cases_dispatch_as_repeated_case_flags(self):
         result = self.run_dispatch(
             cases="qa_3b_endpoint_status_live_chat, qa_8b_hn_keyword_live_chat"
         )

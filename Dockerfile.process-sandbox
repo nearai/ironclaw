@@ -1,4 +1,4 @@
-# Docker process compatibility image for IronClaw Reborn process execution.
+# Docker process compatibility image for IronClaw process execution.
 #
 # Build:
 #   docker build -f Dockerfile.process-sandbox -t ironclaw-process-sandbox:dev .

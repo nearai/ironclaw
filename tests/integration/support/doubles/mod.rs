@@ -1,4 +1,4 @@
-//! Test doubles substituting production ports for the Reborn binary-E2E
+//! Test doubles substituting production ports for the IronClaw binary-E2E
 //! and host-runtime capability harnesses. One file per substituted port.
 
 mod empty_identity_context_source;

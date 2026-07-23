@@ -5,7 +5,7 @@
 //! [`ResolvedExtensionManifest`]; the installation store persists it next to
 //! the raw source, and production projection reads the record — raw TOML is
 //! kept for diagnostics and recompilation only
-//! (`docs/reborn/extension-runtime/overview.md` §3.3, checklist REC-1..4).
+//! (`docs/ironclaw/extension-runtime/overview.md` §3.3, checklist REC-1..4).
 //!
 //! Rehydration goes through [`ResolvedExtensionManifest::to_internal`], which
 //! rebuilds the validated in-memory model without reparsing TOML. Component

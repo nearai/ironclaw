@@ -2,10 +2,10 @@ use chrono::Utc;
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, ThreadId};
 use ironclaw_product_workflow::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
+    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, IronClawCancelRunResponse,
+    IronClawGetRunStateResponse, IronClawSubmitTurnResponse, ProductOutboundPayload,
     ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase, ProgressKind,
-    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
-    RebornSubmitTurnResponse,
+    ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,
@@ -109,8 +109,8 @@ fn auth_prompt() -> AuthPromptView {
     }
 }
 
-fn accepted_ack() -> RebornSubmitTurnResponse {
-    RebornSubmitTurnResponse::Submitted {
+fn accepted_ack() -> IronClawSubmitTurnResponse {
+    IronClawSubmitTurnResponse::Submitted {
         thread_id: ThreadId::new("thread-alpha").expect("thread"),
         accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("message ref"),
         turn_id: "turn-alpha".to_string(),
@@ -122,8 +122,8 @@ fn accepted_ack() -> RebornSubmitTurnResponse {
     }
 }
 
-fn cancelled_response() -> RebornCancelRunResponse {
-    RebornCancelRunResponse {
+fn cancelled_response() -> IronClawCancelRunResponse {
+    IronClawCancelRunResponse {
         run_id: run_id(),
         status: TurnStatus::Cancelled,
         event_cursor: EventCursor(2),
@@ -131,8 +131,8 @@ fn cancelled_response() -> RebornCancelRunResponse {
     }
 }
 
-fn failed_run_state() -> RebornGetRunStateResponse {
-    RebornGetRunStateResponse {
+fn failed_run_state() -> IronClawGetRunStateResponse {
+    IronClawGetRunStateResponse {
         turn_id: "turn-failed".to_string(),
         run_id: run_id(),
         status: TurnStatus::Failed,

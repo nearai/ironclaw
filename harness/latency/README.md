@@ -20,7 +20,7 @@ Current dev scope:
 - `webui_session`
 - `hosted_substrate_build`
 
-`hosted_substrate_build` uses the exported Reborn production substrate builders
+`hosted_substrate_build` uses the exported IronClaw production substrate builders
 with deterministic fake process and wake ports. It exercises hosted
 filesystem-backed secrets, resources, approvals, run-state, triggers, event
 store setup, and production wiring validation without live providers.
@@ -39,7 +39,7 @@ the comparison measures backend behavior instead of the old full-snapshot blob
 CAS path.
 
 `webui_session` builds the real
-`build_reborn_runtime -> build_webui_services -> webui_v2_app` stack once per
+`build_ironclaw_runtime -> build_webui_services -> webui_v2_app` stack once per
 backend, then measures authenticated `GET /api/webchat/v2/session` requests
 through the composed Axum router. It uses deterministic multi-user bearer
 tokens so the workload measures normal session-bootstrap latency instead of

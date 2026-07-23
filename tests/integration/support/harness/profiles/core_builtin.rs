@@ -1,7 +1,7 @@
 //! core_builtin domain tools profile (`core_builtin_tools`).
 //!
 //! Unlike the other `profiles/*` domains, this harness does NOT flow through
-//! `new_with_options`/`RebornServices` — it builds the `HostRuntime` directly
+//! `new_with_options`/`IronClawServices` — it builds the `HostRuntime` directly
 //! via `local_dev_host_runtime_with_http_egress` /
 //! `local_dev_host_runtime_with_live_http_egress` and assembles
 //! `HostRuntimeCapabilityHarness` by hand (`core_builtin_tools_from_runtime`),
@@ -141,7 +141,7 @@ pub(crate) async fn core_builtin_tools(
                 workspace_root,
                 runtime,
                 network_policy,
-                UserId::new("reborn-e2e-core-builtins-real-egress-user")?,
+                UserId::new("ironclaw-e2e-core-builtins-real-egress-user")?,
             )?;
             harness.real_egress_transport = Some(Arc::new(transport));
             harness.process_port = recording_process_port;
@@ -155,7 +155,7 @@ pub(crate) async fn core_builtin_tools(
                 workspace_root,
                 runtime,
                 network_policy,
-                UserId::new("reborn-e2e-core-builtins-live-http-user")?,
+                UserId::new("ironclaw-e2e-core-builtins-live-http-user")?,
             )
         }
         EgressMode::Recording => {
@@ -173,7 +173,7 @@ pub(crate) async fn core_builtin_tools(
                 workspace_root,
                 runtime,
                 network_policy,
-                UserId::new("reborn-e2e-core-builtins-user")?,
+                UserId::new("ironclaw-e2e-core-builtins-user")?,
             )?;
             harness.http_egress = Some(runtime_http_egress);
             harness.process_port = recording_process_port;
@@ -306,7 +306,7 @@ fn core_builtin_tools_from_runtime(
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
-        reborn_services: None,
+        ironclaw_services: None,
         trigger_active_run_lookup_requested: false,
     })
 }

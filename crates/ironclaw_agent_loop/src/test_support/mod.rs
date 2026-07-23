@@ -2,7 +2,7 @@
 //!
 //! The module is intentionally absent from normal production builds. Tests in
 //! downstream crates can enable `ironclaw_agent_loop/test-support` and drive
-//! the canonical executor through the same host trait used by Reborn.
+//! the canonical executor through the same host trait used by IronClaw.
 
 use std::{
     collections::VecDeque,

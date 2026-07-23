@@ -1,4 +1,4 @@
-//! Reborn-native product command contract.
+//! IronClaw-native product command contract.
 //!
 //! Slash strings are only an edge syntax. This module starts from normalized
 //! command payloads so command parsing does not depend on v1 agent routing or on

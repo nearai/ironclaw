@@ -23,10 +23,10 @@ fn caller() -> WebUiAuthenticatedCaller {
     )
 }
 
-fn service_unavailable_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn service_unavailable_error() -> IronClawServicesError {
+    IronClawServicesError {
+        code: IronClawServicesErrorCode::Unavailable,
+        kind: IronClawServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: false,
         field: None,
@@ -50,8 +50,8 @@ impl RecordingServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         key: String,
-        request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        request: IronClawOperatorConfigSetRequest,
+    ) -> Result<IronClawOperatorConfigGetResponse, IronClawServicesError> {
         self.calls
             .lock()
             .expect("lock")
@@ -68,8 +68,8 @@ impl ProductSurface for RecordingServices {
     async fn query(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+        query: IronClawViewQuery,
+    ) -> Result<IronClawViewPage, IronClawServicesError> {
         if query.view_id != OPERATOR_CONFIG_KEY_VIEW.id {
             unreachable!("not exercised by this test");
         }
@@ -90,19 +90,19 @@ impl ProductSurface for RecordingServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, IronClawServicesError> {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(service_unavailable_error)?;
         match operation_id {
             ProductOperationId::OperatorConfigSetKey => {
-                let request: RebornOperatorConfigSetProductRequest =
+                let request: IronClawOperatorConfigSetProductRequest =
                     serde_json::from_value(request.input)
-                        .map_err(RebornServicesError::internal_from)?;
+                        .map_err(IronClawServicesError::internal_from)?;
                 ProductOperationResponse::json(
                     self.set_operator_config_key(
                         caller,
                         request.key,
-                        RebornOperatorConfigSetRequest {
+                        IronClawOperatorConfigSetRequest {
                             value: request.value,
                         },
                     )

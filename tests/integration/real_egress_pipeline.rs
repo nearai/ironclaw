@@ -14,14 +14,14 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 /// Not in the harness's default `http_test_policy()` allowlist
@@ -40,11 +40,11 @@ const SEEDED_AWS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 /// the harness, not just a stand-in that always says yes.
 #[tokio::test]
 async fn real_network_policy_denies_out_of_allowlist_host_before_transport() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_real_egress_pipeline()
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": DENIED_URL})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": DENIED_URL})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -70,13 +70,13 @@ async fn real_network_policy_denies_out_of_allowlist_host_before_transport() {
 /// reaching the model.
 #[tokio::test]
 async fn real_leak_scan_blocks_response_containing_seeded_secret() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_real_egress_response_bodies(
             [format!(r#"{{"note":"{SEEDED_AWS_KEY}"}}"#).into_bytes()],
         )
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": ALLOWED_URL})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": ALLOWED_URL})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -101,14 +101,14 @@ async fn real_leak_scan_blocks_response_containing_seeded_secret() {
 /// runtime) because this pins the SEPARATE real-egress runtime constructor.
 #[tokio::test]
 async fn real_egress_pipeline_shell_dispatches_through_inert_process_port() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_real_egress_pipeline()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.shell",
                 json!({"command": "echo real-egress-probe"}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -129,14 +129,14 @@ async fn real_egress_pipeline_shell_dispatches_through_inert_process_port() {
 /// result — not a full-body success.
 #[tokio::test]
 async fn real_egress_transport_honors_response_body_limit() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_real_egress_response_bodies([vec![b'a'; 2048]])
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.http",
                 json!({"url": ALLOWED_URL, "response_body_limit": 1024}),
             ),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await

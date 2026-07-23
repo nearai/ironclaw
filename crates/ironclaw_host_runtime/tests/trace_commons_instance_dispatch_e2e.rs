@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use ironclaw_host_runtime::{
     TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
 };
-use ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope;
-use ironclaw_reborn_traces::onboarding::{OnboardConsents, onboard_at_dir};
+use ironclaw_traces::contribution::trace_contribution_dir_for_scope;
+use ironclaw_traces::onboarding::{OnboardConsents, onboard_at_dir};
 use serde_json::json;
 
 #[path = "support/trace_commons_dispatch.rs"]

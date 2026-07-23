@@ -1729,7 +1729,7 @@ fn dispatch_failure_message(
 ) -> String {
     // This message is the PUBLIC label: persisted into run-state rows and
     // published on the runtime event sink before any downstream validation
-    // (reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces
+    // (ironclaw_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces
     // pins the boundary). It fails closed: only summaries that pass the strict
     // loop-summary validation (host-authored sentences, sanitized guest error
     // codes) pass through; wild raw causes degrade to the kind's fixed

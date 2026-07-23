@@ -2,8 +2,8 @@
 //!
 //! Routes every memory document operation through the unified
 //! [`RootFilesystem`] trait from `ironclaw_filesystem`. This is the
-//! single Reborn-native memory repository — the per-backend
-//! `Reborn{LibSql,Postgres}MemoryDocumentRepository` SQL repos were
+//! single IronClaw-native memory repository — the per-backend
+//! `IronClaw{LibSql,Postgres}MemoryDocumentRepository` SQL repos were
 //! collapsed onto this implementation once `ironclaw_filesystem` grew
 //! native FTS, vector, and CAS support.
 //!

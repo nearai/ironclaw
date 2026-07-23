@@ -1,4 +1,4 @@
-//! Reborn integration-test framework — slice 5 inert process port.
+//! IronClaw integration-test framework — slice 5 inert process port.
 //!
 //! Proves the `builtin.shell` dispatch path with the inert `RecordingProcessPort`
 //! default: the command is recorded (real dispatch path ran) and no real OS
@@ -7,14 +7,14 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::assertions::ToolErrorClass;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::assertions::ToolErrorClass;
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::reply::IronClawScriptedReply;
 use serde_json::json;
 
 /// Default build: a scripted `builtin.shell` call is recorded by the inert
@@ -22,11 +22,11 @@ use serde_json::json;
 /// invariant).
 #[tokio::test]
 async fn shell_call_recorded_not_executed() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.shell", json!({"command": "echo s5-probe"})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.shell", json!({"command": "echo s5-probe"})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -48,8 +48,8 @@ async fn shell_call_recorded_not_executed() {
 /// command list.
 #[tokio::test]
 async fn shell_assertions_fail_when_no_shell_call_ran() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("no shell")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("no shell")])
         .build()
         .await
         .expect("harness builds");
@@ -63,11 +63,11 @@ async fn shell_assertions_fail_when_no_shell_call_ran() {
 /// / `"success":false`, so the run completes and the model can react.
 #[tokio::test]
 async fn shell_non_zero_exit_surfaces_as_completed_result() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_shell_exit_code(1)
         .script([
-            RebornScriptedReply::tool_call("builtin.shell", json!({"command": "echo boom"})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.shell", json!({"command": "echo boom"})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -92,11 +92,11 @@ async fn shell_non_zero_exit_surfaces_as_completed_result() {
 /// run continues to completion rather than dying with `driver_unavailable`.
 #[tokio::test]
 async fn shell_timeout_surfaces_recoverable_failed() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_shell_timeout()
         .script([
-            RebornScriptedReply::tool_call("builtin.shell", json!({"command": "sleep 999"})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.shell", json!({"command": "sleep 999"})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -122,7 +122,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
 /// this file — which never exercises `.with_live_shell()` — would stay green.
 ///
 /// Runs on a larger-stack thread (mirrors
-/// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`): the
+/// `tests/ironclaw_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`): the
 /// real `HostProcessPort` subprocess path (spawn + piped-stream capture)
 /// adds enough async-state-machine depth on top of the full
 /// `product_workflow → composition → webui_v2 → runtime` chain to overflow
@@ -130,14 +130,14 @@ async fn shell_timeout_surfaces_recoverable_failed() {
 #[test]
 fn live_shell_uses_local_process_port() {
     run_with_larger_stack(async {
-        let h = RebornIntegrationHarness::test_default()
+        let h = IronClawIntegrationHarness::test_default()
             .with_live_shell()
             .script([
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.shell",
                     json!({"command": "echo live-shell-probe"}),
                 ),
-                RebornScriptedReply::text("done"),
+                IronClawScriptedReply::text("done"),
             ])
             .build()
             .await
@@ -159,7 +159,7 @@ fn live_shell_uses_local_process_port() {
 /// Spawns `test` on a dedicated 16MB-stack thread with a current-thread tokio
 /// runtime. See the doc comment on `live_shell_uses_local_process_port` for
 /// why this one test needs it (matches the existing fix in
-/// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`).
+/// `tests/ironclaw_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`).
 fn run_with_larger_stack<F>(test: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,

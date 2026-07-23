@@ -321,9 +321,9 @@ impl RunProfileId {
 
     /// Dedicated run profile for scheduled-trigger fires (issue #5505). Its
     /// `capability_surface_profile_id` selects the capability surface that the
-    /// Reborn runtime composition (`ironclaw_runner::runtime`) narrows to deny
+    /// IronClaw runtime composition (`ironclaw_runner::runtime`) narrows to deny
     /// the trigger-mutator capabilities — this crate only owns the stable,
-    /// distinct id; the deny policy itself is defined and enforced in Reborn.
+    /// distinct id; the deny policy itself is defined and enforced in IronClaw.
     pub fn scheduled_trigger() -> Self {
         Self::from_trusted_static("scheduled_trigger")
     }

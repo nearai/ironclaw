@@ -6,26 +6,26 @@
 
 use std::sync::Arc;
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
-use super::reborn_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
+use super::ironclaw_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
 use axum::http::StatusCode;
 use chrono::Duration;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_product_workflow::RebornServices;
+use ironclaw_product_workflow::IronClawServices;
 use ironclaw_triggers::{ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, TriggerId};
 use ironclaw_turns::TurnStatus;
 use serde_json::{Value, json};
 
 const TRIGGER_NAME: &str = "c-triggered-gate-hold-visible";
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     // Every-minute cron (not Once) so elapsed-occurrence counting is
     // meaningful for the hold projection (#5886).
     let creator = g
         .thread("conv-triggered-hold-create")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.trigger_create",
                 json!({
                     "name": TRIGGER_NAME,
@@ -33,7 +33,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "schedule": {"kind": "cron", "expression": "* * * * *", "timezone": "UTC"},
                 }),
             ),
-            RebornScriptedReply::text("created"),
+            IronClawScriptedReply::text("created"),
         ])
         .build()
         .await?;
@@ -64,11 +64,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_triggered_turn_scripted(
             "write the scheduled report",
             [
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.write_file",
                     json!({"path": "/workspace/triggered-hold.txt", "content": "hold visible"}),
                 ),
-                RebornScriptedReply::text("report written after approval"),
+                IronClawScriptedReply::text("report written after approval"),
             ],
         )
         .await?;
@@ -121,12 +121,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Surface 1 (#5886): the automations list entry must carry active_hold
     // while the fire is gate-parked.
-    let facade =
-        ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
-            Arc::clone(&repo),
-            Arc::clone(&g.shared.turn_store),
-        );
-    let services = RebornServices::new(
+    let facade = ironclaw_composition::test_support::local_dev_automation_product_facade_for_test(
+        Arc::clone(&repo),
+        Arc::clone(&g.shared.turn_store),
+    );
+    let services = IronClawServices::new(
         creator.thread_harness.service.clone(),
         creator.coordinator.clone(),
     )
@@ -141,8 +140,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lister = g
         .thread("conv-triggered-hold-list")
         .script([
-            RebornScriptedReply::tool_call("builtin.trigger_list", json!({})),
-            RebornScriptedReply::text("listed"),
+            IronClawScriptedReply::tool_call("builtin.trigger_list", json!({})),
+            IronClawScriptedReply::text("listed"),
         ])
         .build()
         .await?;
@@ -184,8 +183,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lister_after = g
         .thread("conv-triggered-hold-list-after")
         .script([
-            RebornScriptedReply::tool_call("builtin.trigger_list", json!({})),
-            RebornScriptedReply::text("listed again"),
+            IronClawScriptedReply::tool_call("builtin.trigger_list", json!({})),
+            IronClawScriptedReply::text("listed again"),
         ])
         .build()
         .await?;

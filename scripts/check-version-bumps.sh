@@ -141,7 +141,7 @@ if $WIT_TOOL_CHANGED; then
         echo "  OK: WIT package version bumped."
     fi
 
-    # Check WIT_TOOL_VERSION constant matches (Reborn host lives in
+    # Check WIT_TOOL_VERSION constant matches (IronClaw host lives in
     # crates/ironclaw_wasm/src/config.rs; the v1 src/tools/wasm/mod.rs was
     # deleted under Tier B).
     CONST_VER=$(extract_rust_const "crates/ironclaw_wasm/src/config.rs" "WIT_TOOL_VERSION")
@@ -170,7 +170,7 @@ if $WIT_CHANNEL_CHANGED; then
 
     # No host-side WIT_CHANNEL_VERSION constant to cross-check: the v1
     # src/tools/wasm/mod.rs (which defined it) was deleted under Tier B and the
-    # Reborn WASM host does not pin a channel WIT version constant. The WIT
+    # IronClaw WASM host does not pin a channel WIT version constant. The WIT
     # package version bump above remains the enforced contract.
 fi
 

@@ -6,6 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_composition::{
+    IronClawBuildInput, IronClawServices, ProductLiveCapabilityAuthorityResolver,
+    ProductLiveCapabilityIo, ProductLiveModelRouteSettings, ProductLivePlannedRuntimeAdapterConfig,
+    ProductLivePlannedRuntimeAdapterError, ProductLivePlannedRuntimeAdapters,
+    ProductLiveVisibleCapabilityRequestConfig, build_ironclaw_services, capability_allowlist,
+};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
@@ -33,19 +39,13 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
     InboundTurnService, ResolvedBinding,
 };
-use ironclaw_reborn_composition::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    RebornServices, build_reborn_services, capability_allowlist,
-};
 use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{
         ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
     },
     runtime::{
-        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
+        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, IronClawRuntimeLoopComposition,
         RuntimeTurnStateStore, build_product_live_planned_runtime,
     },
     subagent::await_edge::{
@@ -85,7 +85,7 @@ pub struct ProductLiveAgentLoopHarness {
     thread_service: InMemorySessionThreadService,
     turn_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
-    composition: RebornRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
+    composition: IronClawRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
     capability_invocations: Arc<Mutex<Vec<LoopRequest>>>,
     capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -181,7 +181,7 @@ pub struct HostRuntimeCapabilityConfig {
 }
 
 async fn enable_host_runtime_auto_approve_for_harness_user(
-    services: &RebornServices,
+    services: &IronClawServices,
     binding: &ResolvedBinding,
 ) {
     let auto_approve = services
@@ -260,7 +260,7 @@ impl ProductLiveAgentLoopHarness {
             .as_ref()
             .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
         let host_runtime_services = if let Some(root) = &host_runtime_root {
-            let services = build_reborn_services(RebornBuildInput::local_dev(
+            let services = build_ironclaw_services(IronClawBuildInput::local_dev(
                 "planned-harness-host-runtime",
                 root.path().join("local-dev"),
             ))
@@ -312,7 +312,7 @@ impl ProductLiveAgentLoopHarness {
                 // both stores so a raise and its resume round-trip through the
                 // same records.
                 let capability_store_filesystem =
-                    ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
+                    ironclaw_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
                 let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
                     Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
                         Arc::clone(&capability_store_filesystem),
@@ -719,7 +719,7 @@ impl ScriptedHostRuntimeToolCall {
 }
 
 struct ProductLiveHostRuntimeCapabilityFactory {
-    services: Arc<RebornServices>,
+    services: Arc<IronClawServices>,
     io: Arc<ProductLiveCapabilityIo>,
     staged_inputs: Arc<Mutex<HashMap<TurnRunId, CapabilityInputRef>>>,
     invocations: Arc<Mutex<Vec<LoopRequest>>>,

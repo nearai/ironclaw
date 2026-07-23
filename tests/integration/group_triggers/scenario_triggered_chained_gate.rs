@@ -8,27 +8,27 @@
 //! reads `state.product_context.origin` at both parks AND at final
 //! `Completed` — closing the gap where origin regresses only on the second hop.
 
-use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
-use super::reborn_support::reply::RebornScriptedReply;
+use super::ironclaw_support::group::{HarnessResult, IronClawIntegrationGroup};
+use super::ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_turns::{TurnOriginKind, TurnStatus};
 use serde_json::json;
 
-pub async fn run_chained_approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run_chained_approve(g: &IronClawIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-triggered-chained-gate").build().await?;
 
     let submission = h
         .submit_triggered_turn_scripted(
             "write the scheduled report and then the follow-up note",
             [
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.write_file",
                     json!({"path": "/workspace/triggered-chained-a.txt", "content": "triggered chained write A"}),
                 ),
-                RebornScriptedReply::tool_call(
+                IronClawScriptedReply::tool_call(
                     "builtin.write_file",
                     json!({"path": "/workspace/triggered-chained-b.txt", "content": "triggered chained write B"}),
                 ),
-                RebornScriptedReply::text("both scheduled writes complete after approval"),
+                IronClawScriptedReply::text("both scheduled writes complete after approval"),
             ],
         )
         .await?;

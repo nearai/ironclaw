@@ -7,7 +7,7 @@
 - Use these sources of truth before changing behavior:
 - `.claude/rules/skills.md`
 - `CLAUDE.md`
-- `docs/reborn/contracts/extensions.md`
+- `docs/ironclaw/contracts/extensions.md`
 
 ## What This Crate Owns
 

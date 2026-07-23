@@ -18,7 +18,7 @@ use crate::subagent::{
 };
 
 #[cfg(test)]
-pub struct RebornSubagentPromptMaterialSource<G>
+pub struct IronClawSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + ?Sized,
 {
@@ -27,7 +27,7 @@ where
 }
 
 #[cfg(test)]
-impl<G> RebornSubagentPromptMaterialSource<G>
+impl<G> IronClawSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + ?Sized,
 {
@@ -102,7 +102,7 @@ where
 
 #[cfg(test)]
 #[async_trait]
-impl<G> SubagentPromptMaterialSource for RebornSubagentPromptMaterialSource<G>
+impl<G> SubagentPromptMaterialSource for IronClawSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + Send + Sync + ?Sized,
 {
@@ -308,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn material_source_fails_loud_on_goal_miss() {
         let store = Arc::new(in_memory_backed_subagent_goal_store());
-        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::General);
+        let source = IronClawSubagentPromptMaterialSource::new(store, SubagentFlavorId::General);
         let context = ironclaw_agent_loop::test_support::test_run_context("missing-goal");
 
         let error = source.material_for_run(&context).await.unwrap_err();
@@ -331,7 +331,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::Planner);
+        let source = IronClawSubagentPromptMaterialSource::new(store, SubagentFlavorId::Planner);
 
         let material = source.material_for_run(&context).await.unwrap();
 

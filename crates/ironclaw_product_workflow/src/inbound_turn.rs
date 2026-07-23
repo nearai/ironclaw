@@ -39,11 +39,11 @@ use crate::binding_ref::{
     bounded_source_binding_ref,
 };
 use crate::error::ProductWorkflowError;
+use crate::ironclaw_services::InboundAttachmentLander;
 use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
-use crate::reborn_services::InboundAttachmentLander;
 
 #[cfg(not(any(test, feature = "test-support")))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1608,7 +1608,7 @@ mod tests {
     use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
 
     use crate::binding::ResolveBindingRequest;
-    use crate::reborn_services::RebornServicesError;
+    use crate::ironclaw_services::IronClawServicesError;
 
     struct LandingBindingStub;
 
@@ -1648,7 +1648,7 @@ mod tests {
             _thread_scope: &ThreadScope,
             message_id: &str,
             attachments: Vec<InboundAttachment>,
-        ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+        ) -> Result<Vec<AttachmentRef>, IronClawServicesError> {
             let refs = attachments
                 .iter()
                 .enumerate()

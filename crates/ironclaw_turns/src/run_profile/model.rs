@@ -26,7 +26,7 @@ use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 /// It MUST stay below the runner lease
 /// ([`crate::filesystem_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
 /// provider is surfaced as a retryable `Unavailable` error before the lease
-/// reclaims the runner mid-flight — the failure mode that wedged the Reborn
+/// reclaims the runner mid-flight — the failure mode that wedged the IronClaw
 /// runtime on 2026-06-24. The invariant is enforced by
 /// `primary_model_call_idle_timeout_is_below_runner_lease` below.
 ///

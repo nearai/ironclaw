@@ -171,7 +171,7 @@ pub(crate) fn validate_loop_inline_message_body(value: String) -> Result<String,
 }
 
 /// Validate a persisted provider/model route component with the same redaction
-/// marker policy used by host-owned loop snapshots and Reborn route keys.
+/// marker policy used by host-owned loop snapshots and IronClaw route keys.
 pub fn validate_model_route_component_value(
     label: &'static str,
     value: &str,

@@ -1,12 +1,12 @@
-# ironclaw_hooks — Reborn loop hook framework
+# ironclaw_hooks — IronClaw loop hook framework
 
 This crate owns the contract for inline (before-behavior) and event-triggered (after-fact)
-hooks across the Reborn loop. It does not own:
+hooks across the IronClaw loop. It does not own:
 
 - The runner-facing `AgentLoopDriver` trait — that stays in `ironclaw_turns`.
 - The concrete `LoopCapabilityPort` / `LoopPromptPort` / `LoopModelPort` impls —
   those stay in `ironclaw_loop_host` and `ironclaw_runner`.
-- The Reborn-side middleware composition that wraps host ports — that lives in
+- The IronClaw-side middleware composition that wraps host ports — that lives in
   `ironclaw_runner::loop_driver_host` and consumes types from this crate.
 - Extension bundle loading and installation. Installed-tier WASM hooks execute
   here once their module bytes are resolved, but the extension installer remains
@@ -21,7 +21,7 @@ ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-u
 ironclaw_engine      -> no hook ownership; optional future driver consumer
 ```
 
-Architecture test in `ironclaw_architecture::tests::reborn_dependency_boundaries`
+Architecture test in `ironclaw_architecture::tests::ironclaw_dependency_boundaries`
 proves the `ironclaw_turns -> ironclaw_hooks` edge stays absent.
 
 ## Trust model
@@ -125,7 +125,7 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
 - `ordering` — `HookPhase`, `HookPriority`, stable composition
 - `failure_policy` — `FailureCategory` taxonomy and per-kind behavior
 - `registry` — `HookRegistry`, `HookBinding`, run-profile-sourced resolution
-- `dispatch` — `HookDispatcher` executor contract (will be wrapped by Reborn
+- `dispatch` — `HookDispatcher` executor contract (will be wrapped by IronClaw
   middleware in a follow-up)
 - `manifest` — extension manifest `[[hooks]]` schema (serde types)
 - `predicate` — declarative predicate language for `Installed` hooks (types
@@ -135,18 +135,18 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
 
 The `HookDispatcher` owns mutable state — most importantly the registry's
 slot-poisoning bits — that should not survive across host builds. Earlier
-slices held one `Arc<HookDispatcher>` on the Reborn factory and reused it
+slices held one `Arc<HookDispatcher>` on the IronClaw factory and reused it
 for every `build_text_only_host*` call, which meant a hook poisoned during
 run N stayed disabled for runs N+1, N+2, …  The
 `PredicateEvaluator`'s sliding-window counter is keyed by
 `(hook_id, tenant_id, capability)` so rate-cap state was already correctly
 partitioned across tenants, but the dispatcher itself was not.
 
-The Reborn factory now accepts a **closure** that mints a fresh dispatcher
+The IronClaw factory now accepts a **closure** that mints a fresh dispatcher
 per host build:
 
 ```rust
-RebornLoopDriverHostFactory::new(/* … */)
+IronClawLoopDriverHostFactory::new(/* … */)
     .with_hook_dispatcher_factory(move || {
         let mut dispatcher = HookDispatcher::new(HookRegistry::new());
         dispatcher

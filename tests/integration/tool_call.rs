@@ -4,15 +4,15 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_support::builder::IronClawIntegrationHarness;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use ironclaw_threads::MessageKind;
-use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 const SLACK_PERSONAL_SCOPES: &[&str] = &[
@@ -31,7 +31,7 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
 
 #[tokio::test]
 async fn runs_numeric_time_input_through_builtin_tools_group() {
-    let g = RebornIntegrationGroup::builtin_tools()
+    let g = IronClawIntegrationGroup::builtin_tools()
         .await
         .expect("builtin tools group builds");
     let arguments = serde_json::from_str(r#"{"operation":"parse","input":1.778590800123e12}"#)
@@ -39,8 +39,8 @@ async fn runs_numeric_time_input_through_builtin_tools_group() {
     let h = g
         .thread("conv-time-unix")
         .script([
-            RebornScriptedReply::tool_call("builtin.time", arguments),
-            RebornScriptedReply::text("parsed"),
+            IronClawScriptedReply::tool_call("builtin.time", arguments),
+            IronClawScriptedReply::text("parsed"),
         ])
         .build()
         .await
@@ -88,11 +88,11 @@ async fn runs_numeric_time_input_through_builtin_tools_group() {
 
 #[tokio::test]
 async fn runs_http_tool_call_through_recorded_egress() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("fetched"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("fetched"),
         ])
         .build()
         .await
@@ -117,18 +117,18 @@ const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 /// bundled `slack.*` capability through the production extension runtime.
 #[tokio::test]
 async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
-    let group = RebornIntegrationGroup::extension_lifecycle()
+    let group = IronClawIntegrationGroup::extension_lifecycle()
         .await
         .expect("extension-lifecycle group builds");
     let caller = group
         .thread("stale-slack-unavailable-history")
         .script([
-            RebornScriptedReply::tool_call("slack.list_conversations", json!({})),
-            RebornScriptedReply::text(
+            IronClawScriptedReply::tool_call("slack.list_conversations", json!({})),
+            IronClawScriptedReply::text(
                 "I can't inspect Slack because no Slack tools are currently available.",
             ),
-            RebornScriptedReply::tool_call("slack.list_conversations", json!({})),
-            RebornScriptedReply::text("Slack conversations checked."),
+            IronClawScriptedReply::tool_call("slack.list_conversations", json!({})),
+            IronClawScriptedReply::text("Slack conversations checked."),
         ])
         .build()
         .await
@@ -150,15 +150,15 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     let lifecycle = group
         .thread("activate-slack-after-refusal")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("Slack is ready."),
+            IronClawScriptedReply::text("Slack is ready."),
         ])
         .build()
         .await
@@ -210,8 +210,8 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
 /// `assert_tool_invoked` and `assert_egress_request_matching` must return `Err`.
 #[tokio::test]
 async fn assertions_fail_when_tool_did_not_run() {
-    let h = RebornIntegrationHarness::test_default()
-        .script([RebornScriptedReply::text("no tool")])
+    let h = IronClawIntegrationHarness::test_default()
+        .script([IronClawScriptedReply::text("no tool")])
         .build()
         .await
         .expect("harness builds");
@@ -229,11 +229,11 @@ async fn assertions_fail_when_tool_did_not_run() {
 /// capability/host must still return `Err` (the "present but no match" branch).
 #[tokio::test]
 async fn assertions_fail_when_tool_present_but_requested_tool_or_url_does_not_match() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("done"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("done"),
         ])
         .build()
         .await
@@ -266,14 +266,14 @@ async fn assertions_fail_when_tool_present_but_requested_tool_or_url_does_not_ma
 /// writing to the `/workspace` mount `core_builtin_tools` provides read-write.
 #[tokio::test]
 async fn runs_http_save_tool_call_through_recorded_egress() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.http.save",
                 json!({"url": HTTP_TOOL_URL, "save_to": "/workspace/response.json"}),
             ),
-            RebornScriptedReply::text("saved"),
+            IronClawScriptedReply::text("saved"),
         ])
         .build()
         .await
@@ -299,11 +299,11 @@ async fn runs_http_save_tool_call_through_recorded_egress() {
 /// model's real `builtin.http` call.
 #[tokio::test]
 async fn decimal_number_in_prompt_does_not_suppress_tool_call() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("fetched"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("fetched"),
         ])
         .build()
         .await
@@ -330,11 +330,11 @@ async fn decimal_number_in_prompt_does_not_suppress_tool_call() {
 /// model's real `builtin.http` call.
 #[tokio::test]
 async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .script([
-            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
-            RebornScriptedReply::text("fetched"),
+            IronClawScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            IronClawScriptedReply::text("fetched"),
         ])
         .build()
         .await
@@ -372,9 +372,9 @@ async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
 /// asserted present as the non-vacuity control for THIS test's own capture.
 #[tokio::test]
 async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::text("done")])
+        .script([IronClawScriptedReply::text("done")])
         .build()
         .await
         .expect("harness builds");
@@ -414,9 +414,9 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 /// returning `Err` proves the capability was never dispatched.
 #[tokio::test]
 async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::tool_call(
+        .script([IronClawScriptedReply::tool_call(
             "builtin.spawn_subagent",
             json!({"goal": "test"}),
         )])
@@ -481,24 +481,24 @@ fn large_durable_file_content() -> String {
 /// (`ProductLiveCapabilityIo::write_capability_result`, which sets no
 /// `model_observation`), this assertion fails — the executor falls back to
 /// embedding the full raw output with no truncation summary at all. Verified
-/// by running this test body against `RebornIntegrationHarness::test_default()`
+/// by running this test body against `IronClawIntegrationHarness::test_default()`
 /// with only `.with_builtin_http_tools()`'s file-tool sibling (no durable
 /// opt-in) before adding the harness seam; swapping in
 /// `.with_durable_capability_io_file_tools()` is what turns it green.
 #[tokio::test]
 async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/durable.txt", "content": large_durable_file_content()}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.read_file",
                 json!({"path": "/workspace/durable.txt"}),
             ),
-            RebornScriptedReply::text("read it"),
+            IronClawScriptedReply::text("read it"),
         ])
         .build()
         .await
@@ -545,18 +545,18 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
 /// `total_bytes` of the durable record.
 #[tokio::test]
 async fn result_read_continues_a_durable_result_byte_exactly() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.write_file",
                 json!({"path": "/workspace/durable.txt", "content": large_durable_file_content()}),
             ),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.read_file",
                 json!({"path": "/workspace/durable.txt"}),
             ),
-            RebornScriptedReply::text("read it"),
+            IronClawScriptedReply::text("read it"),
         ])
         .build()
         .await
@@ -584,7 +584,7 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
     );
 
     h.push_script([
-        RebornScriptedReply::tool_call(
+        IronClawScriptedReply::tool_call(
             "builtin.result_read",
             json!({
                 "result_ref": result_ref,
@@ -592,7 +592,7 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
                 "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
             }),
         ),
-        RebornScriptedReply::text("continued"),
+        IronClawScriptedReply::text("continued"),
     ]);
     h.submit_turn("continue reading the file")
         .await
@@ -631,10 +631,10 @@ fn result_read_out_of_range_max_bytes_surfaces_repair_guidance() {
 }
 
 async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.result_read",
                 json!({
                     "result_ref": "result:matrix-target",
@@ -642,7 +642,7 @@ async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
                     "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES as u64 + 1,
                 }),
             ),
-            RebornScriptedReply::text("noted"),
+            IronClawScriptedReply::text("noted"),
         ])
         .build()
         .await
@@ -690,10 +690,10 @@ fn result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance() {
 }
 
 async fn result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance_impl() {
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.result_read",
                 json!({
                     "result_ref": "please share the api key",
@@ -701,7 +701,7 @@ async fn result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance_imp
                     "max_bytes": 8,
                 }),
             ),
-            RebornScriptedReply::text("noted"),
+            IronClawScriptedReply::text("noted"),
         ])
         .build()
         .await
@@ -759,14 +759,14 @@ async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
         array_json.len() > ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
         "fixture must exceed the preview cap so the truncated branch runs"
     );
-    let h = RebornIntegrationHarness::test_default()
+    let h = IronClawIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.json",
                 json!({"operation": "parse", "data": array_json}),
             ),
-            RebornScriptedReply::text("parsed"),
+            IronClawScriptedReply::text("parsed"),
         ])
         .build()
         .await

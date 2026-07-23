@@ -2,7 +2,7 @@
 #
 # Composition mass ratchet gate.
 #
-# Fails when ironclaw_reborn_composition's share of production crate code grows
+# Fails when ironclaw_composition's share of production crate code grows
 # past the committed ceiling in scripts/ci/composition-budget.toml. See that
 # file's header for the rationale and the metric definition.
 #
@@ -11,7 +11,7 @@
 #   scripts/ci/check-composition-budget.sh --print   # print observed share only, never fail
 #
 # Test/override env vars (used by test-check-composition-budget.sh; unset in prod):
-#   COMPOSITION_SRC   numerator dir      (default: crates/ironclaw_reborn_composition/src)
+#   COMPOSITION_SRC   numerator dir      (default: crates/ironclaw_composition/src)
 #   CRATES_ROOT       denominator root   (default: crates)  -> counts $CRATES_ROOT/*/src/**.rs
 #   BUDGET_FILE       budget TOML path   (default: scripts/ci/composition-budget.toml)
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-COMPOSITION_SRC="${COMPOSITION_SRC:-crates/ironclaw_reborn_composition/src}"
+COMPOSITION_SRC="${COMPOSITION_SRC:-crates/ironclaw_composition/src}"
 CRATES_ROOT="${CRATES_ROOT:-crates}"
 BUDGET_FILE="${BUDGET_FILE:-scripts/ci/composition-budget.toml}"
 
@@ -141,8 +141,8 @@ if [ "${observed_bp}" -gt "${effective_ceiling}" ]; then
     prefix=""; [ "${enforce}" = true ] || prefix="[dry-run, would FAIL] "
     echo "  ${prefix}MASS EXCEEDED: composition is $(fmt_pct "${observed_bp}")% of production crate code," \
          "$(fmt_pct "${over}")pp over the effective ceiling of $(fmt_pct "${effective_ceiling}")%."
-    echo "    Move behavior OUT of ironclaw_reborn_composition into an owning crate (charter is"
-    echo "    assembly-only). See .claude/skills/ironclaw-reborn-architecture-review (item 2)."
+    echo "    Move behavior OUT of ironclaw_composition into an owning crate (charter is"
+    echo "    assembly-only). See .claude/skills/ironclaw-architecture-review (item 2)."
     echo "    If justified, raise ceiling_bp in ${BUDGET_FILE} with a PR rationale."
     breached=1
 elif [ "$((ceiling_bp - observed_bp))" -gt 100 ]; then

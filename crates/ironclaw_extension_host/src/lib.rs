@@ -1,4 +1,4 @@
-//! Generic extension lifecycle host for IronClaw Reborn.
+//! Generic extension lifecycle host for IronClaw.
 //!
 //! This crate owns the extension model's generic core (overview.md §4–§6):
 //! the [`entrypoint`] contract and binding rule, the two standard state

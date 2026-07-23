@@ -1,0 +1,657 @@
+{
+  "model_name": "ironclaw-qa-qa_9d_routine_per_trigger_delivery_target",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named ironclaw-qa-9d-per-trigger-target-1784643152455. As a one-time routine scheduled about 90 seconds from now (compute the time with the time capability, use the UTC timezone), report the current UTC time using the time capability as this routine's result. The routine's final answer must include the exact marker IRONCLAW_QA_9D_PER_TRIGGER_TARGET_SLACK_DELIVERED_1784643152455. Create the routine now; do not run it immediately. During routine creation, do not perform the routine's live check, web/search/HTTP lookup, or Slack send. In your final answer include the exact marker IRONCLAW_QA_9D_PER_TRIGGER_TARGET_ROUTINE_CREATED_1784643152455 and include the text routine. Before creating the routine, make sure the Slack tools extension is installed and activated (the Slack account is already connected); install and activate it if it is not. Route THIS routine's results to my Slack DM by listing my outbound delivery targets and passing the Slack DM target id as delivery_target_id when creating the trigger. Do not change my default outbound delivery target."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_821186f07a8a410381743cf0",
+            "name": "builtin__time",
+            "arguments": {
+              "operation": "now",
+              "timezone": "UTC"
+            }
+          },
+          {
+            "id": "call_6d6a9d365c2d439a83609046",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 13640,
+        "output_tokens": 111
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b5e7a0934ef440ce9d3f0ae0",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 1024,
+              "offset": 0,
+              "result_ref": "result:700b011c-d616-46ff-a295-4442ac25c248.3e5ef6d8-ec66-44e3-a1f4-96f3c548e937"
+            }
+          },
+          {
+            "id": "call_0cf57ac62f6e4807816c20dd",
+            "name": "builtin__skill_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 14012,
+        "output_tokens": 145
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_44290a8efe5a41d287022dae",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 18859,
+        "output_tokens": 98
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bb18f94a85a64c32995a669f",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 18958,
+        "output_tokens": 57
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 12
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b048de26fec947ec9b4a9cf4",
+            "name": "capability_info",
+            "arguments": {
+              "detail": "schema",
+              "name": "builtin__extension_install"
+            }
+          }
+        ],
+        "input_tokens": 19057,
+        "output_tokens": 66
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 14
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_e4f426bffc244fd6b344eaae",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 19391,
+        "output_tokens": 66
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 16
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_3e5931a2b63146da85157324",
+            "name": "builtin__extension_search",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 19507,
+        "output_tokens": 31
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 18
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_f6badcebc27748f9a5cbccff",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 19572,
+        "output_tokens": 57
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 20
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_1f859ee2cefc4f81a9010514",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "SLACK"
+            }
+          }
+        ],
+        "input_tokens": 19671,
+        "output_tokens": 48
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 22
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0d533c31cf0f451ea25a9d8e",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "near.social"
+            }
+          }
+        ],
+        "input_tokens": 19770,
+        "output_tokens": 49
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 24
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0e7382c0c8154082b577dddc",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "reborn"
+            }
+          }
+        ],
+        "input_tokens": 19966,
+        "output_tokens": 48
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 26
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_7b25ec7aa18c4150abe366ac",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 20627,
+        "output_tokens": 69
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 28
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_3a3355d4ac9949cd9931c426",
+            "name": "builtin__time",
+            "arguments": {
+              "input": "2026-07-21T14:12:37Z",
+              "operation": "convert",
+              "timezone": "UTC"
+            }
+          }
+        ],
+        "input_tokens": 20881,
+        "output_tokens": 190
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 30
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_aeb71dd1e1414b7988ab3e7d",
+            "name": "builtin__time",
+            "arguments": {
+              "format": "%Y-%m-%dT%H:%M:%S",
+              "input": 1784643157,
+              "operation": "format",
+              "timezone": "UTC"
+            }
+          }
+        ],
+        "input_tokens": 21064,
+        "output_tokens": 212
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 32
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0c4f4f5fa5034147baa4e295",
+            "name": "builtin__shell",
+            "arguments": {
+              "command": "python3 -c \"from datetime import datetime, timezone; t=1784643157+90; print(datetime.fromtimestamp(t, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))\""
+            }
+          }
+        ],
+        "input_tokens": 21339,
+        "output_tokens": 140
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 34
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_2ec0e3830aaf4147af283ecd",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "delivery_target_id": "slack:personal-dm:SLACK_ID_REDACTED:ironclaw-webui-v2-live-qa-user",
+              "name": "ironclaw-qa-9d-per-trigger-target-1784643152455",
+              "prompt": "Report the current UTC time using the time capability (builtin__time with operation=now, timezone=UTC). In your final answer include the exact marker IRONCLAW_QA_9D_PER_TRIGGER_TARGET_SLACK_DELIVERED_1784643152455.",
+              "schedule": {
+                "at": "2026-07-21T14:14:07",
+                "kind": "once",
+                "timezone": "UTC"
+              }
+            }
+          }
+        ],
+        "input_tokens": 21589,
+        "output_tokens": 266
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 36
+      },
+      "response": {
+        "type": "text",
+        "content": "## Routine Created Successfully\n\nThe Slack outbound delivery target was already available (no install/activation needed), so I used it directly.\n\n**Routine:** `ironclaw-qa-9d-per-trigger-target-1784643152455`  \n**Schedule:** One-time at **2026-07-21T14:14:07 UTC** (≈90 seconds from now)  \n**Delivery target:** Slack DM  \n**State:** `scheduled`, next run at `2026-07-21T14:14:07Z`\n\nWhen it fires, it will report the current UTC time and include the marker `IRONCLAW_QA_9D_PER_TRIGGER_TARGET_SLACK_DELIVERED_1784643152455` in its result, which gets delivered directly to your Slack DM.\n\n**IRONCLAW_QA_9D_PER_TRIGGER_TARGET_ROUTINE_CREATED_1784643152455** — the **routine** is created and waiting to fire.",
+        "input_tokens": 22170,
+        "output_tokens": 212
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4fde608d588a46e592f1e793",
+            "name": "builtin__time",
+            "arguments": {
+              "operation": "now"
+            }
+          },
+          {
+            "id": "call_dd5ed685b015480eb99f99ec",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 13638,
+        "output_tokens": 104
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_6f59a8026b1f429fab429ede",
+            "name": "builtin__time",
+            "arguments": {
+              "input": "2026-07-21T14:13:49.070595704+00:00",
+              "operation": "convert",
+              "to_timezone": "UTC"
+            }
+          },
+          {
+            "id": "call_3ca794877cab4974854709e9",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 13957,
+        "output_tokens": 191
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_e72f91933971400cb1e58216",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack extension"
+            }
+          }
+        ],
+        "input_tokens": 14345,
+        "output_tokens": 112
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_f65d443c24e84dd2ae2e5579",
+            "name": "builtin__extension_search",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 14545,
+        "output_tokens": 31
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 12
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_8a79561faeb54eabb26c39ae",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 14627,
+        "output_tokens": 48
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 14
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a5b3da49d19e43c7b7af18d1",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "composable"
+            }
+          }
+        ],
+        "input_tokens": 14726,
+        "output_tokens": 65
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 16
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_2f9f951719ef4e88bf158038",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "slack"
+            }
+          }
+        ],
+        "input_tokens": 14918,
+        "output_tokens": 59
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 18
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ed1f10c8e2d14ec390fd6ba8",
+            "name": "builtin__skill_activate",
+            "arguments": {
+              "names": [
+                "commitment-triage",
+                "commitment-digest"
+              ]
+            }
+          }
+        ],
+        "input_tokens": 15017,
+        "output_tokens": 59
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Report the current UTC time using the time capability (builtin__time with operat",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bf82e5e69b964751bf22c85e",
+            "name": "builtin__time",
+            "arguments": {
+              "operation": "now",
+              "timezone": "UTC"
+            }
+          }
+        ],
+        "input_tokens": 12012,
+        "output_tokens": 63
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Report the current UTC time using the time capability (builtin__time with operat",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "text",
+        "content": "Current UTC time: **2026-07-21T14:14:09Z**\n\nREBORN_QA_9D_PER_TRIGGER_TARGET_SLACK_DELIVERED_1784643152455",
+        "input_tokens": 12303,
+        "output_tokens": 47
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 20
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a3efde4e5c25497d875dac8f",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 17681,
+        "output_tokens": 70
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 22
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_41afdb5e7eb04a808d0f7a3a",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "delivery_target_id": "slack:personal-dm:SLACK_ID_REDACTED:ironclaw-webui-v2-live-qa-user",
+              "name": "ironclaw-qa-9d-per-trigger-target-1784643225160",
+              "prompt": "Report the current UTC time using the time capability. Your final answer must include the exact marker IRONCLAW_QA_9D_PER_TRIGGER_TARGET_SLACK_DELIVERED_1784643225160.",
+              "schedule": {
+                "at": "2026-07-21T14:15:19",
+                "kind": "once",
+                "timezone": "UTC"
+              }
+            }
+          }
+        ],
+        "input_tokens": 17938,
+        "output_tokens": 305
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case qa_9d_routine_per_trigger_delivery_target: create a routine named reborn",
+        "min_message_count": 24
+      },
+      "response": {
+        "type": "text",
+        "content": "Done. Here's the summary:\n\n**Slack extension** — no search results were returned from the catalog (it doesn't appear as an installable extension in this environment), but the Slack DM delivery target was already listed as an outbound delivery target, so routing is available.\n\n**Routine created:** `ironclaw-qa-9d-per-trigger-target-1784643225160`\n- **Schedule:** One-time at `2026-07-21T14:15:19Z` (~90 seconds from now)\n- **Delivery target:** Slack DM (`slack:personal-dm:SLACK_ID_REDACTED:ironclaw-webui-v2-live-qa-user`)\n- **Default target unchanged** — only this trigger has the Slack DM delivery_target_id\n\n**Markers:**\n- `IRONCLAW_QA_9D_PER_TRIGGER_TARGET_ROUTINE_CREATED_1784643225160` — **routine** created and confirmed above\n- The routine's fire will include `IRONCLAW_QA_9D_PER_TRIGGER_TARGET_SLACK_DELIVERED_1784643225160` when it runs",
+        "input_tokens": 18500,
+        "output_tokens": 244
+      }
+    },
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Yes, go ahead and create it. Use the UTC timezone for the schedule."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Yes, go ahead and create it. Use the UTC timezone for the schedule.",
+        "min_message_count": 26
+      },
+      "response": {
+        "type": "text",
+        "content": "The routine is already created — see above! Let me confirm the details:\n\n**Routine name:** `ironclaw-qa-9d-per-trigger-target-1784643225160`\n\n**Status:** Created and active — fires once at `2026-07-21T14:15:19Z` (UTC) and delivers its result to your Slack DM.\n\n**Trigger ID:** `01KY2GE25XEJ8TPDN7F76VRBH4`\n\nNo changes needed — it was set up with UTC timezone, the Slack DM delivery target, and your default outbound target was left untouched.\n\n**Marker:** `IRONCLAW_QA_9D_PER_TRIGGER_TARGET_ROUTINE_CREATED_1784643225160`",
+        "input_tokens": 16301,
+        "output_tokens": 160
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.trigger_create"
+    ]
+  }
+}

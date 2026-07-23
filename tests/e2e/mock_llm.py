@@ -22,7 +22,7 @@ DENIAL_PATTERN = re.compile(
 
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
-    # Reborn attachment e2e: the inbound pipeline extracts a document's text
+    # IronClaw attachment e2e: the inbound pipeline extracts a document's text
     # and folds it into the model-visible <attachments> block. A unique marker
     # in the uploaded file proves the extracted text reached the prompt.
     (
@@ -33,7 +33,7 @@ CANNED_RESPONSES = [
     # The renderer must add target=_blank to the rendered anchor.
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
-    # Reborn v2 download chips: after the agent writes a CSV and a PDF (the
+    # IronClaw v2 download chips: after the agent writes a CSV and a PDF (the
     # builtin__write_file dispatch lives in TOOL_CALL_PATTERNS), it replies
     # referencing their /workspace paths so the WebUI renders downloadable file
     # chips. Fires after the tool calls run (match_tool_call dedups the
@@ -129,7 +129,7 @@ def _new_llm_trace_state() -> dict:
 
 
 def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
-    """Validate a recorded Reborn trace and make it executable by this mock."""
+    """Validate a recorded IronClaw trace and make it executable by this mock."""
     if not isinstance(trace, dict):
         raise ValueError("trace must be an object")
     steps = trace.get("steps")
@@ -454,15 +454,15 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
-REBORN_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
+IRONCLAW_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
     r"reborn external tool loop",
     re.IGNORECASE,
 )
-REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
+IRONCLAW_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
     r"reborn external tool failure",
     re.IGNORECASE,
 )
-REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
+IRONCLAW_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
     r"reborn mixed internal external tools",
     re.IGNORECASE,
 )
@@ -515,7 +515,7 @@ NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
 )
 
 TOOL_CALL_PATTERNS = [
-    # Reborn parallel tool-call port: the Reborn provider-visible builtin tool
+    # IronClaw parallel tool-call port: the IronClaw provider-visible builtin tool
     # names are namespaced/sanitized, while the legacy engine keeps using the
     # unqualified trigger below.
     (
@@ -549,7 +549,7 @@ TOOL_CALL_PATTERNS = [
     # Private tool installs (#5459 P1) — the three test-tools/ fixture bundles
     # (test-tools/README.md). The provider-visible tool name sanitizes the
     # dotted capability id's "." to "__" (`encode_provider_tool_name` in
-    # ironclaw_reborn::tool_disclosure); the model gateway's provider_tool_name
+    # ironclaw::tool_disclosure); the model gateway's provider_tool_name
     # validator rejects a raw "." outright ("only ASCII letters, digits, '_',
     # and '-' are allowed"), so the mock LLM must emit the encoded form, not
     # the dotted capability id.
@@ -573,8 +573,8 @@ TOOL_CALL_PATTERNS = [
         "hacker-news__top_stories",
         lambda _: {},
     ),
-    # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
-    # the project workspace. Reborn exposes this first-party tool by capability
+    # IronClaw v2 download chips: one assistant turn writes a CSV and a PDF into
+    # the project workspace. IronClaw exposes this first-party tool by capability
     # id; the provider-facing tool name sanitizes dots as "__". After both
     # results land, match_tool_call dedups builtin__write_file and the
     # conversation falls through to the CANNED_RESPONSES reply that
@@ -1437,7 +1437,7 @@ def _active_skill_names(messages: list[dict]) -> set[str]:
 def _typed_user_content_for_skill_detection(messages: list[dict]) -> str:
     """Return user-authored text without generated attachment context.
 
-    Reborn appends a model-visible ``<attachments>`` block to user messages so
+    IronClaw appends a model-visible ``<attachments>`` block to user messages so
     tools can reason about uploaded files and their /workspace storage paths.
     Those paths are not user-typed slash skills, so the mock's missing-skill
     heuristic must ignore that generated block.
@@ -2016,41 +2016,41 @@ def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
     return [result for result in _find_tool_results(messages) if result.get("name") == name]
 
 
-REBORN_SCRIPTED_TOOL_SCENARIOS = (
+IRONCLAW_SCRIPTED_TOOL_SCENARIOS = (
     {
-        "trigger": REBORN_EXTERNAL_TOOL_LOOP_TRIGGER,
+        "trigger": IRONCLAW_EXTERNAL_TOOL_LOOP_TRIGGER,
         "batches": (
             (("lookup_weather", {"city": "Boston"}),),
             (("lookup_time", {"city": "Boston"}),),
             (("lookup_fact", {"topic": "Boston"}),),
         ),
-        "missing_text": "Reborn external tool loop missing tool definitions.",
-        "complete_prefix": "Reborn external tool loop complete: ",
+        "missing_text": "IronClaw external tool loop missing tool definitions.",
+        "complete_prefix": "IronClaw external tool loop complete: ",
         "summary_order": ("lookup_weather", "lookup_time", "lookup_fact"),
     },
     {
-        "trigger": REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER,
+        "trigger": IRONCLAW_EXTERNAL_TOOL_FAILURE_TRIGGER,
         "batches": ((("lookup_weather", {"city": "Boston"}),),),
-        "missing_text": "Reborn external tool failure missing tool definitions.",
-        "complete_prefix": "Reborn external tool failure observed: ",
+        "missing_text": "IronClaw external tool failure missing tool definitions.",
+        "complete_prefix": "IronClaw external tool failure observed: ",
         "summary_order": ("lookup_weather",),
     },
     {
-        "trigger": REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER,
+        "trigger": IRONCLAW_MIXED_INTERNAL_EXTERNAL_TRIGGER,
         "batches": (
             (
                 ("builtin__echo", {"message": "mixed-internal-echo"}),
                 ("lookup_weather", {"city": "Boston"}),
             ),
         ),
-        "missing_text": "Reborn mixed tool run missing tool definitions.",
-        "complete_prefix": "Reborn mixed tool run complete: ",
+        "missing_text": "IronClaw mixed tool run missing tool definitions.",
+        "complete_prefix": "IronClaw mixed tool run complete: ",
         "summary_order": ("builtin__echo", "lookup_weather"),
     },
 )
 
 
-def match_reborn_scripted_tool_response(
+def match_ironclaw_scripted_tool_response(
     messages: list[dict],
     has_tools: bool,
 ) -> dict | None:
@@ -2058,7 +2058,7 @@ def match_reborn_scripted_tool_response(
     scenario = next(
         (
             candidate
-            for candidate in REBORN_SCRIPTED_TOOL_SCENARIOS
+            for candidate in IRONCLAW_SCRIPTED_TOOL_SCENARIOS
             if _conversation_has_user_trigger(messages, candidate["trigger"])
         ),
         None,
@@ -2308,12 +2308,12 @@ async def _send_sse(resp: web.StreamResponse, data: dict):
 
 
 def _preferred_tool_name(available_tool_names: set[str], legacy: str) -> str:
-    reborn_name = {
+    ironclaw_name = {
         "echo": "builtin__echo",
         "time": "builtin__time",
     }.get(legacy)
-    if reborn_name and reborn_name in available_tool_names:
-        return reborn_name
+    if ironclaw_name and ironclaw_name in available_tool_names:
+        return ironclaw_name
     return legacy
 
 
@@ -2739,7 +2739,7 @@ def match_special_response(
                     "tool_name": "google_drive",
                     "arguments": {
                         "action": "list_files",
-                        "query": "name contains 'Reborn QA Brief'",
+                        "query": "name contains 'IronClaw QA Brief'",
                         "page_size": 5,
                     },
                 },
@@ -2962,10 +2962,10 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
                 return _tool_call_response(cid, followup)
             return await _stream_tool_call(request, cid, followup)
 
-    reborn_scripted_tool = match_reborn_scripted_tool_response(messages, has_tools)
-    if reborn_scripted_tool:
+    ironclaw_scripted_tool = match_ironclaw_scripted_tool_response(messages, has_tools)
+    if ironclaw_scripted_tool:
         return await _dispatch_special_response(
-            request, cid, stream, reborn_scripted_tool
+            request, cid, stream, ironclaw_scripted_tool
         )
     if (
         not tool_results
@@ -3412,14 +3412,14 @@ async def oauth_state_handler(request: web.Request) -> web.Response:
 
 
 async def google_oauth_token(request: web.Request) -> web.Response:
-    """Minimal Google token endpoint for standalone Reborn OAuth tests."""
+    """Minimal Google token endpoint for standalone IronClaw OAuth tests."""
     data = await request.post()
     if data.get("grant_type") != "authorization_code":
         return web.json_response({"error": "unsupported_grant_type"}, status=400)
     # Full-path QA uses one pre-consented reusable Google identity. Google may
     # report the account's cumulative grants during a narrower scope-upgrade
     # flow, so the extension-specific codes expose that deterministic union.
-    all_reborn_google_scopes = " ".join(
+    all_ironclaw_google_scopes = " ".join(
         (
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.send",
@@ -3439,11 +3439,11 @@ async def google_oauth_token(request: web.Request) -> web.Response:
             "https://www.googleapis.com/auth/drive.readonly "
             "https://www.googleapis.com/auth/drive"
         ),
-        "mock_auth_code_gmail": all_reborn_google_scopes,
-        "mock_auth_code_google_calendar": all_reborn_google_scopes,
-        "mock_auth_code_google_drive": all_reborn_google_scopes,
-        "mock_auth_code_google_docs": all_reborn_google_scopes,
-        "mock_auth_code_google_sheets": all_reborn_google_scopes,
+        "mock_auth_code_gmail": all_ironclaw_google_scopes,
+        "mock_auth_code_google_calendar": all_ironclaw_google_scopes,
+        "mock_auth_code_google_drive": all_ironclaw_google_scopes,
+        "mock_auth_code_google_docs": all_ironclaw_google_scopes,
+        "mock_auth_code_google_sheets": all_ironclaw_google_scopes,
     }
     code = data.get("code")
     scope = scopes_by_code.get(code)

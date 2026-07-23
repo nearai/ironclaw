@@ -1,4 +1,4 @@
-//! Reborn integration-test framework — storage-backend matrix.
+//! IronClaw integration-test framework — storage-backend matrix.
 //!
 //! Covers: backend parity (one golden scenario through `StorageMode::InMemory`
 //! and `StorageMode::LibSql`, asserting an identical outcome — the canonical
@@ -11,13 +11,13 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
 
-use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_support::builder::{IronClawIntegrationHarness, StorageMode};
+use ironclaw_support::reply::IronClawScriptedReply;
 use rstest::rstest;
 
 /// Backend-parity self-test (design §7): the same golden turn must produce the
@@ -29,9 +29,9 @@ use rstest::rstest;
 #[case(StorageMode::Postgres)]
 #[tokio::test]
 async fn backend_parity_replies_to_greeting(#[case] storage: StorageMode) {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .storage(storage)
-        .script([RebornScriptedReply::text("Hello! How can I help?")])
+        .script([IronClawScriptedReply::text("Hello! How can I help?")])
         .build()
         .await
         .expect("harness builds");
@@ -50,9 +50,9 @@ async fn backend_parity_replies_to_greeting(#[case] storage: StorageMode) {
 /// in-process cache. InMemory cannot make this assertion (nothing reaches disk).
 #[tokio::test]
 async fn libsql_persists_reply_across_reopen() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .storage(StorageMode::LibSql)
-        .script([RebornScriptedReply::text("durable answer")])
+        .script([IronClawScriptedReply::text("durable answer")])
         .build()
         .await
         .expect("harness builds");
@@ -71,9 +71,9 @@ async fn libsql_persists_reply_across_reopen() {
 /// green — it inspects real on-disk history.
 #[tokio::test]
 async fn persistence_assertion_fails_on_mismatch_after_reopen() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = IronClawIntegrationHarness::test_default()
         .storage(StorageMode::LibSql)
-        .script([RebornScriptedReply::text("durable answer")])
+        .script([IronClawScriptedReply::text("durable answer")])
         .build()
         .await
         .expect("harness builds");

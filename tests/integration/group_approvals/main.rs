@@ -1,7 +1,7 @@
-//! Group integration tests for the Reborn approval flow — the real gate path.
+//! Group integration tests for the IronClaw approval flow — the real gate path.
 //!
 //! `approvals_group_e2e` is one sequential `#[tokio::test]` that drives
-//! several scenarios over a shared [`RebornIntegrationGroup::live_approvals`]
+//! several scenarios over a shared [`IronClawIntegrationGroup::live_approvals`]
 //! group (one approval-request store, one capability-lease store, one
 //! `(tenant, user)` auto-approve toggle, all shared across threads). See
 //! `tests/integration/CLAUDE.md` §"Group tests".
@@ -43,7 +43,7 @@
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
@@ -59,12 +59,12 @@ mod scenario_gate_then_approve;
 mod scenario_gate_then_deny;
 mod scenario_submit_inbound_approval_resolution;
 
-use reborn_support::builder::StorageMode;
-use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
+use ironclaw_support::builder::StorageMode;
+use ironclaw_support::group::{IronClawIntegrationGroup, ScenarioReport};
 
 #[tokio::test]
 async fn approvals_group_e2e() {
-    let g = RebornIntegrationGroup::live_approvals()
+    let g = IronClawIntegrationGroup::live_approvals()
         .await
         .expect("group builds");
 
@@ -126,7 +126,7 @@ async fn approvals_group_e2e() {
 /// arm a real adapter's "approve"/"deny" reply hits.
 #[tokio::test]
 async fn approvals_group_real_gate_dispatch_e2e() {
-    let g = RebornIntegrationGroup::builder()
+    let g = IronClawIntegrationGroup::builder()
         .with_real_gate_dispatch_services()
         .live_approvals()
         .await
@@ -146,7 +146,7 @@ async fn approvals_group_real_gate_dispatch_e2e() {
 
 #[tokio::test]
 async fn approvals_group_libsql_e2e() {
-    let g = RebornIntegrationGroup::builder()
+    let g = IronClawIntegrationGroup::builder()
         .storage(StorageMode::LibSql)
         .live_approvals()
         .await

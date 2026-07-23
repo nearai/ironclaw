@@ -6,22 +6,22 @@ use crate::RuntimeProcessError;
 
 use super::reject_nul;
 
-const REBORN_NETWORK_MODE_ENV: &str = "IRONCLAW_REBORN_NETWORK_MODE";
-const REBORN_HTTP_PROXY_ENV: &str = "IRONCLAW_REBORN_HTTP_PROXY";
-const REBORN_HTTP_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_SOCKET";
-const REBORN_HTTP_BROKER_URL_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_URL";
-const REBORN_SECRET_MODE_ENV: &str = "IRONCLAW_REBORN_SECRET_MODE";
-const REBORN_SECRET_BROKER_ENV: &str = "IRONCLAW_REBORN_SECRET_BROKER_URL";
-const REBORN_SECRET_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_SECRET_BROKER_SOCKET";
+const LEGACY_NETWORK_MODE_ENV: &str = "IRONCLAW_REBORN_NETWORK_MODE";
+const LEGACY_HTTP_PROXY_ENV: &str = "IRONCLAW_REBORN_HTTP_PROXY";
+const LEGACY_HTTP_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_SOCKET";
+const LEGACY_HTTP_BROKER_URL_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_URL";
+const LEGACY_SECRET_MODE_ENV: &str = "IRONCLAW_REBORN_SECRET_MODE";
+const LEGACY_SECRET_BROKER_ENV: &str = "IRONCLAW_REBORN_SECRET_BROKER_URL";
+const LEGACY_SECRET_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_SECRET_BROKER_SOCKET";
 const HTTP_PROXY_ENV_KEYS: &[&str] = &["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"];
 pub(super) const RESERVED_BROKER_ENV_KEYS: &[&str] = &[
-    REBORN_NETWORK_MODE_ENV,
-    REBORN_HTTP_PROXY_ENV,
-    REBORN_HTTP_BROKER_SOCKET_ENV,
-    REBORN_HTTP_BROKER_URL_ENV,
-    REBORN_SECRET_MODE_ENV,
-    REBORN_SECRET_BROKER_ENV,
-    REBORN_SECRET_BROKER_SOCKET_ENV,
+    LEGACY_NETWORK_MODE_ENV,
+    LEGACY_HTTP_PROXY_ENV,
+    LEGACY_HTTP_BROKER_SOCKET_ENV,
+    LEGACY_HTTP_BROKER_URL_ENV,
+    LEGACY_SECRET_MODE_ENV,
+    LEGACY_SECRET_BROKER_ENV,
+    LEGACY_SECRET_BROKER_SOCKET_ENV,
     "http_proxy",
     "https_proxy",
     "HTTP_PROXY",
@@ -37,20 +37,20 @@ const CONTAINER_BROKER_URL: &str = "http://ironclaw-broker";
 /// variant intentionally requires Docker network attachment and is for
 /// compositions that accept proxy-enforced rather than Docker-enforced egress.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSandboxNetworkBroker {
-    kind: RebornSandboxNetworkBrokerKind,
+pub struct IronClawSandboxNetworkBroker {
+    kind: IronClawSandboxNetworkBrokerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RebornSandboxNetworkBrokerKind {
+enum IronClawSandboxNetworkBrokerKind {
     HttpProxy { proxy_url: BrokerUrl },
     UnixSocket { host_socket: BrokerSocket },
 }
 
-impl RebornSandboxNetworkBroker {
+impl IronClawSandboxNetworkBroker {
     pub fn new(proxy_url: impl Into<String>) -> Result<Self, RuntimeProcessError> {
         Ok(Self {
-            kind: RebornSandboxNetworkBrokerKind::HttpProxy {
+            kind: IronClawSandboxNetworkBrokerKind::HttpProxy {
                 proxy_url: BrokerUrl::new("network broker proxy URL", proxy_url.into())?,
             },
         })
@@ -61,7 +61,7 @@ impl RebornSandboxNetworkBroker {
         debug_assert!(validate_broker_url("network broker proxy URL", &proxy_url).is_ok());
 
         Self {
-            kind: RebornSandboxNetworkBrokerKind::HttpProxy {
+            kind: IronClawSandboxNetworkBrokerKind::HttpProxy {
                 proxy_url: BrokerUrl::trusted(proxy_url),
             },
         }
@@ -73,39 +73,42 @@ impl RebornSandboxNetworkBroker {
     /// use the HTTP-proxy broker shape instead.
     pub fn unix_socket(host_socket: impl Into<PathBuf>) -> Result<Self, RuntimeProcessError> {
         Ok(Self {
-            kind: RebornSandboxNetworkBrokerKind::UnixSocket {
+            kind: IronClawSandboxNetworkBrokerKind::UnixSocket {
                 host_socket: BrokerSocket::new("network broker socket", host_socket.into())?,
             },
         })
     }
 
     pub(super) fn requires_docker_network(&self) -> bool {
-        matches!(self.kind, RebornSandboxNetworkBrokerKind::HttpProxy { .. })
+        matches!(
+            self.kind,
+            IronClawSandboxNetworkBrokerKind::HttpProxy { .. }
+        )
     }
 
     fn push_env(&self, env: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
-        push_reserved_env(env, REBORN_NETWORK_MODE_ENV, "brokered")?;
+        push_reserved_env(env, LEGACY_NETWORK_MODE_ENV, "brokered")?;
         match &self.kind {
-            RebornSandboxNetworkBrokerKind::HttpProxy { proxy_url } => {
-                push_reserved_env(env, REBORN_HTTP_PROXY_ENV, proxy_url.as_str())?;
+            IronClawSandboxNetworkBrokerKind::HttpProxy { proxy_url } => {
+                push_reserved_env(env, LEGACY_HTTP_PROXY_ENV, proxy_url.as_str())?;
                 for key in HTTP_PROXY_ENV_KEYS {
                     push_reserved_env(env, key, proxy_url.as_str())?;
                 }
             }
-            RebornSandboxNetworkBrokerKind::UnixSocket { .. } => {
+            IronClawSandboxNetworkBrokerKind::UnixSocket { .. } => {
                 push_reserved_env(
                     env,
-                    REBORN_HTTP_BROKER_SOCKET_ENV,
+                    LEGACY_HTTP_BROKER_SOCKET_ENV,
                     CONTAINER_HTTP_BROKER_SOCKET,
                 )?;
-                push_reserved_env(env, REBORN_HTTP_BROKER_URL_ENV, CONTAINER_BROKER_URL)?;
+                push_reserved_env(env, LEGACY_HTTP_BROKER_URL_ENV, CONTAINER_BROKER_URL)?;
             }
         }
         Ok(())
     }
 
     fn append_bind(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
-        let RebornSandboxNetworkBrokerKind::UnixSocket { host_socket } = &self.kind else {
+        let IronClawSandboxNetworkBrokerKind::UnixSocket { host_socket } = &self.kind else {
             return Ok(());
         };
         binds.push(docker_file_bind(
@@ -122,20 +125,20 @@ impl RebornSandboxNetworkBroker {
 /// The value is an endpoint, not secret material. Concrete brokers remain
 /// responsible for authentication, one-shot leases, redaction, and audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSandboxSecretBroker {
-    kind: RebornSandboxSecretBrokerKind,
+pub struct IronClawSandboxSecretBroker {
+    kind: IronClawSandboxSecretBrokerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RebornSandboxSecretBrokerKind {
+enum IronClawSandboxSecretBrokerKind {
     HttpEndpoint { broker_url: BrokerUrl },
     UnixSocket { host_socket: BrokerSocket },
 }
 
-impl RebornSandboxSecretBroker {
+impl IronClawSandboxSecretBroker {
     pub fn new(broker_url: impl Into<String>) -> Result<Self, RuntimeProcessError> {
         Ok(Self {
-            kind: RebornSandboxSecretBrokerKind::HttpEndpoint {
+            kind: IronClawSandboxSecretBrokerKind::HttpEndpoint {
                 broker_url: BrokerUrl::new("secret broker URL", broker_url.into())?,
             },
         })
@@ -147,22 +150,22 @@ impl RebornSandboxSecretBroker {
     /// use the HTTP endpoint broker shape instead.
     pub fn unix_socket(host_socket: impl Into<PathBuf>) -> Result<Self, RuntimeProcessError> {
         Ok(Self {
-            kind: RebornSandboxSecretBrokerKind::UnixSocket {
+            kind: IronClawSandboxSecretBrokerKind::UnixSocket {
                 host_socket: BrokerSocket::new("secret broker socket", host_socket.into())?,
             },
         })
     }
 
     fn push_env(&self, env: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
-        push_reserved_env(env, REBORN_SECRET_MODE_ENV, "brokered")?;
+        push_reserved_env(env, LEGACY_SECRET_MODE_ENV, "brokered")?;
         match &self.kind {
-            RebornSandboxSecretBrokerKind::HttpEndpoint { broker_url } => {
-                push_reserved_env(env, REBORN_SECRET_BROKER_ENV, broker_url.as_str())?;
+            IronClawSandboxSecretBrokerKind::HttpEndpoint { broker_url } => {
+                push_reserved_env(env, LEGACY_SECRET_BROKER_ENV, broker_url.as_str())?;
             }
-            RebornSandboxSecretBrokerKind::UnixSocket { .. } => {
+            IronClawSandboxSecretBrokerKind::UnixSocket { .. } => {
                 push_reserved_env(
                     env,
-                    REBORN_SECRET_BROKER_SOCKET_ENV,
+                    LEGACY_SECRET_BROKER_SOCKET_ENV,
                     CONTAINER_SECRET_BROKER_SOCKET,
                 )?;
             }
@@ -171,7 +174,7 @@ impl RebornSandboxSecretBroker {
     }
 
     fn append_bind(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
-        let RebornSandboxSecretBrokerKind::UnixSocket { host_socket } = &self.kind else {
+        let IronClawSandboxSecretBrokerKind::UnixSocket { host_socket } = &self.kind else {
             return Ok(());
         };
         binds.push(docker_file_bind(
@@ -184,27 +187,27 @@ impl RebornSandboxSecretBroker {
 }
 
 pub(super) fn push_broker_env(
-    network_broker: Option<&RebornSandboxNetworkBroker>,
-    secret_broker: Option<&RebornSandboxSecretBroker>,
+    network_broker: Option<&IronClawSandboxNetworkBroker>,
+    secret_broker: Option<&IronClawSandboxSecretBroker>,
     env: &mut Vec<String>,
 ) -> Result<(), RuntimeProcessError> {
     reject_reserved_broker_env_overrides(env)?;
     if let Some(broker) = network_broker {
         broker.push_env(env)?;
     } else {
-        push_reserved_env(env, REBORN_NETWORK_MODE_ENV, "disabled")?;
+        push_reserved_env(env, LEGACY_NETWORK_MODE_ENV, "disabled")?;
     }
     if let Some(broker) = secret_broker {
         broker.push_env(env)?;
     } else {
-        push_reserved_env(env, REBORN_SECRET_MODE_ENV, "disabled")?;
+        push_reserved_env(env, LEGACY_SECRET_MODE_ENV, "disabled")?;
     }
     Ok(())
 }
 
 pub(super) fn append_broker_binds(
-    network_broker: Option<&RebornSandboxNetworkBroker>,
-    secret_broker: Option<&RebornSandboxSecretBroker>,
+    network_broker: Option<&IronClawSandboxNetworkBroker>,
+    secret_broker: Option<&IronClawSandboxSecretBroker>,
     binds: &mut Vec<String>,
 ) -> Result<(), RuntimeProcessError> {
     if let Some(broker) = network_broker {

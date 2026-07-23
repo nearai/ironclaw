@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Skill learning logic for IronClaw Reborn.
+//! Skill learning logic for IronClaw.
 //!
 //! Distills a reusable `SKILL.md` from a completed run's transcript. (Refinement
 //! and library upkeep land here too in later increments.)

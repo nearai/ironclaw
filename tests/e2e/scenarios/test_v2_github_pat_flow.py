@@ -1,6 +1,6 @@
-"""E2E tests: GitHub PAT auth flow via Reborn product-auth routes (issue #4112).
+"""E2E tests: GitHub PAT auth flow via IronClaw product-auth routes (issue #4112).
 
-Tests the full guided manual-token authentication flow against the Reborn
+Tests the full guided manual-token authentication flow against the IronClaw
 WebUI v2 HTTP surface:
 
 1. Mock API server requires Bearer auth (returns 401 without, 200 with)
@@ -20,7 +20,7 @@ Wire-shape assertions (P1, issue #4112):
 - ``account_label`` present for manual-token challenges
 
 Browser tests (P2, issue #4112):
-- Require ``IRONCLAW_REBORN_WEBUI`` env wired (the WebUI v2 routes are
+- Require ``IRONCLAW_WEBUI`` env wired (the WebUI v2 routes are
   compiled in unconditionally); skipped via ``pytest.mark.skip`` until the
   E2E binary is updated.
 """
@@ -187,7 +187,7 @@ async def _resolve_auth_gate(base_url: str, thread_id: str, request_id: str, tok
 # ---------------------------------------------------------------------------
 
 class TestGitHubPatFlow:
-    """GitHub PAT manual-token auth via Reborn product-auth routes."""
+    """GitHub PAT manual-token auth via IronClaw product-auth routes."""
 
     async def test_github_pat_auth_gate_appears(self, v2_pat_server):
         """Auth gate surfaces in history when GitHub tool triggers 401."""
@@ -292,7 +292,7 @@ class TestGitHubPatWireShape:
         auth_url = gate.get("auth_url")
         gate_ref = gate.get("request_id", "")
 
-        # Skip this assertion if the route isn't wired to the Reborn product-auth path.
+        # Skip this assertion if the route isn't wired to the IronClaw product-auth path.
         submit_r = await api_post(
             v2_pat_server,
             "/api/reborn/product-auth/manual-token/submit",
@@ -307,8 +307,8 @@ class TestGitHubPatWireShape:
         )
         if submit_r.status_code == 404:
             pytest.skip(
-                "Reborn product-auth routes not mounted in this binary "
-                "(need the Reborn binary)"
+                "IronClaw product-auth routes not mounted in this binary "
+                "(need the IronClaw binary)"
             )
         if submit_r.status_code in (400, 422):
             # Route mounted but gate not found (expected for dummy IDs).
@@ -329,7 +329,7 @@ class TestGitHubPatWireShape:
 @pytest.mark.skip(
     reason=(
         "Playwright browser test requires the ironclaw binary with the "
-        "IRONCLAW_REBORN_WEBUI_TOKEN env wired. "
+        "IRONCLAW_WEBUI_TOKEN env wired. "
         "Build with: cargo build"
     )
 )

@@ -439,17 +439,17 @@ where
 
 /// Scoped-filesystem-backed product workflow idempotency ledger.
 ///
-/// Construct with the same [`ScopedFilesystem`] handle used by the Reborn host
+/// Construct with the same [`ScopedFilesystem`] handle used by the IronClaw host
 /// stores. The supplied [`ResourceScope`] is passed to the filesystem for every
 /// operation so the filesystem's mount resolver owns any tenant/user rewriting.
-pub struct RebornFilesystemIdempotencyLedger<F: ?Sized>
+pub struct IronClawFilesystemIdempotencyLedger<F: ?Sized>
 where
     F: RootFilesystem,
 {
     inner: FilesystemIdempotencyLedger<F>,
 }
 
-impl<F> RebornFilesystemIdempotencyLedger<F>
+impl<F> IronClawFilesystemIdempotencyLedger<F>
 where
     F: RootFilesystem + ?Sized + 'static,
 {
@@ -495,7 +495,7 @@ where
 }
 
 #[async_trait]
-impl<F> IdempotencyLedger for RebornFilesystemIdempotencyLedger<F>
+impl<F> IdempotencyLedger for IronClawFilesystemIdempotencyLedger<F>
 where
     F: RootFilesystem + ?Sized + 'static,
 {
@@ -518,10 +518,10 @@ where
 
 /// libSQL-backed product workflow idempotency ledger using the shared
 /// SQL filesystem backend for persistence.
-pub struct RebornLibSqlIdempotencyLedger {
+pub struct IronClawLibSqlIdempotencyLedger {
     inner: FilesystemIdempotencyLedger<LibSqlRootFilesystem>,
 }
-impl RebornLibSqlIdempotencyLedger {
+impl IronClawLibSqlIdempotencyLedger {
     pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
         Self {
             inner: FilesystemIdempotencyLedger::new_root(filesystem),
@@ -558,7 +558,7 @@ impl RebornLibSqlIdempotencyLedger {
     }
 }
 #[async_trait]
-impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
+impl IdempotencyLedger for IronClawLibSqlIdempotencyLedger {
     async fn begin_or_replay(
         &self,
         fingerprint: ActionFingerprintKey,
@@ -578,10 +578,10 @@ impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
 
 /// PostgreSQL-backed product workflow idempotency ledger using the shared
 /// SQL filesystem backend for persistence.
-pub struct RebornPostgresIdempotencyLedger {
+pub struct IronClawPostgresIdempotencyLedger {
     inner: FilesystemIdempotencyLedger<PostgresRootFilesystem>,
 }
-impl RebornPostgresIdempotencyLedger {
+impl IronClawPostgresIdempotencyLedger {
     pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
         Self {
             inner: FilesystemIdempotencyLedger::new_root(filesystem),
@@ -618,7 +618,7 @@ impl RebornPostgresIdempotencyLedger {
     }
 }
 #[async_trait]
-impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
+impl IdempotencyLedger for IronClawPostgresIdempotencyLedger {
     async fn begin_or_replay(
         &self,
         fingerprint: ActionFingerprintKey,

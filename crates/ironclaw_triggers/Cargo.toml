@@ -3,7 +3,7 @@ name = "ironclaw_triggers"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Scheduled trigger domain and source-provider contracts for IronClaw Reborn"
+description = "Scheduled trigger domain and source-provider contracts for IronClaw"
 publish = false
 
 [package.metadata.ironclaw]

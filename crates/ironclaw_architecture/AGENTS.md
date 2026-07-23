@@ -4,13 +4,13 @@
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/_contract-freeze-index.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- Use these IronClaw contracts as the source of truth before changing behavior:
+- `docs/ironclaw/contracts/_contract-freeze-index.md`
+- `docs/ironclaw/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 
-- Workspace architecture contract tests and Reborn dependency-boundary enforcement.
+- Workspace architecture contract tests and IronClaw dependency-boundary enforcement.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

@@ -122,7 +122,7 @@ async fn gateway_records_prompt_cache_break_within_a_run() {
     let run_id = request.run_id;
     gateway.stream_model(request).await.unwrap();
     assert!(
-        logs_contain("reborn model gateway prompt cache usage"),
+        logs_contain("IronClaw model gateway prompt cache usage"),
         "every completed call must emit the per-call cache series"
     );
     assert!(!logs_contain("prompt cache break detected"));
@@ -188,7 +188,7 @@ async fn gateway_records_prompt_cache_break_on_tool_capable_path_when_tool_surfa
         .await
         .unwrap();
     assert!(
-        logs_contain("reborn model gateway prompt cache usage"),
+        logs_contain("IronClaw model gateway prompt cache usage"),
         "tool-capable calls must record the per-call cache series"
     );
     assert!(!logs_contain("prompt cache break detected"));
@@ -1150,7 +1150,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
     logs_assert(|lines: &[&str]| {
         let recorded = lines
             .iter()
-            .filter(|line| line.contains("reborn model gateway prompt cache usage"))
+            .filter(|line| line.contains("IronClaw model gateway prompt cache usage"))
             .count();
         if recorded == 2 {
             Ok(())

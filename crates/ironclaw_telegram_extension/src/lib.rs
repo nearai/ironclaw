@@ -1,6 +1,6 @@
-//! Telegram channel extension for Reborn (issue #3285).
+//! Telegram channel extension for IronClaw (issue #3285).
 //!
-//! The Telegram side of the Reborn generic-ingress [`ChannelAdapter`]
+//! The Telegram side of the IronClaw generic-ingress [`ChannelAdapter`]
 //! contract defined in `ironclaw_product_adapters`. Pure Bot API protocol
 //! work (payload normalization, outbound rendering) lives in
 //! `ironclaw_telegram_v2_adapter`; this crate owns the adapter itself —

@@ -9,11 +9,11 @@
 //! `Arc<dyn ProjectService>` via `project_service_for_test` instead.
 use async_trait::async_trait;
 use ironclaw_product_workflow::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectMemberInfo, RebornProjectResponse,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    IronClawAddMemberRequest, IronClawCreateProjectRequest, IronClawDeleteProjectRequest,
+    IronClawGetProjectRequest, IronClawListMembersRequest, IronClawListMembersResponse,
+    IronClawListProjectsRequest, IronClawListProjectsResponse, IronClawProjectMemberInfo,
+    IronClawProjectResponse, IronClawRemoveMemberRequest, IronClawUpdateMemberRoleRequest,
+    IronClawUpdateProjectRequest, ProjectCaller, ProjectService, ProjectServiceError,
 };
 
 pub(crate) struct UnavailableProjectService;
@@ -23,39 +23,39 @@ impl ProjectService for UnavailableProjectService {
     async fn list_projects(
         &self,
         _caller: ProjectCaller,
-        _request: RebornListProjectsRequest,
-    ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+        _request: IronClawListProjectsRequest,
+    ) -> Result<IronClawListProjectsResponse, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn create_project(
         &self,
         _caller: ProjectCaller,
-        _request: RebornCreateProjectRequest,
-    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        _request: IronClawCreateProjectRequest,
+    ) -> Result<IronClawProjectResponse, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn get_project(
         &self,
         _caller: ProjectCaller,
-        _request: RebornGetProjectRequest,
-    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        _request: IronClawGetProjectRequest,
+    ) -> Result<IronClawProjectResponse, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn update_project(
         &self,
         _caller: ProjectCaller,
-        _request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        _request: IronClawUpdateProjectRequest,
+    ) -> Result<IronClawProjectResponse, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn delete_project(
         &self,
         _caller: ProjectCaller,
-        _request: RebornDeleteProjectRequest,
+        _request: IronClawDeleteProjectRequest,
     ) -> Result<(), ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
@@ -63,31 +63,31 @@ impl ProjectService for UnavailableProjectService {
     async fn list_members(
         &self,
         _caller: ProjectCaller,
-        _request: RebornListMembersRequest,
-    ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+        _request: IronClawListMembersRequest,
+    ) -> Result<IronClawListMembersResponse, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn add_member(
         &self,
         _caller: ProjectCaller,
-        _request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        _request: IronClawAddMemberRequest,
+    ) -> Result<IronClawProjectMemberInfo, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn update_member_role(
         &self,
         _caller: ProjectCaller,
-        _request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        _request: IronClawUpdateMemberRoleRequest,
+    ) -> Result<IronClawProjectMemberInfo, ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }
 
     async fn remove_member(
         &self,
         _caller: ProjectCaller,
-        _request: RebornRemoveMemberRequest,
+        _request: IronClawRemoveMemberRequest,
     ) -> Result<(), ProjectServiceError> {
         Err(ProjectServiceError::Unavailable)
     }

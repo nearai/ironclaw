@@ -1,6 +1,6 @@
 # ironclaw_agent_loop
 
-Owns the reusable Reborn loop framework: loop-family identity and registry,
+Owns the reusable IronClaw loop framework: loop-family identity and registry,
 sealed planner composition, strategy traits, default strategy impls, the
 canonical executor, loop execution state, and executor test support.
 

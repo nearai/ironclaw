@@ -135,7 +135,7 @@ test("STATE_TONES/STATE_LABELS contain exactly the honest wire states (§6.1 ins
   // The installation-state axis (§6.1, `ironclaw_host_api::InstallationState`)
   // has six resting states on a *listed* extension — `removed` is an
   // action-response signal only and never appears there. The onboarding-state
-  // axis (§6.2, `RebornExtensionOnboardingState`) layers `auth_required` /
+  // axis (§6.2, `IronClawExtensionOnboardingState`) layers `auth_required` /
   // `setup_required` on top (its `installed` / `failed` values are shared with
   // the installation axis). The old transient installation states
   // (`activating` / `deactivating` / `removing` / `removal_pending`) no longer

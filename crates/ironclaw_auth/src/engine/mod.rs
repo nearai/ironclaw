@@ -1,4 +1,4 @@
-//! The host auth engine (`docs/reborn/extension-runtime/overview.md` §4.3).
+//! The host auth engine (`docs/ironclaw/extension-runtime/overview.md` §4.3).
 //!
 //! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
 //! registration for vendors whose recipe carries no deployment client

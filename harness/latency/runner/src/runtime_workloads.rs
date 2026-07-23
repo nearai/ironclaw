@@ -101,7 +101,7 @@ async fn build_webui_runtime_context(
     let workspace_root = root.path().join("workspace");
     let mut build_input = match backend {
         BackendName::Libsql => local_runtime_build_input(
-            RebornCompositionProfile::HostedSingleTenantVolume,
+            IronClawCompositionProfile::HostedSingleTenantVolume,
             WEBUI_SESSION_RUNTIME_USER,
             storage_root,
         )?,
@@ -112,8 +112,8 @@ async fn build_webui_runtime_context(
                     postgres_pool_size
                 )
             })?;
-            RebornBuildInput::hosted_single_tenant_postgres(
-                RebornCompositionProfile::HostedSingleTenant,
+            IronClawBuildInput::hosted_single_tenant_postgres(
+                IronClawCompositionProfile::HostedSingleTenant,
                 WEBUI_SESSION_RUNTIME_USER,
                 storage_root,
                 pool,
@@ -126,8 +126,8 @@ async fn build_webui_runtime_context(
     let tenant_id = TenantId::new(WEBUI_SESSION_TENANT)?;
     let agent_id = AgentId::new(WEBUI_SESSION_AGENT)?;
     build_input = build_input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
-    let runtime_input = RebornRuntimeInput::from_services(build_input)
-        .with_identity(RebornRuntimeIdentity {
+    let runtime_input = IronClawRuntimeInput::from_services(build_input)
+        .with_identity(IronClawRuntimeIdentity {
             tenant_id: WEBUI_SESSION_TENANT.to_string(),
             agent_id: WEBUI_SESSION_AGENT.to_string(),
             source_binding_id: "latency-webui-source".to_string(),
@@ -137,7 +137,7 @@ async fn build_webui_runtime_context(
             interval: Duration::from_millis(10),
             max_total: Duration::from_secs(10),
         });
-    let runtime = build_reborn_runtime(runtime_input).await?;
+    let runtime = build_ironclaw_runtime(runtime_input).await?;
     let bundle = build_webui_services(&runtime, None)?;
     let config = WebuiServeConfig::new(
         tenant_id,
@@ -200,7 +200,7 @@ async fn hosted_libsql_substrate_build(
     );
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
-        event_store: RebornEventStoreConfig::Libsql {
+        event_store: IronClawEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
         },
@@ -233,7 +233,7 @@ async fn hosted_postgres_substrate_build(
     let services =
         build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
             pool,
-            event_store: RebornEventStoreConfig::Postgres {
+            event_store: IronClawEventStoreConfig::Postgres {
                 url: ironclaw_secrets::SecretMaterial::from(url),
                 tls_options: Default::default(),
             },
@@ -258,7 +258,7 @@ fn hosted_substrate_wiring_config() -> ProductionWiringConfig {
 }
 
 fn production_runtime_policy()
--> Result<RebornProductionRuntimePolicy, Box<dyn std::error::Error + Send + Sync>> {
+-> Result<IronClawProductionRuntimePolicy, Box<dyn std::error::Error + Send + Sync>> {
     let policy = EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
         requested_profile: RuntimeProfile::HostedSafe,
@@ -271,7 +271,7 @@ fn production_runtime_policy()
         audit_mode: AuditMode::Standard,
     };
     Ok(
-        RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        IronClawProductionRuntimePolicy::with_tenant_sandbox_process_port(
             policy,
             Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
                 Arc::new(RecordingSandboxTransport),

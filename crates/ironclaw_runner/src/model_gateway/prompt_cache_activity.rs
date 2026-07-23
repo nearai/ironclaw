@@ -1,4 +1,4 @@
-//! Prompt-cache continuity telemetry for the Reborn model gateways.
+//! Prompt-cache continuity telemetry for the IronClaw model gateways.
 //!
 //! Benchmarks showed the provider KV cache hit rate collapsing from ~82% to
 //! 29% past ~200 model calls per run (~3.5x input cost). This module tracks
@@ -159,7 +159,7 @@ impl PromptCacheActivityLog {
             cache_read_input_tokens = usage.cache_read_input_tokens,
             cache_creation_input_tokens = usage.cache_creation_input_tokens,
             input_tokens = usage.input_tokens,
-            "reborn model gateway prompt cache usage"
+            "IronClaw model gateway prompt cache usage"
         );
         if let PromptCacheObservation::Break {
             previous_cache_read_tokens,

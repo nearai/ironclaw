@@ -1,6 +1,6 @@
-//! Product-facing projections over Reborn durable runtime and audit logs.
+//! Product-facing projections over IronClaw durable runtime and audit logs.
 //!
-//! This crate is a read-model boundary. Upper Reborn layers should consume
+//! This crate is a read-model boundary. Upper IronClaw layers should consume
 //! these DTOs instead of parsing durable event/audit rows directly. The first
 //! implementation is replay-derived over [`ironclaw_events::DurableEventLog`]
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
@@ -1005,7 +1005,7 @@ pub enum AuditStreamResume {
     Updates(AuditProjectionReplay),
 }
 
-/// Transport-agnostic facade for scoped Reborn projection replay.
+/// Transport-agnostic facade for scoped IronClaw projection replay.
 ///
 /// Product transports should enter through this manager rather than reaching
 /// directly into durable logs. The manager intentionally keeps runtime and

@@ -159,7 +159,7 @@ fn debug_host_unavailable(stage: HostStage, error: &AgentLoopHostError) {
     }
 }
 
-/// Reference executor for the Reborn skeleton loop.
+/// Reference executor for the IronClaw skeleton loop.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CanonicalAgentLoopExecutor;
 

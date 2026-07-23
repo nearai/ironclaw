@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# The automated deletion test (docs/reborn/extension-runtime/overview.md §8,
-# checklist DEL-9): every generic Reborn crate's dependency graph must be free
+# The automated deletion test (docs/ironclaw/extension-runtime/overview.md §8,
+# checklist DEL-9): every generic IronClaw crate's dependency graph must be free
 # of concrete extension crates, and its tests must pass without them.
 #
 # Generic crates are derived from `cargo metadata` — every `ironclaw_*`
-# workspace crate declaring a Reborn layer — minus the concrete extension
+# workspace crate declaring a IronClaw layer — minus the concrete extension
 # crates themselves, the package inventory crate, and the sanctioned
 # assemblers (the binary and the architecture test crate).
-# This mirrors `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`;
+# This mirrors `crates/ironclaw_architecture/tests/ironclaw_extension_specificity.rs`;
 # keep the two lists in sync.
 #
 # TEMPORARY_EXCEPTIONS below mirrors CONCRETE_DEPENDENCY_EXCEPTIONS in that
@@ -41,7 +41,7 @@ while IFS= read -r crate_name; do
 done < <(cargo metadata --format-version 1 | python3 -c '
 import json, sys
 
-REBORN_LAYERS = {"contracts", "substrates", "runtimes", "kernel", "loops", "products", "app"}
+IRONCLAW_LAYERS = {"contracts", "substrates", "runtimes", "kernel", "loops", "products", "app"}
 EXCLUDED = {
     # Concrete extension crates (the deletion test subjects, not its scope).
     "ironclaw_slack_extension",
@@ -49,7 +49,7 @@ EXCLUDED = {
     # The package inventory crate owns the concrete packages.
     "ironclaw_first_party_extensions",
     # Sanctioned assemblers.
-    "ironclaw_reborn_cli",
+    "ironclaw_cli",
     "ironclaw_architecture",
     "ironclaw_stress",
 }
@@ -62,7 +62,7 @@ for package in metadata["packages"]:
     if name in EXCLUDED:
         continue
     layer = (package.get("metadata") or {}).get("ironclaw", {}).get("layer")
-    if layer in REBORN_LAYERS:
+    if layer in IRONCLAW_LAYERS:
         print(name)
 ' | sort)
 

@@ -9,13 +9,13 @@
 - `tests/approval_interaction_contract.rs`
 - `tests/inbound_turn_contract.rs`
 - `tests/webui_inbound_contract.rs`
-- `tests/reborn_services_contract.rs`
+- `tests/ironclaw_services_contract.rs`
 
 ## What This Crate Owns
 
-- Product-facing Reborn workflow orchestration between product adapters and host-layer services.
+- Product-facing IronClaw workflow orchestration between product adapters and host-layer services.
 - Binding resolution, inbound message staging, turn submission, idempotency, busy/deferred handling, gate routing, and product-safe acknowledgements.
-- The WebUI-facing Reborn facade over thread, turn, and projection ports.
+- The WebUI-facing IronClaw facade over thread, turn, and projection ports.
 - Crate-local public API, tests, and fakes needed to prove that ownership.
 
 ## Do Not Move In Here
@@ -28,7 +28,7 @@
 
 - Fast local check: `cargo test -p ironclaw_product_workflow`
 - Lint check: `cargo clippy -p ironclaw_product_workflow --all-targets -- -D warnings`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture ironclaw_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 

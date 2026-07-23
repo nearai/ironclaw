@@ -1,4 +1,4 @@
-//! Reborn integration test — the generic channel ingress router (P4, ING).
+//! IronClaw integration test — the generic channel ingress router (P4, ING).
 //!
 //! Drives the REAL production mount (`extension_ingress_route_mount` over the
 //! composed runtime's snapshot watch — the same `PublicRouteMount` `serve`
@@ -19,7 +19,7 @@
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
-mod reborn_support;
+mod ironclaw_support;
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
 mod support;
@@ -30,15 +30,15 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_product_workflow::ProductSurface;
-use ironclaw_reborn_composition::{
+use ironclaw_composition::{
     ChannelInboundSinkConfig, ChannelIngressRegistration, ExtensionIngressParts,
     GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
     extension_ingress_route_mount,
 };
-use reborn_support::builder::StorageMode;
-use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::reply::RebornScriptedReply;
+use ironclaw_product_workflow::ProductSurface;
+use ironclaw_support::builder::StorageMode;
+use ironclaw_support::group::IronClawIntegrationGroup;
+use ironclaw_support::reply::IronClawScriptedReply;
 use rstest::rstest;
 use serde_json::json;
 use sha2::Sha256;
@@ -103,7 +103,7 @@ impl PostAdmissionObserver for RecordingAdmissionObserver {
 
 struct AcmeIngress {
     parts: ExtensionIngressParts,
-    mount: ironclaw_reborn_composition::PublicRouteMount,
+    mount: ironclaw_composition::PublicRouteMount,
     observer: Arc<RecordingAdmissionObserver>,
 }
 
@@ -115,7 +115,7 @@ impl AcmeIngress {
     /// ledger.
     fn register(
         parts: ExtensionIngressParts,
-        harness: &reborn_support::builder::RebornIntegrationHarness,
+        harness: &ironclaw_support::builder::IronClawIntegrationHarness,
     ) -> Self {
         let observer = Arc::new(RecordingAdmissionObserver::default());
         let surface = harness.product_workflow_for_test() as Arc<dyn ProductSurface>;
@@ -140,7 +140,7 @@ impl AcmeIngress {
                     },
                 ])),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
-                drain: Some(sink as Arc<dyn ironclaw_reborn_composition::ChannelIngressDrain>),
+                drain: Some(sink as Arc<dyn ironclaw_composition::ChannelIngressDrain>),
             },
         );
         let mount = extension_ingress_route_mount(&parts).expect("production mount builds");
@@ -227,20 +227,20 @@ impl AcmeIngress {
 
 /// Install + activate the acme fixture through the production lifecycle
 /// tools, then return the composed runtime's REAL ingress parts.
-async fn activate_acme(group: &RebornIntegrationGroup) -> ExtensionIngressParts {
+async fn activate_acme(group: &IronClawIntegrationGroup) -> ExtensionIngressParts {
     let lifecycle = group
         .thread("conv-acme-ingress-lifecycle")
         .script([
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "acme-messenger"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
+            IronClawScriptedReply::text("installed"),
+            IronClawScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "acme-messenger"}),
             ),
-            RebornScriptedReply::text("activated"),
+            IronClawScriptedReply::text("activated"),
         ])
         .build()
         .await
@@ -269,7 +269,7 @@ async fn activate_acme(group: &RebornIntegrationGroup) -> ExtensionIngressParts 
     group
         .capability_harness()
         .expect("host-runtime capability harness")
-        .reborn_services_for_test()
+        .ironclaw_services_for_test()
         .expect("composed reborn services")
         .extension_ingress_parts()
         .expect("composition built the generic ingress")
@@ -291,7 +291,7 @@ fn message_body(event_id: &str, text: &str) -> String {
 /// admitted (ING-1/3/9/10 + the acme half of ING-12).
 #[tokio::test]
 async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
-    let group = RebornIntegrationGroup::extension_runtime_acme()
+    let group = IronClawIntegrationGroup::extension_runtime_acme()
         .await
         .expect("acme group builds");
     let parts = activate_acme(&group).await;
@@ -301,7 +301,7 @@ async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
     // DefaultProductSurface the sink submits through.
     let inbound_thread = group
         .thread("conv-acme-ingress-inbound")
-        .script([RebornScriptedReply::text("unused")])
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -386,7 +386,7 @@ async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
 #[case(StorageMode::Postgres)]
 #[tokio::test]
 async fn duplicate_and_restart_replay_converge_exactly_once(#[case] storage: StorageMode) {
-    let group = RebornIntegrationGroup::builder()
+    let group = IronClawIntegrationGroup::builder()
         .storage(storage)
         .extension_runtime_acme()
         .await
@@ -395,7 +395,7 @@ async fn duplicate_and_restart_replay_converge_exactly_once(#[case] storage: Sto
 
     let inbound_thread = group
         .thread("conv-acme-ingress-dedupe")
-        .script([RebornScriptedReply::text("unused")])
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("inbound thread builds");
@@ -421,7 +421,7 @@ async fn duplicate_and_restart_replay_converge_exactly_once(#[case] storage: Sto
     // same durable idempotency ledger — the replayed event still converges.
     let restarted_thread = group
         .thread("conv-acme-ingress-dedupe-restart")
-        .script([RebornScriptedReply::text("unused")])
+        .script([IronClawScriptedReply::text("unused")])
         .build()
         .await
         .expect("restart thread builds");
