@@ -303,8 +303,8 @@ empty. `ExternalProgressPush` remains opt-in and is wired off.
 `REBORN_TELEGRAM_V2_ENABLED` and
 `ironclaw::config::validate_telegram_v1_v2_exclusivity` are retained with
 the env name unchanged (config compat). Their meaning is now: **the Reborn
-Telegram channel host owns the deployment bot — the v1 monolith Telegram
-WASM channel (`channels-src/telegram`) must not activate for the same
+Telegram channel host owns the deployment bot -- the v1 monolith Telegram
+WASM channel must not activate for the same
 installation.** The validator runs at env-resolve time and again at runtime
 startup with the persisted-active channel set, and fails startup closed
 when both would handle the same bot. The v1 channel keeps working (default

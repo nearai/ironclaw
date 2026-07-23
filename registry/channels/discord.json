@@ -11,11 +11,6 @@
     "discord",
     "bot"
   ],
-  "source": {
-    "dir": "channels-src/discord",
-    "capabilities": "discord.capabilities.json",
-    "crate_name": "discord-channel"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-discord-0.2.3-wasm32-wasip2.tar.gz",

@@ -36,8 +36,7 @@ from provider_fault_proxy import ProviderFaultProxyWorld
 # Project root (two levels up from tests/e2e/)
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Git main repo root (for worktree support — WASM build artifacts live
-# in the main repo's tools-src/*/target/ and aren't shared across worktrees)
+# Git main repo root (for worktree support).
 _MAIN_ROOT = None
 try:
     import subprocess as _sp
@@ -143,8 +142,6 @@ def _binary_needs_rebuild(binary: Path) -> bool:
         ROOT / "Cargo.lock",
         ROOT / "build.rs",
         ROOT / "providers.json",
-        ROOT / "src",
-        ROOT / "channels-src",
         ROOT / "crates",
     ]
     return any(_latest_mtime(path) > binary_mtime for path in inputs)
@@ -464,8 +461,6 @@ def ironclaw_reborn_openai_compat_binary():
         _latest_mtime(ROOT / "Cargo.lock"),
         _latest_mtime(ROOT / "build.rs"),
         _latest_mtime(ROOT / "providers.json"),
-        _latest_mtime(ROOT / "src"),
-        _latest_mtime(ROOT / "channels-src"),
         _latest_mtime(ROOT / "crates"),
     )
     if (
@@ -946,33 +941,8 @@ def wasm_tools_dir(_wasm_build_symlinks):
 
 @pytest.fixture(scope="session", autouse=True)
 def _wasm_build_symlinks():
-    """Symlink WASM build artifacts from the main repo into the worktree.
-
-    In a git worktree, tools-src/*/target/ directories don't exist because
-    Cargo build artifacts aren't shared. The install API's source fallback
-    checks these paths. Symlinking makes the fallback work without rebuilding.
-    """
-    if _MAIN_ROOT is None or _MAIN_ROOT == ROOT:
-        yield
-        return
-
-    created = []
-    for src_dir_name in ("tools-src", "channels-src"):
-        src_dir = ROOT / src_dir_name
-        main_src_dir = _MAIN_ROOT / src_dir_name
-        if src_dir.is_dir() and main_src_dir.is_dir():
-            for child in src_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                target = child / "target"
-                main_target = main_src_dir / child.name / "target"
-                if not target.exists() and main_target.is_dir():
-                    target.symlink_to(main_target)
-                    created.append(target)
+    """Compatibility fixture retained for older worktrees."""
     yield
-    for link in created:
-        if link.is_symlink():
-            link.unlink()
 
 
 @pytest.fixture(scope="session")
