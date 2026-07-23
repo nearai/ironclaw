@@ -107,7 +107,9 @@ pub use local_dev_boot::{
     mount_local_dev_database_roots_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use local_dev_capability_io::staged_capability_io_for_test;
+pub use local_dev_capability_io::{
+    staged_capability_io_for_test, staged_capability_io_with_observer_for_test,
+};
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_root;

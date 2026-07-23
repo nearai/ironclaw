@@ -2,12 +2,9 @@
 
 //! Reborn composition root.
 //!
-//! Two entry points:
+//! Main entry point:
 //!
-//! - [`build_reborn_services`] — substrate/product facades (host runtime,
-//!   turn coordinator, product auth). Useful when an outer harness wires the loop
-//!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
-//! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
+//! - [`build_runtime`] — full runtime assembly: deployment config + loop
 //!   driver registry + LLM model gateway + turn-runner worker, spawned
 //!   as one unit. This is the single entry
 //!   point used by the standalone `ironclaw-reborn` binary and any
@@ -51,12 +48,12 @@ mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_fire_access;
 mod turn_run_snapshot;
-mod web_access;
 mod webui;
 
 pub use admin_login_token::{AdminLoginTokenMinter, ReusableLoginTokenValidator};
@@ -79,8 +76,9 @@ pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
-pub use extension_host::gsuite::{
-    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+pub use extension_host::first_party::{
+    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
+    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
 };
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
@@ -90,13 +88,21 @@ pub use factory::ChannelHostAssemblyTestWiring;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+/// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
+/// modules that build a production trust policy from the concrete inventory).
+#[cfg(test)]
+pub(crate) use factory::builtin_first_party_trust_policy;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
+/// Production first-party trust-policy builder over the neutral injected bundle
+/// set. Public so integration tests (which convert the concrete first-party
+/// inventory via the dev-dependency) can build the same trust policy the
+/// production binary composes at build time.
+pub use factory::production_first_party_trust_policy;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
-pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
-    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+    ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
@@ -108,8 +114,30 @@ pub use input::{
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
 /// test — the type must travel through this facade instead.
 pub use ironclaw_auth::OAuthRedirectUri;
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountStatus, CredentialOwnership, Timestamp,
+};
+/// First-party capability-wiring vocabulary re-exported so the assembling
+/// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
+/// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
+/// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
+/// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
+/// allow-list is frozen to the composition facade, so these types travel
+/// through here.
+pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
+pub use ironclaw_host_api::{
+    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle,
+};
 pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+pub use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
@@ -125,6 +153,7 @@ pub use ironclaw_product_workflow::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
 // the CLI consumes composition as its facade and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
@@ -162,6 +191,8 @@ pub use deployment::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
@@ -225,7 +256,7 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime, build_runtime,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
@@ -235,7 +266,6 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 // Host-supplied route-mount vocabulary shared with composition's own route
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
@@ -454,6 +484,11 @@ const PER_USER_ALIASES: &[&str] = &[
     "/workspace",
 ];
 
+/// The canonical global `/system` subroots, each exposed as its own read-only
+/// alias resolving to the same tenant-independent `VirtualPath`. Single source
+/// for the mount-grant wiring and its resolution test so the two cannot drift.
+const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/system/skills"];
+
 /// Per-invocation [`MountView`] used as the production resolver.
 ///
 /// Every call rebuilds the alias→VirtualPath table for the caller's
@@ -527,7 +562,7 @@ fn invocation_mount_view_for_segments(
         ))?,
         MountPermissions::read_write_list_delete(),
     ));
-    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+    for system_subroot in SYSTEM_SUBROOTS {
         grants.push(MountGrant::new(
             MountAlias::new(system_subroot)?,
             VirtualPath::new(system_subroot)?,
@@ -790,7 +825,7 @@ mod mount_view_tests {
         // read-only alias and resolves to the same VirtualPath
         // regardless of tenant — system data is global, not
         // per-tenant.
-        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+        for system_subroot in SYSTEM_SUBROOTS {
             let resolved = view
                 .resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
                 .unwrap();

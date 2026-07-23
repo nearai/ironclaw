@@ -22,6 +22,7 @@ function threadCacheSourceForTest() {
 globalThis.__testExports = {
   deriveSidebarTitle,
   displaySidebarTitle,
+  appendThreadListPage,
   normalizeSidebarTitle,
   removeThreadList,
   touchThreadList,
@@ -159,6 +160,53 @@ test("removeThreadList preserves cache identity when the thread is absent", () =
 
   assert.equal(removeThreadList(data, "thread-missing"), data);
   assert.equal(removeThreadList(undefined, "thread-missing"), undefined);
+});
+
+test("appendThreadListPage appends unique threads and advances the cursor", () => {
+  const { appendThreadListPage } = loadThreadCache();
+  const current = {
+    threads: [
+      { thread_id: "thread-new" },
+      { thread_id: "thread-overlap", title: "Fresh title" },
+    ],
+    next_cursor: "cursor-1",
+  };
+  const page = {
+    threads: [
+      { thread_id: "thread-overlap", title: "Stale title" },
+      { thread_id: "thread-old" },
+    ],
+    next_cursor: "cursor-2",
+  };
+
+  assert.deepEqual(
+    normalize(appendThreadListPage(current, page, "cursor-1")),
+    {
+      threads: [
+        { thread_id: "thread-new" },
+        { thread_id: "thread-overlap", title: "Fresh title" },
+        { thread_id: "thread-old" },
+      ],
+      next_cursor: "cursor-2",
+    },
+  );
+});
+
+test("appendThreadListPage ignores a response for a stale cursor", () => {
+  const { appendThreadListPage } = loadThreadCache();
+  const current = {
+    threads: [{ thread_id: "thread-current" }],
+    next_cursor: "cursor-new",
+  };
+
+  assert.equal(
+    appendThreadListPage(
+      current,
+      { threads: [{ thread_id: "thread-stale" }], next_cursor: null },
+      "cursor-old",
+    ),
+    current,
+  );
 });
 
 test("touchThreadList updates activity without overwriting an existing title", () => {

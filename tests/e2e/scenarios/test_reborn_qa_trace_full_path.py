@@ -19,6 +19,12 @@ import pytest
 
 from emulate_provider import google_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
+from provider_capability_inventory import (
+    EMULATE_SUPPORTED_TOOLS,
+    capability_id_to_wire_name,
+)
+from provider_operation_cases import PROVIDER_OPERATION_CASES
+from provider_operation_types import ProviderOperationCase
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,
@@ -42,6 +48,7 @@ GOOGLE_EXTENSIONS = (
     "google-drive",
     "google-docs",
     "google-sheets",
+    "google-slides",
 )
 GOOGLE_EXTENSION_SCOPES = {
     "gmail": (
@@ -65,6 +72,10 @@ GOOGLE_EXTENSION_SCOPES = {
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/spreadsheets.readonly",
     ),
+    "google-slides": (
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/presentations.readonly",
+    ),
 }
 GOOGLE_CUMULATIVE_SCOPES = tuple(
     dict.fromkeys(
@@ -79,12 +90,9 @@ GOOGLE_TOOL_PREFIXES = (
     "google-docs__",
     "google-drive__",
     "google-sheets__",
+    "google-slides__",
 )
-PROVIDER_TOOL_PREFIXES = (
-    *GOOGLE_TOOL_PREFIXES,
-    "github__",
-    "slack__",
-)
+PROVIDER_TOOL_NAMES = EMULATE_SUPPORTED_TOOLS
 ALL_EXTENSIONS = (*GOOGLE_EXTENSIONS, "github", "slack")
 TRACE_BOOTSTRAP_TOOLS = {"builtin__extension_search"}
 MUTATING_PROVIDER_TOOLS = {
@@ -105,7 +113,7 @@ def _provider_journey_cases() -> tuple[str, ...]:
             continue
         trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
         if any(
-            call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            call["name"] in PROVIDER_TOOL_NAMES
             for step in trace["steps"]
             for call in step["response"].get("tool_calls", [])
         ):
@@ -173,6 +181,8 @@ async def reborn_qa_emulate_runtime(
             f"{emulate_google_address.port}",
             f"sheets.googleapis.com={emulate_google_address.hostname}:"
             f"{emulate_google_address.port}",
+            f"slides.googleapis.com={emulate_google_address.hostname}:"
+            f"{emulate_google_address.port}",
             f"api.github.com={emulate_github_address.hostname}:"
             f"{emulate_github_address.port}",
             f"slack.com={emulate_slack_address.hostname}:"
@@ -239,6 +249,21 @@ async def reborn_qa_emulate_provider_server(
             )
         if reset_services:
             await resettable_emulate_provider_world.reset(reset_services)
+
+
+@pytest.fixture
+async def reborn_provider_operation_server(
+    reborn_qa_emulate_runtime,
+    resettable_emulate_provider_world,
+    operation_case,
+):
+    """Reuse Reborn but restore the case's provider after execution."""
+    try:
+        yield reborn_qa_emulate_runtime
+    finally:
+        await resettable_emulate_provider_world.reset(
+            {operation_case.provider_service}
+        )
 
 
 async def _seed_google_account(
@@ -512,7 +537,7 @@ async def _activate_extensions(base_url: str, extension_ids: tuple[str, ...]) ->
             assert body.get("activated") is True, body
 
 
-def _provider_leg(trace: dict, prefixes: tuple[str, ...]) -> dict:
+def _provider_leg(trace: dict, provider_tools: frozenset[str]) -> dict:
     """Keep the recorded provider decisions and final response in order."""
     provider_steps = []
     final_text = None
@@ -522,7 +547,7 @@ def _provider_leg(trace: dict, prefixes: tuple[str, ...]) -> dict:
             calls = [
                 call
                 for call in response["tool_calls"]
-                if call["name"].startswith(prefixes)
+                if call["name"] in provider_tools
                 or call["name"] in TRACE_BOOTSTRAP_TOOLS
             ]
             if calls:
@@ -551,14 +576,14 @@ def _inject_deferred_tool_disclosure(trace: dict) -> None:
             call["name"]
             for step in trace["steps"]
             for call in step["response"].get("tool_calls", [])
-            if call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            if call["name"] in PROVIDER_TOOL_NAMES
         )
     )
     first_provider_step = next(
         index
         for index, step in enumerate(trace["steps"])
         if any(
-            call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            call["name"] in PROVIDER_TOOL_NAMES
             for call in step["response"].get("tool_calls", [])
         )
     )
@@ -585,7 +610,7 @@ def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> N
         index
         for index, step in enumerate(trace["steps"])
         if any(
-            call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            call["name"] in PROVIDER_TOOL_NAMES
             for call in step["response"].get("tool_calls", [])
         )
     ]
@@ -711,12 +736,12 @@ async def _load_trace(
     mock_llm_server: str,
     trace_path: Path,
     *,
-    provider_prefixes: tuple[str, ...] | None = None,
+    provider_tools: frozenset[str] | None = None,
     slack_state: dict[str, str] | None = None,
 ) -> dict:
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
-    if provider_prefixes is not None:
-        trace = _provider_leg(trace, provider_prefixes)
+    if provider_tools is not None:
+        trace = _provider_leg(trace, provider_tools)
     if trace_path.stem == "qa_9c_slack_digest_names_not_ids":
         _coalesce_independent_provider_reads(trace)
         _inject_deferred_tool_disclosure(trace)
@@ -724,7 +749,7 @@ async def _load_trace(
         trace["steps"][-1]["request_hint"] = {
             "expected_failed_tool_result_contains": "channel_not_found"
         }
-    if provider_prefixes is not None:
+    if provider_tools is not None:
         _normalize_google_arguments(trace, trace_path.stem)
     if slack_state is not None:
         _normalize_slack_arguments(trace, slack_state, trace_path.stem)
@@ -736,6 +761,66 @@ async def _load_trace(
         )
         response.raise_for_status()
     return trace
+
+
+async def _install_inline_trace(
+    mock_llm_server: str,
+    source: str,
+    trace: dict,
+) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/llm_trace",
+            json={"source": source, "trace": trace},
+            timeout=15,
+        )
+    response.raise_for_status()
+
+
+def _provider_operation_trace(
+    case: ProviderOperationCase, arguments: dict
+) -> dict:
+    wire_name = capability_id_to_wire_name(case.capability_id)
+    return {
+        "steps": [
+            {
+                "response": {
+                    "type": "user_input",
+                    "content": f"Execute provider contract {case.case_id}",
+                }
+            },
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": f"disclose_{case.case_id}",
+                            "name": "capability_info",
+                            "arguments": {"name": case.capability_id},
+                        }
+                    ],
+                }
+            },
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": f"execute_{case.case_id}",
+                            "name": wire_name,
+                            "arguments": arguments,
+                        }
+                    ],
+                }
+            },
+            {
+                "response": {
+                    "type": "text",
+                    "content": "Provider operation completed.",
+                }
+            },
+        ]
+    }
 
 
 async def _wait_for_trace_replay(mock_llm_server: str, timeout: float = 30) -> dict:
@@ -804,7 +889,7 @@ def _recorded_provider_calls(trace: dict) -> list[dict]:
         call
         for step in trace["steps"]
         for call in step["response"].get("tool_calls", [])
-        if call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+        if call["name"] in PROVIDER_TOOL_NAMES
     ]
 
 
@@ -1126,7 +1211,7 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     trace = await _load_trace(
         mock_llm_server,
         trace_path,
-        provider_prefixes=PROVIDER_TOOL_PREFIXES,
+        provider_tools=PROVIDER_TOOL_NAMES,
         slack_state=reborn_qa_emulate_provider_server["slack_state"],
     )
     user_input = trace["steps"][0]["response"]["content"]
@@ -1200,6 +1285,59 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         "source": trace_path.name,
         "next_response": len(trace["steps"]) - 1,
         "response_count": len(trace["steps"]) - 1,
+        "complete": True,
+        "error": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "operation_case",
+    PROVIDER_OPERATION_CASES,
+    ids=lambda case: case.case_id,
+)
+async def test_provider_operation_case_executes_with_provider_readback(
+    reborn_provider_operation_server,
+    mock_llm_server,
+    operation_case,
+):
+    """Typed operation cases cross Reborn and prove provider-observable results."""
+    server = reborn_provider_operation_server["base_url"]
+    emulate_url = reborn_provider_operation_server[
+        f"emulate_{operation_case.provider_service}_url"
+    ]
+    source = f"provider-operation-{operation_case.case_id}.json"
+    await operation_case.assert_baseline(emulate_url)
+    arguments = await operation_case.resolve_arguments(emulate_url)
+    trace = _provider_operation_trace(operation_case, arguments)
+    await _install_inline_trace(mock_llm_server, source, trace)
+
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, server)
+        await send_message(
+            client,
+            server,
+            thread_id,
+            trace["steps"][0]["response"]["content"],
+        )
+        replay = await _wait_for_trace_replay(mock_llm_server, timeout=120)
+        await wait_for_assistant_message(client, server, thread_id, timeout=120)
+        timeline = await _fetch_all_timeline_pages_with_retry(
+            client, server, thread_id
+        )
+
+    matches = [
+        preview
+        for message in timeline.get("messages", [])
+        if (preview := capability_preview_payload(message)) is not None
+        and preview["capability_id"] == operation_case.capability_id
+    ]
+    assert len(matches) == 1, matches
+    assert matches[0]["status"] == "completed", matches[0]
+    await operation_case.assert_outcome(emulate_url, matches[0])
+    assert replay == {
+        "source": source,
+        "next_response": 3,
+        "response_count": 3,
         "complete": True,
         "error": None,
     }

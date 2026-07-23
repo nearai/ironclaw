@@ -42,9 +42,10 @@ use crate::product_auth::credentials::runtime_credentials::host_managed_fallback
     HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
 };
 use crate::product_auth::credentials::runtime_credentials::{
-    ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
-    RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
-    RuntimeCredentialAccountSelectionService,
+    DefaultRuntimeCredentialAccountVisibilityPolicy, ProductAuthRuntimeCredentialAccountRefresher,
+    ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountRefreshPort,
+    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
+    RuntimeCredentialAccountVisibilityPolicy,
 };
 use crate::product_auth::oauth::oauth_gate::{OAuthGateChallengeRequest, OAuthGateFlowDriver};
 use ironclaw_product_workflow::{
@@ -493,6 +494,11 @@ impl RebornProductAuthServicePorts {
         self.provider_client = provider_client;
         self
     }
+
+    pub fn with_current_provider_client(self) -> Self {
+        let provider_client = self.provider_client.clone();
+        self.with_provider_client(provider_client)
+    }
 }
 
 /// RAII guard for the process-local continuation-dispatch single-flight lease.
@@ -533,6 +539,12 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
+    /// Injected policy deciding which resolved credential accounts are visible
+    /// to a requester extension. `None` falls back to the safe, strictly
+    /// more-restrictive [`DefaultRuntimeCredentialAccountVisibilityPolicy`]; the
+    /// assembling binary injects an extension-family-aware policy (e.g. the
+    /// GSuite account visibility policy) so composition names no concrete extension.
+    credential_account_visibility_policy: Option<Arc<dyn RuntimeCredentialAccountVisibilityPolicy>>,
     /// Secret store forwarded to the inline-refresh margin check (A2).
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     host_managed_nearai_credential_scope: Option<AuthProductScope>,
@@ -637,6 +649,7 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
+            credential_account_visibility_policy: None,
             // §4.3: volatile default — the production encrypted filesystem
             // secret store over an in-memory backend (ephemeral master key).
             secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
@@ -754,12 +767,14 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
+        let visibility_policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy> = self
+            .credential_account_visibility_policy
+            .clone()
+            .unwrap_or_else(|| Arc::new(DefaultRuntimeCredentialAccountVisibilityPolicy));
         let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 self.credential_account_record_source(),
-                Arc::new(
-                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
-                ),
+                visibility_policy,
             ),
         );
         let Some(host_scope) = self.host_managed_nearai_credential_scope.clone() else {
@@ -863,6 +878,17 @@ impl RebornProductAuthServices {
 
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
         self.security_audit_sink = Some(sink);
+        self
+    }
+
+    /// Inject the credential-account visibility policy used by the runtime
+    /// credential-account selection service. Absent this, the selection service
+    /// applies [`DefaultRuntimeCredentialAccountVisibilityPolicy`] (fail-closed).
+    pub fn with_credential_account_visibility_policy(
+        mut self,
+        policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy>,
+    ) -> Self {
+        self.credential_account_visibility_policy = Some(policy);
         self
     }
 

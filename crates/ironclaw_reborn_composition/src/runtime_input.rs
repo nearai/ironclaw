@@ -1,6 +1,6 @@
 //! Input DTO for the assembled Reborn runtime (`build_reborn_runtime`).
 //!
-//! `RebornRuntimeInput` extends `RebornBuildInput` (which is substrate-only)
+//! `RebornRuntimeInput` extends `RebornHostBindings` (which is substrate-only)
 //! with the additional knobs needed to assemble a runnable agent:
 //!
 //! - **LLM configuration** (optional).
@@ -36,7 +36,7 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -471,7 +471,7 @@ impl TriggerPollerSettings {
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
 pub struct RebornRuntimeInput {
-    pub services: Option<RebornBuildInput>,
+    pub services: Option<RebornHostBindings>,
     pub llm: Option<ResolvedRebornLlm>,
     /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
@@ -546,7 +546,7 @@ impl RebornRuntimeInput {
     /// provided — there is no in-memory-only fallback at this layer because
     /// the substrate decisions (local-dev root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
-    pub fn from_services(services: RebornBuildInput) -> Self {
+    pub fn from_build_input(services: RebornHostBindings) -> Self {
         Self {
             services: Some(services),
             llm: None,
@@ -574,6 +574,28 @@ impl RebornRuntimeInput {
             #[cfg(any(test, feature = "test-support"))]
             model_availability_retry_attempts_override: None,
         }
+    }
+
+    /// The declarative deployment config (Phase A) — the authoritative "what
+    /// deployment is this" input, read separately from the code-carrying
+    /// `services` bindings. It is sourced from the bindings the caller supplied
+    /// to [`from_build_input`](Self::from_build_input) (that is where the
+    /// profile preset and all declarative DATA are seeded), so existing callers
+    /// keep working while the runtime layer can treat config as a first-class,
+    /// bindings-independent value. Returns `None` only before services are set.
+    pub fn config(&self) -> Option<&crate::deployment::DeploymentConfig> {
+        self.services.as_ref().map(RebornHostBindings::deployment)
+    }
+
+    /// Override the deployment config carried by the bindings. Lets a caller
+    /// install an accurately-resolved config (e.g. one built with the operator's
+    /// yolo host-access disclosure) after constructing the input, without
+    /// reaching into the bindings directly.
+    pub fn with_config(mut self, config: crate::deployment::DeploymentConfig) -> Self {
+        if let Some(services) = self.services.take() {
+            self.services = Some(services.with_deployment_config(config));
+        }
+        self
     }
 
     /// Supply pre-resolved budget defaults. The caller is responsible
