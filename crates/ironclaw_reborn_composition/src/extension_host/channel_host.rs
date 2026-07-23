@@ -1011,7 +1011,11 @@ impl RunDeliveryPostAdmissionObserver {
     }
 }
 
+// Lives under `channel_host/tests/` (the repo's test-only path convention the
+// no-panics checker recognizes); `#[path]` keeps the module name and its
+// `super::` references unchanged.
 #[cfg(test)]
+#[path = "channel_host/tests/e2e_tests.rs"]
 mod e2e_tests;
 
 #[cfg(test)]
