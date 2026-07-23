@@ -300,6 +300,7 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
         ironclaw_reborn_composition::local_dev_build_input(user_id.as_str(), storage_root.clone())
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+            .with_bundled_first_party_for_test()
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             ));
@@ -411,6 +412,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -529,6 +531,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -652,6 +655,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -781,6 +785,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -877,6 +882,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -1093,6 +1099,7 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -1170,6 +1177,7 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     )
     .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
     .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(Arc::new(
         reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
     ));
@@ -1533,6 +1541,7 @@ impl AdminConfigurationFixture {
         )
         .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
         .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_bundled_first_party_for_test()
         .with_account_setup_descriptors(vec![telegram_pairing_descriptor()])
         .with_network_http_egress_for_test(Arc::new(
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
