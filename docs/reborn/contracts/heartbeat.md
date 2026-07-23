@@ -85,9 +85,11 @@ uses the existing `(tenant_id, trigger_id, fire_slot)` derivation.
 
 The trusted poller mints the turn actor and scope from the persisted trigger
 record. It must re-check fire-time authorization and must never substitute an
-ambient user, tenant, agent, or project. A heartbeat turn stamps
-`InvocationOrigin::Automation(RoutineId("heartbeat"))`; adapters and untrusted
-product code cannot mint that origin.
+ambient user, tenant, agent, or project. A heartbeat run keeps the generic
+`TurnOriginKind::ScheduledTrigger` origin and additionally records trusted
+automation provenance `RoutineId("heartbeat")`; adapters and untrusted product
+code cannot mint that provenance. Model-initiated capability calls inside the
+run remain `InvocationOrigin::LoopRun` and do not inherit scheduler authority.
 
 ## 5. Typed configuration
 
