@@ -10,6 +10,7 @@ use crate::RebornProductAuthServicePorts;
 #[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
+use crate::deployment::TrafficPolicy;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
@@ -2395,6 +2396,7 @@ async fn build_production_shaped(
     let nearai_mcp_bootstrap_config = deployment.nearai_mcp_bootstrap_config.clone();
     let turn_state_store_limits = deployment.turn_state_store_limits;
     let first_party_bundles = deployment.first_party_bundles.clone();
+    let traffic_policy = deployment.traffic();
     // Label for logging/errors; behaviour reads `deployment`'s axes.
     let profile = deployment.profile();
     let wiring_config = production_config(
@@ -2429,7 +2431,7 @@ async fn build_production_shaped(
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
             let production_wiring = production_wiring(
-                profile,
+                traffic_policy,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2487,7 +2489,7 @@ async fn build_production_shaped(
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
             let production_wiring = production_wiring(
-                profile,
+                traffic_policy,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2549,7 +2551,7 @@ async fn build_production_shaped(
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
-                profile,
+                traffic_policy,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2613,7 +2615,7 @@ async fn build_production_shaped(
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
-                profile,
+                traffic_policy,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2867,7 +2869,7 @@ struct RebornProductionBuildContext {
 }
 
 fn production_wiring(
-    profile: RebornCompositionProfile,
+    traffic_policy: TrafficPolicy,
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     turn_run_wake_notifier: Arc<ironclaw_runner::turn_scheduler::SchedulerTurnRunWakeNotifier>,
@@ -2878,10 +2880,7 @@ fn production_wiring(
         return Err(RebornBuildError::EmptyProductionTrustPolicy);
     }
     let runtime_policy = runtime_policy.ok_or(RebornBuildError::MissingRuntimePolicy)?;
-    if matches!(
-        profile,
-        RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
-    ) {
+    if traffic_policy.requires_production_runtime_policy_preflight() {
         validate_production_runtime_policy(&runtime_policy)?;
     }
     validate_production_process_binding(&runtime_policy, &runtime_process_binding)?;

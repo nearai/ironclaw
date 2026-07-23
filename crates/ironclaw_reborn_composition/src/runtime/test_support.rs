@@ -8,7 +8,7 @@
 use super::*;
 
 fn build_approval_interaction_service_with_parts(
-    parts: &LocalDevInteractionServiceTestParts,
+    parts: &InteractionServiceTestParts,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     turn_run_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
@@ -101,7 +101,7 @@ impl RebornRuntime {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        let Some(parts) = self.local_dev_interaction_service_parts.as_ref() else {
+        let Some(parts) = self.interaction_service_test_parts.as_ref() else {
             return Ok(None);
         };
         build_approval_interaction_service_with_parts(

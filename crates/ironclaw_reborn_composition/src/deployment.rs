@@ -138,6 +138,17 @@ impl TrafficPolicy {
         matches!(self, Self::Serve { .. })
     }
 
+    pub(crate) fn requires_production_runtime_policy_preflight(self) -> bool {
+        matches!(
+            self,
+            Self::ValidateOnly
+                | Self::Serve {
+                    veto_on_production_blocking_diagnostic: true,
+                    ..
+                }
+        )
+    }
+
     /// The operator-facing reason this deployment refuses live traffic, or
     /// `None` when it serves.
     ///

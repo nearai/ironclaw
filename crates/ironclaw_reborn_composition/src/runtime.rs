@@ -565,7 +565,7 @@ pub struct RebornRuntime {
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    pub(crate) channel_connection_facade_slot:
+    pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
     pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
@@ -625,7 +625,7 @@ pub struct RebornRuntime {
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
-    local_dev_interaction_service_parts: Option<LocalDevInteractionServiceTestParts>,
+    interaction_service_test_parts: Option<InteractionServiceTestParts>,
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
@@ -641,7 +641,7 @@ pub struct RebornRuntime {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct LocalDevInteractionServiceTestParts {
+pub(crate) struct InteractionServiceTestParts {
     approval_requests: Arc<crate::factory::ComposedApprovalRequestStore>,
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
@@ -4051,26 +4051,23 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
     #[cfg(any(test, feature = "test-support"))]
-    let local_dev_interaction_service_parts =
-        local_runtime.zip(builtin_capability_policy.as_ref()).map(
-            |(local_runtime, builtin_capability_policy)| LocalDevInteractionServiceTestParts {
-                approval_requests: Arc::clone(&local_runtime.approval_requests),
-                capability_leases: Arc::clone(&local_runtime.capability_leases),
-                extension_registry: Arc::clone(&local_runtime.extension_registry),
-                workspace_mounts: local_runtime.workspace_mounts.clone(),
-                skill_mounts: local_runtime.skill_mounts.clone(),
-                memory_mounts: local_runtime.memory_mounts.clone(),
-                system_extensions_lifecycle_mounts: local_runtime
-                    .system_extensions_lifecycle_mounts
-                    .clone(),
-                persistent_approval_policies: Arc::clone(
-                    &local_runtime.persistent_approval_policies,
-                ),
-                tool_permission_overrides: Arc::clone(&local_runtime.tool_permission_overrides),
-                extension_management: Arc::clone(&local_runtime.extension_management),
-                builtin_capability_policy: Arc::clone(builtin_capability_policy),
-            },
-        );
+    let interaction_service_test_parts = local_runtime.zip(builtin_capability_policy.as_ref()).map(
+        |(local_runtime, builtin_capability_policy)| InteractionServiceTestParts {
+            approval_requests: Arc::clone(&local_runtime.approval_requests),
+            capability_leases: Arc::clone(&local_runtime.capability_leases),
+            extension_registry: Arc::clone(&local_runtime.extension_registry),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            skill_mounts: local_runtime.skill_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            persistent_approval_policies: Arc::clone(&local_runtime.persistent_approval_policies),
+            tool_permission_overrides: Arc::clone(&local_runtime.tool_permission_overrides),
+            extension_management: Arc::clone(&local_runtime.extension_management),
+            builtin_capability_policy: Arc::clone(builtin_capability_policy),
+        },
+    );
 
     // Spawn the engine-owned credential keepalive sweep (B4;
     // `ironclaw_auth::keepalive`). The factory reports whether the durable
@@ -4168,7 +4165,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         extension_filesystem: services.extension_filesystem.clone(),
         workspace_mounts: services.workspace_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
-        channel_connection_facade_slot: services.channel_disconnect_slot.clone(),
+        channel_facade_slot: services.channel_disconnect_slot.clone(),
         channel_config: services.channel_config.clone(),
         admin_configuration: services.admin_configuration.clone(),
         admin_configuration_uses: services.admin_configuration_uses.clone(),
@@ -4202,7 +4199,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         approval_interaction_service,
         auth_interaction_service,
         #[cfg(any(test, feature = "test-support"))]
-        local_dev_interaction_service_parts,
+        interaction_service_test_parts,
         webui_event_log: event_log,
         default_run_profile_id,
         send_locks: Mutex::new(HashMap::new()),
@@ -4223,9 +4220,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // slot before the runtime was built keeps its facade (same stores, same
     // durable state), so the discarded `set` result is deliberate.
     if let Some(channel_connection) = runtime.generic_channel_connection_facade() {
-        let _ = runtime
-            .channel_connection_facade_slot
-            .set(channel_connection);
+        let _ = runtime.channel_facade_slot.set(channel_connection);
     }
     Ok(runtime)
 }

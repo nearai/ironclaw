@@ -177,7 +177,7 @@ pub(crate) fn first_party_bundles_from_inventory() -> Vec<FirstPartyPackageBundl
 
 /// Test-support first-party handler registrars (GSuite + web tooling) mirroring
 /// the concrete executors the `ironclaw_reborn_cli` binary assembles in
-/// production (`crates/ironclaw_reborn_cli/src/first_party/{gsuite,web_access}.rs`).
+/// production (`crates/ironclaw_reborn_cli/src/first_party/`).
 ///
 /// Composition names `ironclaw_first_party_extensions` in production nowhere
 /// (extension-runtime DEL-7); the binary supplies these registrars on the build

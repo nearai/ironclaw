@@ -116,7 +116,7 @@ pub fn build_channel_connection_for_test(
         Some(runtime.channel_dm_target_store.clone()),
         runtime.channel_pairing.clone(),
     ));
-    let disconnect_slot = &runtime.channel_connection_facade_slot;
+    let disconnect_slot = &runtime.channel_facade_slot;
     if disconnect_slot.set(Arc::clone(&facade)).is_err() {
         return Err(
             "channel connection facade slot is already occupied; extension-removal cleanup \

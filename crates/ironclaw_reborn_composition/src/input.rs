@@ -913,8 +913,9 @@ impl RebornHostBindings {
     }
 
     /// Test-support: inject the full first-party extension surface (catalog
-    /// bundles, capability-handler registrars, and the Google-account visibility
-    /// policy) exactly as the `ironclaw_reborn_cli` binary does in production.
+    /// bundles, capability-handler registrars, and the provider-account
+    /// visibility policy) exactly as the `ironclaw_reborn_cli` binary does in
+    /// production.
     ///
     /// Composition names no concrete first-party extension in production
     /// (extension-runtime DEL-7); the binary supplies these on the build input.

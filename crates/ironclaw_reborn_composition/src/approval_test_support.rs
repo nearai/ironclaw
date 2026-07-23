@@ -13,7 +13,7 @@ use crate::factory::{
     RebornRuntimeStores,
 };
 
-pub(crate) trait LocalDevApprovalHarness {
+pub(crate) trait ApprovalHarness {
     fn host_runtime(&self) -> Option<&Arc<dyn HostRuntime>>;
     fn approval_requests(&self) -> Option<&Arc<ComposedApprovalRequestStore>>;
     fn capability_leases(&self) -> Option<&Arc<ComposedCapabilityLeaseStore>>;
@@ -27,7 +27,7 @@ pub(crate) trait LocalDevApprovalHarness {
     fn auto_approve_settings(&self) -> Option<&Arc<ComposedAutoApproveSettingStore>>;
 }
 
-impl LocalDevApprovalHarness for RebornRuntimeStores {
+impl ApprovalHarness for RebornRuntimeStores {
     fn host_runtime(&self) -> Option<&Arc<dyn HostRuntime>> {
         Some(&self.host_runtime)
     }
@@ -73,7 +73,7 @@ impl LocalDevApprovalHarness for RebornRuntimeStores {
 /// site; integration-test and root-crate binaries keep their own copies (they
 /// cannot see this helper).
 pub(crate) async fn disable_global_auto_approve(
-    runtime: &impl LocalDevApprovalHarness,
+    runtime: &impl ApprovalHarness,
     context: &ExecutionContext,
 ) {
     runtime
@@ -89,7 +89,7 @@ pub(crate) async fn disable_global_auto_approve(
 }
 
 pub(crate) async fn invoke_json_with_local_dev_approval(
-    runtime: &impl LocalDevApprovalHarness,
+    runtime: &impl ApprovalHarness,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -102,7 +102,7 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
 }
 
 pub(crate) async fn invoke_with_local_dev_approval(
-    runtime: &impl LocalDevApprovalHarness,
+    runtime: &impl ApprovalHarness,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
