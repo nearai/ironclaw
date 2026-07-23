@@ -5,7 +5,7 @@ use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
 use ironclaw_host_api::{EffectKind, ExtensionId, RuntimeKind, UserId};
 use ironclaw_product_workflow::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
 
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 
 #[derive(Clone)]
 pub(crate) struct ActiveRegistryOperatorToolCatalog {
@@ -15,14 +15,14 @@ pub(crate) struct ActiveRegistryOperatorToolCatalog {
     /// for the local-dev runtime; `None` for assemblies without extension
     /// management, where every registry tool is treated as tenant-shared
     /// (there is no per-user install path to leak).
-    owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
+    owner_source: Option<Arc<ExtensionManagementPort>>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
     pub(crate) fn new(
         registry: Arc<SharedExtensionRegistry>,
         synthetic_tools: Vec<RebornOperatorToolInfo>,
-        owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
+        owner_source: Option<Arc<ExtensionManagementPort>>,
     ) -> Self {
         Self {
             registry,

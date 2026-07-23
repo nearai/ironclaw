@@ -20,7 +20,7 @@ use ironclaw_skills::{
 };
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
@@ -29,13 +29,13 @@ pub(crate) type SkillManagementMountResolver =
     dyn Fn(&ResourceScope) -> Result<MountView, HostApiError> + Send + Sync;
 
 #[derive(Clone)]
-pub(crate) struct RebornLocalSkillManagementPort {
+pub(crate) struct SkillManagementPort {
     owner_user_id: UserId,
     filesystem: Arc<dyn RootFilesystem>,
     skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
 }
 
-impl RebornLocalSkillManagementPort {
+impl SkillManagementPort {
     #[cfg(test)]
     pub(crate) fn new(
         owner_user_id: UserId,
@@ -67,7 +67,7 @@ impl RebornLocalSkillManagementPort {
         Arc::clone(&self.skill_management_mount_resolver)
     }
 
-    pub(crate) fn owner_scope(&self) -> Result<ResourceScope, RebornLocalSkillManagementError> {
+    pub(crate) fn owner_scope(&self) -> Result<ResourceScope, SkillManagementPortError> {
         ResourceScope::local_default(self.owner_user_id.clone(), InvocationId::new())
             .map_err(invalid_skill_context)
     }
@@ -75,7 +75,7 @@ impl RebornLocalSkillManagementPort {
     fn skill_context_for_scope(
         &self,
         scope: ResourceScope,
-    ) -> Result<SkillManagementContext, RebornLocalSkillManagementError> {
+    ) -> Result<SkillManagementContext, SkillManagementPortError> {
         let mounts =
             (self.skill_management_mount_resolver)(&scope).map_err(invalid_skill_context)?;
         Ok(SkillManagementContext::new(
@@ -88,7 +88,7 @@ impl RebornLocalSkillManagementPort {
     pub(crate) async fn list_for_scope(
         &self,
         scope: ResourceScope,
-    ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
+    ) -> Result<Vec<ironclaw_skills::SkillSummary>, SkillManagementPortError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(list_skills(&context).await?)
     }
@@ -98,7 +98,7 @@ impl RebornLocalSkillManagementPort {
         scope: ResourceScope,
         query: &str,
         limit: usize,
-    ) -> Result<ironclaw_skills::SkillSearchResult, RebornLocalSkillManagementError> {
+    ) -> Result<ironclaw_skills::SkillSearchResult, SkillManagementPortError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
     }
@@ -107,7 +107,7 @@ impl RebornLocalSkillManagementPort {
         &self,
         scope: ResourceScope,
         name: &str,
-    ) -> Result<ironclaw_skills::SkillContentResult, RebornLocalSkillManagementError> {
+    ) -> Result<ironclaw_skills::SkillContentResult, SkillManagementPortError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(read_skill_content(&context, ironclaw_skills::SkillContentRequest { name }).await?)
     }
@@ -117,7 +117,7 @@ impl RebornLocalSkillManagementPort {
         scope: ResourceScope,
         name: &str,
         content: &str,
-    ) -> Result<ironclaw_skills::SkillUpdateResult, RebornLocalSkillManagementError> {
+    ) -> Result<ironclaw_skills::SkillUpdateResult, SkillManagementPortError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(update_skill(&context, SkillUpdateRequest { name, content }).await?)
     }
@@ -127,7 +127,7 @@ impl RebornLocalSkillManagementPort {
         scope: ResourceScope,
         name: Option<&str>,
         content: &str,
-    ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
+    ) -> Result<ironclaw_skills::SkillInstallResult, SkillManagementPortError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(install_skill(
             &context,
@@ -146,21 +146,21 @@ impl RebornLocalSkillManagementPort {
         &self,
         scope: ResourceScope,
         name: &str,
-    ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
+    ) -> Result<ironclaw_skills::SkillRemoveResult, SkillManagementPortError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RebornLocalSkillManagementError {
+pub(crate) enum SkillManagementPortError {
     #[error("invalid skill management context: {reason}")]
     InvalidContext { reason: String },
     #[error("skill management failed: {0:?}")]
     Skill(SkillManagementError),
 }
 
-impl From<SkillManagementError> for RebornLocalSkillManagementError {
+impl From<SkillManagementError> for SkillManagementPortError {
     fn from(error: SkillManagementError) -> Self {
         Self::Skill(error)
     }
@@ -169,26 +169,24 @@ impl From<SkillManagementError> for RebornLocalSkillManagementError {
 pub(crate) fn build_local_skill_management_port<F>(
     owner_user_id: UserId,
     filesystem: Arc<F>,
-) -> Result<Arc<RebornLocalSkillManagementPort>, crate::RebornBuildError>
+) -> Result<Arc<SkillManagementPort>, crate::RebornBuildError>
 where
     F: RootFilesystem + 'static,
 {
     let mount_resolver: Arc<SkillManagementMountResolver> =
         Arc::new(scoped_skill_management_mount_view);
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
-    Ok(Arc::new(
-        RebornLocalSkillManagementPort::new_with_mount_resolver(
-            owner_user_id,
-            filesystem,
-            mount_resolver,
-        ),
-    ))
+    Ok(Arc::new(SkillManagementPort::new_with_mount_resolver(
+        owner_user_id,
+        filesystem,
+        mount_resolver,
+    )))
 }
 
 pub(crate) fn build_existing_local_dev_skill_management_port(
     owner_id: impl Into<String>,
     local_dev_storage_root: impl Into<PathBuf>,
-) -> Result<Option<Arc<RebornLocalSkillManagementPort>>, crate::RebornBuildError> {
+) -> Result<Option<Arc<SkillManagementPort>>, crate::RebornBuildError> {
     let owner_id = owner_id.into();
     let local_dev_storage_root = local_dev_storage_root.into();
     if !local_dev_storage_root.try_exists().map_err(|error| {
@@ -216,23 +214,23 @@ pub(crate) fn build_existing_local_dev_skill_management_port(
     build_local_skill_management_port(owner_user_id, Arc::new(filesystem)).map(Some)
 }
 
-fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManagementError {
-    RebornLocalSkillManagementError::InvalidContext {
+fn invalid_skill_context(error: impl std::fmt::Display) -> SkillManagementPortError {
+    SkillManagementPortError::InvalidContext {
         reason: error.to_string(),
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct RebornLocalLifecycleFacade {
-    skill_management: Arc<RebornLocalSkillManagementPort>,
-    extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+pub(crate) struct LifecycleFacade {
+    skill_management: Arc<SkillManagementPort>,
+    extension_management: Option<Arc<ExtensionManagementPort>>,
     channel_config: Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
 
-impl RebornLocalLifecycleFacade {
-    pub(crate) fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
+impl LifecycleFacade {
+    pub(crate) fn new(skill_management: Arc<SkillManagementPort>) -> Self {
         Self {
             skill_management,
             extension_management: None,
@@ -244,7 +242,7 @@ impl RebornLocalLifecycleFacade {
 
     pub(crate) fn with_extension_management(
         mut self,
-        extension_management: Arc<RebornLocalExtensionManagementPort>,
+        extension_management: Arc<ExtensionManagementPort>,
     ) -> Self {
         self.extension_management = Some(extension_management);
         self
@@ -503,7 +501,7 @@ impl RebornLocalLifecycleFacade {
     async fn extension_activation_credential_gate(
         &self,
         context: &LifecycleProductContext,
-        extension_management: &RebornLocalExtensionManagementPort,
+        extension_management: &ExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
@@ -531,7 +529,7 @@ impl RebornLocalLifecycleFacade {
 }
 
 #[async_trait]
-impl LifecycleProductFacade for RebornLocalLifecycleFacade {
+impl LifecycleProductFacade for LifecycleFacade {
     async fn execute(
         &self,
         context: LifecycleProductContext,
@@ -756,14 +754,12 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
     }
 }
 
-fn map_local_skill_management_error(
-    error: RebornLocalSkillManagementError,
-) -> ProductWorkflowError {
+fn map_local_skill_management_error(error: SkillManagementPortError) -> ProductWorkflowError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { reason } => {
+        SkillManagementPortError::InvalidContext { reason } => {
             ProductWorkflowError::InvalidBindingRequest { reason }
         }
-        RebornLocalSkillManagementError::Skill(error) => map_skill_error(error),
+        SkillManagementPortError::Skill(error) => map_skill_error(error),
     }
 }
 
@@ -1075,11 +1071,7 @@ mod tests {
         ));
     }
 
-    fn lifecycle_fixture() -> (
-        tempfile::TempDir,
-        std::path::PathBuf,
-        RebornLocalLifecycleFacade,
-    ) {
+    fn lifecycle_fixture() -> (tempfile::TempDir, std::path::PathBuf, LifecycleFacade) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -1091,7 +1083,7 @@ mod tests {
                 HostPath::from_path_buf(storage_root.clone()),
             )
             .expect("mount storage root");
-        let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
+        let skill_management = Arc::new(SkillManagementPort::new(
             UserId::new("lifecycle-owner").expect("valid user"),
             Arc::new(filesystem),
             MountView::new(vec![
@@ -1108,7 +1100,7 @@ mod tests {
             ])
             .expect("valid mount view"),
         ));
-        let facade = RebornLocalLifecycleFacade::new(skill_management);
+        let facade = LifecycleFacade::new(skill_management);
         (dir, storage_root, facade)
     }
 

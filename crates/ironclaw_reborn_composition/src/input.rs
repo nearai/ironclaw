@@ -235,7 +235,7 @@ pub struct ChannelExtensionBinding {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RebornLocalRuntimeIdentity {
+pub(crate) struct RuntimeOwnerIdentity {
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
 }
@@ -367,7 +367,7 @@ impl RebornHostBindings {
     /// Override the local runtime tenant/agent identity used by command-style
     /// facades that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
-        self.deployment.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+        self.deployment.local_runtime_identity = Some(RuntimeOwnerIdentity {
             tenant_id,
             agent_id,
         });

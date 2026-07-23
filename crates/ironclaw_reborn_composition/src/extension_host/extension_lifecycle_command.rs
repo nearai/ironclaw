@@ -6,7 +6,7 @@ use ironclaw_product_workflow::{
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::extension_host::lifecycle::RebornLocalLifecycleFacade;
+use crate::extension_host::lifecycle::LifecycleFacade;
 use crate::runtime::RebornRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +29,7 @@ pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &RebornRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let mut facade = RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
+    let mut facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
     facade = facade.with_extension_management(runtime.extension_management.clone());
     if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
         facade = facade.with_runtime_http_egress(runtime_http_egress.clone());

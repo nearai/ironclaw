@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
+    ExtensionActivationMode, ExtensionManagementPort,
 };
 use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use crate::{RebornBuildError, RebornProductAuthServices};
@@ -209,7 +209,7 @@ fn is_documentation_v6(ip: std::net::Ipv6Addr) -> bool {
 pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
     product_auth: &Arc<RebornProductAuthServices>,
-    extension_management: &Arc<RebornLocalExtensionManagementPort>,
+    extension_management: &Arc<ExtensionManagementPort>,
     owner_scope: ResourceScope,
 ) -> Result<NearAiMcpBootstrapOutcome, RebornBuildError> {
     let Some(config) = config else {
