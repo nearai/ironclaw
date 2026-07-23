@@ -489,7 +489,10 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 /// closure the binary-side native registration provides.
 fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
     Arc::new(|message| {
-        ironclaw_slack_extension::classify_interaction_resolution(&message.text, message.trigger)
+        ironclaw_slack_extension::classify_channel_interaction_resolution(
+            &message.text,
+            message.trigger,
+        )
     })
 }
 

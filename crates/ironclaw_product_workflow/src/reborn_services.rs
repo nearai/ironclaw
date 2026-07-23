@@ -30,8 +30,11 @@ use ironclaw_host_api::{
     TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
-    ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
-    ProjectionSubscriptionRequest,
+    AdapterInstallationId, ChannelInboundClassification, NormalizedInboundMessage,
+    ParsedProductInbound, ProductAdapterError, ProductAdapterId, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductWorkflow, ProductWorkflowRejectionKind,
+    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
+    TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
@@ -2085,6 +2088,129 @@ fn operator_diagnostics_surface_status(
     } else {
         RebornOperatorSurfaceStatus::Available
     }
+}
+
+/// One verified, normalized channel message admitted through ProductSurface.
+///
+/// The channel ingress router verifies the transport request and runs the
+/// adapter's pure normalization first. ProductSurface owns conversion into the
+/// legacy workflow envelope while that implementation remains the durable commit
+/// mechanism.
+#[derive(Debug)]
+pub struct ChannelInboundSurfaceRequest {
+    pub adapter_id: ProductAdapterId,
+    pub installation_id: AdapterInstallationId,
+    pub evidence: ProtocolAuthEvidence,
+    pub received_at: chrono::DateTime<Utc>,
+    pub message: NormalizedInboundMessage,
+    pub classification: Option<ChannelInboundClassification>,
+}
+
+/// Durable channel admission evidence returned by ProductSurface.
+#[derive(Debug, Clone)]
+pub struct ChannelInboundSurfaceAdmission {
+    pub envelope: ProductInboundEnvelope,
+    pub ack: ProductInboundAck,
+}
+
+/// Workflow rejection after ProductSurface had enough trusted input to build
+/// the canonical envelope.
+#[derive(Debug, Clone)]
+pub struct ChannelInboundSurfaceRejectedAdmission {
+    pub envelope: ProductInboundEnvelope,
+    pub error: ProductAdapterError,
+}
+
+/// Channel admission failed before or during the durable ProductSurface commit.
+#[derive(Debug, Clone)]
+pub enum ChannelInboundSurfaceError {
+    Invalid(ProductAdapterError),
+    Rejected(Box<ChannelInboundSurfaceRejectedAdmission>),
+}
+
+impl ChannelInboundSurfaceError {
+    pub fn unavailable() -> Self {
+        Self::Invalid(ProductAdapterError::Internal {
+            detail: RedactedString::new("channel ProductSurface admission is not available"),
+        })
+    }
+}
+
+/// ProductSurface adapter over the existing workflow-backed channel admission
+/// implementation. This is intentionally narrow: channel ingress depends on
+/// ProductSurface, while the legacy workflow envelope stays behind this facade.
+pub struct ProductWorkflowChannelSurface {
+    workflow: Arc<dyn ProductWorkflow>,
+}
+
+impl ProductWorkflowChannelSurface {
+    pub fn new(workflow: Arc<dyn ProductWorkflow>) -> Self {
+        Self { workflow }
+    }
+}
+
+impl ProductSurface for ProductWorkflowChannelSurface {}
+
+#[async_trait]
+impl ChannelInboundProductSurface for ProductWorkflowChannelSurface {
+    async fn admit_channel_inbound(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+    ) -> Result<ChannelInboundSurfaceAdmission, ChannelInboundSurfaceError> {
+        let context = TrustedInboundContext::from_verified_evidence(
+            request.adapter_id,
+            request.installation_id,
+            request.received_at,
+            &request.evidence,
+        )
+        .map_err(ChannelInboundSurfaceError::Invalid)?;
+        let payload = match request.classification {
+            Some(classification) => ProductInboundPayload::from(classification),
+            None => ProductInboundPayload::UserMessage(
+                UserMessagePayload::new(
+                    request.message.text.clone(),
+                    request
+                        .message
+                        .attachments
+                        .iter()
+                        .map(|attachment| attachment.descriptor.clone())
+                        .collect(),
+                    request.message.trigger,
+                )
+                .map_err(ChannelInboundSurfaceError::Invalid)?,
+            ),
+        };
+        let parsed = ParsedProductInbound::new(
+            request.message.event_id,
+            request.message.actor,
+            request.message.conversation,
+            payload,
+        )
+        .map_err(ChannelInboundSurfaceError::Invalid)?;
+        let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)
+            .map_err(ChannelInboundSurfaceError::Invalid)?;
+        match self.workflow.submit_inbound(envelope.clone()).await {
+            Ok(ack) => Ok(ChannelInboundSurfaceAdmission { envelope, ack }),
+            Err(error) => Err(ChannelInboundSurfaceError::Rejected(Box::new(
+                ChannelInboundSurfaceRejectedAdmission { envelope, error },
+            ))),
+        }
+    }
+}
+
+/// Typed channel-admission companion surface for ProductSurface implementations.
+///
+/// This stays out of [`ProductSurface`] because the §5.2 facade ratchet allows
+/// only the generic operation/query conduits there. Channel admission carries
+/// host-minted verified evidence that is intentionally not replayable through
+/// JSON, so it remains a typed ingress-only companion to ProductSurface rather
+/// than a serialized product operation.
+#[async_trait]
+pub trait ChannelInboundProductSurface: ProductSurface {
+    async fn admit_channel_inbound(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+    ) -> Result<ChannelInboundSurfaceAdmission, ChannelInboundSurfaceError>;
 }
 
 #[async_trait]

@@ -104,6 +104,12 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   §5.10 vocabulary tightened around product terminals vs external channel
   adapters. §14 refreshed against current `origin/main` after #6386 / #6396 /
   #6430 / #6432 / #6116 / #6438 / #6447.
+- **r12** 2026-07-23 — status-only update for channel ingress: extension/channel
+  ingress now admits verified normalized messages through the typed
+  `ChannelInboundProductSurface` companion instead of depending on
+  `ProductWorkflow` or constructing `ProductInboundPayload` directly. Slack
+  gate/auth interaction classifiers now return the channel-classification DTO
+  consumed by ProductSurface admission.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2480,6 +2486,12 @@ loop-facing capability result and every result mirror is deleted.
   `ProductSurface::invoke` -> descriptor-declared first-party handler or
   product-workflow-owned API capability -> authoritative `query` read-back where
   an authoritative read model exists.
+  Channel ingress now follows the same facade direction: transport verification,
+  pairing, and pure adapter normalization stay in composition, then the generic
+  channel sink calls the typed `ChannelInboundProductSurface` companion; the
+  transitional `ProductWorkflowChannelSurface` adapter owns the legacy envelope
+  conversion and delegates to the durable workflow commit path until that
+  implementation is renamed or collapsed.
   Remaining facade methods still need migration or explicit turn-lifecycle
   classification before the trait can collapse to the §5.2 end state.
 - **§5.2.10 causal routing / product-terminal path** — design added here and

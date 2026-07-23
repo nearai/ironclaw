@@ -30,6 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_product_workflow::{ChannelInboundProductSurface, ProductWorkflowChannelSurface};
 use ironclaw_reborn_composition::{
     ChannelInboundSinkConfig, ChannelIngressRegistration, ExtensionIngressParts,
     GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
@@ -117,6 +118,9 @@ impl AcmeIngress {
         harness: &reborn_support::builder::RebornIntegrationHarness,
     ) -> Self {
         let observer = Arc::new(RecordingAdmissionObserver::default());
+        let surface = Arc::new(ProductWorkflowChannelSurface::new(
+            harness.product_workflow_for_test(),
+        )) as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ironclaw_product_adapters::ProductAdapterId::new("acme-messenger")
                 .expect("adapter id"),
@@ -125,7 +129,7 @@ impl AcmeIngress {
                 timestamp_header: Some("X-Acme-Request-Timestamp".to_string()),
             },
             classifier: None,
-            workflow: harness.product_workflow_for_test(),
+            surface,
             observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
         }));
         parts.registry.register(

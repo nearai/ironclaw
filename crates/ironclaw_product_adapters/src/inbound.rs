@@ -95,6 +95,35 @@ pub enum ProductTriggerReason {
     LinkedThreadAction,
 }
 
+/// Optional host-side reclassification for a normalized channel message before
+/// it enters the product surface.
+///
+/// `None` at the call site means the normalized message is an ordinary user
+/// message. These variants cover only protocol-specific interaction replies
+/// that should not become user turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelInboundClassification {
+    ApprovalResolution(ApprovalResolutionPayload),
+    ScopedApprovalResolution(ScopedApprovalResolutionPayload),
+    AuthResolution(AuthResolutionPayload),
+    NoOp,
+}
+
+impl From<ChannelInboundClassification> for ProductInboundPayload {
+    fn from(classification: ChannelInboundClassification) -> Self {
+        match classification {
+            ChannelInboundClassification::ApprovalResolution(payload) => {
+                Self::ApprovalResolution(payload)
+            }
+            ChannelInboundClassification::ScopedApprovalResolution(payload) => {
+                Self::ScopedApprovalResolution(payload)
+            }
+            ChannelInboundClassification::AuthResolution(payload) => Self::AuthResolution(payload),
+            ChannelInboundClassification::NoOp => Self::NoOp,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserMessagePayload {
     pub text: String,

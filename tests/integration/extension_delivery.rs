@@ -72,8 +72,9 @@ use ironclaw_product_adapters::{
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product_workflow::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ChannelConnectionNoticePolicy, ChannelInboundProductSurface, ConversationBindingService,
+    ProductWorkflowChannelSurface, ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -362,11 +363,14 @@ impl VendorIngress {
         harness: &RebornIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
     ) -> Self {
+        let surface = Arc::new(ProductWorkflowChannelSurface::new(
+            harness.product_workflow_for_test(),
+        )) as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
             classifier: None,
-            workflow: harness.product_workflow_for_test(),
+            surface,
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
         }));
         parts.registry.register(

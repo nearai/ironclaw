@@ -53,13 +53,13 @@ pub use fakes::{
 pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
-    InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductCommandResultPayload, ProductControlActionPayload,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductSlashCommandParseError,
-    ProductTriggerReason, ProjectionReadPayload, ProjectionSubscriptionPayload,
-    ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
-    parse_product_slash_command,
+    ChannelInboundClassification, InboundCommandPayload, InboundRetryDisposition,
+    LinkedThreadActionPayload, ParsedProductInbound, ProductCommandResultPayload,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ProductSlashCommandParseError, ProductTriggerReason, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload, TrustedInboundContext,
+    UserMessagePayload, parse_product_slash_command,
 };
 pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
 pub use outbound::{
