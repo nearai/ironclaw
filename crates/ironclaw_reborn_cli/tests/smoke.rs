@@ -5935,6 +5935,10 @@ fn status_json_reports_reborn_home_without_touching_v1_state() {
         json["ironclaw_home"],
         reborn_home.to_str().expect("utf8 path")
     );
+    assert_eq!(
+        json["reborn_home"], json["ironclaw_home"],
+        "legacy status clients must receive the same home path"
+    );
     assert_eq!(json["profile"], "local-dev");
     assert!(json["drivers"]["text_only"].is_object());
     assert!(

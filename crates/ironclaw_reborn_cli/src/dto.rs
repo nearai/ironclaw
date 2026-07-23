@@ -7,7 +7,9 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct StatusDto {
     pub version: String,
-    #[serde(rename = "ironclaw_home")]
+    pub ironclaw_home: PathBuf,
+    /// Deprecated JSON compatibility field. Keep this value identical to
+    /// `ironclaw_home` until consumers have migrated to the canonical key.
     pub reborn_home: PathBuf,
     pub home_source: &'static str,
     pub profile: String,
