@@ -589,8 +589,6 @@ async def _run_emulate_server(
                         timeout=2,
                     )
                     if response.status_code == 200:
-                        if service == "github":
-                            await _bootstrap_emulate_github_access(client, url)
                         yield {"url": url}
                         return
                     last_error = f"HTTP {response.status_code}: {response.text[:400]}"
@@ -673,6 +671,26 @@ async def _emulate_service(
             yield server
 
 
+@asynccontextmanager
+async def _emulate_github_service(
+    *, port: int | None = None
+) -> AsyncIterator[dict[str, str]]:
+    """Start GitHub Emulate and grant the seeded actor repository access."""
+    async with _emulate_service(
+        service="github",
+        seed_path=EMULATE_GITHUB_SEED,
+        ready_method="GET",
+        ready_path="/user",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+        },
+        port=port,
+    ) as server:
+        async with httpx.AsyncClient() as client:
+            await _bootstrap_emulate_github_access(client, server["url"])
+        yield server
+
+
 class ResettableEmulateProviderWorld:
     """Restart seeded provider processes on stable ports between journeys."""
 
@@ -726,16 +744,7 @@ class ResettableEmulateProviderWorld:
                     port=self._ports[service],
                 )
             elif service == "github":
-                context = _emulate_service(
-                    service=service,
-                    seed_path=EMULATE_GITHUB_SEED,
-                    ready_method="GET",
-                    ready_path="/user",
-                    ready_headers={
-                        "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
-                    },
-                    port=self._ports[service],
-                )
+                context = _emulate_github_service(port=self._ports[service])
             else:
                 raise ValueError(f"Unknown Emulate provider service: {service}")
             reservation = self._reservations.pop(service, None)
@@ -817,15 +826,7 @@ async def emulate_slack_server():
 @pytest.fixture(scope="session")
 async def emulate_github_server():
     """Start Emulate GitHub with a seeded user, org, and repository."""
-    async for server in _run_emulate_server(
-        service="github",
-        seed_path=EMULATE_GITHUB_SEED,
-        ready_method="GET",
-        ready_path="/user",
-        ready_headers={
-            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
-        },
-    ):
+    async with _emulate_github_service() as server:
         yield server
 
 
