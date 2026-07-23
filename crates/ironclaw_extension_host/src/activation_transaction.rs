@@ -66,6 +66,20 @@ pub enum ExtensionActivationTransactionResult {
     Activated(Box<ExtensionPackage>),
 }
 
+/// Outcome of the hosted-MCP discovery step within an activation.
+pub enum HostedMcpDiscoveryOutcome {
+    /// Discovery produced a bounded catalog; the package carries the discovered
+    /// tools and is the candidate for publication after the authority recheck.
+    /// Boxed to keep the enum small (the package dwarfs the rejection payload).
+    Discovered(Box<ExtensionPackage>),
+    /// The provider rejected the staged credentials during discovery (a
+    /// mid-`tools/list` 401/403). No catalog can be published, so the
+    /// transaction routes the caller back through credential setup / OAuth
+    /// exactly like a pre-discovery missing credential — never a retry-forever
+    /// transient.
+    CredentialsRejected(Vec<RuntimeCredentialAuthRequirement>),
+}
+
 /// Concrete operations supplied by the composition root.
 ///
 /// The transaction is generic over this port and never stores it behind
@@ -123,7 +137,7 @@ pub trait ExtensionActivationOperations: Send + Sync {
         max_tools: u32,
         scope: ResourceScope,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    ) -> Result<ExtensionPackage, Self::Error>;
+    ) -> Result<HostedMcpDiscoveryOutcome, Self::Error>;
 
     fn package_is_published(&self, extension_id: &ExtensionId, package: &ExtensionPackage) -> bool;
 
@@ -223,14 +237,27 @@ where
     let discovery_authority =
         McpDiscoveryFence::capture(initial.package, &initial.manifest, credential_accounts)
             .map_err(|error| operations.map_authority_error(error))?;
-    let active_package = operations
+    let active_package = match operations
         .discover_hosted_mcp_package(
             discovery_authority.package(),
             discovery_authority.max_tools(),
             scope,
             runtime_http_egress,
         )
-        .await?;
+        .await?
+    {
+        HostedMcpDiscoveryOutcome::Discovered(package) => *package,
+        HostedMcpDiscoveryOutcome::CredentialsRejected(missing) => {
+            // The provider rejected the staged credentials mid-discovery.
+            // Nothing was published, so route the caller back through
+            // credential setup / OAuth — the same outcome as a pre-discovery
+            // missing credential — instead of surfacing a retry-forever
+            // transient that re-hits the same rejection.
+            return Ok(ExtensionActivationTransactionResult::CredentialsMissing(
+                missing,
+            ));
+        }
+    };
 
     let _operation_guard = operation_lock.lock().await;
     let current = capture_snapshot(operations, extension_id, installation_id, caller)
@@ -420,8 +447,8 @@ mod tests {
     };
     use ironclaw_host_api::{
         HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-        InvocationId, NetworkPolicy, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, SecretHandle, VirtualPath,
+        InvocationId, NetworkPolicy, RuntimeCredentialAccountSetup, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId, VirtualPath,
     };
     use tokio::sync::Notify;
 
@@ -480,6 +507,53 @@ mod tests {
 
         assert_eq!(error, "scripted discovery failure");
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn hosted_discovery_credentials_rejected_routes_to_credentials_missing() {
+        // A provider that rejects the staged credentials mid-discovery must not
+        // surface as an error (which would leave the extension retrying the
+        // same rejection forever). It routes to the credentials-missing outcome
+        // so the caller is sent back through OAuth, publishes nothing, and the
+        // staged discovery authority is still revoked.
+        let requirement = RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("hosted-provider").expect("vendor id"),
+            setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            requester_extension: fixture_extension_id(),
+            provider_scopes: Vec::new(),
+        };
+        let operations =
+            ActivationOperationsFixture::credentials_rejected(vec![requirement.clone()]);
+        let drops = Arc::clone(&operations.guard_drops);
+
+        let result = run_extension_activation(
+            &Mutex::new(()),
+            &operations,
+            &fixture_extension_id(),
+            &fixture_installation_id(),
+            &fixture_user_id(),
+            fixture_discovery_mode(),
+        )
+        .await
+        .expect("a provider credential rejection must not fail activation as a retry dead-end");
+
+        match result {
+            ExtensionActivationTransactionResult::CredentialsMissing(missing) => {
+                assert_eq!(
+                    missing,
+                    vec![requirement],
+                    "the re-auth requirements must be forwarded, not discarded"
+                );
+            }
+            ExtensionActivationTransactionResult::Activated(_) => {
+                panic!("a provider credential rejection must never yield a false activation")
+            }
+        }
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "the staged discovery authority must still be revoked on re-auth routing"
+        );
     }
 
     #[tokio::test]
@@ -661,6 +735,7 @@ mod tests {
     enum DiscoveryScript {
         Success,
         Failure,
+        CredentialsRejected(Vec<RuntimeCredentialAuthRequirement>),
         Pending(Arc<Notify>),
     }
 
@@ -687,6 +762,10 @@ mod tests {
 
         fn failure() -> Self {
             Self::new(DiscoveryScript::Failure)
+        }
+
+        fn credentials_rejected(requirements: Vec<RuntimeCredentialAuthRequirement>) -> Self {
+            Self::new(DiscoveryScript::CredentialsRejected(requirements))
         }
 
         fn pending(entered: Arc<Notify>) -> Self {
@@ -797,10 +876,15 @@ mod tests {
             _max_tools: u32,
             _scope: ResourceScope,
             _runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-        ) -> Result<ExtensionPackage, Self::Error> {
+        ) -> Result<HostedMcpDiscoveryOutcome, Self::Error> {
             match &self.discovery {
-                DiscoveryScript::Success => Ok(package.clone()),
+                DiscoveryScript::Success => Ok(HostedMcpDiscoveryOutcome::Discovered(Box::new(
+                    package.clone(),
+                ))),
                 DiscoveryScript::Failure => Err("scripted discovery failure".to_string()),
+                DiscoveryScript::CredentialsRejected(requirements) => Ok(
+                    HostedMcpDiscoveryOutcome::CredentialsRejected(requirements.clone()),
+                ),
                 DiscoveryScript::Pending(entered) => {
                     entered.notify_one();
                     std::future::pending().await
