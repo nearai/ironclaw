@@ -41,7 +41,7 @@ jobs:
             echo "Skipping Claude review for forked pull request #${PR_NUMBER}."
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: steps.pr_metadata.outputs.is_cross_repository != 'true'
         with:
           ref: refs/pull/${{ env.PR_NUMBER }}/merge
@@ -50,7 +50,7 @@ jobs:
 
       - name: Run Claude Code review
         if: steps.pr_metadata.outputs.is_cross_repository != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        uses: anthropics/claude-code-action@44423bdec74b97d67543eb16c110546762c110b2 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
