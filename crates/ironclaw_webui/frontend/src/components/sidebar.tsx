@@ -11,6 +11,7 @@ export function Sidebar({
   toggleTheme,
   profile,
   isAdmin,
+  canManageUsers = false,
   rebornProjectsEnabled = false,
   onSignOut,
   onClose,
@@ -38,6 +39,7 @@ export function Sidebar({
         onNewChat={onNewChat}
         isCreating={threadsState.isCreating}
         isAdmin={isAdmin}
+        canManageUsers={canManageUsers}
         onNavigate={onClose}
       />
 

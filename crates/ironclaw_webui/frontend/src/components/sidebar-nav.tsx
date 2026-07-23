@@ -104,11 +104,19 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
   );
 }
 
-export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate }) {
+export function SidebarNav({
+  onNewChat,
+  isCreating,
+  isAdmin = false,
+  canManageUsers = false,
+  onNavigate,
+}) {
   const t = useT();
   const visibleRoutes = React.useMemo(
-    () => navRoutes.filter((route) => isAdmin || route.id !== "admin"),
-    [isAdmin]
+    () => navRoutes.filter(
+      (route) => isAdmin || canManageUsers || route.id !== "admin"
+    ),
+    [canManageUsers, isAdmin]
   );
 
   return (
@@ -135,7 +143,11 @@ export function SidebarNav({ onNewChat, isCreating, isAdmin = false, onNavigate 
           const subRoutes = (EXPANDABLE_SUB_ROUTES[route.id] || []).filter(
             (subRoute) =>
               isAdmin ||
-              !(route.id === "settings" && ["users", "inference"].includes(subRoute.id))
+              !(
+                (route.id === "settings" &&
+                  ["users", "inference"].includes(subRoute.id)) ||
+                (route.id === "admin" && subRoute.id !== "users")
+              )
           );
           if (subRoutes.length > 0) {
             return (

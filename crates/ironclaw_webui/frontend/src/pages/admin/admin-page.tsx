@@ -6,7 +6,7 @@ import { UserDetail } from "./components/user-detail";
 import { AdminUsersTab } from "./components/users-tab";
 import { AdminConfigurationTab } from "./components/configuration-tab";
 
-export function AdminPage() {
+export function AdminPage({ isOperator = false }) {
   // Users is the only shipped admin tab in this port; dashboard/usage
   // (analytics) are out of scope, so both the default and the fallback land on
   // Users rather than the empty dashboard.
@@ -40,7 +40,7 @@ export function AdminPage() {
     usage: (<UsageTab onSelectUser={handleSelectUser} />),
   };
 
-  if (!tabContent[tab]) {
+  if (!tabContent[tab] || (!isOperator && tab !== "users")) {
     return (<Navigate to="/admin/users" replace />);
   }
 

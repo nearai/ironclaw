@@ -143,6 +143,7 @@ function AuthenticatedLayout({ auth }) {
         profile={auth.profile}
         isChecking={auth.isChecking}
         isAdmin={auth.isAdmin}
+        canManageUsers={auth.canManageUsers}
         rebornProjectsEnabled={auth.rebornProjectsEnabled}
         globalAutoApproveEnabled={auth.globalAutoApproveEnabled}
         onSignOut={auth.signOut}
@@ -152,10 +153,10 @@ function AuthenticatedLayout({ auth }) {
 }
 
 function AdminRoute({ auth }) {
-  if (!auth.isAdmin) {
+  if (!auth.canManageUsers) {
     return (<Navigate to={defaultRoute} replace />);
   }
-  return (<AdminPage />);
+  return (<AdminPage isOperator={auth.isAdmin} />);
 }
 
 export function App() {

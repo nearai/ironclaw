@@ -132,6 +132,10 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Whether this caller may enter the tenant user-management surface.
+    /// This is distinct from host-operator configuration authority; every
+    /// admin mutation still performs its canonical, current-state check.
+    pub admin_user_management: bool,
     /// Deployment-wide feature gates the browser uses to show/hide
     /// not-yet-finished surfaces. Distinct from `capabilities`, which are
     /// per-token authorization flags.
@@ -169,11 +173,24 @@ pub async fn get_session(
 ) -> Json<WebUiV2SessionResponse> {
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
-    let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
+    let global_auto_approve = global_auto_approve_enabled(&state, caller.clone()).await;
+    let admin_user_management = ADMIN_USERS_VIEW
+        .query_on(
+            state.services().as_ref(),
+            caller,
+            RebornAdminUserListQuery {
+                limit: Some(1),
+                ..RebornAdminUserListQuery::default()
+            },
+            None,
+        )
+        .await
+        .is_ok();
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
         capabilities,
+        admin_user_management,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
             global_auto_approve,

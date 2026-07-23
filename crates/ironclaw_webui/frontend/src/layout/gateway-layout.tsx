@@ -26,6 +26,7 @@ export function GatewayLayout({
   profile,
   isChecking = false,
   isAdmin,
+  canManageUsers = false,
   rebornProjectsEnabled = false,
   globalAutoApproveEnabled = false,
   onSignOut,
@@ -136,6 +137,7 @@ export function GatewayLayout({
           toggleTheme={toggleTheme}
           profile={profile}
           isAdmin={isAdmin}
+          canManageUsers={canManageUsers}
           rebornProjectsEnabled={rebornProjectsEnabled}
           onSignOut={onSignOut}
           onClose={sidebar.close}

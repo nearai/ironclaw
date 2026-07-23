@@ -31,6 +31,7 @@ use ironclaw_reborn_composition::{
     AdminLoginTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
     RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
+use ironclaw_reborn_identity::{PreallocatedRebornUser, RebornUserRole, UserContentAccessPolicy};
 use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
 };
@@ -411,6 +412,20 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         .await
         .expect("simulate verified admin login");
     let admin_session = operator.as_bearer(admin_token.expose_secret());
+    let (status, session) = admin_session
+        .send(Method::GET, "/api/webchat/v2/session", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session["admin_user_management"].as_bool(),
+        Some(true),
+        "a persisted active admin may enter tenant user management"
+    );
+    assert_eq!(
+        session["capabilities"]["operator_webui_config"].as_bool(),
+        Some(false),
+        "tenant admin authority must not become host-operator authority"
+    );
 
     // An administrator may explicitly request a private user's login token.
     // The returned bearer authenticates as that UserId, not as the operator.
@@ -531,6 +546,43 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
     let (status, _) = admin_session.delete_secret(&admin_id, "forbidden").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    // A target carrying the managed policy still cannot cross the tenant
+    // boundary. Seed the foreign record through the real identity directory,
+    // then drive the public HTTP resource routes so the composed caller must
+    // derive and preserve both the actor tenant and target UserId correctly.
+    let foreign_tenant = TenantId::new("foreign-tenant").expect("foreign tenant");
+    let foreign_managed_id = UserId::new("foreign-managed-agent").expect("foreign managed user id");
+    harness
+        ._runtime
+        .reborn_user_directory_for_tests()
+        .create_user_with_id(PreallocatedRebornUser {
+            user_id: foreign_managed_id.clone(),
+            tenant_id: foreign_tenant,
+            email: None,
+            display_name: Some("Foreign Managed Agent".to_string()),
+            role: RebornUserRole::Member,
+            content_access_policy: UserContentAccessPolicy::TenantAdminManaged,
+            created_by: UserId::new(&admin_id).expect("admin user id"),
+        })
+        .await
+        .expect("seed cross-tenant managed target");
+    let (status, _) = admin_session
+        .put_secret(
+            foreign_managed_id.as_str(),
+            "cross_tenant",
+            "must-not-persist",
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = admin_session
+        .list_secrets(foreign_managed_id.as_str())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = admin_session
+        .delete_secret(foreign_managed_id.as_str(), "cross_tenant")
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     // The managed policy permits administrator-on-behalf access; it does not
     // grant access to an arbitrary same-tenant authenticated member.
     let (status, member) = operator
@@ -539,6 +591,15 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
     assert_eq!(status, StatusCode::OK);
     let member_id = user_id_of(&member);
     let member_session = authenticated_user(&harness, &operator, &member_id).await;
+    let (status, session) = member_session
+        .send(Method::GET, "/api/webchat/v2/session", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session["admin_user_management"].as_bool(),
+        Some(false),
+        "a member must not receive the user-management UI capability"
+    );
     let (status, _) = member_session.list_secrets(&managed_id).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = member_session

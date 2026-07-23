@@ -81,9 +81,79 @@ async def managed_agent(admin_client):
     await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
 
 
+@pytest.fixture(scope="module")
+async def tenant_admin_login_token(reborn_v2_server):
+    """Issue one real tenant-admin bearer for this module's resource tests."""
+    suffix = uuid.uuid4().hex[:8]
+    async with httpx.AsyncClient(
+        base_url=reborn_v2_server,
+        headers={**reborn_bearer_headers(), "Content-Type": "application/json"},
+        timeout=15,
+    ) as client:
+        created = await client.post(
+            f"{ADMIN_BASE}/users",
+            json={
+                "display_name": f"E2E Signed-in Admin {suffix}",
+                "role": "admin",
+                "issue_login_token": True,
+            },
+        )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["login_token"]
+    # This record intentionally remains: deleting the tenant's sole active
+    # admin is forbidden by the production lifecycle contract.
+    yield body["login_token"]
+
+
 # ---------------------------------------------------------------
 # Private-user and managed-agent creation
 # ---------------------------------------------------------------
+
+
+async def test_admin_users_empty_state_hides_irrelevant_filters(
+    reborn_v2_page, reborn_v2_server
+):
+    """A zero-user response renders guidance instead of an empty filter table."""
+
+    async def return_empty_user_list(route):
+        request_path = route.request.url.split("?", maxsplit=1)[0]
+        if (
+            route.request.method == "GET"
+            and request_path.endswith(f"{ADMIN_BASE}/users")
+        ):
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"users":[]}',
+            )
+            return
+        await route.continue_()
+
+    page = reborn_v2_page
+    await page.route(f"**{ADMIN_BASE}/users*", return_empty_user_list)
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    await expect(page.get_by_text("No users yet.", exact=True)).to_be_visible()
+    await expect(
+        page.get_by_text(
+            "Invite a person to sign in, or create a non-login agent managed by "
+            "tenant administrators.",
+            exact=True,
+        )
+    ).to_be_visible()
+    await expect(
+        page.get_by_role("button", name="New user", exact=True)
+    ).to_be_visible()
+    await expect(
+        page.get_by_role("button", name="New managed agent", exact=True)
+    ).to_be_visible()
+    await expect(page.get_by_placeholder("Search…")).to_have_count(0)
+    await expect(
+        page.get_by_role("button", name="All", exact=True)
+    ).to_have_count(0)
 
 
 async def test_create_private_user_returns_record_without_login_credential(admin_client):
@@ -528,36 +598,56 @@ async def test_suspend_and_activate(admin_client, test_user):
 # ---------------------------------------------------------------
 
 
-async def test_secret_lifecycle(admin_client, managed_agent):
+async def test_secret_lifecycle(
+    admin_client, managed_agent, tenant_admin_login_token
+):
     uid = managed_agent["id"]
+    tenant_admin_headers = reborn_bearer_headers(tenant_admin_login_token)
 
     r = await admin_client.put(
         f"{ADMIN_BASE}/users/{uid}/secrets/abound_token",
         json={"value": "secret-value"},
+        headers=tenant_admin_headers,
     )
     assert r.status_code == 200, r.text
     assert r.json()["secret"]["handle"] == "abound_token"
 
-    r = await admin_client.get(f"{ADMIN_BASE}/users/{uid}/secrets")
+    r = await admin_client.get(
+        f"{ADMIN_BASE}/users/{uid}/secrets",
+        headers=tenant_admin_headers,
+    )
     assert r.status_code == 200, r.text
     handles = [s["handle"] for s in r.json()["secrets"]]
     assert "abound_token" in handles
     # The material is never echoed back through the list.
     assert "secret-value" not in r.text
 
-    r = await admin_client.delete(f"{ADMIN_BASE}/users/{uid}/secrets/abound_token")
+    r = await admin_client.delete(
+        f"{ADMIN_BASE}/users/{uid}/secrets/abound_token",
+        headers=tenant_admin_headers,
+    )
     assert r.status_code == 200, r.text
     assert r.json()["deleted"] is True
 
 
 async def test_admin_user_detail_manages_write_only_secrets(
-    admin_client, reborn_v2_page, reborn_v2_server, managed_agent
+    admin_client,
+    reborn_v2_page,
+    reborn_v2_server,
+    managed_agent,
+    tenant_admin_login_token,
 ):
     """The Admin UI provisions, replaces, and confirms deletion without echoing values."""
     page = reborn_v2_page
+    await page.evaluate("sessionStorage.clear()")
     await page.goto(
-        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+        f"{reborn_v2_server}/v2/admin/users?token={tenant_admin_login_token}"
     )
+    await expect(
+        page.get_by_role("link", name="Configuration", exact=True)
+    ).to_have_count(0)
+    await page.goto(f"{reborn_v2_server}/admin/configuration")
+    await expect(page).to_have_url(re.compile(r"/admin/users$"))
     await page.get_by_role(
         "button", name=managed_agent["display_name"], exact=True
     ).click()
@@ -591,7 +681,11 @@ async def test_admin_user_detail_manages_write_only_secrets(
     await expect(value_input).to_have_value("")
     assert first_value not in await page.locator("body").inner_text()
 
-    listed = await admin_client.get(f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets")
+    tenant_admin_headers = reborn_bearer_headers(tenant_admin_login_token)
+    listed = await admin_client.get(
+        f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets",
+        headers=tenant_admin_headers,
+    )
     assert listed.status_code == 200, listed.text
     assert first_value not in listed.text
     handles = [secret["handle"] for secret in listed.json()["secrets"]]
@@ -633,7 +727,8 @@ async def test_admin_user_detail_manages_write_only_secrets(
     await expect(row).to_have_count(0, timeout=15000)
     await expect(page.locator(SEL_V2["admin_secret_status"])).to_contain_text(handle)
     listed_after_delete = await admin_client.get(
-        f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets"
+        f"{ADMIN_BASE}/users/{managed_agent['id']}/secrets",
+        headers=tenant_admin_headers,
     )
     assert listed_after_delete.status_code == 200, listed_after_delete.text
     assert handle not in [
@@ -641,6 +736,55 @@ async def test_admin_user_detail_manages_write_only_secrets(
     ]
     assert first_value not in listed_after_delete.text
     assert replacement_value not in listed_after_delete.text
+
+
+async def test_managed_agent_detail_explains_fixed_role_and_operator_boundary(
+    reborn_v2_page, reborn_v2_server, managed_agent
+):
+    """Operator lifecycle access does not silently grant subject-resource access."""
+    page = reborn_v2_page
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    await expect(
+        page.get_by_text("Managed agent", exact=True).first
+    ).to_be_visible(timeout=15000)
+    await page.get_by_role(
+        "button", name=managed_agent["display_name"], exact=True
+    ).click()
+
+    await expect(
+        page.get_by_role(
+            "heading", name=managed_agent["display_name"], exact=True
+        )
+    ).to_be_visible(timeout=15000)
+    role_policy = page.locator("[data-testid='admin-user-managed-role-policy']")
+    await expect(role_policy).to_be_visible()
+    await expect(role_policy).to_contain_text("Managed agent")
+    await expect(role_policy).to_contain_text(
+        "Managed agents always remain members and cannot be enabled for sign-in."
+    )
+    await expect(
+        page.get_by_role("button", name="Current role", exact=True)
+    ).to_have_count(0)
+    await expect(
+        page.locator("[data-testid='admin-user-detail-save-role']")
+    ).to_have_count(0)
+
+    boundary = page.locator(
+        "[data-testid='admin-user-secrets-access-boundary']"
+    )
+    await expect(boundary).to_be_visible(timeout=15000)
+    await expect(boundary).to_contain_text("Tenant admin sign-in required")
+    await expect(boundary).to_contain_text(
+        "The host operator can manage this agent’s lifecycle, but subject "
+        "credentials are available only to an active tenant administrator."
+    )
+    await expect(page.locator(SEL_V2["admin_secret_handle_input"])).to_have_count(0)
+    await expect(page.locator(SEL_V2["admin_secret_value_input"])).to_have_count(0)
+    await expect(page.locator(SEL_V2["admin_secret_save"])).to_have_count(0)
+    assert "Participant denied" not in await page.locator("body").inner_text()
 
 
 # ---------------------------------------------------------------
