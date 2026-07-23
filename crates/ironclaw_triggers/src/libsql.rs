@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat extends the owning trigger persistence adapter, plan #6570
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -19,7 +20,7 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, automation";
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
        SET name = ?6
@@ -31,7 +32,7 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
      RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
-       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, automation";
 const TRIGGER_ID_COL: usize = 0;
 const TENANT_ID_COL: usize = 1;
 const CREATOR_USER_ID_COL: usize = 2;
@@ -53,6 +54,7 @@ const ACTIVE_RUN_REF_COL: usize = 17;
 const CREATED_AT_COL: usize = 18;
 const SCHEDULE_AT_COL: usize = 19;
 const DELIVERY_TARGET_COL: usize = 20;
+const AUTOMATION_COL: usize = 21;
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const RUN_TENANT_ID_COL: usize = 0;
@@ -102,6 +104,7 @@ impl LibSqlTriggerRepository {
                         active_fire_slot TEXT,
                         active_run_ref TEXT,
                         created_at TEXT NOT NULL,
+                        automation TEXT,
                         PRIMARY KEY (tenant_id, trigger_id)
                     )"
                 ),
@@ -247,6 +250,19 @@ impl LibSqlTriggerRepository {
                 let msg = error.to_string();
                 if !msg.contains("duplicate column") && !msg.contains("already exists") {
                     return Err(backend_error("add delivery_target column", error));
+                }
+            }
+            // Add host-owned automation metadata for managed schedules.
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_TABLE} ADD COLUMN automation TEXT"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add automation column", error));
                 }
             }
             // Drop the legacy `completion_policy` column on tables created before the
@@ -1353,6 +1369,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
         .map(crate::TriggerDeliveryTargetId::new)
         .transpose()?;
+    let automation = crate::heartbeat::automation_from_storage(
+        optional_text(row, AUTOMATION_COL, "automation")?.as_deref(),
+    )?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -1365,6 +1384,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         schedule,
         prompt: required_text(row, PROMPT_COL, "prompt")?,
         delivery_target,
+        automation,
         state: crate::parse_state_codec(&required_text(row, STATE_COL, "state")?)?,
         next_run_at: parse_timestamp(
             &required_text(row, NEXT_RUN_AT_COL, "next_run_at")?,
@@ -1439,14 +1459,15 @@ async fn write_record(
     record: &TriggerRecord,
 ) -> Result<(), TriggerError> {
     let (schedule_kind, schedule_expression, schedule_at) = record.schedule.to_storage();
+    let automation = crate::heartbeat::automation_to_storage(&record.automation)?;
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_TABLE} (
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                 name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
-                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, automation
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
@@ -1465,7 +1486,8 @@ async fn write_record(
                 active_fire_slot = excluded.active_fire_slot,
                 active_run_ref = excluded.active_run_ref,
                 schedule_at = excluded.schedule_at,
-                delivery_target = excluded.delivery_target"
+                delivery_target = excluded.delivery_target,
+                automation = excluded.automation"
         ),
         libsql::params_from_iter([
             libsql::Value::Text(record.trigger_id.to_string()),
@@ -1489,6 +1511,7 @@ async fn write_record(
             libsql::Value::Text(fmt_ts(&record.created_at)),
             schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
             record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
+            automation.map_or(libsql::Value::Null, libsql::Value::Text),
         ]),
     )
     .await

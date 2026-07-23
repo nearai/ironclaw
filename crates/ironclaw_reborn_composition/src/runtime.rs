@@ -2984,6 +2984,7 @@ pub async fn build_reborn_runtime(
         runner,
         tool_disclosure,
         trigger_poller,
+        heartbeat,
         credential_refresh,
         trigger_fire_access_checker,
         trigger_fire_access,
@@ -3953,6 +3954,33 @@ pub async fn build_reborn_runtime(
     let trigger_conversation_pairing_value: Option<
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
+    if let Some(heartbeat) = heartbeat {
+        if heartbeat.enabled && !trigger_poller.enabled {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "enabled heartbeat requires the existing trigger poller".to_string(),
+            });
+        }
+        let repository = trigger_repository
+            .clone()
+            .ok_or(RebornRuntimeError::InvalidArgument {
+                reason: "heartbeat configured but no trigger repository present".to_string(),
+            })?;
+        ironclaw_triggers::HeartbeatScheduleService::new(repository)
+            .reconcile(
+                ironclaw_triggers::HeartbeatScope {
+                    tenant_id: thread_scope.tenant_id.clone(),
+                    creator_user_id: actor_user_id.clone(),
+                    agent_id: Some(thread_scope.agent_id.clone()),
+                    project_id: thread_scope.project_id.clone(),
+                },
+                heartbeat,
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("heartbeat schedule could not be reconciled: {error}"),
+            })?;
+    }
     if trigger_poller.enabled {
         // Fire-time authorizer: an explicit override wins (tests/advanced),
         // otherwise build one from the deployment's `TriggerFireAccessPolicy`

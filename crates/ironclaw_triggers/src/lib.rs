@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat adds fields to the owning trigger contract, plan #6570
 //! Scheduled trigger domain contracts for IronClaw Reborn.
 //!
 //! This crate owns trigger records, source-provider evaluation, deterministic
@@ -23,11 +24,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
+mod heartbeat;
 mod libsql;
 mod postgres;
 mod trusted_submit;
 mod worker;
 
+pub use heartbeat::{
+    HeartbeatConfig, HeartbeatInterval, HeartbeatQuietHours, HeartbeatScheduleService,
+    HeartbeatScope, HeartbeatSystemMetadata, TriggerAutomation,
+};
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerMaterializedPrompt,
@@ -58,6 +64,8 @@ pub enum TriggerError {
     },
     #[error("invalid trigger poller configuration: {reason}")]
     InvalidPollerConfig { reason: String },
+    #[error("invalid heartbeat configuration: {reason}")]
+    InvalidHeartbeatConfig { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule {
         kind: TriggerScheduleValidationKind,
@@ -382,6 +390,11 @@ pub struct TriggerRecord {
     /// clobbered by another automation (or a later preference change).
     #[serde(default)]
     pub delivery_target: Option<TriggerDeliveryTargetId>,
+    /// Host-minted automation provenance and policy. Ordinary user-created
+    /// schedules use `UserSchedule`; product surfaces cannot manufacture a
+    /// system automation marker.
+    #[serde(default)]
+    pub automation: TriggerAutomation,
     pub state: TriggerState,
     pub next_run_at: Timestamp,
     pub last_run_at: Option<Timestamp>,
@@ -413,6 +426,7 @@ impl TriggerRecord {
                 reason: "active_run_ref requires active_fire_slot".to_string(),
             });
         }
+        self.automation.validate_for_record(self)?;
         self.schedule.validate()?;
         Ok(())
     }
@@ -901,6 +915,8 @@ pub struct TriggerFire {
     /// delivery layer can honor it without re-reading the trigger row.
     #[serde(default)]
     pub delivery_target: Option<TriggerDeliveryTargetId>,
+    #[serde(default)]
+    pub automation: TriggerAutomation,
 }
 
 #[async_trait]
@@ -1051,6 +1067,12 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
         if record.source != TriggerSourceKind::Schedule || !record.is_due_at(now) {
             return Ok(None);
         }
+        if record
+            .automation
+            .is_quiet_at(&record.schedule, record.next_run_at)?
+        {
+            return Ok(None);
+        }
         let identity = TriggerFireIdentity::new(
             record.tenant_id.clone(),
             record.trigger_id,
@@ -1063,6 +1085,7 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
             delivery_target: record.delivery_target.clone(),
+            automation: record.automation.clone(),
         }))
     }
 }
@@ -2315,6 +2338,7 @@ mod tests {
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
             prompt: "summarize unread mail".to_string(),
             delivery_target: None,
+            automation: TriggerAutomation::UserSchedule,
             state: TriggerState::Scheduled,
             next_run_at,
             last_run_at: None,

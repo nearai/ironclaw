@@ -224,6 +224,13 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 // names the product surface a direct-user `Product` invocation entered through.
 string_id!(ProductKind, "product", validate_name_segment);
 string_id!(RoutineId, "routine", validate_name_segment);
+
+impl RoutineId {
+    /// Canonical automation provenance for the system heartbeat routine.
+    pub fn heartbeat() -> Self {
+        Self::from_trusted("heartbeat".to_string())
+    }
+}
 // Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
 // handle to a durably-stored host-error record. The recoverability *class* rides
 // the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays

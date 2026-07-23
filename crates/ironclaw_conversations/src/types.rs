@@ -238,6 +238,7 @@ pub struct InboundTurnRequest {
 /// trusted ingress is `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrustedInboundKind {
+    Heartbeat,
     Trigger,
     // arch-exempt: dead_code, reserved trusted non-trigger ingress — the only
     // trusted production path today is the trigger submit seam (which builds

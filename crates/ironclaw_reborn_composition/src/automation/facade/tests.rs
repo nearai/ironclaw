@@ -89,6 +89,7 @@ fn make_record(
     cron: &str,
 ) -> TriggerRecord {
     TriggerRecord {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         trigger_id,
         tenant_id: caller.tenant_id.clone(),
         creator_user_id: caller.user_id.clone(),

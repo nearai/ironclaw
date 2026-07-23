@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat updates existing trigger worker fixtures, plan #6570
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -63,6 +64,7 @@ fn sample_record(
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
         delivery_target: None,
+        automation: crate::TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -4453,6 +4455,7 @@ async fn timezone_aware_firing_harness() {
         schedule: schedule.clone(),
         prompt: "run daily summary".to_string(),
         delivery_target: None,
+        automation: crate::TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at: computed_seed,
         last_run_at: None,

@@ -396,6 +396,7 @@ mod tests {
             },
             prompt: "check mail".to_string(),
             delivery_target: None,
+            automation: crate::TriggerAutomation::UserSchedule,
             state: TriggerState::Scheduled,
             next_run_at: now,
             last_run_at: None,

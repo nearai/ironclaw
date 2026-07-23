@@ -251,6 +251,7 @@ async fn production_runtime_trigger_poller_fires_due_scheduled_trigger() {
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
         delivery_target: None,
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,

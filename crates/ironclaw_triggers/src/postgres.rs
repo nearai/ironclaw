@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat extends the owning trigger persistence adapter, plan #6570
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, automation";
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
        SET name = $6
@@ -35,7 +36,7 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
      RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
-       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, automation";
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
@@ -104,18 +105,20 @@ impl TriggerRepository for PostgresTriggerRepository {
             .delivery_target
             .as_ref()
             .map(|target| target.as_str().to_string());
+        let automation = crate::heartbeat::automation_to_storage(&record.automation)?;
 
         let sql = r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
-                    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
+                    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target,
+                    automation
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
                     $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20, $21
+                    $16, $17, $18, $19, $20, $21, $22
                 )
                 ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                     creator_user_id = EXCLUDED.creator_user_id,
@@ -135,7 +138,8 @@ impl TriggerRepository for PostgresTriggerRepository {
                     active_fire_slot = EXCLUDED.active_fire_slot,
                     active_run_ref = EXCLUDED.active_run_ref,
                     schedule_at = EXCLUDED.schedule_at,
-                    delivery_target = EXCLUDED.delivery_target
+                    delivery_target = EXCLUDED.delivery_target,
+                    automation = EXCLUDED.automation
                 "#;
         cached_execute(
             &client,
@@ -162,6 +166,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                 &created_at,
                 &schedule_at,
                 &delivery_target,
+                &automation,
             ],
         )
         .await
@@ -1341,6 +1346,8 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
     let delivery_target = optional_text(row, "delivery_target")?
         .map(crate::TriggerDeliveryTargetId::new)
         .transpose()?;
+    let automation =
+        crate::heartbeat::automation_from_storage(optional_text(row, "automation")?.as_deref())?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -1353,6 +1360,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
         schedule,
         prompt: required_text(row, "prompt")?,
         delivery_target,
+        automation,
         state: crate::parse_state_codec(&required_text(row, "state")?)?,
         next_run_at: parse_timestamp(&required_text(row, "next_run_at")?, "next_run_at")?,
         last_run_at,
@@ -1448,6 +1456,7 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     created_at TEXT NOT NULL,
     schedule_at TEXT,
     delivery_target TEXT,
+    automation TEXT,
     PRIMARY KEY (tenant_id, trigger_id)
 );
 
@@ -1455,6 +1464,7 @@ ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_timezone TEXT NOT 
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_kind TEXT NOT NULL DEFAULT 'cron';
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_at TEXT;
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS delivery_target TEXT;
+ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS automation TEXT;
 -- Completion is derived from the schedule (Once / exhausted cron); the legacy
 -- completion_policy column is no longer written and is dropped so inserts that
 -- omit it do not violate its NOT NULL constraint on pre-rework tables.

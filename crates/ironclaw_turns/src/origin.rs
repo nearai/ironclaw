@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{AgentId, ProjectId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, RoutineId, UserId};
 
 /// How this turn run was initiated. Generic — no product/channel specifics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +125,11 @@ pub enum TurnOwner {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductTurnContext {
     pub origin: TurnOriginKind,
+    /// Optional trusted automation provenance for a scheduled run. This is run
+    /// provenance only: model-initiated capability calls inside the run remain
+    /// `InvocationOrigin::LoopRun`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<RoutineId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface_type: Option<TurnSurfaceType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,11 +159,18 @@ impl ProductTurnContext {
     ) -> Self {
         Self {
             origin,
+            automation: None,
             surface_type,
             adapter,
             source_channel,
             owner,
         }
+    }
+
+    /// Attach trusted automation provenance at the ingress resolver boundary.
+    pub fn with_automation(mut self, automation: RoutineId) -> Self {
+        self.automation = Some(automation);
+        self
     }
 }
 

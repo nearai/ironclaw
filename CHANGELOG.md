@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Reborn heartbeat scheduling:** add an opt-in, typed `[heartbeat]` boot
+  configuration that reconciles one durable, scope-isolated managed trigger
+  through the existing trigger poller and trusted turn pipeline.
+
 ### Fixed
 
 - **Model recovery:** preserve typed, sanitized context-overflow,

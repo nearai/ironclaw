@@ -1257,6 +1257,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     // Fire the trigger. creator == USER so the recorded route keys to the same
     // user the inbound DM resolves to; project None => personal (not denied).
     let fire = TriggerFire {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
         creator_user_id: user.clone(),
         agent_id: None,
@@ -1533,6 +1534,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     );
 
     let fire = TriggerFire {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
         creator_user_id: user.clone(),
         agent_id: None,
@@ -1665,6 +1667,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     );
 
     let fire = TriggerFire {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
         creator_user_id: user.clone(),
         agent_id: None,
@@ -4261,6 +4264,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
     );
 
     let fire = TriggerFire {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
         creator_user_id: user.clone(),
         agent_id: None,
@@ -4323,6 +4327,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         .await
         .expect("overwrite preference with a foreign-vendor target");
     let foreign_fire = TriggerFire {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
         creator_user_id: user.clone(),
         agent_id: None,
@@ -4407,6 +4412,7 @@ async fn generic_triggered_hook_honors_per_trigger_target_without_global_default
         registry,
     );
     let fire = TriggerFire {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         identity: TriggerFireIdentity::new(
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             TriggerId::new(),

@@ -44,6 +44,41 @@ async fn triggered_submit_carries_scheduled_trigger_origin() {
     );
 }
 
+#[tokio::test]
+async fn heartbeat_submit_carries_trusted_automation_provenance() {
+    let harness = RebornIntegrationHarness::test_default()
+        .build()
+        .await
+        .expect("harness builds");
+
+    let submission = harness
+        .submit_heartbeat_turn("run the heartbeat checklist")
+        .await
+        .expect("heartbeat submit accepted");
+
+    let state = harness
+        .coordinator
+        .get_run_state(ironclaw_turns::GetRunStateRequest {
+            scope: submission.turn_scope,
+            run_id: submission.run_id,
+        })
+        .await
+        .expect("run state readable at the coordinator boundary");
+    let product_context = state.product_context.expect("product context persisted");
+    assert_eq!(
+        product_context.origin,
+        ironclaw_turns::TurnOriginKind::ScheduledTrigger
+    );
+    assert_eq!(
+        product_context
+            .automation
+            .as_ref()
+            .map(ironclaw_host_api::RoutineId::as_str),
+        Some("heartbeat"),
+        "only the host-minted heartbeat fire path may persist automation/heartbeat provenance",
+    );
+}
+
 /// C-TRIGGERED-ORIGIN contrast arm: an interactive turn on the same
 /// `submit_turn` → coordinator wire must record `TurnOriginKind::Inbound`, not
 /// `ScheduledTrigger` — the control proving the trigger path's origin above

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat extends existing backend parity fixtures, plan #6570
 use chrono::{SecondsFormat, TimeZone, Utc};
 use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
@@ -12,6 +13,7 @@ use {
     ironclaw_triggers::LibSqlTriggerRepository,
     libsql::params,
     std::{
+        num::NonZeroU32,
         sync::Arc,
         time::{Duration, Instant},
     },
@@ -50,6 +52,7 @@ fn sample_record(
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
         delivery_target: None,
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -62,10 +65,19 @@ fn sample_record(
 }
 
 async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
-    let due = sample_record(
+    let mut due = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
         tenant("tenant-a"),
         ts(1_704_067_200),
+    );
+    due.automation = ironclaw_triggers::TriggerAutomation::Heartbeat(
+        ironclaw_triggers::HeartbeatSystemMetadata {
+            quiet_hours: Some(ironclaw_triggers::HeartbeatQuietHours::new(
+                chrono::NaiveTime::from_hms_opt(22, 0, 0).expect("valid time"),
+                chrono::NaiveTime::from_hms_opt(7, 0, 0).expect("valid time"),
+            )),
+            failure_limit: NonZeroU32::new(3).expect("non-zero"),
+        },
     );
     let later = sample_record(
         TriggerId::parse("01J00000000000000000000000").expect("ulid"),

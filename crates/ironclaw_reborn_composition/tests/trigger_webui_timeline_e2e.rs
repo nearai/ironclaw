@@ -241,6 +241,7 @@ fn make_trigger_record(
     name: &str,
 ) -> TriggerRecord {
     TriggerRecord {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         trigger_id: TriggerId::new(),
         tenant_id,
         creator_user_id: user_id,

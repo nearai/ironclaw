@@ -327,6 +327,7 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
 
 fn trigger_record_for_pairing_test() -> TriggerRecord {
     TriggerRecord {
+        automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
         trigger_id: ironclaw_triggers::TriggerId::new(),
         tenant_id: TenantId::new("pairing-test-tenant").expect("tenant id"),
         creator_user_id: UserId::new("pairing-test-user").expect("user id"),

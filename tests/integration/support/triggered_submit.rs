@@ -15,6 +15,7 @@
 // `builder.rs`/`assertions.rs`/`session_thread.rs`.
 #![allow(dead_code)]
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,10 +29,10 @@ use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_triggers::{
-    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
-    TriggerInboundContentRef, TriggerMaterializedPrompt, TrustedTriggerFireSubmitOutcome,
-    TrustedTriggerSubmitRequest,
+    HeartbeatSystemMetadata, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerAutomation, TriggerFire, TriggerFireIdentity,
+    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt,
+    TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
 };
 use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{
@@ -77,6 +78,7 @@ impl RebornIntegrationHarness {
             project_id: self.binding.project_id.clone(),
             prompt: prompt.to_string(),
             delivery_target: None,
+            automation: TriggerAutomation::UserSchedule,
         }
     }
 
@@ -114,8 +116,34 @@ impl RebornIntegrationHarness {
         &self,
         prompt: &str,
     ) -> HarnessResult<TriggeredSubmission> {
+        self.submit_triggered_turn_with_automation(prompt, TriggerAutomation::UserSchedule)
+            .await
+    }
+
+    /// Submit a host-minted heartbeat fire through the real trusted-trigger
+    /// ingress so tests can prove persisted automation provenance.
+    pub(crate) async fn submit_heartbeat_turn(
+        &self,
+        prompt: &str,
+    ) -> HarnessResult<TriggeredSubmission> {
+        self.submit_triggered_turn_with_automation(
+            prompt,
+            TriggerAutomation::Heartbeat(HeartbeatSystemMetadata {
+                quiet_hours: None,
+                failure_limit: NonZeroU32::new(3).ok_or("failure limit must be non-zero")?,
+            }),
+        )
+        .await
+    }
+
+    async fn submit_triggered_turn_with_automation(
+        &self,
+        prompt: &str,
+        automation: TriggerAutomation,
+    ) -> HarnessResult<TriggeredSubmission> {
         let fire_slot = triggered_fire_slot();
-        let fire = self.triggered_fire(prompt, fire_slot);
+        let mut fire = self.triggered_fire(prompt, fire_slot);
+        fire.automation = automation;
         let content_ref = TriggerInboundContentRef::new(format!(
             "content:triggered-submit:{}",
             fire.identity.external_event_id().as_str()

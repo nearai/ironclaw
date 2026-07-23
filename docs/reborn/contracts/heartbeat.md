@@ -127,6 +127,28 @@ Rules:
 - `failure_limit` is bounded by the domain and controls when automatic
   scheduling is disabled after consecutive terminal failures.
 
+The standalone binary promotes the dependency-neutral boot config into this
+typed shape. A minimal enabled configuration is:
+
+```toml
+[trigger_poller]
+enabled = true
+
+[heartbeat]
+enabled = true
+interval_minutes = 30
+timezone = "UTC"
+failure_limit = 3
+
+[heartbeat.quiet_hours]
+start = "22:00"
+end = "07:00"
+```
+
+An absent `[heartbeat]` section creates no managed trigger. A present section
+defaults to `enabled = false`; enabling heartbeat while the trigger poller is
+disabled fails boot rather than silently accepting a schedule that cannot run.
+
 Configuration persistence and the managed trigger update are one logical
 reconciliation operation. Implementations use the repository's transaction or
 bounded CAS semantics so a crash cannot leave two active heartbeat triggers for

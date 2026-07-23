@@ -20,6 +20,7 @@
 //! The CLI builds this struct from env vars / config; it does not call into
 //! `ironclaw_runner` or `ironclaw_llm` directly.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +35,10 @@ use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
     DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
 };
-use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
+use ironclaw_triggers::{
+    HeartbeatConfig, HeartbeatInterval, HeartbeatQuietHours, TriggerDeliveryTargetId, TriggerId,
+    TriggerPollerWorkerConfig,
+};
 
 use crate::input::RebornBuildInput;
 use crate::observability::hooks::HooksActivationConfig;
@@ -479,6 +483,9 @@ pub struct RebornRuntimeInput {
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
+    /// Optional system-managed heartbeat schedule. `None` preserves the
+    /// existing disabled-by-default behavior.
+    pub heartbeat: Option<HeartbeatConfig>,
     pub credential_refresh: KeepaliveSweepSettings,
     /// Explicit fire-time access checker override. Primarily a test/advanced
     /// seam; production callers set [`trigger_fire_access`](Self::trigger_fire_access)
@@ -555,6 +562,7 @@ impl RebornRuntimeInput {
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
+            heartbeat: None,
             credential_refresh: KeepaliveSweepSettings::default(),
             trigger_fire_access_checker: None,
             trigger_fire_access: TriggerFireAccessPolicy::default(),
@@ -685,6 +693,72 @@ impl RebornRuntimeInput {
     pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
         self.trigger_poller = trigger_poller;
         self
+    }
+
+    pub fn with_heartbeat(mut self, heartbeat: HeartbeatConfig) -> Self {
+        self.heartbeat = Some(heartbeat);
+        self
+    }
+
+    /// Promote operator-facing boot values into the validated trigger-domain
+    /// heartbeat shape without exposing trigger internals to the CLI crate.
+    #[rustfmt::skip]
+    // arch-exempt: too_many_args, mirrors sparse boot fields without a composition-owned mirror DTO, plan #6570
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_heartbeat_boot_config( // pub-api-exempt: standalone CLI caller crosses the crate boundary to preserve layering.
+        self,
+        enabled: bool,
+        interval_minutes: u32,
+        timezone: String,
+        quiet_start: Option<String>,
+        quiet_end: Option<String>,
+        delivery_target: Option<String>,
+        failure_limit: u32,
+    ) -> Result<Self, crate::RebornBuildError> {
+        let quiet_hours = match (quiet_start, quiet_end) {
+            (None, None) => None,
+            (Some(start), Some(end)) => {
+                Some(HeartbeatQuietHours::parse(&start, &end).map_err(|error| {
+                    crate::RebornBuildError::InvalidConfig {
+                        reason: error.to_string(),
+                    }
+                })?)
+            }
+            _ => {
+                return Err(crate::RebornBuildError::InvalidConfig {
+                    reason: "heartbeat quiet hours require both start and end".to_string(),
+                });
+            }
+        };
+        let failure_limit = NonZeroU32::new(failure_limit).ok_or_else(|| {
+            crate::RebornBuildError::InvalidConfig {
+                reason: "heartbeat failure_limit must be non-zero".to_string(),
+            }
+        })?;
+        let delivery_target = delivery_target
+            .map(TriggerDeliveryTargetId::new)
+            .transpose()
+            .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?;
+        let heartbeat = HeartbeatConfig {
+            enabled,
+            interval: HeartbeatInterval::from_minutes(interval_minutes).map_err(|error| {
+                crate::RebornBuildError::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            })?,
+            timezone,
+            quiet_hours,
+            delivery_target,
+            failure_limit,
+        };
+        heartbeat
+            .validate()
+            .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?;
+        Ok(self.with_heartbeat(heartbeat))
     }
 
     pub fn with_credential_refresh_settings(

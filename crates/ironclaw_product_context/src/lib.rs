@@ -1,5 +1,6 @@
 //! Single owner of turn-origin/surface/owner classification at ingress.
 
+use ironclaw_host_api::RoutineId;
 use ironclaw_turns::{
     ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
 };
@@ -11,6 +12,8 @@ pub const CLI_SOURCE_CHANNEL: &str = "cli";
 /// into one value, so the resolver cannot receive a contradictory pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundClassification {
+    /// Trusted ingress from the system-managed heartbeat trigger.
+    TrustedHeartbeat,
     /// Trusted ingress whose adapter is the trusted-trigger adapter.
     TrustedTrigger,
     /// Trusted ingress, non-trigger adapter.
@@ -42,19 +45,27 @@ pub fn resolve_inbound_with_source_channel(
     owner: TurnOwner,
 ) -> ProductTurnContext {
     let origin = match classification {
-        InboundClassification::TrustedTrigger => TurnOriginKind::ScheduledTrigger,
+        InboundClassification::TrustedHeartbeat | InboundClassification::TrustedTrigger => {
+            TurnOriginKind::ScheduledTrigger
+        }
         InboundClassification::TrustedOther | InboundClassification::Untrusted => {
             TurnOriginKind::Inbound
         }
     };
     let source_channel = source_channel.or_else(|| Some(adapter.clone()));
-    ProductTurnContext::new_with_source_channel(
+    let context = ProductTurnContext::new_with_source_channel(
         origin,
         surface_type,
         Some(adapter),
         source_channel,
         owner,
-    )
+    );
+    match classification {
+        InboundClassification::TrustedHeartbeat => context.with_automation(RoutineId::heartbeat()),
+        InboundClassification::TrustedTrigger
+        | InboundClassification::TrustedOther
+        | InboundClassification::Untrusted => context,
+    }
 }
 
 /// Resolve a WebUI submission. Always `WebUi`, no adapter/surface, source channel `webui`.
@@ -112,12 +123,29 @@ mod tests {
             ctx.source_channel.as_ref().map(RunOriginAdapter::as_str),
             Some("trigger")
         );
+        assert!(ctx.automation.is_none());
+    }
+
+    #[test]
+    fn trusted_heartbeat_yields_scheduled_trigger_with_automation_provenance() {
+        let ctx = resolve_inbound(
+            InboundClassification::TrustedHeartbeat,
+            adapter(),
+            None,
+            owner(),
+        );
+        assert_eq!(ctx.origin, TurnOriginKind::ScheduledTrigger);
+        assert_eq!(
+            ctx.automation.as_ref().map(RoutineId::as_str),
+            Some("heartbeat")
+        );
     }
 
     #[test]
     fn untrusted_trigger_adapter_yields_inbound_not_trigger() {
         let ctx = resolve_inbound(InboundClassification::Untrusted, adapter(), None, owner());
         assert_eq!(ctx.origin, TurnOriginKind::Inbound);
+        assert!(ctx.automation.is_none());
     }
 
     #[test]

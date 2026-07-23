@@ -535,6 +535,7 @@ fn map_trigger_error(error: TriggerError) -> RebornServicesError {
         | TriggerError::InvalidFireIdentityComponent { .. }
         | TriggerError::InvalidRecord { .. }
         | TriggerError::InvalidPollerConfig { .. }
+        | TriggerError::InvalidHeartbeatConfig { .. }
         | TriggerError::InvalidSchedule { .. }
         | TriggerError::InvalidMaterialization { .. } => internal_invariant(),
         TriggerError::BlockedMaterialization { .. } => services_error(

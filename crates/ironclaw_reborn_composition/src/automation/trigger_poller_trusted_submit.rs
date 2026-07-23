@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat reuses the existing trusted-trigger submit seam, plan #6570
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -578,6 +579,7 @@ mod tests {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let authorizer = Arc::new(StaticTriggerFireAuthorizer::new(Err(error)));
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot),
             creator_user_id: creator_user_id.clone(),
             agent_id: Some(agent_id.clone()),
@@ -706,6 +708,7 @@ mod tests {
 
     fn test_trigger_record(input: TestTriggerRecordInput) -> TriggerRecord {
         TriggerRecord {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             trigger_id: input.trigger_id,
             tenant_id: input.tenant_id,
             creator_user_id: input.creator_user_id,
@@ -736,6 +739,7 @@ mod tests {
         let trigger_id = TriggerId::new();
         let fire_slot = Utc::now();
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot),
             creator_user_id: creator_user_id.clone(),
             agent_id: Some(agent_id.clone()),
@@ -761,6 +765,7 @@ mod tests {
         let trigger_id = TriggerId::new();
         let fire_slot = Utc::now();
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(tenant_id, trigger_id, fire_slot),
             creator_user_id,
             agent_id: None,
@@ -782,6 +787,7 @@ mod tests {
         let agent_id = AgentId::new("trigger-authorized-agent").expect("agent id");
         let project_id = ProjectId::new("trigger-authorized-project").expect("project id");
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(tenant_id.clone(), TriggerId::new(), Utc::now()),
             creator_user_id,
             agent_id: Some(agent_id),
@@ -803,6 +809,7 @@ mod tests {
         let foreign_tenant = TenantId::new("trigger-foreign-tenant").expect("tenant id");
         let creator_user_id = UserId::new("trigger-foreign-user").expect("user id");
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(foreign_tenant, TriggerId::new(), Utc::now()),
             creator_user_id,
             agent_id: None,
@@ -1687,6 +1694,7 @@ mod tests {
             )
             .await;
         repo.upsert_trigger(TriggerRecord {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             trigger_id,
             tenant_id: tenant_id.clone(),
             creator_user_id: creator_user_id.clone(),
@@ -1818,6 +1826,7 @@ mod tests {
 
         let error = materializer
             .materialize_prompt(TriggerFire {
+                automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
                 identity: TriggerFireIdentity::new(tenant_id, trigger_id, fire_slot),
                 creator_user_id,
                 agent_id: Some(agent_id.clone()),
@@ -1889,6 +1898,7 @@ mod tests {
 
         let error = materializer
             .materialize_prompt(TriggerFire {
+                automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
                 identity: TriggerFireIdentity::new(foreign_tenant, TriggerId::new(), Utc::now()),
                 creator_user_id,
                 agent_id: Some(agent_id.clone()),
@@ -1964,6 +1974,7 @@ mod tests {
             )
             .await;
         repo.upsert_trigger(TriggerRecord {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             trigger_id,
             tenant_id: tenant_id.clone(),
             creator_user_id: creator_user_id.clone(),
@@ -2068,6 +2079,7 @@ mod tests {
             )
             .await;
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(tenant_id.clone(), trigger_id, fire_slot),
             creator_user_id: creator_user_id.clone(),
             agent_id: Some(agent_id.clone()),
@@ -2144,6 +2156,7 @@ mod tests {
             )
             .await;
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: TriggerFireIdentity::new(tenant_id, trigger_id, fire_slot),
             creator_user_id,
             agent_id: Some(agent_id.clone()),

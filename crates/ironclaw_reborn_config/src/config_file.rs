@@ -98,6 +98,9 @@ pub struct RebornConfigFile {
     /// Trigger poller lifecycle settings. All fields optional; absent section
     /// leaves the worker at the compiled defaults in the composition root.
     pub trigger_poller: Option<TriggerPollerConfigSection>,
+    /// Opt-in system-managed heartbeat schedule. An absent section leaves
+    /// heartbeat disabled and does not create a managed trigger.
+    pub heartbeat: Option<HeartbeatConfigSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -569,6 +572,32 @@ impl TriggerPollerConfigSection {
         self.tick_jitter_max_secs = Some(tick_jitter_max_secs);
         self
     }
+}
+
+/// `[heartbeat]` section for the system-managed periodic checklist.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeartbeatConfigSection {
+    /// Explicit feature switch. Defaults to false when the section exists.
+    pub enabled: Option<bool>,
+    /// Fixed cron-representable cadence in whole minutes. Defaults to 30.
+    pub interval_minutes: Option<u32>,
+    /// IANA timezone used by the cadence and quiet window. Defaults to UTC.
+    pub timezone: Option<String>,
+    /// Optional local-time quiet window.
+    pub quiet_hours: Option<HeartbeatQuietHoursSection>,
+    /// Opaque creator-owned outbound delivery target.
+    pub delivery_target: Option<String>,
+    /// Consecutive terminal failures allowed before pausing. Defaults to 3.
+    pub failure_limit: Option<u32>,
+}
+
+/// Nested `[heartbeat.quiet_hours]` local-time window.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeartbeatQuietHoursSection {
+    pub start: Option<String>,
+    pub end: Option<String>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -2302,6 +2331,43 @@ not_a_field = true
         let err = RebornConfigFile::parse_text(toml, &attributed())
             .expect_err("deny_unknown_fields must catch typos in [trigger_poller]");
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
+    fn heartbeat_section_and_quiet_hours_parse_without_runtime_types() {
+        let toml = r#"
+[heartbeat]
+enabled = true
+interval_minutes = 30
+timezone = "America/Los_Angeles"
+delivery_target = "target-1"
+failure_limit = 4
+
+[heartbeat.quiet_hours]
+start = "22:00"
+end = "07:00"
+"#;
+        let config = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("heartbeat section must parse");
+        let heartbeat = config.heartbeat.expect("heartbeat section present");
+        assert_eq!(heartbeat.enabled, Some(true));
+        assert_eq!(heartbeat.interval_minutes, Some(30));
+        assert_eq!(heartbeat.timezone.as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(heartbeat.delivery_target.as_deref(), Some("target-1"));
+        assert_eq!(heartbeat.failure_limit, Some(4));
+        let quiet = heartbeat.quiet_hours.expect("quiet hours present");
+        assert_eq!(quiet.start.as_deref(), Some("22:00"));
+        assert_eq!(quiet.end.as_deref(), Some("07:00"));
+    }
+
+    #[test]
+    fn heartbeat_section_rejects_unknown_key() {
+        let error = RebornConfigFile::parse_text(
+            "[heartbeat]\nenabled = true\nnot_a_field = 1\n",
+            &attributed(),
+        )
+        .expect_err("heartbeat typos must fail closed");
+        assert!(matches!(error, RebornConfigFileError::Toml { .. }));
     }
 }
 // arch-exempt: large_file, versioned config migration remains centralized, plan #6175

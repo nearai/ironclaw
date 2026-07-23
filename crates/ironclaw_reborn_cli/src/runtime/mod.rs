@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::RebornCliContext;
 
 mod account_setups;
+mod heartbeat;
 mod native_extensions;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
@@ -33,6 +34,7 @@ mod native_extensions;
 pub(crate) mod test_env;
 mod trigger_poller;
 
+use heartbeat::apply_heartbeat_config;
 use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
@@ -563,6 +565,7 @@ pub(crate) fn build_runtime_input_with_options(
         .with_regex_skill_activation_enabled(regex_skill_activation_enabled(
             runtime_services.config_file.as_ref(),
         ));
+    runtime_input = apply_heartbeat_config(runtime_input, runtime_services.config_file.as_ref())?;
 
     {
         // The composition runtime cold-boots with a placeholder gateway and

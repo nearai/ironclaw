@@ -32,7 +32,7 @@ pub(super) fn classify_failure(error: &TriggerError) -> FailureClassification {
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::InvalidRecord,
         ),
-        TriggerError::InvalidPollerConfig { .. } => (
+        TriggerError::InvalidPollerConfig { .. } | TriggerError::InvalidHeartbeatConfig { .. } => (
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::InvalidPollerConfig,
         ),

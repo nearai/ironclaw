@@ -1,3 +1,4 @@
+// arch-exempt: large_file, heartbeat extends the existing trusted-trigger ingress seam, plan #6570
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -100,6 +101,10 @@ where
         // only when the trusted-trigger submit seam built this request with
         // `TrustedInboundKind::Trigger`; see `.claude/rules/types.md`.
         let classification = match &binding_policy {
+            BindingResolutionPolicy::Trusted {
+                kind: TrustedInboundKind::Heartbeat,
+                ..
+            } => ironclaw_product_context::InboundClassification::TrustedHeartbeat,
             BindingResolutionPolicy::Trusted {
                 kind: TrustedInboundKind::Trigger,
                 ..
@@ -416,7 +421,11 @@ fn trusted_inbound_request_from_trigger(
         fire.agent_id,
         fire.project_id,
         Some(fire.creator_user_id),
-        TrustedInboundKind::Trigger,
+        if fire.automation.is_heartbeat() {
+            TrustedInboundKind::Heartbeat
+        } else {
+            TrustedInboundKind::Trigger
+        },
     ))
 }
 
@@ -809,6 +818,7 @@ mod tests {
         let fire_slot = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
         let identity = TriggerFireIdentity::new(tenant(), TriggerId::new(), fire_slot);
         let fire = TriggerFire {
+            automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
             identity: identity.clone(),
             creator_user_id: creator.clone(),
             agent_id: Some(agent()),

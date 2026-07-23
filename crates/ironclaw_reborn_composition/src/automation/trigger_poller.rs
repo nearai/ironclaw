@@ -420,6 +420,7 @@ mod tests {
         fn settlement_event(run_id: TurnRunId) -> TriggerAcceptedFireSettlement {
             let trigger_id = TriggerId::new();
             let fire = TriggerFire {
+                automation: ironclaw_triggers::TriggerAutomation::UserSchedule,
                 identity: TriggerFireIdentity::new(observer_tenant(), trigger_id, Utc::now()),
                 creator_user_id: UserId::new("hook-wrapper-user").expect("user"),
                 agent_id: Some(AgentId::new("hook-wrapper-agent").expect("agent")),

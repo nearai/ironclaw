@@ -8,6 +8,7 @@
 #![cfg(feature = "test-support")]
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,9 +35,10 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
-    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    HeartbeatConfig, HeartbeatInterval, HeartbeatScope, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
+    TRIGGER_TRUSTED_ADAPTER_KIND, TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerAutomation,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::run_profile::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -390,6 +392,15 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     model_gateway: Arc<G>,
     trigger_poller: TriggerPollerSettings,
 ) -> RebornRuntime {
+    build_runtime_with_heartbeat(root, model_gateway, trigger_poller, None).await
+}
+
+async fn build_runtime_with_heartbeat<G: HostManagedModelGateway + 'static>(
+    root: &tempfile::TempDir,
+    model_gateway: Arc<G>,
+    trigger_poller: TriggerPollerSettings,
+    heartbeat: Option<HeartbeatConfig>,
+) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
@@ -403,7 +414,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let mut input = RebornRuntimeInput::from_services(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -412,6 +423,9 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
         })
         .with_trigger_poller_settings(trigger_poller)
         .with_model_gateway_override(model_gateway);
+    if let Some(heartbeat) = heartbeat {
+        input = input.with_heartbeat(heartbeat);
+    }
 
     build_reborn_runtime(input).await.expect("runtime builds")
 }
@@ -598,6 +612,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
         delivery_target: None,
+        automation: TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,
@@ -698,6 +713,110 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         TriggerState::Completed,
         "once schedule: state must be Completed after clear_active_fire — record: {final_record:?}",
     );
+}
+
+#[tokio::test]
+async fn configured_heartbeat_reuses_poller_dedupes_and_survives_restart() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(TokioMutex::new(Vec::new())),
+    });
+    let heartbeat = HeartbeatConfig {
+        enabled: true,
+        interval: HeartbeatInterval::from_minutes(1).expect("valid interval"),
+        timezone: "UTC".to_string(),
+        quiet_hours: None,
+        delivery_target: None,
+        failure_limit: NonZeroU32::new(3).expect("non-zero"),
+    };
+    let poller = TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
+        .with_worker_config(
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
+        );
+    let runtime = build_runtime_with_heartbeat(
+        &root,
+        Arc::clone(&recording_gateway),
+        poller.clone(),
+        Some(heartbeat.clone()),
+    )
+    .await;
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let pairing = runtime
+        .trigger_conversation_pairing()
+        .expect("trigger poller runtime exposes conversation pairing service");
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+    pairing
+        .pair_external_actor(
+            tenant_id.clone(),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                .expect("actor ref"),
+            user_id.clone(),
+        )
+        .await
+        .expect("pair heartbeat owner");
+
+    let heartbeat_id = HeartbeatScope {
+        tenant_id: tenant_id.clone(),
+        creator_user_id: user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+    }
+    .trigger_id();
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), heartbeat_id)
+        .await
+        .expect("read managed heartbeat")
+        .expect("managed heartbeat persisted");
+    assert!(record.automation.is_heartbeat());
+    // Make exactly one slot due. Moving this back by multiple interval widths
+    // would intentionally exercise the existing trigger catch-up behavior.
+    record.next_run_at = Utc::now() - chrono::Duration::seconds(1);
+    repo.upsert_trigger(record)
+        .await
+        .expect("make heartbeat due");
+
+    let settled = wait_for_settled(
+        &repo,
+        &tenant_id,
+        heartbeat_id,
+        Duration::from_secs(15),
+        |record| record.last_status == Some(TriggerRunStatus::Ok),
+    )
+    .await;
+    let fired_slot = settled.last_fired_slot.expect("heartbeat fired");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        recording_gateway
+            .request_count_containing("HEARTBEAT.md checklist")
+            .await,
+        1,
+        "duplicate poll ticks must not create a second run for one due slot",
+    );
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let restarted =
+        build_runtime_with_heartbeat(&root, recording_gateway, poller, Some(heartbeat)).await;
+    let restarted_repo = restarted
+        .trigger_repository()
+        .expect("restarted runtime exposes repository");
+    let reloaded = restarted_repo
+        .get_trigger(tenant_id, heartbeat_id)
+        .await
+        .expect("reload heartbeat")
+        .expect("heartbeat survives restart");
+    assert_eq!(reloaded.last_fired_slot, Some(fired_slot));
+    assert_eq!(reloaded.last_status, Some(TriggerRunStatus::Ok));
+    restarted
+        .shutdown()
+        .await
+        .expect("restarted runtime shutdown");
 }
 
 #[tokio::test]
@@ -996,6 +1115,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
         delivery_target: None,
+        automation: TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
         last_run_at: None,
@@ -1094,6 +1214,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     // claim, and remains Scheduled until the actor is paired.
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
     let record = TriggerRecord {
+        automation: TriggerAutomation::UserSchedule,
         trigger_id,
         tenant_id: tenant_id.clone(),
         creator_user_id: user_id,
@@ -1226,6 +1347,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
         delivery_target: None,
+        automation: TriggerAutomation::UserSchedule,
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,
         last_run_at: None,
