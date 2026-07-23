@@ -32,6 +32,7 @@ on:
       - "crates/ironclaw_*/**"
       - "docs/reborn/**"
       - "scripts/reborn-e2e-rust.sh"
+      - "scripts/ci/check-ironclaw-serve-e2e-manifest.py"
       - "tests/e2e/**"
       - "build.rs"
       - "providers.json"
@@ -73,7 +74,7 @@ jobs:
 
           # Keep this pattern in sync with the push `paths:` filter in the
           # `on:` block above.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/check-ironclaw-serve-e2e-manifest\.py$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"
@@ -163,6 +164,9 @@ jobs:
       - name: Check Reborn Responses API E2E inventory
         run: python3 scripts/ci/check-reborn-responses-e2e-manifest.py
 
+      - name: Check retained IronClaw serve E2E inventory
+        run: python3 scripts/ci/check-ironclaw-serve-e2e-manifest.py
+
       - name: Install WebUI frontend dependencies
         run: |
           cd crates/ironclaw_webui/frontend
@@ -227,6 +231,17 @@ jobs:
             exit 1
           fi
           pytest "${responses_tests[@]}" -v --timeout=120
+
+      - name: Run retained IronClaw serve E2E scenarios
+        run: |
+          mapfile -t serve_tests < <(
+            sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/ironclaw_serve_e2e_tests.txt
+          )
+          if ((${#serve_tests[@]} == 0)); then
+            echo "No retained IronClaw serve E2E tests selected"
+            exit 1
+          fi
+          pytest "${serve_tests[@]}" -v --timeout=120
 
       - name: Package live-canary binary
         id: live_canary_binary
