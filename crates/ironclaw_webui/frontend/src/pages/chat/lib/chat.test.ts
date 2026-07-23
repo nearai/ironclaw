@@ -82,7 +82,15 @@ function renderChat({
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
   onSelectThread = () => {},
+  // Positional ref slots, shared by reference across repeated renderChat()
+  // calls that pass the same array -- lets a test simulate the same
+  // component "instance" re-rendering (e.g. a navigation-triggered
+  // rerender) with useRef state persisted across renders, the way real
+  // React would. Left undefined by default: each call gets fresh refs,
+  // matching every existing single-render test.
+  refs = [],
 }) {
+  let refSlot = 0;
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -107,7 +115,12 @@ function renderChat({
         if (runEffects) effect();
       },
       useMemo: (fn) => fn(),
-      useRef: (initial) => ({ current: initial }),
+      useRef: (initial) => {
+        const slot = refSlot;
+        refSlot += 1;
+        if (!(slot in refs)) refs[slot] = { current: initial };
+        return refs[slot];
+      },
       useState: (initial) => [
         typeof initial === "function" ? initial() : initial,
         () => {},
@@ -755,4 +768,94 @@ test("Chat does not double-navigate when multiple sends resolve before either ca
   // and fails Node's strict deep-equality identity checks despite matching
   // structurally.
   assert.equal(selections[0].options.replace, true);
+});
+
+test("Chat does not double-navigate when a stale send resolves after the first navigation's rerender", async () => {
+  // Regression test for PR #6592 review comment: the previous reset rule
+  // ("clear the claim whenever activeThreadId is truthy") fires on the very
+  // rerender the first navigation itself causes, re-opening the window for
+  // a second, still-in-flight send -- one whose closure captured the old
+  // null activeThreadId, same as the first -- to navigate again and
+  // reproduce the SSE thrash. This is a genuinely distinct race from
+  // "Chat does not double-navigate when multiple sends resolve before
+  // either can navigate away from the empty-thread view" above: that test
+  // resolves both sends within a single render and never exercises the
+  // rerender in between, so it can't see this bug. Reproducing it needs
+  // controllable send resolution order plus a real second render sharing
+  // ref state, which is why it's a separate test rather than an extra
+  // assertion on the existing one.
+  const selections = [];
+  let resolveFirst;
+  let resolveSecond;
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: [],
+    sseStatus: "closed",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: async (content) =>
+      content === "weather in NY"
+        ? new Promise((resolve) => {
+            resolveFirst = resolve;
+          })
+        : new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const refs = [];
+
+  // Render 1: the empty-thread landing view (activeThreadId = null). Both
+  // sends are fired from this render, so both handleSend closures capture
+  // activeThreadId = null -- exactly like two concurrent "new chat" sends.
+  const render1 = renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+  const emptyState1 = findComponent(render1.tree, render1.components.EmptyState);
+  const { onSend } = componentProps(emptyState1, render1.components.EmptyState);
+
+  const firstSend = onSend("weather in NY");
+  const secondSend = onSend("weather in LA");
+
+  // The first send resolves and claims the navigation.
+  resolveFirst({ thread_id: "thread-for-weather in NY" });
+  await firstSend;
+  assert.equal(selections.length, 1, "first send should navigate");
+  assert.equal(selections[0].threadId, "thread-for-weather in NY");
+
+  // Render 2: simulates the rerender `onSelectThread` triggers once the
+  // parent adopts the new thread id -- activeThreadId is now truthy. Shares
+  // `refs` with render 1 so the navigation-claim ref persists across
+  // renders the way a real mounted component would.
+  renderChat({
+    activeThreadId: "thread-for-weather in NY",
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+
+  // The second send -- still holding its stale render-1 closure with
+  // activeThreadId = null -- resolves after the rerender.
+  resolveSecond({ thread_id: "thread-for-weather in LA" });
+  await secondSend;
+
+  assert.equal(
+    selections.length,
+    1,
+    "a stale send resolving after the first navigation's rerender must not navigate again"
+  );
 });

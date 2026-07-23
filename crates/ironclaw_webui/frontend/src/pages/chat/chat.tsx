@@ -185,12 +185,23 @@ export function Chat({
   // first response lands). Without this, every one of those sends' stale
   // "no active thread" closures independently navigates as its own
   // response arrives, thrashing the URL and tearing down/reopening the
-  // single app-wide SSE stream on each flip. Resets once a real thread is
-  // confirmed active, so a later "+ New" cycle can navigate again.
+  // single app-wide SSE stream on each flip.
+  //
+  // The claim must survive the rerender the navigation itself causes: once
+  // a send claims it and calls onSelectThread, activeThreadId flips to
+  // truthy on the very next render, but other sends from the same
+  // empty-thread batch are still in flight and still hold a closure over
+  // the old null activeThreadId. Only clear the claim when a *new*
+  // empty-thread cycle actually begins -- i.e. when activeThreadId
+  // transitions from truthy back to falsy (e.g. "+ New") -- never merely
+  // because it happens to be truthy on this render, or a later resolver
+  // from the same batch can reclaim it and navigate a second time.
   const hasNavigatedToNewThreadRef = React.useRef(false);
-  if (activeThreadId) {
+  const previousActiveThreadIdRef = React.useRef(activeThreadId);
+  if (previousActiveThreadIdRef.current && !activeThreadId) {
     hasNavigatedToNewThreadRef.current = false;
   }
+  previousActiveThreadIdRef.current = activeThreadId;
   const composerStatusText =
     approvalSubmitWarning ||
     (cooldownSeconds > 0 ? t("chat.retryIn", { seconds: cooldownSeconds }) : undefined);

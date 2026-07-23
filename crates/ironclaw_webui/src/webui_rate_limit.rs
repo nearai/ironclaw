@@ -53,6 +53,7 @@
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -136,6 +137,17 @@ enum ResolvedPolicy {
 pub(crate) struct RateLimitState {
     routes: Arc<Vec<RouteLimit>>,
     shards: Arc<Vec<Mutex<LruCache<CounterKey, Window>>>>,
+    /// Mints a unique, monotonically increasing id every time a [`Window`]
+    /// entry is (re)created — a fresh key insert or a window-expiry reset.
+    /// [`refund_charge`] validates this instead of `window_start` alone: an
+    /// entry evicted from the shard's LRU under load and then reinserted
+    /// for the same key within the same wall-clock second would otherwise
+    /// coincidentally match on `window_start`, letting a delayed refund for
+    /// the evicted charge credit the unrelated replacement entry (PR #6592
+    /// review). A single counter shared across shards is simplest and the
+    /// contention is negligible next to the shard mutex each charge/refund
+    /// already takes.
+    next_generation: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for RateLimitState {
@@ -162,6 +174,11 @@ struct Window {
     remaining: u32,
     /// Epoch second at which the current window started.
     window_start: u64,
+    /// Unique id minted by [`RateLimitState::next_generation`] when this
+    /// window instance was (re)created. Refunds validate this — see the
+    /// field doc on `next_generation` for why `window_start` alone isn't
+    /// sufficient.
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -196,6 +213,7 @@ pub(crate) fn build_rate_limit_state(
     Ok(RateLimitState {
         routes: Arc::new(routes),
         shards: Arc::new(shards),
+        next_generation: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -391,7 +409,7 @@ pub(crate) async fn enforce_rate_limit(
     let window_seconds = window.as_secs().max(1);
 
     let shard_idx = shard_index(&key.bucket_key);
-    let charged_window_start = {
+    let charged_generation = {
         let mut guard = match state.shards[shard_idx].lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -406,23 +424,29 @@ pub(crate) async fn enforce_rate_limit(
         let window_entry = guard.get_or_insert_mut(key.clone(), || Window {
             remaining: max_requests,
             window_start: now,
+            generation: state.next_generation.fetch_add(1, Ordering::Relaxed),
         });
 
         if now.saturating_sub(window_entry.window_start) >= window_seconds {
             // Window expired — start a new one. Charge the current
-            // request against the fresh budget.
+            // request against the fresh budget. This is logically a new
+            // window instance, so it gets a fresh generation too — a
+            // refund arriving after a legitimate rollover for the same
+            // caller must not credit the new window any more than one
+            // arriving after an LRU eviction should.
             window_entry.window_start = now;
             window_entry.remaining = max_requests.saturating_sub(1);
-            Some(window_entry.window_start)
+            window_entry.generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
+            Some(window_entry.generation)
         } else if window_entry.remaining == 0 {
             None
         } else {
             window_entry.remaining -= 1;
-            Some(window_entry.window_start)
+            Some(window_entry.generation)
         }
     };
 
-    let Some(charged_window_start) = charged_window_start else {
+    let Some(charged_generation) = charged_generation else {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Try again shortly.",
@@ -440,7 +464,7 @@ pub(crate) async fn enforce_rate_limit(
         refund_charge(
             &state.shards[shard_idx],
             &key,
-            charged_window_start,
+            charged_generation,
             max_requests,
         );
     }
@@ -450,14 +474,23 @@ pub(crate) async fn enforce_rate_limit(
 
 /// Credits back a charge made by [`enforce_rate_limit`] when the downstream
 /// handler marked its own `429` response refundable (see
-/// [`mark_rate_limit_refundable`]). Only refunds into the exact window it
-/// charged (`window_start` must be unchanged); if the window rolled over or
-/// the entry was evicted under LRU pressure in the meantime, this is a
-/// no-op rather than mis-crediting a different window.
+/// [`mark_rate_limit_refundable`]). Only refunds into the exact window
+/// instance it charged — validated by `generation`, a per-entry token minted
+/// by [`RateLimitState::next_generation`] whenever a [`Window`] is (re)created
+/// (fresh insert or window-expiry reset). A plain `window_start` comparison
+/// is only second-resolution: if the charged entry is evicted from the
+/// shard's LRU under load and the same caller then makes a brand-new,
+/// unrelated request within the same wall-clock second, the replacement
+/// entry's `window_start` can coincidentally match the original charge's.
+/// `generation` is unique per (re)creation regardless of timing, so it
+/// can't be fooled by that coincidence — it subsumes the `window_start`
+/// check rather than complementing it. If the entry is missing (evicted and
+/// never reinserted) or its generation has moved on (rolled over or
+/// replaced), this is a no-op rather than mis-crediting the wrong window.
 fn refund_charge(
     shard: &Mutex<LruCache<CounterKey, Window>>,
     key: &CounterKey,
-    charged_window_start: u64,
+    charged_generation: u64,
     max_requests: u32,
 ) {
     let mut guard = match shard.lock() {
@@ -471,7 +504,7 @@ fn refund_charge(
         }
     };
     if let Some(window_entry) = guard.get_mut(key)
-        && window_entry.window_start == charged_window_start
+        && window_entry.generation == charged_generation
         && window_entry.remaining < max_requests
     {
         window_entry.remaining += 1;
@@ -483,7 +516,8 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{TenantId, UserId};
 
-    fn caller(tenant: &str, user: &str) -> WebUiAuthenticatedCaller {
+    /// `pub(super)`: reused by the sibling `webui_rate_limit_router_contract_test` module.
+    pub(super) fn caller(tenant: &str, user: &str) -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller::new(
             TenantId::new(tenant).expect("tenant"),
             UserId::new(user).expect("user"),
@@ -509,6 +543,7 @@ mod tests {
         RateLimitState {
             routes: Arc::new(vec![route]),
             shards: Arc::new(shards),
+            next_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -547,10 +582,12 @@ mod tests {
         let window_entry = guard.get_or_insert_mut(key, || Window {
             remaining: max,
             window_start: now,
+            generation: state.next_generation.fetch_add(1, Ordering::Relaxed),
         });
         if now.saturating_sub(window_entry.window_start) >= window_seconds {
             window_entry.window_start = now;
             window_entry.remaining = max.saturating_sub(1);
+            window_entry.generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
             true
         } else if window_entry.remaining == 0 {
             false
@@ -847,18 +884,20 @@ mod tests {
         let shard = &state.shards[shard_index(&key.bucket_key)];
 
         // Simulate a charge made against a now-stale window: insert an
-        // entry whose window_start is different from what the (stale)
-        // caller believes it charged.
+        // entry whose generation differs from what the (stale) caller
+        // believes it charged — e.g. the window rolled over since, minting
+        // a fresh generation for the new window instance.
         {
             let mut guard = shard.lock().expect("lock");
             guard.get_or_insert_mut(key.clone(), || Window {
                 remaining: 1,
                 window_start: 1_000,
+                generation: 7,
             });
         }
-        let stale_charged_window_start = 500; // does not match the 1_000 above
+        let stale_charged_generation = 3; // does not match the live entry's generation (7)
 
-        refund_charge(shard, &key, stale_charged_window_start, 3);
+        refund_charge(shard, &key, stale_charged_generation, 3);
 
         let guard = shard.lock().expect("lock");
         let entry = guard.peek(&key).expect("entry still present");
@@ -880,12 +919,78 @@ mod tests {
 
         // No entry was ever inserted for this key (never charged, or
         // evicted under LRU pressure) — refund must not fabricate one.
-        refund_charge(shard, &key, now_epoch_secs(), 3);
+        refund_charge(shard, &key, 0, 3);
 
         let guard = shard.lock().expect("lock");
         assert!(
             guard.peek(&key).is_none(),
             "refund must not create an entry for an uncharged/evicted key"
+        );
+    }
+
+    /// Regression for PR #6592 review comment ("Refund can credit a
+    /// replacement entry after LRU eviction"): a plain `window_start`
+    /// equality check is only second-resolution. If the original charge's
+    /// entry is evicted from the shard's LRU (other callers on the same
+    /// shard churning it out under load) and the SAME caller then makes a
+    /// brand-new, unrelated request within the same wall-clock second, the
+    /// replacement entry's `window_start` can coincidentally match the
+    /// original charge's `window_start` — so a `window_start`-only guard
+    /// would let a delayed refund for the evicted charge incorrectly credit
+    /// the unrelated replacement entry. The per-entry `generation` token
+    /// is unique per (re)creation regardless of any `window_start`
+    /// coincidence, so it must not be fooled by this.
+    #[test]
+    fn refund_charge_does_not_credit_replacement_entry_after_eviction_same_second() {
+        let state = limited_state(3, 60);
+        let alice = caller("tenant-alpha", "alice");
+        let key = CounterKey {
+            route_idx: 0,
+            bucket_key: caller_key(&alice),
+        };
+        let shard = &state.shards[shard_index(&key.bucket_key)];
+        let window_start = 1_000;
+
+        // Original charge: insert alice's entry at generation 1, remember
+        // that generation as `refund_charge` would (this is exactly
+        // `charged_generation` in `enforce_rate_limit`).
+        {
+            let mut guard = shard.lock().expect("lock");
+            guard.get_or_insert_mut(key.clone(), || Window {
+                remaining: 2,
+                window_start,
+                generation: 1,
+            });
+        }
+        let charged_generation = 1;
+
+        // Simulate LRU eviction of alice's entry (other callers on the same
+        // shard churning through their 512-entry cap under load), then a
+        // brand-new, unrelated request from alice within the same second
+        // reinserting a fresh entry — same `window_start` by coincidence,
+        // but a new, distinct `generation` (2).
+        {
+            let mut guard = shard.lock().expect("lock");
+            guard.pop(&key);
+            guard.get_or_insert_mut(key.clone(), || Window {
+                remaining: 1,
+                window_start,
+                generation: 2,
+            });
+        }
+
+        // The delayed refund for the ORIGINAL (now-evicted, generation 1)
+        // charge arrives late and must not credit the unrelated
+        // replacement entry (generation 2) it happens to collide with on
+        // `window_start`.
+        refund_charge(shard, &key, charged_generation, 3);
+
+        let guard = shard.lock().expect("lock");
+        let entry = guard.peek(&key).expect("replacement entry still present");
+        assert_eq!(
+            entry.remaining, 1,
+            "refund for an evicted charge must not credit an unrelated \
+             replacement entry that coincidentally shares window_start"
         );
     }
 
@@ -899,19 +1004,21 @@ mod tests {
         };
         let shard = &state.shards[shard_index(&key.bucket_key)];
         let window_start = now_epoch_secs();
+        let generation = 42;
 
         {
             let mut guard = shard.lock().expect("lock");
             guard.get_or_insert_mut(key.clone(), || Window {
                 remaining: 3,
                 window_start,
+                generation,
             });
         }
 
         // Two refunds for the same charge (a duplicate/racing refund)
         // must not push `remaining` past `max_requests`.
-        refund_charge(shard, &key, window_start, 3);
-        refund_charge(shard, &key, window_start, 3);
+        refund_charge(shard, &key, generation, 3);
+        refund_charge(shard, &key, generation, 3);
 
         let guard = shard.lock().expect("lock");
         let entry = guard.peek(&key).expect("entry still present");
@@ -921,3 +1028,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "webui_rate_limit_router_contract_test.rs"]
+mod webui_rate_limit_router_contract_test;
