@@ -326,6 +326,23 @@ pub(crate) fn parse_v3(
             .map_err(|error| ManifestV3Error::InvalidChannel { error })?;
     }
     if let Some(descriptor) = &raw.admin_configuration {
+        // Trust gate: an `[admin_configuration]` group declares deployment-owned,
+        // operator-managed secrets and routing. Only a host-bundled (first-party)
+        // manifest — one compiled into the host binary — may declare one. An
+        // untrusted, filesystem-discovered, or registry-installed manifest must
+        // not: otherwise it could collide with a first-party group id (aborting
+        // boot via a descriptor conflict) or register itself as a consumer of a
+        // first-party group's non-secret routing (a confused-deputy read). This
+        // is the earliest fail-closed point; composition's fold applies the same
+        // source gate as defense in depth.
+        if !source.allows_first_party() {
+            return Err(ManifestV3Error::Invalid {
+                reason:
+                    "[admin_configuration] declares a deployment-owned administrator group, which \
+                     is reserved for host-bundled (first-party) manifests"
+                        .to_string(),
+            });
+        }
         descriptor
             .validate()
             .map_err(|error| ManifestV3Error::Invalid {

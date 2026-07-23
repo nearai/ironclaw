@@ -189,9 +189,16 @@ fn resolve(toml: &str) -> ResolvedExtensionManifest {
             .unwrap();
         registry
     };
+    // These channel fixtures declare an `[admin_configuration]` group to back
+    // their channel signing secrets — a deployment-owned surface only a
+    // host-bundled (first-party) manifest may declare (see `parse_v3`'s trust
+    // gate). Real channel extensions (Slack, Telegram) are host-bundled, so
+    // resolve fixtures with that source. Their `trust = "third_party"` ceiling
+    // is unaffected: the resolved manifest is source-independent for a
+    // third-party trust class.
     ExtensionManifestRecord::from_toml(
         toml,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &catalog(),
         None,
         &contracts,
