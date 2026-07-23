@@ -6159,7 +6159,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Gateway state seeded after runtime build.
     struct LifecycleFacadeHandle {
-        facade: crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        facade: crate::extension_host::lifecycle::LifecycleFacade,
     }
 
     impl std::fmt::Debug for LifecycleFacadeHandle {
@@ -6324,7 +6324,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Seed the lifecycle facade before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+    let facade = crate::extension_host::lifecycle::LifecycleFacade::new(Arc::clone(
         &runtime.skill_management,
     ))
     .with_extension_management(extension_management)
