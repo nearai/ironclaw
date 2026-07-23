@@ -17,6 +17,7 @@ use ironclaw_host_api::{EffectKind, HostApiError};
 use ironclaw_host_runtime::{FirstPartyCapabilityRegistry, ProductAuthProviderRuntimePorts};
 
 /// Byte content of one asset shipped inside a first-party package.
+#[derive(Debug, Clone)]
 pub struct FirstPartyPackageAsset {
     pub path: String,
     pub bytes: Vec<u8>,
@@ -24,6 +25,7 @@ pub struct FirstPartyPackageAsset {
 
 /// A package's user-facing onboarding copy, carried as plain data (mirrors
 /// `ironclaw_first_party_extensions::packages::PackageOnboarding`).
+#[derive(Debug, Clone)]
 pub struct FirstPartyPackageOnboarding {
     pub instructions: String,
     pub credential_instructions: Option<String>,
@@ -33,6 +35,7 @@ pub struct FirstPartyPackageOnboarding {
 
 /// A bespoke OAuth-*setup* credential requirement replacing the manifest-derived
 /// one (mirrors `ironclaw_first_party_extensions::packages::PackageOAuthSetup`).
+#[derive(Debug, Clone)]
 pub struct FirstPartyPackageOAuthSetup {
     pub requirement_name: String,
     pub provider: String,
@@ -42,6 +45,7 @@ pub struct FirstPartyPackageOAuthSetup {
 /// An opaque, data-only first-party package the binary hands composition. Host
 /// code consumes this without naming the concrete package; the concrete
 /// identity lives only in the injecting binary.
+#[derive(Debug, Clone)]
 pub struct FirstPartyPackageBundle {
     pub id: String,
     pub display_name: String,

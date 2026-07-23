@@ -171,11 +171,8 @@ pub struct RebornHostBindings {
     /// [`RebornHostBindings::with_deployment`] — `local_runtime_build_input_with_options`
     /// is the one that does.
     pub(crate) deployment: DeploymentConfig,
-    pub(crate) owner_id: String,
-    pub(crate) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
-    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
     #[cfg(any(test, feature = "test-support"))]
@@ -188,10 +185,6 @@ pub struct RebornHostBindings {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) trust_fixture_extensions_for_test: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
-    pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
-    pub(crate) oauth_dcr_callback: Option<OAuthDcrCallbackConfig>,
-    pub(crate) nearai_mcp_bootstrap_config:
-        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// `first_party`-runtime extension factories the binary assembles
     /// (extension-runtime P2). Empty until concrete extension crates extract
     /// in P6; integration tests register the invented-vendor fixture factory
@@ -204,22 +197,6 @@ pub struct RebornHostBindings {
     /// channel host assembly consumes the extras. Composition never names a
     /// concrete extension crate.
     pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
-    /// Concurrency limits applied to the in-memory turn-state store.
-    /// Defaults to no limits (all caps `None` / unlimited).
-    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
-    /// Binary-assembled account-setup declarations (extension-runtime §5.5):
-    /// per-extension activation gates and connect-strategy presentation.
-    /// `WebGeneratedCode` declarations additionally get a generic pairing
-    /// service composed over the durable identity/pairing stores.
-    pub(crate) account_setup_descriptors:
-        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
-    /// Binary-assembled first-party package inventory (extension-runtime
-    /// DEL-7), injected as neutral data so composition never names a concrete
-    /// first-party extension crate. Feeds the available-extension catalog, the
-    /// built-in trust policy's per-package effect grants, and the reserved
-    /// host-bundled id set. Empty by default; the binary MUST inject the real
-    /// bundles or first-party extensions silently vanish.
-    pub(crate) first_party_bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
     /// Binary-assembled first-party capability handler registrars (GSuite,
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
@@ -358,11 +335,11 @@ impl RebornHostBindings {
     /// Owner id (string form). Used by the assembled runtime to mint the
     /// `UserId` actor for inbound CLI messages.
     pub fn owner_id(&self) -> &str {
-        &self.owner_id
+        &self.deployment.owner_id
     }
 
     pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
-        self.nearai_mcp_bootstrap_config.is_some()
+        self.deployment.nearai_mcp_bootstrap_config.is_some()
     }
 
     /// Override the owner id after construction.
@@ -373,14 +350,14 @@ impl RebornHostBindings {
     /// thread context from the same `owners/<user>` subtree the v2 facade
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
-        self.owner_id = owner_id.into();
+        self.deployment.owner_id = owner_id.into();
         self
     }
 
     /// Override the local runtime tenant/agent identity used by command-style
     /// facades that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
-        self.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+        self.deployment.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
             tenant_id,
             agent_id,
         });
@@ -550,7 +527,7 @@ impl RebornHostBindings {
     }
 
     pub fn requires_local_runtime_confirmed_host_home_root(&self) -> bool {
-        self.runtime_policy.as_ref().is_some_and(|policy| {
+        self.deployment.runtime_policy.as_ref().is_some_and(|policy| {
             policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
         })
     }
@@ -560,7 +537,7 @@ impl RebornHostBindings {
     }
 
     pub fn grants_trusted_laptop_access(&self) -> bool {
-        self.runtime_policy.as_ref().is_some_and(|policy| {
+        self.deployment.runtime_policy.as_ref().is_some_and(|policy| {
             policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
                 || policy.network_mode == NetworkMode::Direct
                 || policy.secret_mode == SecretMode::InheritedEnv
@@ -695,12 +672,12 @@ impl RebornHostBindings {
     }
 
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
-        self.runtime_policy = Some(policy);
+        self.deployment.runtime_policy = Some(policy);
         self
     }
 
     pub fn runtime_policy(&self) -> Option<&EffectiveRuntimePolicy> {
-        self.runtime_policy.as_ref()
+        self.deployment.runtime_policy.as_ref()
     }
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
@@ -760,7 +737,7 @@ impl RebornHostBindings {
         mut self,
         descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
     ) -> Self {
-        self.account_setup_descriptors = descriptors;
+        self.deployment.account_setup_descriptors = descriptors;
         self
     }
 
@@ -768,7 +745,7 @@ impl RebornHostBindings {
         mut self,
         config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
-        self.nearai_mcp_bootstrap_config = Some(config);
+        self.deployment.nearai_mcp_bootstrap_config = Some(config);
         self
     }
 
@@ -776,7 +753,7 @@ impl RebornHostBindings {
         mut self,
         config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
-        self.nearai_mcp_bootstrap_config = config;
+        self.deployment.nearai_mcp_bootstrap_config = config;
         self
     }
 
@@ -835,7 +812,7 @@ impl RebornHostBindings {
     ) -> Result<Self, ironclaw_auth::AuthProductError> {
         let callback_origin = callback_origin.into();
         validate_dcr_callback_origin(&callback_origin)?;
-        self.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
+        self.deployment.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
         Ok(self)
     }
 
@@ -845,12 +822,13 @@ impl RebornHostBindings {
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
     pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
-        self.turn_state_store_limits = limits;
+        self.deployment.turn_state_store_limits = limits;
         self
     }
 
     fn push_oauth_provider_config(&mut self, vendor: String, client: OAuthClientConfig) {
         if let Some(existing) = self
+            .deployment
             .oauth_provider_configs
             .iter_mut()
             .find(|existing| existing.vendor == vendor)
@@ -858,7 +836,7 @@ impl RebornHostBindings {
             existing.client = client;
             return;
         }
-        self.oauth_provider_configs
+        self.deployment.oauth_provider_configs
             .push(OAuthProviderBackendConfig { vendor, client });
     }
 
@@ -867,13 +845,15 @@ impl RebornHostBindings {
         owner_id: impl Into<String>,
         storage: RebornStorageInput,
     ) -> Self {
+        // Owner id is declarative DATA (Phase A) — carry it on the deployment,
+        // not the bindings. Every other DATA field defaults on the deployment
+        // preset and is overridden through the delegating builders below.
+        let mut deployment = deployment;
+        deployment.owner_id = owner_id.into();
         Self {
             deployment,
-            owner_id: owner_id.into(),
-            local_runtime_identity: None,
             storage,
             production_trust_policy: None,
-            runtime_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -881,14 +861,8 @@ impl RebornHostBindings {
             #[cfg(any(test, feature = "test-support"))]
             trust_fixture_extensions_for_test: false,
             product_auth_ports: None,
-            oauth_provider_configs: Vec::new(),
-            oauth_dcr_callback: None,
-            nearai_mcp_bootstrap_config: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
-            turn_state_store_limits: TurnStateStoreLimits::default(),
-            account_setup_descriptors: Vec::new(),
-            first_party_bundles: Vec::new(),
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
         }
@@ -899,7 +873,7 @@ impl RebornHostBindings {
         mut self,
         bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
     ) -> Self {
-        self.first_party_bundles = bundles;
+        self.deployment.first_party_bundles = bundles;
         self
     }
 

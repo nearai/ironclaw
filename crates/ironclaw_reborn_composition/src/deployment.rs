@@ -19,6 +19,7 @@
 
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_reborn_event_store::RebornProfile;
+use ironclaw_turns::TurnStateStoreLimits;
 use ironclaw_runtime_policy::{
     EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest,
 };
@@ -202,7 +203,10 @@ pub(crate) struct RuntimePolicyRequest {
 ///   *handles*, not deployment policy — they continue to ride
 ///   `RebornStorageInput`. This value carries only the policy request and the
 ///   shape selections.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Deliberately not `PartialEq`/`Eq`: the DATA fields below (oauth/nearai
+// configs) carry secret material and connection settings that don't derive
+// equality. Compare observable axes (profile, storage_shape) instead.
+#[derive(Debug, Clone)]
 pub struct DeploymentConfig {
     /// The profile name this config was built from. A **label** — carried for
     /// logging, telemetry, and the readiness diagnostics the operator reads.
@@ -230,6 +234,29 @@ pub struct DeploymentConfig {
     /// Whether the build must provision WASM credential injection. Declarative
     /// deployment requirement; defaulted `false` by every preset.
     pub(crate) require_wasm_credentials: bool,
+    // --- Declarative DATA the assembling binary supplies (Phase A) ---
+    // These carry *what* the deployment is, not live handles. The binary sets
+    // them through the `RebornHostBindings` builders, which delegate here; the
+    // bindings struct keeps only the irreducible code (trait objects,
+    // factories, registrars, pre-opened handles).
+    /// Owner id (string form) used to mint the runtime's `UserId` actor.
+    /// Late-overridable via [`DeploymentConfig::with_owner_id`] (WebChat serve
+    /// pins the authenticated user after the disclosure gate is built).
+    pub(crate) owner_id: String,
+    pub(crate) local_runtime_identity: Option<crate::input::RebornLocalRuntimeIdentity>,
+    /// Resolved runtime policy. Populated late (the yolo host-access disclosure
+    /// is not known at preset-construction time); the profile→bindings bridge
+    /// installs the accurate value.
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
+    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
+    pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
+    pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
+    pub(crate) nearai_mcp_bootstrap_config:
+        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    pub(crate) account_setup_descriptors:
+        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    pub(crate) first_party_bundles:
+        Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
 }
 
 impl DeploymentConfig {
@@ -250,6 +277,15 @@ impl DeploymentConfig {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -278,6 +314,15 @@ impl DeploymentConfig {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -327,6 +372,15 @@ impl DeploymentConfig {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -378,6 +432,15 @@ impl DeploymentConfig {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            owner_id: String::new(),
+            local_runtime_identity: None,
+            runtime_policy: None,
+            turn_state_store_limits: TurnStateStoreLimits::default(),
+            oauth_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
+            nearai_mcp_bootstrap_config: None,
+            account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
         }
     }
 
@@ -906,12 +969,16 @@ mod tests {
     #[test]
     fn deployment_targets_differ_only_as_data() {
         // The whole local/hosted diff is field values on one struct — the
-        // §4.4 claim this module exists to make true.
-        assert_ne!(
-            DeploymentConfig::local_dev(),
-            DeploymentConfig::hosted_single_tenant_volume()
+        // §4.4 claim this module exists to make true. `DeploymentConfig` is no
+        // longer `PartialEq` (it now carries non-`Eq` secret/config DATA), so
+        // compare the observable axes the claim is actually about.
+        let local = DeploymentConfig::local_dev();
+        let hosted = DeploymentConfig::hosted_single_tenant_volume();
+        assert_ne!(local.readiness().state, hosted.readiness().state);
+        assert_eq!(
+            DeploymentConfig::local_dev().readiness().state,
+            DeploymentConfig::local_dev().readiness().state
         );
-        assert_eq!(DeploymentConfig::local_dev(), DeploymentConfig::local_dev());
     }
 }
 

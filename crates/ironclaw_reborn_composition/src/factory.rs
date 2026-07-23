@@ -658,7 +658,7 @@ pub(crate) async fn build_runtime_substrate(
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     tracing::debug!(
         profile = %input.profile(),
-        owner_id = %input.owner_id,
+        owner_id = %input.owner_id(),
         "building Reborn composition facades"
     );
     // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
@@ -2327,30 +2327,33 @@ async fn build_production_shaped(
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornHostBindings {
         deployment,
-        owner_id,
-        local_runtime_identity,
         storage,
         production_trust_policy,
-        runtime_policy,
         // The notifier field on `RebornHostBindings` is kept for backward
         // compatibility with test callers that pre-mint one, but the
         // production-shaped build now mints its own notifier internally so the
         // coordinator and scheduler always share the exact same channel.
         turn_run_wake_notifier: _,
-        account_setup_descriptors,
         runtime_process_binding,
         product_auth_ports,
-        oauth_provider_configs,
-        oauth_dcr_callback,
-        nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
-        turn_state_store_limits,
-        first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
         ..
     } = input;
+    // The declarative DATA now lives on the deployment (Phase A). Clone the
+    // fields this build path consumes by value; `deployment` stays in scope for
+    // its substrate/traffic/readiness axes below.
+    let owner_id = deployment.owner_id.clone();
+    let local_runtime_identity = deployment.local_runtime_identity.clone();
+    let runtime_policy = deployment.runtime_policy.clone();
+    let account_setup_descriptors = deployment.account_setup_descriptors.clone();
+    let oauth_provider_configs = deployment.oauth_provider_configs.clone();
+    let oauth_dcr_callback = deployment.oauth_dcr_callback.clone();
+    let nearai_mcp_bootstrap_config = deployment.nearai_mcp_bootstrap_config.clone();
+    let turn_state_store_limits = deployment.turn_state_store_limits;
+    let first_party_bundles = deployment.first_party_bundles.clone();
     // Label for logging/errors; behaviour reads `deployment`'s axes.
     let profile = deployment.profile();
     let wiring_config = production_config(
