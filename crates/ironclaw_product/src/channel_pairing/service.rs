@@ -38,6 +38,17 @@ impl ChannelPairingService {
         &self.extension_id
     }
 
+    /// Test-only view of the continuation dispatcher composition wired in.
+    /// Mirrors the production dispatch in `dispatch_pairing_completion_with`;
+    /// lets composition tests pin (by `Arc::ptr_eq`) that pairing completions
+    /// run the SAME lifecycle-wrapped dispatcher product-auth uses, so
+    /// readiness reconciliation cannot be silently skipped for paired
+    /// channels. Ships zero bytes in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn continuation_dispatcher_for_test(&self) -> Arc<dyn ProductAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation)
+    }
+
     pub fn connection_notices(&self) -> &ChannelConnectionNoticePolicy {
         &self.connection_notices
     }

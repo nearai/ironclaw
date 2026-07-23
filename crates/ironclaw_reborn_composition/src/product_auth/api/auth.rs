@@ -676,6 +676,16 @@ impl RebornProductAuthServices {
         self.flow_manager.clone()
     }
 
+    /// Test-only view of the composed continuation dispatcher. Lets factory
+    /// tests pin (by `Arc::ptr_eq`) that other continuation producers —
+    /// channel pairing in particular — were wired with the SAME
+    /// lifecycle-wrapped dispatcher, not a bare turn-resume one. Ships zero
+    /// bytes in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn continuation_dispatcher_for_test(&self) -> Arc<dyn RebornAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation_dispatcher)
+    }
+
     /// Auth-flow read projection used only by product/WebUI interaction views.
     ///
     /// `None` is an intentional unsupported mode for bundles that can perform

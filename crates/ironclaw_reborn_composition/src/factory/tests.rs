@@ -3146,3 +3146,47 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
         "a fanned-out continuation must stamp the durable fence"
     );
 }
+
+/// #6520 live-repro regression: a completed channel pairing must run the SAME
+/// lifecycle-wrapped continuation dispatcher product-auth uses — readiness
+/// reconciliation (runtime publication) before the blocked-run fan-out. When
+/// composition handed pairing a bare turn-resume dispatcher instead, a
+/// freshly paired channel extension (telegram: remove → install → pair) sat
+/// at setup_needed forever because nothing re-published it. Pinned by pointer
+/// identity at the composition seam: every pairing service's dispatcher IS
+/// product-auth's composed dispatcher.
+#[tokio::test]
+async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "local-dev-pairing-continuation-owner",
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+
+    let product_auth_dispatcher = services.product_auth.continuation_dispatcher_for_test();
+    let channel_pairing = services
+        .channel_pairing
+        .as_ref()
+        .expect("local-dev build composes the channel pairing registry");
+    let mut pairing_services_checked = 0usize;
+    for extension_id in ["telegram", "slack"] {
+        let Some(pairing) = channel_pairing.get(extension_id) else {
+            continue;
+        };
+        pairing_services_checked += 1;
+        assert!(
+            Arc::ptr_eq(
+                &pairing.continuation_dispatcher_for_test(),
+                &product_auth_dispatcher,
+            ),
+            "{extension_id} pairing completions must dispatch through product-auth's \
+             lifecycle-wrapped continuation dispatcher, not a bare turn-resume one",
+        );
+    }
+    assert!(
+        pairing_services_checked > 0,
+        "expected at least one bundled channel extension with a pairing service",
+    );
+}

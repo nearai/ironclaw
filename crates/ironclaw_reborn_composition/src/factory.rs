@@ -4216,12 +4216,13 @@ async fn build_backend_production(
                 product_auth_dependencies.runtime_credential_account_selection_service(),
             ),
     );
-    let product_auth_services = Arc::new(product_auth_core.with_continuation_dispatcher(
-        ironclaw_product::lifecycle_auth_continuation_dispatcher(
-            lifecycle_continuation_facade,
-            base_auth_continuation,
-        ),
-    ));
+    let lifecycle_wrapped_continuation = ironclaw_product::lifecycle_auth_continuation_dispatcher(
+        lifecycle_continuation_facade,
+        base_auth_continuation,
+    );
+    let product_auth_services = Arc::new(
+        product_auth_core.with_continuation_dispatcher(Arc::clone(&lifecycle_wrapped_continuation)),
+    );
     // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
     // (no caller-supplied product_auth_ports); recipes are present only when
@@ -4464,13 +4465,14 @@ async fn build_backend_production(
                     .map_err(|error| RebornBuildError::InvalidConfig {
                         reason: error.to_string(),
                     })?;
-                let continuation = auth_continuation_dispatcher(
-                    turn_coordinator.clone(),
-                    Some(Arc::clone(&turn_state)
-                        as Arc<
-                            dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-                        >),
-                );
+                // Pairing completions dispatch `LifecycleActivation` refs and
+                // must run the SAME lifecycle-wrapped continuation the OAuth
+                // paths use: readiness reconciliation (runtime publication)
+                // before the blocked-run fan-out. A bare turn-resume
+                // dispatcher here leaves a freshly paired channel extension
+                // stuck at setup_needed until an unrelated reconcile runs
+                // (#6520 live-repro: telegram remove → install → pair).
+                let continuation = Arc::clone(&lifecycle_wrapped_continuation);
                 let agent_id = match channel_egress_scope.agent_id.clone() {
                     Some(agent_id) => agent_id,
                     None => ironclaw_host_api::AgentId::new("reborn").map_err(|error| {
