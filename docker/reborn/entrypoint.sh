@@ -271,10 +271,10 @@ port="${PORT:-${IRONCLAW_SERVE_PORT:-3000}}"
 
 resolve_env_placeholder_arg() {
   case "$1" in
-    '$IRONCLAW_SERVE_HOST'|'${IRONCLAW_SERVE_HOST}')
+    '$IRONCLAW_SERVE_HOST'|'${IRONCLAW_SERVE_HOST}'|'$IRONCLAW_REBORN_SERVE_HOST'|'${IRONCLAW_REBORN_SERVE_HOST}')
       printf '%s\n' "$host"
       ;;
-    '$PORT'|'${PORT}'|'$IRONCLAW_SERVE_PORT'|'${IRONCLAW_SERVE_PORT}')
+    '$PORT'|'${PORT}'|'$IRONCLAW_SERVE_PORT'|'${IRONCLAW_SERVE_PORT}'|'$IRONCLAW_REBORN_SERVE_PORT'|'${IRONCLAW_REBORN_SERVE_PORT}')
       printf '%s\n' "$port"
       ;;
     *)

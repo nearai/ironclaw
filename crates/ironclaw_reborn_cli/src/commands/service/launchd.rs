@@ -220,6 +220,14 @@ pub(super) fn install_with_runner(
     runner: &mut dyn ServiceCommandRunner,
 ) -> Result<bool> {
     let file = plist_path()?;
+    let legacy_file = plist_path_for(LEGACY_SERVICE_LABEL)?;
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    if legacy_file.exists() || find_label_status_for(&list, LEGACY_SERVICE_LABEL).is_some() {
+        bail!(
+            "Legacy launchd service {LEGACY_SERVICE_LABEL} is still installed or loaded; unload and remove it explicitly before installing {SERVICE_LABEL} to avoid running two IronClaw daemons"
+        );
+    }
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -230,8 +238,6 @@ pub(super) fn install_with_runner(
     // add it externally if long-running installs need it.
     let stdout_log = logs_dir.join("serve.stdout.log");
     let stderr_log = logs_dir.join("serve.stderr.log");
-    let list =
-        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
     let was_loaded = service_loaded(&list);
     // Captured before the write: a pre-existing file at this path may
     // have been installed by this CLI's own prior run, or by the WebUI
@@ -601,6 +607,67 @@ mod tests {
             !replaced,
             "a fresh install (no prior plist) must not report a replacement"
         );
+    }
+
+    #[test]
+    fn install_refuses_to_create_canonical_plist_beside_legacy_service() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let legacy = plist_path_for(LEGACY_SERVICE_LABEL).expect("legacy plist path");
+        std::fs::create_dir_all(legacy.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&legacy, "legacy plist").expect("write legacy plist");
+        let canonical = plist_path().expect("canonical plist path");
+        let mut runner = RecordingRunner::default();
+
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("install must refuse a second service identity");
+        assert!(error.to_string().contains(LEGACY_SERVICE_LABEL));
+        assert!(!canonical.exists(), "canonical plist must not be created");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list"],
+            "only the legacy-service preflight query may run"
+        );
+    }
+
+    #[test]
+    fn install_refuses_when_legacy_launchd_label_is_loaded_without_plist() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let canonical = plist_path().expect("canonical plist path");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{LEGACY_SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("loaded legacy label must block install");
+        assert!(error.to_string().contains(LEGACY_SERVICE_LABEL));
+        assert!(!canonical.exists(), "canonical plist must not be created");
     }
 
     #[test]

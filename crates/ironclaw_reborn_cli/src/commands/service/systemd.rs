@@ -216,6 +216,13 @@ pub(super) fn install_with_runner(
     runner: &mut dyn ServiceCommandRunner,
 ) -> Result<bool> {
     let file = unit_path()?;
+    let legacy_file = unit_path_for(LEGACY_SYSTEMD_UNIT)?;
+    if legacy_file.exists() {
+        bail!(
+            "Legacy systemd service {LEGACY_SYSTEMD_UNIT} is still installed at {}; remove it explicitly before installing {SYSTEMD_UNIT} to avoid running two IronClaw daemons",
+            legacy_file.display()
+        );
+    }
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -991,6 +998,28 @@ mod tests {
                 vec!["--user", "daemon-reload"],
                 vec!["--user", "start", LEGACY_SYSTEMD_UNIT],
             ]
+        );
+    }
+
+    #[test]
+    fn install_refuses_to_create_canonical_unit_beside_legacy_unit() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let legacy = unit_path_for(LEGACY_SYSTEMD_UNIT).expect("legacy unit path");
+        std::fs::create_dir_all(legacy.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&legacy, "[Service]\n").expect("write legacy unit");
+        let canonical = unit_path().expect("canonical unit path");
+        let mut runner = RecordingRunner::default();
+
+        let error = install_with_runner(&sample_context(), &sample_invocation(), &mut runner)
+            .expect_err("install must refuse a second service identity");
+
+        assert!(error.to_string().contains(LEGACY_SYSTEMD_UNIT));
+        assert!(!canonical.exists(), "canonical unit must not be created");
+        assert!(
+            runner.labels.is_empty(),
+            "service manager commands must not run after the legacy preflight fails"
         );
     }
 
