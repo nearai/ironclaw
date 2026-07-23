@@ -42,7 +42,6 @@ ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
@@ -110,6 +109,11 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
+# DEL-7: composition no longer links first-party extensions in production; the
+# binary injects them as neutral data. The dev-dependency stays so the crate's
+# own unit/integration tests (and the test-support inventory helper) can build
+# the catalog and trust policy without the binary.
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"

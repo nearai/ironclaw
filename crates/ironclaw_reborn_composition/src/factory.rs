@@ -28,9 +28,7 @@ use crate::extension_host::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
     extension_removal_cleanup::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry},
-    gsuite::{
-        ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
-    },
+    first_party::{FirstPartyRegistrarContext, first_party_reserved_extension_ids},
     provider_instance_readiness::{
         ProviderInstanceReadinessInput, provider_instance_readiness_map,
     },
@@ -53,7 +51,6 @@ use crate::root::default_system_prompt::seed_default_system_prompt;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::storage_catalog::validate_reborn_runtime_storage;
 use crate::support::fs::RebornProjectService;
-use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
@@ -703,6 +700,9 @@ struct ProductAuthServicesCompositionInput {
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
+    credential_account_visibility_policy: Option<
+        Arc<dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy>,
+    >,
 }
 
 fn compose_product_auth_services(
@@ -716,6 +716,7 @@ fn compose_product_auth_services(
         security_audit_sink,
         secret_store,
         nearai_mcp_host_managed_scope,
+        credential_account_visibility_policy,
     } = input;
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
@@ -727,6 +728,9 @@ fn compose_product_auth_services(
     );
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
+    }
+    if let Some(policy) = credential_account_visibility_policy {
+        services = services.with_credential_account_visibility_policy(policy);
     }
     if let Some(engine) = provider_composition.engine {
         services = services.with_auth_engine(engine);
@@ -2216,7 +2220,16 @@ fn production_first_party_registry_with_trigger_create_hook(
     })
 }
 
-pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+/// Build the production first-party trust policy from the binary-injected
+/// neutral bundle set (extension-runtime DEL-7). The provider entry comes from
+/// `builtin_capability_policy` (no first-party dependency); each package's host
+/// authority grant is sourced from its injected `trust_effects` instead of a
+/// direct `ironclaw_first_party_extensions` call. Every entry is byte-identical
+/// to the one the inventory-driven builder produced — same id, local-manifest
+/// path, manifest digest, and effect list — so behavior is preserved exactly.
+pub fn production_first_party_trust_policy(
+    bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
+) -> Result<HostTrustPolicy, RebornBuildError> {
     let policy = builtin_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev capability policy is invalid: {error}"),
     })?;
@@ -2232,20 +2245,19 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         policy.provider.authority_effects,
         None,
     )];
-    // Packages migrated to the self-contained inventory supply their own trust
-    // grant as data (`PackageBundle::trust_effects`); composition still owns the
-    // decision (`first_party`) and the policy construction. Each entry is
-    // byte-identical to the explicit one it replaced — same id, local-manifest
-    // path, manifest digest, and effect list. Packages with `None` (WASM tools,
-    // channel-only) draw trust from the extension registry instead and are
-    // skipped here.
-    for bundle in ironclaw_first_party_extensions::packages::bundled_packages() {
-        let Some(effects) = bundle.trust_effects else {
+    // Packages supply their own trust grant as data (`trust_effects`);
+    // composition still owns the decision (`first_party`) and the policy
+    // construction. Packages with `None` (WASM tools, channel-only) draw trust
+    // from the extension registry instead and are skipped here.
+    for bundle in bundles {
+        let Some(effects) = bundle.trust_effects.clone() else {
             continue;
         };
         entries.push(AdminEntry::for_local_manifest(
-            PackageId::new(bundle.id).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("first-party package id '{}' is invalid: {error}", bundle.id),
+            PackageId::new(bundle.id.as_str()).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("first-party package id '{}' is invalid: {error}", bundle.id),
+                }
             })?,
             format!("/system/extensions/{}/manifest.toml", bundle.id),
             Some(sha256_digest_token(bundle.manifest_toml.as_bytes())),
@@ -2259,6 +2271,19 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             reason: format!("built-in first-party trust policy is invalid: {error}"),
         }
     })
+}
+
+/// Inventory-driven trust policy for composition's own unit tests (mirrors the
+/// production builder, sourcing the neutral bundle set from the concrete
+/// inventory). Gated `#[cfg(test)]` because it names
+/// `ironclaw_first_party_extensions`, a dev-dependency; integration tests build
+/// their trust policy from `production_first_party_trust_policy` plus bundles
+/// they convert themselves (see `tests/support/first_party.rs`).
+#[cfg(test)]
+pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+    production_first_party_trust_policy(
+        &crate::extension_host::first_party::first_party_bundles_from_inventory(),
+    )
 }
 
 #[cfg(test)]
@@ -2294,6 +2319,9 @@ async fn build_production_shaped(
         native_extension_factories,
         channel_extension_bindings,
         turn_state_store_limits,
+        first_party_bundles,
+        first_party_registrars,
+        credential_account_visibility_policy,
         ..
     } = input;
     // Label for logging/errors; behaviour reads `deployment`'s axes.
@@ -2303,6 +2331,18 @@ async fn build_production_shaped(
         deployment.require_runtime_http_egress,
         deployment.require_wasm_credentials,
     );
+    // The built-in first-party trust policy is composed here, at BUILD time,
+    // from the binary-injected neutral bundle set (extension-runtime DEL-7) when
+    // the caller did not pre-supply one — construction time (input.rs) predates
+    // bundle injection. Same grants as the inventory-driven builder, sourced
+    // from injected data instead of a direct `ironclaw_first_party_extensions`
+    // call.
+    let production_trust_policy = match production_trust_policy {
+        Some(policy) => Some(policy),
+        None => Some(Arc::new(production_first_party_trust_policy(
+            &first_party_bundles,
+        )?)),
+    };
     match storage {
         RebornStorageInput::Disabled => Err(RebornBuildError::InvalidConfig {
             reason: format!(
@@ -2317,12 +2357,8 @@ async fn build_production_shaped(
         } => {
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
-            let trust_policy = match production_trust_policy {
-                Some(policy) => Some(policy),
-                None => Some(Arc::new(builtin_first_party_trust_policy()?)),
-            };
             let production_wiring = production_wiring(
-                trust_policy,
+                production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
@@ -2343,6 +2379,9 @@ async fn build_production_shaped(
                 nearai_mcp_bootstrap_config,
                 native_extension_factories,
                 channel_extension_bindings,
+                first_party_bundles,
+                first_party_registrars,
+                credential_account_visibility_policy,
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
@@ -2373,12 +2412,8 @@ async fn build_production_shaped(
             let pool = open_postgres_pool_from_source(pool_source)?;
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
-            let trust_policy = match production_trust_policy {
-                Some(policy) => Some(policy),
-                None => Some(Arc::new(builtin_first_party_trust_policy()?)),
-            };
             let production_wiring = production_wiring(
-                trust_policy,
+                production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
@@ -2399,6 +2434,9 @@ async fn build_production_shaped(
                 nearai_mcp_bootstrap_config,
                 native_extension_factories,
                 channel_extension_bindings,
+                first_party_bundles,
+                first_party_registrars,
+                credential_account_visibility_policy,
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
@@ -2462,6 +2500,9 @@ async fn build_production_shaped(
                 nearai_mcp_bootstrap_config,
                 native_extension_factories,
                 channel_extension_bindings,
+                first_party_bundles,
+                first_party_registrars,
+                credential_account_visibility_policy,
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
@@ -2514,6 +2555,9 @@ async fn build_production_shaped(
                 nearai_mcp_bootstrap_config,
                 native_extension_factories,
                 channel_extension_bindings,
+                first_party_bundles,
+                first_party_registrars,
+                credential_account_visibility_policy,
                 workspace_filesystems: None,
                 local_dev_storage_root: None,
                 default_system_prompt_path: None,
@@ -2715,6 +2759,20 @@ struct RebornProductionBuildContext {
     nearai_mcp_bootstrap_config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     native_extension_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    /// Binary-injected neutral first-party bundle set (extension-runtime DEL-7):
+    /// feeds the available-extension catalog, vendor auth recipes, and the
+    /// reserved host-bundled id set.
+    first_party_bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+    /// Binary-injected first-party capability handler registrars (GSuite,
+    /// web tooling).
+    first_party_registrars:
+        Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+    /// Injected credential-account visibility policy (see the build-input field).
+    credential_account_visibility_policy: Option<
+        Arc<
+            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
+        >,
+    >,
     workspace_filesystems: Option<WorkspaceFilesystems>,
     local_dev_storage_root: Option<PathBuf>,
     default_system_prompt_path: Option<PathBuf>,
@@ -3260,11 +3318,17 @@ async fn build_backend_production(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
+        first_party_bundles,
+        first_party_registrars,
+        credential_account_visibility_policy,
         workspace_filesystems,
         local_dev_storage_root,
         default_system_prompt_path,
     } = context;
     let uses_local_host_runtime = local_process_port.is_some();
+    // The reserved host-bundled id set consulted during filesystem catalog
+    // load and by the upload-import path, sourced from the injected bundles.
+    let first_party_reserved_ids = first_party_reserved_extension_ids(&first_party_bundles);
     // Computed before `oauth_provider_configs` is consumed by
     // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
@@ -3517,6 +3581,7 @@ async fn build_backend_production(
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
         channel_config_credential_slot.clone(),
+        &first_party_bundles,
     )?;
     let services = if let Some(process_port) = local_process_port {
         services.with_runtime_process_port(Arc::new(process_port))
@@ -3593,6 +3658,7 @@ async fn build_backend_production(
                 channel_egress_scope.clone(),
                 AuthSurface::Api,
             )),
+            credential_account_visibility_policy,
         })?;
     // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
@@ -3621,22 +3687,28 @@ async fn build_backend_production(
         ),
     ));
     services = attach_wasm_runtime(services)?;
-    register_bundled_gsuite_first_party_handlers(
-        &mut first_party_registry,
-        product_auth_services.credential_account_service(),
-        product_auth_services.credential_account_record_source(),
-        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
-            product_auth_runtime_ports.clone(),
-        )),
+    // Install every binary-assembled first-party capability handler (GSuite,
+    // web tooling) through the generic registrar seam (extension-runtime DEL-7).
+    // Composition owns the loop and the shared context; the concrete executors
+    // live in the assembling binary.
+    let first_party_registrar_context = FirstPartyRegistrarContext {
+        credential_account_service: product_auth_services.credential_account_service(),
+        credential_account_record_source: product_auth_services.credential_account_record_source(),
+        product_auth_runtime_ports: product_auth_runtime_ports.clone(),
         google_oauth_configured,
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("GSuite first-party handlers are invalid: {error}"),
-    })?;
+    };
+    for registrar in &first_party_registrars {
+        registrar
+            .register(&mut first_party_registry, &first_party_registrar_context)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("first-party capability handlers are invalid: {error}"),
+            })?;
+    }
     let extensions_root = VirtualPath::new("/system/extensions")?;
     let filesystem_catalog = AvailableExtensionCatalog::from_filesystem_root(
         stores.filesystem.as_ref(),
         &extensions_root,
+        &first_party_reserved_ids,
     )
     .await;
     let mut available_extensions =
@@ -3646,11 +3718,17 @@ async fn build_backend_production(
     available_extensions.extend(
         AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
             nearai_mcp_bootstrap_config.as_ref(),
+            &first_party_bundles,
         )
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("first-party extension catalog could not be loaded: {error}"),
         })?,
     );
+    // Carry the reserved first-party id set onto the composed catalog so the
+    // upload-import path can reject reserved ids without re-deriving the
+    // inventory.
+    available_extensions =
+        available_extensions.with_reserved_bundled_ids(first_party_reserved_ids.clone());
     let admin_configuration_uses = available_extensions.admin_configuration_uses();
     let available_manifests = available_extensions.resolved_manifests();
     let deployment_bindings = available_manifests
@@ -3817,11 +3895,9 @@ async fn build_backend_production(
     );
     let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
-    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
-        |error| RebornBuildError::InvalidConfig {
-            reason: format!("web access first-party handlers are invalid: {error}"),
-        },
-    )?;
+    // The first-party capability handlers were installed above through the
+    // binary-supplied `first_party_registrars` loop (extension-runtime DEL-7);
+    // composition names no concrete first-party executor here.
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),

@@ -401,7 +401,7 @@ mod auth_interaction_tests;
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
 mod latency;
-mod local_dev;
+pub(crate) mod local_dev;
 #[cfg(test)]
 #[path = "runtime/tests/outbound_delivery.rs"]
 mod outbound_delivery_tests;

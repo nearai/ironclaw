@@ -52,7 +52,7 @@ use crate::{
     runtime::ComposedSelectableSkillContextSource,
 };
 
-pub(super) mod extension_surface;
+pub(crate) mod extension_surface;
 mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;

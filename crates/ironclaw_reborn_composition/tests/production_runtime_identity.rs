@@ -38,8 +38,11 @@ use ironclaw_host_runtime::{
 use ironclaw_reborn_composition::{
     ExternalSubjectId, ProviderKind, RebornBuildInput, RebornCompositionProfile,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProcessBinding,
-    ResolveExternalIdentity, SurfaceKind, build_reborn_runtime, builtin_first_party_trust_policy,
+    ResolveExternalIdentity, SurfaceKind, build_reborn_runtime,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 
 // ─── minimal sandbox transport stub (production requires a process binding) ───
 
@@ -101,9 +104,7 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,

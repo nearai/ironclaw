@@ -64,8 +64,10 @@ use ironclaw_loop_host::{
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, TriggerPollerSettings, build_reborn_runtime,
-    builtin_first_party_trust_policy,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
@@ -154,9 +156,7 @@ async fn build_production_runtime_with_poller(
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,

@@ -37,8 +37,10 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
-    builtin_first_party_trust_policy,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 
 const RUNTIME_TENANT: &str = "prod-projects-tenant";
 const RUNTIME_AGENT: &str = "prod-projects-agent";
@@ -97,9 +99,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,

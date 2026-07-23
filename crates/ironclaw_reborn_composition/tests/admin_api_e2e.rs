@@ -926,10 +926,11 @@ fn production_effective_policy() -> EffectiveRuntimePolicy {
     }
 }
 
+#[path = "support/first_party.rs"]
+mod first_party_support;
+
 async fn build_admin_harness_production() -> AdminHarness {
-    use ironclaw_reborn_composition::{
-        RebornCompositionProfile, RebornRuntimeProcessBinding, builtin_first_party_trust_policy,
-    };
+    use ironclaw_reborn_composition::{RebornCompositionProfile, RebornRuntimeProcessBinding};
 
     let root = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
@@ -947,9 +948,7 @@ async fn build_admin_harness_production() -> AdminHarness {
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )
-    .with_production_trust_policy(Arc::new(
-        builtin_first_party_trust_policy().expect("trust policy"),
-    ))
+    .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
     .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
         ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),

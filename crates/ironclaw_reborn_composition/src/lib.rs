@@ -52,7 +52,6 @@ mod support;
 pub mod test_support;
 mod trigger_fire_access;
 mod turn_run_snapshot;
-mod web_access;
 mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
@@ -76,8 +75,9 @@ pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
-pub use extension_host::gsuite::{
-    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+pub use extension_host::first_party::{
+    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
+    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
 };
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
@@ -87,9 +87,17 @@ pub use factory::ChannelHostAssemblyTestWiring;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
-pub use factory::builtin_first_party_trust_policy;
+/// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
+/// modules that build a production trust policy from the concrete inventory).
+#[cfg(test)]
+pub(crate) use factory::builtin_first_party_trust_policy;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
+/// Production first-party trust-policy builder over the neutral injected bundle
+/// set. Public so integration tests (which convert the concrete first-party
+/// inventory via the dev-dependency) can build the same trust policy the
+/// production binary composes at build time.
+pub use factory::production_first_party_trust_policy;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
@@ -105,8 +113,25 @@ pub use input::{
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
 /// test — the type must travel through this facade instead.
 pub use ironclaw_auth::OAuthRedirectUri;
+/// First-party capability-wiring vocabulary re-exported so the assembling
+/// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
+/// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
+/// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
+/// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
+/// allow-list is frozen to the composition facade, so these types travel
+/// through here.
+pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
+pub use ironclaw_host_api::{
+    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle,
+};
 pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+pub use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
@@ -122,6 +147,7 @@ pub use ironclaw_product_workflow::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
 // the CLI consumes composition as its facade and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
@@ -232,7 +258,6 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 // Host-supplied route-mount vocabulary shared with composition's own route
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly

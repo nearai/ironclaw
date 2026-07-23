@@ -213,6 +213,26 @@ pub struct RebornBuildInput {
     /// service composed over the durable identity/pairing stores.
     pub(crate) account_setup_descriptors:
         Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    /// Binary-assembled first-party package inventory (extension-runtime
+    /// DEL-7), injected as neutral data so composition never names a concrete
+    /// first-party extension crate. Feeds the available-extension catalog, the
+    /// built-in trust policy's per-package effect grants, and the reserved
+    /// host-bundled id set. Empty by default; the binary MUST inject the real
+    /// bundles or first-party extensions silently vanish.
+    pub(crate) first_party_bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+    /// Binary-assembled first-party capability handler registrars (GSuite,
+    /// web tooling): composition runs each once against the shared registry so
+    /// the concrete executors live in the binary, not composition.
+    pub(crate) first_party_registrars:
+        Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+    /// Injected credential-account visibility policy (extension-family-aware,
+    /// e.g. the GSuite account visibility policy). `None` falls back to the safe
+    /// fail-closed default in the product-auth services.
+    pub(crate) credential_account_visibility_policy: Option<
+        Arc<
+            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
+        >,
+    >,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -642,8 +662,12 @@ impl RebornBuildInput {
             process_local_resource_governor_singleton,
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
-        let trust_policy = crate::builtin_first_party_trust_policy()?;
 
+        // The built-in first-party trust policy is composed at BUILD time from
+        // the binary-injected `first_party_bundles` (extension-runtime DEL-7),
+        // not here — construction predates bundle injection. Leaving
+        // `production_trust_policy` unset lets `build_production_shaped` source
+        // the per-package effect grants from the injected bundle set.
         Ok(Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
@@ -653,7 +677,6 @@ impl RebornBuildInput {
                 process_local_resource_governor_singleton,
             },
         )
-        .with_production_trust_policy(Arc::new(trust_policy))
         .with_runtime_policy(runtime_policy)
         .with_runtime_process_binding(RebornRuntimeProcessBinding::none()))
     }
@@ -865,7 +888,39 @@ impl RebornBuildInput {
             channel_extension_bindings: Vec::new(),
             turn_state_store_limits: TurnStateStoreLimits::default(),
             account_setup_descriptors: Vec::new(),
+            first_party_bundles: Vec::new(),
+            first_party_registrars: Vec::new(),
+            credential_account_visibility_policy: None,
         }
+    }
+
+    /// Inject the binary-assembled neutral first-party package inventory.
+    pub fn with_first_party_bundles(
+        mut self,
+        bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+    ) -> Self {
+        self.first_party_bundles = bundles;
+        self
+    }
+
+    /// Inject the binary-assembled first-party capability handler registrars.
+    pub fn with_first_party_registrars(
+        mut self,
+        registrars: Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+    ) -> Self {
+        self.first_party_registrars = registrars;
+        self
+    }
+
+    /// Inject the credential-account visibility policy (see the field doc).
+    pub fn with_credential_account_visibility_policy(
+        mut self,
+        policy: Arc<
+            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
+        >,
+    ) -> Self {
+        self.credential_account_visibility_policy = Some(policy);
+        self
     }
 }
 

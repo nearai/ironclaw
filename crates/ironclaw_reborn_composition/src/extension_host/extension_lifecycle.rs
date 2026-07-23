@@ -1106,9 +1106,10 @@ impl RebornLocalExtensionManagementPort {
                 reason: "import decode limiter is closed".to_string(),
             }
         })?;
+        let reserved_bundled_ids = self.catalog.read().await.reserved_bundled_ids().to_vec();
         let package = tokio::task::spawn_blocking(move || {
             let files = unzip_extension_bundle(&bundle)?;
-            imported_extension_package(files)
+            imported_extension_package(files, &reserved_bundled_ids)
         })
         .await
         .map_err(|error| ProductWorkflowError::Transient {
@@ -9880,6 +9881,7 @@ output_schema_ref = "schemas/search.output.json"
             ],
             onboarding_override: None,
             oauth_setup_override: None,
+            search_aliases: Vec::new(),
         }
     }
 

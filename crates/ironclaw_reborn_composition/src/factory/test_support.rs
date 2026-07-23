@@ -1,14 +1,9 @@
 use super::*;
 
 #[cfg(feature = "test-support")]
-use ironclaw_first_party_extensions::{
-    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
-    WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
-};
-#[cfg(feature = "test-support")]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, EffectKind, ExtensionId, GrantConstraints, NetworkPolicy,
-    NetworkTargetPattern, Principal,
+    Principal,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -785,37 +780,10 @@ fn active_extension_grant_constraints_for_test(
 fn active_extension_network_policy_for_test(
     capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
 ) -> NetworkPolicy {
-    if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
-        return policy;
-    }
-
-    let mut targets = Vec::new();
-    for credential in &capability.runtime_credentials {
-        if !targets.contains(&credential.audience) {
-            targets.push(credential.audience.clone());
-        }
-    }
-    let is_web_access_exa_mcp = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
-        && matches!(
-            capability.id.as_str(),
-            WEB_SEARCH_CAPABILITY_ID | WEB_GET_CONTENT_CAPABILITY_ID
-        );
-    if is_web_access_exa_mcp
-        && !targets
-            .iter()
-            .any(|target| target.host_pattern == EXA_MCP_HOST)
-    {
-        targets.push(NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
-            host_pattern: EXA_MCP_HOST.to_string(),
-            port: None,
-        });
-    }
-    NetworkPolicy {
-        allowed_targets: targets,
-        deny_private_ip_ranges: true,
-        max_egress_bytes: is_web_access_exa_mcp.then_some(NETWORK_EGRESS_LIMIT),
-    }
+    // Delegate to the production manifest-egress policy builder (gsuite +
+    // web-access declare their egress in their manifests now — no per-provider
+    // special-case, and no first-party dependency in this test-support seam).
+    crate::runtime::local_dev::extension_surface::extension_network_policy(capability)
 }
 
 /// Bundle returned by [`RebornRuntimeStores::local_dev_attachment_test_support_for_test`]

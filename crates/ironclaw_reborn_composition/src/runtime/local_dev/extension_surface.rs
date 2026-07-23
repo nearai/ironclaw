@@ -172,7 +172,7 @@ impl ExtensionCapabilitySurface {
     }
 }
 
-fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
+pub(crate) fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
     let mut targets = Vec::new();
     // Manifest-declared egress allowlist — the keyless-but-networked path. A
     // capability declares its egress hosts directly, without a credential
