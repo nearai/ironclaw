@@ -1578,7 +1578,10 @@ slack_user_id = "U123"
     async fn webui_serve_wires_notion_dcr_into_runtime_services() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            ironclaw_reborn_composition::local_dev_build_input("notion-dcr-owner", dir.path().join("local-dev")),
+            ironclaw_reborn_composition::local_dev_build_input(
+                "notion-dcr-owner",
+                dir.path().join("local-dev"),
+            ),
             "http://127.0.0.1:3000",
         )
         .expect("notion dcr wiring");
@@ -1602,7 +1605,10 @@ slack_user_id = "U123"
     async fn webui_serve_wires_notion_dcr_with_canonical_host_origin() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            ironclaw_reborn_composition::local_dev_build_input("notion-dcr-owner", dir.path().join("local-dev")),
+            ironclaw_reborn_composition::local_dev_build_input(
+                "notion-dcr-owner",
+                dir.path().join("local-dev"),
+            ),
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
                 None,
@@ -1649,7 +1655,10 @@ slack_user_id = "U123"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            ironclaw_reborn_composition::local_dev_build_input("notion-dcr-owner", dir.path().join("local-dev")),
+            ironclaw_reborn_composition::local_dev_build_input(
+                "notion-dcr-owner",
+                dir.path().join("local-dev"),
+            ),
             &callback_origin,
         )
         .expect("notion dcr wiring");

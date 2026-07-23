@@ -608,10 +608,11 @@ async fn disabled_returns_empty_services() {
 async fn local_dev_builds_facades_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf()).with_runtime_policy(
-            ironclaw_reborn_composition::local_dev_runtime_policy()
-                .expect("local-dev runtime policy resolves"),
-        ),
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
+            .with_runtime_policy(
+                ironclaw_reborn_composition::local_dev_runtime_policy()
+                    .expect("local-dev runtime policy resolves"),
+            ),
     )
     .await
     .unwrap();
@@ -686,10 +687,11 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
 async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf()).with_runtime_policy(
-            ironclaw_reborn_composition::local_dev_runtime_policy()
-                .expect("local-dev runtime policy resolves"),
-        ),
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
+            .with_runtime_policy(
+                ironclaw_reborn_composition::local_dev_runtime_policy()
+                    .expect("local-dev runtime policy resolves"),
+            ),
     )
     .await
     .unwrap();

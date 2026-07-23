@@ -78,7 +78,7 @@ pub(crate) async fn disable_global_auto_approve(
 ) {
     runtime
         .auto_approve_settings()
-        .expect("local-dev auto-approve store")
+        .expect("local-dev auto-approve store") // safety: test-only helper in #[cfg(test)] module.
         .set(AutoApproveSettingInput {
             scope: context.resource_scope.clone(),
             enabled: false,
@@ -110,25 +110,25 @@ pub(crate) async fn invoke_with_local_dev_approval(
     let host_runtime = runtime.host_runtime().expect("host runtime composed"); // safety: test-only helper in #[cfg(test)] module.
     let approval_requests = runtime
         .approval_requests()
-        .expect("local-dev runtime approval store");
+        .expect("local-dev runtime approval store"); // safety: test-only helper in #[cfg(test)] module.
     let capability_leases = runtime
         .capability_leases()
-        .expect("local-dev runtime capability lease store");
+        .expect("local-dev runtime capability lease store"); // safety: test-only helper in #[cfg(test)] module.
     let capability_policy = runtime
         .capability_policy()
-        .expect("local-dev runtime capability policy");
+        .expect("local-dev runtime capability policy"); // safety: test-only helper in #[cfg(test)] module.
     let workspace_mounts = runtime
         .workspace_mounts()
-        .expect("local-dev runtime workspace mounts");
+        .expect("local-dev runtime workspace mounts"); // safety: test-only helper in #[cfg(test)] module.
     let skill_mounts = runtime
         .skill_mounts()
-        .expect("local-dev runtime skill mounts");
+        .expect("local-dev runtime skill mounts"); // safety: test-only helper in #[cfg(test)] module.
     let memory_mounts = runtime
         .memory_mounts()
-        .expect("local-dev runtime memory mounts");
+        .expect("local-dev runtime memory mounts"); // safety: test-only helper in #[cfg(test)] module.
     let system_extensions_lifecycle_mounts = runtime
         .system_extensions_lifecycle_mounts()
-        .expect("local-dev runtime system extension lifecycle mounts");
+        .expect("local-dev runtime system extension lifecycle mounts"); // safety: test-only helper in #[cfg(test)] module.
     let capability = CapabilityId::new(capability_id).expect("valid capability id"); // safety: test-only helper in #[cfg(test)] module.
     let estimate = ResourceEstimate::default();
     let outcome = host_runtime

@@ -62,7 +62,7 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornHostBindings, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, TriggerPollerSettings, build_reborn_runtime,
 };
 

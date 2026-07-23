@@ -17,7 +17,10 @@ use ironclaw_reborn_composition::{RebornRuntimeInput, build_runtime};
 async fn filesystem_outbound_state_store_persists_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime(RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("w6-outbound-durability", dir.path().join("local-dev")),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "w6-outbound-durability",
+            dir.path().join("local-dev"),
+        ),
     ))
     .await
     .expect("services build");

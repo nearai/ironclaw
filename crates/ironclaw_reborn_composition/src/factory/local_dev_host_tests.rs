@@ -164,9 +164,12 @@ async fn confirmed_host_home_root_is_rejected_without_matching_policy() {
     std::fs::create_dir_all(&host_home).expect("host home root");
 
     let error = build_runtime_substrate(
-        crate::deployment::local_dev_build_input("local-dev-host-owner", dir.path().join("local-dev"))
-            .with_runtime_policy(local_dev_policy())
-            .with_local_dev_confirmed_host_home_root(host_home),
+        crate::deployment::local_dev_build_input(
+            "local-dev-host-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_policy())
+        .with_local_dev_confirmed_host_home_root(host_home),
     )
     .await
     .expect_err("host home root needs matching policy");

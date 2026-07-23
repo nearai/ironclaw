@@ -36,7 +36,7 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::{
-    RebornHostBindings, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
 };
 

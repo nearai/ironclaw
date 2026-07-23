@@ -962,8 +962,8 @@ async fn validate_trigger_delivery_target_against_registry(
         kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
         reason,
     };
-    let target_id = crate::outbound::OutboundDeliveryTargetId::new(target.as_str())
-        .map_err(|error| {
+    let target_id =
+        crate::outbound::OutboundDeliveryTargetId::new(target.as_str()).map_err(|error| {
             tracing::debug!(
                 target = "ironclaw::reborn::trigger_create",
                 %error,
@@ -4080,9 +4080,9 @@ async fn build_backend_production(
         operator_persistent_approval_policies,
         operator_tool_catalog,
     )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("operator configuration handler is invalid: {error}"),
-        })?;
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("operator configuration handler is invalid: {error}"),
+    })?;
     let outbound_target_provider = Arc::clone(&outbound_delivery_targets)
         as Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>;
     let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =

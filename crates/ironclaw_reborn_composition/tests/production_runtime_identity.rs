@@ -36,7 +36,7 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
-    ExternalSubjectId, ProviderKind, RebornHostBindings, RebornCompositionProfile,
+    ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornHostBindings,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProcessBinding,
     ResolveExternalIdentity, SurfaceKind, build_reborn_runtime,
 };

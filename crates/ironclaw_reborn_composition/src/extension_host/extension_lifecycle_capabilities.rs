@@ -435,8 +435,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use crate::OAuthClientConfig;
+    use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use ironclaw_host_api::InstallationState;
     use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
@@ -1353,8 +1353,11 @@ mod tests {
                 .with_tool_description("provider documentation ".repeat(320)),
         );
         let services = build_runtime_substrate(
-            crate::deployment::local_dev_build_input("extension-tools-hosted-mcp-owner", storage_root.clone())
-                .with_network_http_egress_for_test(discovery_script.clone()),
+            crate::deployment::local_dev_build_input(
+                "extension-tools-hosted-mcp-owner",
+                storage_root.clone(),
+            )
+            .with_network_http_egress_for_test(discovery_script.clone()),
         )
         .await
         .expect("local-dev services build");

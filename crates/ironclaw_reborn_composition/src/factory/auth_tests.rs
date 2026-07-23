@@ -168,8 +168,11 @@ impl RuntimeHttpEgress for RecordingOAuthEgress {
 async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        crate::deployment::local_dev_build_input("local-dev-auth-owner", dir.path().join("local-dev"))
-            .with_product_auth_ports(in_memory_product_auth_ports()),
+        crate::deployment::local_dev_build_input(
+            "local-dev-auth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
     )
     .await
     .expect("local-dev services build");
@@ -292,19 +295,20 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
 async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        crate::deployment::local_dev_build_input("local-dev-google-oauth-owner", dir.path().join("local-dev"))
-            .with_vendor_oauth_client(
-                "google",
-                OAuthClientConfig {
-                    client_id: OAuthClientId::new("google-client-123").expect("client id"),
-                    client_secret: None,
-                    redirect_uri: OAuthRedirectUri::new(
-                        "https://app.example/oauth/google/callback",
-                    )
+        crate::deployment::local_dev_build_input(
+            "local-dev-google-oauth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_vendor_oauth_client(
+            "google",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                     .expect("redirect uri"),
-                    hosted_domain_hint: None,
-                },
-            ),
+                hosted_domain_hint: None,
+            },
+        ),
     )
     .await
     .expect("local-dev services build");
@@ -466,31 +470,30 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
 async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        crate::deployment::local_dev_build_input("local-dev-notion-oauth-owner", dir.path().join("local-dev"))
-            .with_vendor_oauth_client(
-                "google",
-                OAuthClientConfig {
-                    client_id: OAuthClientId::new("google-client-123").expect("client id"),
-                    client_secret: None,
-                    redirect_uri: OAuthRedirectUri::new(
-                        "https://app.example/oauth/google/callback",
-                    )
+        crate::deployment::local_dev_build_input(
+            "local-dev-notion-oauth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_vendor_oauth_client(
+            "google",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                     .expect("redirect uri"),
-                    hosted_domain_hint: None,
-                },
-            )
-            .with_vendor_oauth_client(
-                "notion",
-                OAuthClientConfig {
-                    client_id: OAuthClientId::new("notion-client-123").expect("client id"),
-                    client_secret: None,
-                    redirect_uri: OAuthRedirectUri::new(
-                        "https://app.example/oauth/notion/callback",
-                    )
+                hosted_domain_hint: None,
+            },
+        )
+        .with_vendor_oauth_client(
+            "notion",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("notion-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/notion/callback")
                     .expect("redirect uri"),
-                    hosted_domain_hint: None,
-                },
-            ),
+                hosted_domain_hint: None,
+            },
+        ),
     )
     .await
     .expect("local-dev services build");
@@ -643,8 +646,11 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
 async fn oauth_callback_with_stale_gate_converges_without_resuming() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        crate::deployment::local_dev_build_input("local-dev-auth-stale-owner", dir.path().join("local-dev"))
-            .with_product_auth_ports(in_memory_product_auth_ports()),
+        crate::deployment::local_dev_build_input(
+            "local-dev-auth-stale-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
     )
     .await
     .expect("local-dev services build");

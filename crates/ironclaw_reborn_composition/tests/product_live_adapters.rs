@@ -30,9 +30,9 @@ use ironclaw_loop_host::{
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornHostBindings,
-    RebornRuntime, RebornRuntimeInput, build_reborn_runtime, capability_allowlist,
-    visible_capability_request_for_run,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
+    RebornHostBindings, RebornRuntime, RebornRuntimeInput, build_reborn_runtime,
+    capability_allowlist, visible_capability_request_for_run,
 };
 use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -1082,8 +1082,11 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
     let storage_root = root.path().join("local-dev");
     std::fs::create_dir_all(storage_root.join("workspace")).unwrap();
     std::fs::write(storage_root.join("workspace/readme.md"), "alpha\nbeta\n").unwrap();
-    let services =
-        build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input("read-file-owner", storage_root)).await;
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
+        "read-file-owner",
+        storage_root,
+    ))
+    .await;
     let run_context = loop_run_context("read-file").await;
     enable_global_auto_approve_for_run(
         &services,

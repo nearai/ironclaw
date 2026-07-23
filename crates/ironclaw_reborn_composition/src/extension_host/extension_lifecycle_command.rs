@@ -180,8 +180,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-        RebornRuntimeInput, build_reborn_runtime,
+        RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornRuntimeInput,
+        build_reborn_runtime,
     };
 
     #[tokio::test]
