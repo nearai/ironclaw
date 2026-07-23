@@ -262,14 +262,6 @@ async fn health_route_is_public_for_platform_probes() {
 mod openai_compat_mount_tests {
     use super::*;
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
-    use ironclaw_product_adapters::{
-        ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductProjectionReadInput,
-        ProductProjectionSubject, ProductWorkflow, ProjectionReadRequest, RedactedString,
-    };
-    use ironclaw_product_workflow::{
-        ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-        FakeIdempotencyLedger, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
-    };
     use ironclaw_reborn_composition::ProtectedRouteMount;
     use ironclaw_reborn_openai_compat::{
         FilesystemOpenAiCompatRefStore, OpenAiChatCompletionProjection,
@@ -280,12 +272,12 @@ mod openai_compat_mount_tests {
         OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
         OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
     };
-    use ironclaw_threads::InMemorySessionThreadService;
     use ironclaw_turns::runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort};
     use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        AcceptedMessageRef, DefaultTurnCoordinator, StaticTurnAdmissionLimitProvider, TurnActor,
-        TurnAdmissionAxisKind, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
+        AcceptedMessageRef, DefaultTurnCoordinator, IdempotencyKey, ReplyTargetBindingRef,
+        SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest,
+        TurnAdmissionAxisKind, TurnCoordinator, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
     };
 
     const AGENT: &str = "agent-alpha";
@@ -298,8 +290,8 @@ mod openai_compat_mount_tests {
     }
 
     #[tokio::test]
-    async fn openai_chat_completions_mount_uses_webui_auth_and_product_workflow() {
-        let workflow = Arc::new(GatewayOpenAiWorkflow::default());
+    async fn openai_chat_completions_mount_uses_webui_auth_and_product_surface() {
+        let workflow = Arc::new(GatewayOpenAiSurface::default());
         let chat = Arc::new(OpenAiChatCompletionsWorkflow::new(
             workflow.clone(),
             in_memory_openai_compat_ref_store(),
@@ -357,18 +349,7 @@ mod openai_compat_mount_tests {
         let turn_state =
             Arc::new(in_memory_turn_state_store().with_admission_limit_provider(Arc::new(limits)));
         let turn_coordinator = Arc::new(DefaultTurnCoordinator::new(turn_state.clone()));
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let binding = AdmissionTestBindingService;
-        let inbound = Arc::new(DefaultInboundTurnService::new(
-            binding.clone(),
-            thread_service,
-            turn_coordinator,
-        ));
-        let workflow: Arc<dyn ProductWorkflow> = Arc::new(DefaultProductWorkflow::new(
-            inbound,
-            Arc::new(FakeIdempotencyLedger::new()),
-            Arc::new(binding),
-        ));
+        let workflow = Arc::new(AdmissionProductSurface::new(turn_coordinator));
         let chat = Arc::new(
             OpenAiChatCompletionsWorkflow::new(
                 workflow,
@@ -479,8 +460,8 @@ mod openai_compat_mount_tests {
     }
 
     #[tokio::test]
-    async fn openai_responses_mount_uses_webui_auth_and_product_workflow() {
-        let workflow = Arc::new(GatewayOpenAiWorkflow::default());
+    async fn openai_responses_mount_uses_webui_auth_and_product_surface() {
+        let workflow = Arc::new(GatewayOpenAiSurface::default());
         let responses = Arc::new(OpenAiResponsesWorkflow::new(
             workflow.clone(),
             in_memory_openai_compat_ref_store(),
@@ -529,58 +510,6 @@ mod openai_compat_mount_tests {
             "hello through responses"
         );
         assert_eq!(workflow.submit_count(), 1);
-        assert_eq!(workflow.read_count(), 1);
-    }
-
-    #[derive(Clone)]
-    struct AdmissionTestBindingService;
-
-    #[async_trait]
-    impl ConversationBindingService for AdmissionTestBindingService {
-        async fn resolve_binding(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductWorkflowError> {
-            self.resolve(request)
-        }
-
-        async fn lookup_binding(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductWorkflowError> {
-            self.resolve(request)
-        }
-    }
-
-    impl AdmissionTestBindingService {
-        fn resolve(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductWorkflowError> {
-            Ok(ResolvedBinding {
-                tenant_id: TenantId::new(TENANT).map_err(binding_error("test OpenAI tenant id"))?,
-                actor_user_id: UserId::new(request.external_actor_ref.id())
-                    .map_err(binding_error("test OpenAI actor user id"))?,
-                subject_user_id: Some(
-                    UserId::new(request.external_actor_ref.id())
-                        .map_err(binding_error("test OpenAI subject user id"))?,
-                ),
-                thread_id: ThreadId::new(format!("thread-{}", request.external_event_id.as_str()))
-                    .map_err(binding_error("test OpenAI thread id"))?,
-                agent_id: Some(AgentId::new(AGENT).map_err(binding_error("test OpenAI agent id"))?),
-                project_id: Some(
-                    ProjectId::new(PROJECT).map_err(binding_error("test OpenAI project id"))?,
-                ),
-            })
-        }
-    }
-
-    fn binding_error(
-        field: &'static str,
-    ) -> impl FnOnce(ironclaw_host_api::HostApiError) -> ProductWorkflowError + 'static {
-        move |reason| ProductWorkflowError::BindingResolutionFailed {
-            reason: format!("{field}: {reason}"),
-        }
     }
 
     fn chat_request(token: Option<&str>) -> Request<Body> {
@@ -622,75 +551,254 @@ mod openai_compat_mount_tests {
     }
 
     #[derive(Default)]
-    struct GatewayOpenAiWorkflow {
+    struct GatewayOpenAiSurface {
         submit_count: Mutex<usize>,
-        read_count: Mutex<usize>,
     }
 
-    impl GatewayOpenAiWorkflow {
+    impl GatewayOpenAiSurface {
         fn submit_count(&self) -> usize {
             *self
                 .submit_count
                 .lock()
                 .expect("submit count lock should not be poisoned")
         }
-
-        fn read_count(&self) -> usize {
-            *self
-                .read_count
-                .lock()
-                .expect("read count lock should not be poisoned")
-        }
     }
 
     #[async_trait]
-    impl ProductWorkflow for GatewayOpenAiWorkflow {
-        async fn submit_inbound(
+    impl ProductSurface for GatewayOpenAiSurface {
+        async fn create_thread(
             &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            caller: WebUiAuthenticatedCaller,
+            request: WebUiCreateThreadRequest,
+        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+            let thread_id = ThreadId::new(
+                request
+                    .requested_thread_id
+                    .or(request.client_action_id)
+                    .unwrap_or_else(|| THREAD.to_string()),
+            )
+            .map_err(RebornServicesError::internal_from)?;
+            Ok(RebornCreateThreadResponse {
+                thread: test_thread_record(caller, thread_id),
+            })
+        }
+
+        async fn submit_turn(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            request: WebUiSendMessageRequest,
+        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
             *self
                 .submit_count
                 .lock()
                 .expect("submit count lock should not be poisoned") += 1;
-            Ok(ProductInboundAck::Accepted {
+            let thread_id = ThreadId::new(request.thread_id.unwrap_or_else(|| THREAD.to_string()))
+                .map_err(RebornServicesError::internal_from)?;
+            Ok(RebornSubmitTurnResponse::Submitted {
+                thread_id,
                 accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
-                    .expect("accepted ref"),
-                submitted_run_id: TurnRunId::new(),
+                    .map_err(RebornServicesError::internal_from)?,
+                turn_id: "turn-openai-chat".to_string(),
+                run_id: TurnRunId::new(),
+                status: TurnStatus::Queued,
+                resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
+                resolved_run_profile_version: 1,
+                event_cursor: EventCursor::default(),
+            })
+        }
+    }
+
+    struct AdmissionProductSurface {
+        coordinator: Arc<dyn TurnCoordinator>,
+    }
+
+    impl AdmissionProductSurface {
+        fn new(coordinator: Arc<dyn TurnCoordinator>) -> Self {
+            Self { coordinator }
+        }
+    }
+
+    #[async_trait]
+    impl ProductSurface for AdmissionProductSurface {
+        async fn create_thread(
+            &self,
+            caller: WebUiAuthenticatedCaller,
+            request: WebUiCreateThreadRequest,
+        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+            let thread_id = ThreadId::new(
+                request
+                    .requested_thread_id
+                    .or(request.client_action_id)
+                    .unwrap_or_else(|| THREAD.to_string()),
+            )
+            .map_err(RebornServicesError::internal_from)?;
+            Ok(RebornCreateThreadResponse {
+                thread: test_thread_record(caller, thread_id),
             })
         }
 
-        async fn read_projection(
+        async fn submit_turn(
             &self,
-            request: ProductProjectionReadInput,
-        ) -> Result<ProjectionReadRequest, ProductAdapterError> {
-            *self
-                .read_count
-                .lock()
-                .expect("read count lock should not be poisoned") += 1;
-            let ProductProjectionSubject::AdapterExternalRefs { auth_claim, .. } = request.subject
-            else {
-                return Err(ProductAdapterError::Internal {
-                    detail: RedactedString::new("expected adapter refs projection subject"),
-                });
-            };
-            let user_id = UserId::new(auth_claim.subject()).map_err(|error| {
-                ProductAdapterError::Internal {
-                    detail: RedactedString::new(format!("invalid user id: {error}")),
+            caller: WebUiAuthenticatedCaller,
+            request: WebUiSendMessageRequest,
+        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+            let thread_id = ThreadId::new(
+                request
+                    .thread_id
+                    .clone()
+                    .ok_or_else(invalid_request_error)?,
+            )
+            .map_err(RebornServicesError::internal_from)?;
+            let scope = caller.turn_scope(thread_id.clone());
+            let run_id = self
+                .coordinator
+                .prepare_turn(scope.clone())
+                .await
+                .map_err(map_turn_error)?;
+            let accepted_message_ref = AcceptedMessageRef::new(format!(
+                "msg:{}",
+                request.client_action_id.as_deref().unwrap_or("openai-chat")
+            ))
+            .map_err(RebornServicesError::internal_from)?;
+            let response = self
+                .coordinator
+                .submit_turn(SubmitTurnRequest {
+                    scope,
+                    actor: caller.actor(),
+                    accepted_message_ref: accepted_message_ref.clone(),
+                    source_binding_ref: SourceBindingRef::new("source:openai-chat")
+                        .map_err(RebornServicesError::internal_from)?,
+                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply:openai-chat")
+                        .map_err(RebornServicesError::internal_from)?,
+                    requested_run_profile: None,
+                    requested_model: request.model,
+                    idempotency_key: IdempotencyKey::new(
+                        request
+                            .client_action_id
+                            .unwrap_or_else(|| "openai-chat".to_string()),
+                    )
+                    .map_err(RebornServicesError::internal_from)?,
+                    received_at: chrono::Utc::now(),
+                    requested_run_id: Some(run_id),
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                })
+                .await;
+            match response {
+                Ok(ironclaw_turns::SubmitTurnResponse::Accepted {
+                    turn_id,
+                    run_id,
+                    status,
+                    resolved_run_profile_id,
+                    resolved_run_profile_version,
+                    event_cursor,
+                    accepted_message_ref,
+                    ..
+                }) => Ok(RebornSubmitTurnResponse::Submitted {
+                    thread_id,
+                    accepted_message_ref,
+                    turn_id: turn_id.to_string(),
+                    run_id,
+                    status,
+                    resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
+                    resolved_run_profile_version: resolved_run_profile_version.as_u64(),
+                    event_cursor,
+                }),
+                Err(TurnError::ThreadBusy(busy)) => Ok(RebornSubmitTurnResponse::RejectedBusy {
+                    thread_id,
+                    accepted_message_ref,
+                    active_run_id: Some(busy.active_run_id),
+                    status: Some(busy.status),
+                    event_cursor: Some(busy.event_cursor),
+                    notice: "busy".to_string(),
+                }),
+                Err(error) => Err(map_turn_error(error)),
+            }
+        }
+    }
+
+    fn test_thread_record(
+        caller: WebUiAuthenticatedCaller,
+        thread_id: ThreadId,
+    ) -> SessionThreadRecord {
+        SessionThreadRecord {
+            scope: ThreadScope {
+                tenant_id: caller.tenant_id,
+                agent_id: caller
+                    .agent_id
+                    .unwrap_or_else(|| AgentId::new(AGENT).expect("agent")),
+                project_id: caller.project_id,
+                owner_user_id: Some(caller.user_id.clone()),
+                mission_id: None,
+            },
+            thread_id,
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+            goal: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn invalid_request_error() -> RebornServicesError {
+        RebornServicesError {
+            code: RebornServicesErrorCode::InvalidRequest,
+            kind: RebornServicesErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        }
+    }
+
+    fn map_turn_error(error: TurnError) -> RebornServicesError {
+        match error {
+            TurnError::AdmissionRejected(_) | TurnError::CapacityExceeded { .. } => {
+                RebornServicesError {
+                    code: RebornServicesErrorCode::RateLimited,
+                    kind: RebornServicesErrorKind::Busy,
+                    status_code: 429,
+                    retryable: true,
+                    field: None,
+                    validation_code: None,
                 }
-            })?;
-            Ok(ProjectionReadRequest {
-                actor: TurnActor::new(user_id.clone()),
-                scope: TurnScope::new_with_owner(
-                    TenantId::new(TENANT).expect("tenant"),
-                    Some(AgentId::new(AGENT).expect("agent")),
-                    Some(ProjectId::new(PROJECT).expect("project")),
-                    ThreadId::new(THREAD).expect("thread"),
-                    Some(user_id),
-                ),
-                after_cursor: request.after_cursor,
-                limit: request.limit,
-            })
+            }
+            TurnError::ScopeNotFound => RebornServicesError {
+                code: RebornServicesErrorCode::NotFound,
+                kind: RebornServicesErrorKind::NotFound,
+                status_code: 404,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            TurnError::Unauthorized => RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            TurnError::InvalidRequest { .. } => invalid_request_error(),
+            TurnError::Unavailable { .. } => RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            _ => RebornServicesError {
+                code: RebornServicesErrorCode::Internal,
+                kind: RebornServicesErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
         }
     }
 

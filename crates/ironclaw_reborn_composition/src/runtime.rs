@@ -2000,8 +2000,8 @@ impl RebornRuntime {
     /// returned reply will surface that failure via `status = Failed`
     /// and `text = None`.
     ///
-    /// **WebUI-only origin contract**: this task-level send path resolves
-    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// **CLI origin contract**: this task-level send path resolves
+    /// the turn's product-context source channel as CLI chat (`resolve_cli`).
     /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
     /// this method for its submissions; it must resolve its own origin at
     /// that ingress instead.
@@ -2307,7 +2307,7 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                product_context: Some(ironclaw_product_context::resolve_cli(
                     scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
                 )),
             })

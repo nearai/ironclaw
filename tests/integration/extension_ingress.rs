@@ -7,7 +7,7 @@
 //! `hmac_sha256` recipe verifies the signed vendor POST host-side, the
 //! fixture's real channel adapter normalizes the payload, and the generic
 //! inbound sink commits durable dedupe + admission through the REAL
-//! `DefaultProductWorkflow` (idempotency ledger → conversation binding → turn
+//! `DefaultProductSurface` (idempotency ledger → conversation binding → turn
 //! submission) before the 2xx leaves the router.
 //!
 //! Pinned here: ING-1 (route from the active snapshot on the production
@@ -30,7 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_product_workflow::{ChannelInboundProductSurface, ProductWorkflowChannelSurface};
+use ironclaw_product_workflow::ProductSurface;
 use ironclaw_reborn_composition::{
     ChannelInboundSinkConfig, ChannelIngressRegistration, ExtensionIngressParts,
     GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
@@ -118,9 +118,7 @@ impl AcmeIngress {
         harness: &reborn_support::builder::RebornIntegrationHarness,
     ) -> Self {
         let observer = Arc::new(RecordingAdmissionObserver::default());
-        let surface = Arc::new(ProductWorkflowChannelSurface::new(
-            harness.product_workflow_for_test(),
-        )) as Arc<dyn ChannelInboundProductSurface>;
+        let surface = harness.product_workflow_for_test() as Arc<dyn ProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ironclaw_product_adapters::ProductAdapterId::new("acme-messenger")
                 .expect("adapter id"),
@@ -300,7 +298,7 @@ async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
 
     // The inbound thread: its scripted reply is never consulted (the router
     // path ends at turn admission), but its workflow is the REAL per-thread
-    // DefaultProductWorkflow the sink submits through.
+    // DefaultProductSurface the sink submits through.
     let inbound_thread = group
         .thread("conv-acme-ingress-inbound")
         .script([RebornScriptedReply::text("unused")])

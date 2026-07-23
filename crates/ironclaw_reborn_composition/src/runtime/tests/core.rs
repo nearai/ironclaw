@@ -1226,13 +1226,19 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
 
 static RUNTIME_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct RuntimeEnvGuardEntry {
+    name: &'static str,
+    effective: Option<String>,
+    snapshot: ironclaw_common::env_helpers::RuntimeEnvSnapshot,
+}
+
 struct RuntimeEnvGuard {
     // Serializes tokio tests that mutate the runtime env overlay. The
     // set/remove helpers lock only the separate override map, not
     // ENV_MUTEX, so restoration can safely run while this guard is held.
     _async_lock: tokio::sync::MutexGuard<'static, ()>,
     _env_lock: std::sync::MutexGuard<'static, ()>,
-    previous: Vec<(&'static str, Option<String>)>,
+    previous: Vec<RuntimeEnvGuardEntry>,
 }
 
 impl RuntimeEnvGuard {
@@ -1245,12 +1251,16 @@ impl RuntimeEnvGuard {
         let env_lock = ironclaw_common::env_helpers::lock_env();
         let previous = vars
             .iter()
-            .map(|(name, _)| (*name, ironclaw_common::env_helpers::env_or_override(name)))
+            .map(|(name, _)| RuntimeEnvGuardEntry {
+                name,
+                effective: ironclaw_common::env_helpers::env_or_override(name),
+                snapshot: ironclaw_common::env_helpers::snapshot_runtime_env(name),
+            })
             .collect::<Vec<_>>();
         for (name, value) in vars {
             match value {
                 Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                None => ironclaw_common::env_helpers::mask_runtime_env(name),
             }
         }
         Self {
@@ -1263,16 +1273,14 @@ impl RuntimeEnvGuard {
 
 impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
-        for (name, previous) in self.previous.iter().rev() {
-            match previous {
-                Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(name),
-            }
+        for previous in self.previous.iter().rev() {
+            ironclaw_common::env_helpers::restore_runtime_env(previous.snapshot.clone());
             if !std::thread::panicking() {
                 debug_assert_eq!(
-                    ironclaw_common::env_helpers::env_or_override(name),
-                    previous.clone(),
-                    "RuntimeEnvGuard failed to restore {name}"
+                    ironclaw_common::env_helpers::env_or_override(previous.name),
+                    previous.effective.clone(),
+                    "RuntimeEnvGuard failed to restore {}",
+                    previous.name
                 );
             }
         }
@@ -1964,8 +1972,12 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
 
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2115,8 +2127,12 @@ async fn nearai_mcp_runtime_access_secret(
 
 #[tokio::test]
 async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2605,8 +2621,12 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     // by `RebornLlmReloadAdapter::reload`) sets exactly that field from the
     // seeded key below. So the session/auth-url defaults are constructed but
     // never read from disk or contacted over the network.
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
     let root = tempfile::tempdir().expect("tempdir");
@@ -3567,7 +3587,7 @@ async fn send_user_message_persists_personal_owner_for_webui() {
 /// gap by asserting the *rendered* origin appears in the captured model
 /// request.
 #[tokio::test]
-async fn send_user_message_renders_webui_origin_in_model_request() {
+async fn send_user_message_renders_cli_origin_in_model_request() {
     let root = tempfile::tempdir().expect("tempdir");
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
@@ -3627,11 +3647,11 @@ async fn send_user_message_renders_webui_origin_in_model_request() {
             .clone()
     };
 
-    // Exact string produced by LoopRuntimeContext::render_model_content
-    // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+    // Exact string produced by LoopRuntimeContext::render_model_content for
+    // local runtime chat, which stamps the first-party source channel as CLI.
     assert!(
-        runtime_context_content.contains("Run origin: WebUI chat; replies render in this chat."),
-        "runtime-context system message must contain the WebUI origin line, \
+        runtime_context_content.contains("Run origin: CLI chat; replies render in this session."),
+        "runtime-context system message must contain the CLI origin line, \
              got: {runtime_context_content:?}"
     );
 

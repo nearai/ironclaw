@@ -1422,6 +1422,7 @@ impl ProductSurface for StubServices {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(|| service_unavailable_error(false))?;
         match operation_id {
+            ProductOperationId::ChannelInboundAdmit => Err(service_unavailable_error(false)),
             ProductOperationId::CreateThread => ProductOperationResponse::json(
                 self.create_thread(
                     caller,

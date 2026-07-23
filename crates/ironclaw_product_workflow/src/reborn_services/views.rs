@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 use super::{
-    ProductSurface, ProjectFsFile, RebornAttachmentBytes, RebornServicesError,
-    WebUiAuthenticatedCaller,
+    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRequest, ProductSurface, ProjectFsFile,
+    RebornAttachmentBytes, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 #[derive(Deserialize)]
@@ -133,6 +133,7 @@ pub struct RebornViewPage {
 /// Stable identifier for one result-bearing product operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProductOperationId {
+    ChannelInboundAdmit,
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -162,6 +163,7 @@ pub enum ProductOperationId {
 impl ProductOperationId {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ChannelInboundAdmit => "channel.admit_inbound",
             Self::CreateThread => "webui.create_thread",
             Self::SubmitTurn => "webui.submit_turn",
             Self::CancelRun => "webui.cancel_run",
@@ -191,6 +193,7 @@ impl ProductOperationId {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "channel.admit_inbound" => Some(Self::ChannelInboundAdmit),
             "webui.create_thread" => Some(Self::CreateThread),
             "webui.submit_turn" => Some(Self::SubmitTurn),
             "webui.cancel_run" => Some(Self::CancelRun),
@@ -255,6 +258,7 @@ impl<Params, Output> ProductOperation<Params, Output> {
         Ok(ProductOperationRequest {
             operation_id: self.id.as_str().to_string(),
             input: serde_json::to_value(input).map_err(RebornServicesError::internal_from)?,
+            typed_input: None,
         })
     }
 }
@@ -264,6 +268,27 @@ impl<Params, Output> ProductOperation<Params, Output> {
 pub struct ProductOperationRequest {
     pub operation_id: String,
     pub input: serde_json::Value,
+    #[serde(skip)]
+    pub typed_input: Option<ProductOperationTypedInput>,
+}
+
+impl ProductOperationRequest {
+    pub fn channel_inbound(request: ChannelInboundSurfaceRequest) -> Self {
+        Self {
+            operation_id: ProductOperationId::ChannelInboundAdmit.as_str().to_string(),
+            input: serde_json::Value::Null,
+            typed_input: Some(ProductOperationTypedInput::ChannelInbound(Box::new(
+                request,
+            ))),
+        }
+    }
+}
+
+/// Host-only typed operation input carried over the same ProductSurface command
+/// conduit as JSON operations. This field is skipped for browser/API JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductOperationTypedInput {
+    ChannelInbound(Box<ChannelInboundSurfaceRequest>),
 }
 
 /// One result-bearing product operation response.
@@ -272,6 +297,7 @@ pub enum ProductOperationResponse {
     Json(serde_json::Value),
     ProjectFile(ProjectFsFile),
     Attachment(RebornAttachmentBytes),
+    ChannelInbound(Box<ChannelInboundSurfaceOutcome>),
 }
 
 impl ProductOperationResponse {
@@ -289,32 +315,45 @@ impl ProductOperationResponse {
         Self::Attachment(bytes)
     }
 
+    pub fn channel_inbound(outcome: ChannelInboundSurfaceOutcome) -> Self {
+        Self::ChannelInbound(Box::new(outcome))
+    }
+
     pub fn into_json<T: DeserializeOwned>(self) -> Result<T, RebornServicesError> {
         match self {
             Self::Json(value) => {
                 serde_json::from_value(value).map_err(RebornServicesError::internal_from)
             }
-            Self::ProjectFile(_) | Self::Attachment(_) => Err(RebornServicesError::internal_from(
-                "operation returned bytes",
-            )),
+            Self::ProjectFile(_) | Self::Attachment(_) | Self::ChannelInbound(_) => Err(
+                RebornServicesError::internal_from("operation returned non-JSON"),
+            ),
         }
     }
 
     pub fn into_project_file(self) -> Result<ProjectFsFile, RebornServicesError> {
         match self {
             Self::ProjectFile(file) => Ok(file),
-            Self::Json(_) | Self::Attachment(_) => Err(RebornServicesError::internal_from(
-                "operation returned JSON",
-            )),
+            Self::Json(_) | Self::Attachment(_) | Self::ChannelInbound(_) => Err(
+                RebornServicesError::internal_from("operation returned non-file result"),
+            ),
         }
     }
 
     pub fn into_attachment(self) -> Result<RebornAttachmentBytes, RebornServicesError> {
         match self {
             Self::Attachment(bytes) => Ok(bytes),
-            Self::Json(_) | Self::ProjectFile(_) => Err(RebornServicesError::internal_from(
-                "operation returned non-attachment bytes",
-            )),
+            Self::Json(_) | Self::ProjectFile(_) | Self::ChannelInbound(_) => Err(
+                RebornServicesError::internal_from("operation returned non-attachment bytes"),
+            ),
+        }
+    }
+
+    pub fn into_channel_inbound(self) -> Result<ChannelInboundSurfaceOutcome, RebornServicesError> {
+        match self {
+            Self::ChannelInbound(outcome) => Ok(*outcome),
+            Self::Json(_) | Self::ProjectFile(_) | Self::Attachment(_) => Err(
+                RebornServicesError::internal_from("operation returned non-channel result"),
+            ),
         }
     }
 }

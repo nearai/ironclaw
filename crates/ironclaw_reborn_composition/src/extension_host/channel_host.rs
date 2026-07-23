@@ -46,11 +46,11 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ChannelInboundProductSurface, ConversationBindingService, DefaultInboundTurnService,
-    DefaultProductWorkflow, DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
+    DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowChannelSurface, ProductWorkflowError, RebornFilesystemIdempotencyLedger,
+    ProductSurface, ProductWorkflowError, RebornFilesystemIdempotencyLedger,
     ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
@@ -655,7 +655,7 @@ impl GenericChannelHostAssembly {
             Arc::clone(&self.deps.thread_service),
             Arc::clone(&self.deps.turn_coordinator),
         ));
-        let mut workflow = DefaultProductWorkflow::new(
+        let mut workflow = DefaultProductSurface::new(
             inbound,
             Arc::clone(&workflow_state.ledger),
             Arc::clone(&binding),
@@ -686,8 +686,7 @@ impl GenericChannelHostAssembly {
                 service
                     as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
             });
-        let surface = Arc::new(ProductWorkflowChannelSurface::new(Arc::new(workflow)))
-            as Arc<dyn ChannelInboundProductSurface>;
+        let surface = Arc::new(workflow) as Arc<dyn ProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,

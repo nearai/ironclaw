@@ -31,10 +31,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, ChannelInboundClassification, NormalizedInboundMessage,
-    ParsedProductInbound, ProductAdapterError, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductWorkflow, ProductWorkflowRejectionKind,
-    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
-    TrustedInboundContext, UserMessagePayload,
+    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    ProductSourceChannel, ProductWorkflowRejectionKind, ProjectionStream,
+    ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
@@ -222,8 +221,8 @@ pub use types::{
 };
 pub use views::{
     ProductOperation, ProductOperationId, ProductOperationRequest, ProductOperationResponse,
-    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
-    UnavailableRebornViewProvider,
+    ProductOperationTypedInput, ProductView, RebornViewDescriptor, RebornViewPage,
+    RebornViewProvider, RebornViewQuery, UnavailableRebornViewProvider,
 };
 
 type SkillActivationRecorder =
@@ -2094,11 +2093,11 @@ fn operator_diagnostics_surface_status(
 ///
 /// The channel ingress router verifies the transport request and runs the
 /// adapter's pure normalization first. ProductSurface owns conversion into the
-/// legacy workflow envelope while that implementation remains the durable commit
-/// mechanism.
-#[derive(Debug)]
+/// durable inbound envelope and commit path.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelInboundSurfaceRequest {
     pub adapter_id: ProductAdapterId,
+    pub source_channel: ProductSourceChannel,
     pub installation_id: AdapterInstallationId,
     pub evidence: ProtocolAuthEvidence,
     pub received_at: chrono::DateTime<Utc>,
@@ -2107,28 +2106,29 @@ pub struct ChannelInboundSurfaceRequest {
 }
 
 /// Durable channel admission evidence returned by ProductSurface.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelInboundSurfaceAdmission {
     pub envelope: ProductInboundEnvelope,
     pub ack: ProductInboundAck,
 }
 
-/// Workflow rejection after ProductSurface had enough trusted input to build
+/// Admission rejection after ProductSurface had enough trusted input to build
 /// the canonical envelope.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelInboundSurfaceRejectedAdmission {
     pub envelope: ProductInboundEnvelope,
     pub error: ProductAdapterError,
 }
 
-/// Channel admission failed before or during the durable ProductSurface commit.
-#[derive(Debug, Clone)]
-pub enum ChannelInboundSurfaceError {
+/// Channel admission outcome returned by the ProductSurface command conduit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelInboundSurfaceOutcome {
+    Admitted(Box<ChannelInboundSurfaceAdmission>),
     Invalid(ProductAdapterError),
     Rejected(Box<ChannelInboundSurfaceRejectedAdmission>),
 }
 
-impl ChannelInboundSurfaceError {
+impl ChannelInboundSurfaceOutcome {
     pub fn unavailable() -> Self {
         Self::Invalid(ProductAdapterError::Internal {
             detail: RedactedString::new("channel ProductSurface admission is not available"),
@@ -2136,85 +2136,35 @@ impl ChannelInboundSurfaceError {
     }
 }
 
-/// ProductSurface adapter over the existing workflow-backed channel admission
-/// implementation. This is intentionally narrow: channel ingress depends on
-/// ProductSurface, while the legacy workflow envelope stays behind this facade.
-pub struct ProductWorkflowChannelSurface {
-    workflow: Arc<dyn ProductWorkflow>,
-}
-
-impl ProductWorkflowChannelSurface {
-    pub fn new(workflow: Arc<dyn ProductWorkflow>) -> Self {
-        Self { workflow }
-    }
-}
-
-impl ProductSurface for ProductWorkflowChannelSurface {}
-
-#[async_trait]
-impl ChannelInboundProductSurface for ProductWorkflowChannelSurface {
-    async fn admit_channel_inbound(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-    ) -> Result<ChannelInboundSurfaceAdmission, ChannelInboundSurfaceError> {
-        let context = TrustedInboundContext::from_verified_evidence(
-            request.adapter_id,
-            request.installation_id,
-            request.received_at,
-            &request.evidence,
-        )
-        .map_err(ChannelInboundSurfaceError::Invalid)?;
-        let payload = match request.classification {
-            Some(classification) => ProductInboundPayload::from(classification),
-            None => ProductInboundPayload::UserMessage(
-                UserMessagePayload::new(
-                    request.message.text.clone(),
-                    request
-                        .message
-                        .attachments
-                        .iter()
-                        .map(|attachment| attachment.descriptor.clone())
-                        .collect(),
-                    request.message.trigger,
-                )
-                .map_err(ChannelInboundSurfaceError::Invalid)?,
-            ),
-        };
-        let parsed = ParsedProductInbound::new(
-            request.message.event_id,
-            request.message.actor,
-            request.message.conversation,
-            payload,
-        )
-        .map_err(ChannelInboundSurfaceError::Invalid)?;
-        let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)
-            .map_err(ChannelInboundSurfaceError::Invalid)?;
-        match self.workflow.submit_inbound(envelope.clone()).await {
-            Ok(ack) => Ok(ChannelInboundSurfaceAdmission { envelope, ack }),
-            Err(error) => Err(ChannelInboundSurfaceError::Rejected(Box::new(
-                ChannelInboundSurfaceRejectedAdmission { envelope, error },
-            ))),
-        }
-    }
-}
-
-/// Typed channel-admission companion surface for ProductSurface implementations.
-///
-/// This stays out of [`ProductSurface`] because the §5.2 facade ratchet allows
-/// only the generic operation/query conduits there. Channel admission carries
-/// host-minted verified evidence that is intentionally not replayable through
-/// JSON, so it remains a typed ingress-only companion to ProductSurface rather
-/// than a serialized product operation.
-#[async_trait]
-pub trait ChannelInboundProductSurface: ProductSurface {
-    async fn admit_channel_inbound(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-    ) -> Result<ChannelInboundSurfaceAdmission, ChannelInboundSurfaceError>;
-}
-
 #[async_trait]
 pub trait ProductSurface: Send + Sync {
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn submit_turn(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiSendMessageRequest,
+    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn cancel_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// Invoke one descriptor-declared product capability through the generic
     /// mutation conduit targeted by architecture simplification §5.2.
     ///
@@ -3162,6 +3112,11 @@ where
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
         match operation_id {
+            ProductOperationId::ChannelInboundAdmit => {
+                Ok(ProductOperationResponse::channel_inbound(
+                    ChannelInboundSurfaceOutcome::unavailable(),
+                ))
+            }
             ProductOperationId::CreateThread => ProductOperationResponse::json(
                 self.create_thread(caller, product_command_input(request.input)?)
                     .await?,
@@ -5075,6 +5030,30 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        RebornServices::create_thread(self, caller, request).await
+    }
+
+    async fn submit_turn(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiSendMessageRequest,
+    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        RebornServices::submit_turn(self, caller, request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        RebornServices::cancel_run(self, caller, request).await
+    }
+
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -6666,7 +6645,7 @@ fn thread_operation_key(scope: &TurnScope) -> String {
     )
 }
 
-/// Default page size for [`ProductSurface::get_timeline`] when the
+/// Default page size for [`TIMELINE_VIEW`] when the
 /// caller does not supply one. Sized to cover a typical chat history
 /// without forcing a multi-megabyte JSON response on first load.
 pub(crate) const TIMELINE_DEFAULT_PAGE_SIZE: u32 = 100;

@@ -63,6 +63,9 @@ const RETIRED_PROTO_FACADE_TRAIT: &str = "RebornServicesApi";
 /// already listed below; never add another product operation here.
 const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     // --- turn lifecycle (the irreducible core, §5.2.3) ---
+    "create_thread",
+    "submit_turn",
+    "cancel_run",
     "stream_events",
     "supports_stream_events_subscription",
     "subscribe_events",

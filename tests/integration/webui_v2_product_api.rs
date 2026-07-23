@@ -1821,7 +1821,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
 /// turn-state-converged `ApprovalInteractionService`
 /// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`
-/// wires into `DefaultProductWorkflow`) and the production event-stream
+/// wires into `DefaultProductSurface`) and the production event-stream
 /// recipe `sse_activity_stream_replay_and_reconnect` above already pins.
 ///
 /// "Refresh" is simulated the same way that precedent does: a fresh
@@ -1855,7 +1855,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 
     // Wire the REAL approval interaction service over the group's own shared
     // turn-state store — same test-support seam
-    // `with_real_gate_dispatch_services` uses for `DefaultProductWorkflow`,
+    // `with_real_gate_dispatch_services` uses for `DefaultProductSurface`,
     // applied here directly to a webui-level `RebornServices` instead.
     let capability_harness = group
         .capability_harness()

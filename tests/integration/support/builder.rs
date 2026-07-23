@@ -34,9 +34,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
+use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
+    ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
     ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
@@ -613,7 +613,7 @@ impl RebornIntegrationHarnessBuilder {
 /// the real decorator chain. See module docs.
 pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
-    pub(crate) workflow: std::sync::Arc<DefaultProductWorkflow>,
+    pub(crate) workflow: std::sync::Arc<DefaultProductSurface>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
@@ -774,7 +774,7 @@ impl RebornIntegrationHarness {
     /// to complete (C-ATTACH). Lands `bytes` through the harness's real
     /// `InboundAttachmentLander` (production `ProjectScopedAttachmentLander` over
     /// the local-dev workspace filesystem — wired only by `.attachment_tools()`
-    /// groups) via `DefaultProductWorkflow::submit_inbound_with_attachments`, the
+    /// groups) via `DefaultProductSurface::submit_inbound_with_attachments`, the
     /// same production entry point a synchronous host surface (e.g. the
     /// OpenAI-compatible API) uses for inline image bytes. Errors clearly if the
     /// harness has no lander wired.
@@ -893,11 +893,10 @@ impl RebornIntegrationHarness {
         Ok(self.workflow.submit_inbound(envelope).await?)
     }
 
-    /// The REAL per-thread `DefaultProductWorkflow` (durable idempotency
-    /// ledger → conversation binding → turn submission) as the
-    /// `ProductWorkflow` seam — the generic channel inbound sink submits
-    /// through this exact instance.
-    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductWorkflow> {
+    /// The REAL per-thread `DefaultProductSurface` (durable idempotency
+    /// ledger → conversation binding → turn submission). The generic channel
+    /// inbound sink submits through this exact instance.
+    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
         std::sync::Arc::clone(&self.workflow)
     }
 

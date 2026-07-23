@@ -1,6 +1,6 @@
 # ironclaw_product_workflow
 
-Product-facing workflow facade for IronClaw Reborn (issue #3280).
+Product-facing surface orchestration for IronClaw Reborn (issue #3280).
 
 ## Purpose
 
@@ -13,7 +13,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 | Type | Role |
 |------|------|
-| `DefaultProductWorkflow` | Top-level orchestrator implementing `ProductWorkflow` trait |
+| `DefaultProductSurface` | Top-level orchestrator implementing the `ProductSurface` trait |
 | `InboundTurnService` / `DefaultInboundTurnService` | User-message turn submission path |
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
@@ -31,7 +31,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 ## Dependencies
 
-- `ironclaw_product_adapters` — trait definitions, envelope/ack types, `ProjectionStream` for SSE
+- `ironclaw_product_adapters` — adapter DTOs, envelope/ack types, `ProjectionStream` for SSE
 - `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
 - `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership

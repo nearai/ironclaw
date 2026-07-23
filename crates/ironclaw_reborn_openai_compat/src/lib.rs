@@ -6,7 +6,7 @@
 //! the OpenAI-compatible Chat Completions and Responses surfaces. It exposes
 //! axum route fragments for host composition without routing through the v1
 //! gateway. By default the router is
-//! fail-closed; host composition can inject ProductWorkflow-backed Chat,
+//! fail-closed; host composition can inject ProductSurface-backed Chat,
 //! Responses, and projection-streaming services for the wired Reborn slices.
 
 mod ack_helpers;
@@ -43,7 +43,6 @@ pub use chat_workflow::{
     OPENAI_COMPAT_CONVERSATION_PREFIX, OpenAiChatCompletionProjection,
     OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
     OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
-    OpenAiCompatInboundAttachmentSubmit,
 };
 pub use cost::OpenAiCompatCost;
 pub use descriptors::{

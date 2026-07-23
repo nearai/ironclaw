@@ -151,7 +151,7 @@ impl RebornIntegrationGroupBuilder {
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's
-    /// `DefaultProductWorkflow`, so `submit_inbound(ApprovalResolution/
+    /// `DefaultProductSurface`, so `submit_inbound(ApprovalResolution/
     /// AuthResolution)` dispatches through the SAME arms a real adapter reply
     /// hits, instead of every workflow's default `Rejecting*InteractionService`
     /// stubs. Requires a `HostRuntime` capability backend built via

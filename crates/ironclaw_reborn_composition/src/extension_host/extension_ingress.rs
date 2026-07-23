@@ -21,15 +21,16 @@ use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::{SecretHandle, TenantId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
     NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProtocolAuthEvidence,
+    ProductSourceChannel, ProtocolAuthEvidence,
 };
 use ironclaw_product_workflow::{
-    ChannelInboundProductSurface, ChannelInboundSurfaceError,
-    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
+    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
+    ChannelInboundSurfaceRequest, ProductOperationRequest, ProductSurface,
+    WebUiAuthenticatedCaller,
 };
 use tokio::task::JoinSet;
 
@@ -327,7 +328,7 @@ pub struct ChannelInboundSinkConfig {
     pub classifier: Option<Arc<InboundPayloadClassifier>>,
     /// The ProductSurface channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
-    pub surface: Arc<dyn ChannelInboundProductSurface>,
+    pub surface: Arc<dyn ProductSurface>,
     /// Optional post-admission follow-up (e.g. final-reply delivery).
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
@@ -398,6 +399,15 @@ impl GenericChannelInboundSink {
             retryable: false,
             reason: reason.to_string(),
         }
+    }
+
+    fn channel_caller() -> Result<WebUiAuthenticatedCaller, InboundSinkError> {
+        Ok(WebUiAuthenticatedCaller::new(
+            TenantId::new("channel-ingress").map_err(Self::permanent)?,
+            UserId::new("channel-ingress").map_err(Self::permanent)?,
+            None,
+            None,
+        ))
     }
 
     async fn spawn_observer<F>(&self, run: F)
@@ -480,6 +490,8 @@ impl InboundSink for GenericChannelInboundSink {
         // this future; boxing keeps instrumented builds off the stack limit.
         let request = ChannelInboundSurfaceRequest {
             adapter_id: self.config.adapter_id.clone(),
+            source_channel: ProductSourceChannel::new(self.config.adapter_id.as_str())
+                .map_err(Self::permanent)?,
             installation_id: installation,
             evidence,
             received_at: Utc::now(),
@@ -490,8 +502,17 @@ impl InboundSink for GenericChannelInboundSink {
                 .and_then(|classify| classify(&message)),
             message,
         };
-        match Box::pin(self.config.surface.admit_channel_inbound(request)).await {
-            Ok(admission) => {
+        let response = Box::pin(self.config.surface.execute_command(
+            Self::channel_caller()?,
+            ProductOperationRequest::channel_inbound(request),
+        ))
+        .await
+        .map_err(Self::permanent)?
+        .into_channel_inbound()
+        .map_err(Self::permanent)?;
+        match response {
+            ChannelInboundSurfaceOutcome::Admitted(admission) => {
+                let admission = *admission;
                 let envelope = admission.envelope;
                 let ack = admission.ack;
                 let duplicate = matches!(ack, ProductInboundAck::Duplicate { .. });
@@ -513,8 +534,8 @@ impl InboundSink for GenericChannelInboundSink {
                     })
                 }
             }
-            Err(ChannelInboundSurfaceError::Invalid(error)) => Err(Self::permanent(error)),
-            Err(ChannelInboundSurfaceError::Rejected(rejection)) => {
+            ChannelInboundSurfaceOutcome::Invalid(error) => Err(Self::permanent(error)),
+            ChannelInboundSurfaceOutcome::Rejected(rejection) => {
                 let ChannelInboundSurfaceRejectedAdmission { envelope, error } = *rejection;
                 let retryable = error.is_retryable();
                 if let Some(observer) = self.config.observer.clone() {
@@ -781,20 +802,24 @@ mod tests {
 
     use ironclaw_host_api::UserId;
     use ironclaw_product_adapters::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAdapterError,
-        ProductTriggerReason, ProductWorkflow,
+        ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
+        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
     };
-    use ironclaw_product_workflow::{ChannelInboundProductSurface, ProductWorkflowChannelSurface};
+    use ironclaw_product_workflow::{
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
+        ProductOperationResponse, ProductOperationTypedInput, ProductSurface, RebornServicesError,
+        RebornServicesErrorCode, RebornServicesErrorKind,
+    };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::*;
     use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
-    struct CountingWorkflow {
+    struct CountingSurface {
         submissions: AtomicUsize,
     }
 
-    impl CountingWorkflow {
+    impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
@@ -807,17 +832,71 @@ mod tests {
     }
 
     #[async_trait]
-    impl ProductWorkflow for CountingWorkflow {
-        async fn submit_inbound(
+    impl ProductSurface for CountingSurface {
+        async fn execute_command(
             &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            _caller: WebUiAuthenticatedCaller,
+            request: ProductOperationRequest,
+        ) -> Result<ProductOperationResponse, RebornServicesError> {
+            let operation_id =
+                ProductOperationId::parse(request.operation_id.as_str()).ok_or_else(unavailable)?;
+            if operation_id != ProductOperationId::ChannelInboundAdmit {
+                return Err(unavailable());
+            }
+            let Some(ProductOperationTypedInput::ChannelInbound(request)) = request.typed_input
+            else {
+                return Ok(ProductOperationResponse::channel_inbound(
+                    ChannelInboundSurfaceOutcome::unavailable(),
+                ));
+            };
             self.submissions.fetch_add(1, Ordering::SeqCst);
-            Ok(ProductInboundAck::Accepted {
+            let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
                 submitted_run_id: TurnRunId::new(),
-            })
+            };
+            let envelope = ProductInboundEnvelope::from_trusted_parse(
+                TrustedInboundContext::from_verified_evidence_with_source_channel(
+                    request.adapter_id,
+                    request.source_channel,
+                    request.installation_id,
+                    request.received_at,
+                    &request.evidence,
+                )
+                .expect("verified evidence"),
+                ParsedProductInbound::new(
+                    request.message.event_id,
+                    request.message.actor,
+                    request.message.conversation,
+                    ProductInboundPayload::UserMessage(
+                        UserMessagePayload::new(
+                            request.message.text,
+                            Vec::new(),
+                            request.message.trigger,
+                        )
+                        .expect("user message payload"),
+                    ),
+                )
+                .expect("parsed inbound"),
+            )
+            .expect("trusted envelope");
+            Ok(ProductOperationResponse::channel_inbound(
+                ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
+                    envelope,
+                    ack,
+                })),
+            ))
+        }
+    }
+
+    fn unavailable() -> RebornServicesError {
+        RebornServicesError {
+            code: RebornServicesErrorCode::Unavailable,
+            kind: RebornServicesErrorKind::ServiceUnavailable,
+            status_code: 503,
+            retryable: false,
+            field: None,
+            validation_code: None,
         }
     }
 
@@ -857,10 +936,10 @@ mod tests {
         interception: ChannelPairingInterception,
     ) -> (
         GenericChannelInboundSink,
-        Arc<CountingWorkflow>,
+        Arc<CountingSurface>,
         Arc<std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>>,
     ) {
-        let workflow = Arc::new(CountingWorkflow::new());
+        let workflow = Arc::new(CountingSurface::new());
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
@@ -868,9 +947,7 @@ mod tests {
                 header: "X-Vendor-Secret".to_string(),
             },
             classifier: None,
-            surface: Arc::new(ProductWorkflowChannelSurface::new(
-                Arc::clone(&workflow) as Arc<dyn ProductWorkflow>
-            )) as Arc<dyn ChannelInboundProductSurface>,
+            surface: Arc::clone(&workflow) as Arc<dyn ProductSurface>,
             observer: None,
         })
         .with_pairing(
