@@ -1,20 +1,20 @@
 //! Descriptor-backed outbound delivery read projections.
 
 use super::{
-    ProductCapabilityInvoker, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornServices, RebornServicesError, RebornViewDescriptor,
-    RebornViewProvider, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, ProductView, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornServices, RebornServicesError, RebornViewProvider,
+    WebUiAuthenticatedCaller,
 };
 
-pub const OUTBOUND_PREFERENCES_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "outbound_preferences",
-    paginated: false,
-};
+pub const OUTBOUND_PREFERENCES_VIEW: ProductView<
+    serde_json::Value,
+    RebornOutboundPreferencesResponse,
+> = ProductView::unpaginated("outbound_preferences");
 
-pub const OUTBOUND_DELIVERY_TARGETS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "outbound_delivery_targets",
-    paginated: false,
-};
+pub const OUTBOUND_DELIVERY_TARGETS_VIEW: ProductView<
+    serde_json::Value,
+    RebornOutboundDeliveryTargetListResponse,
+> = ProductView::unpaginated("outbound_delivery_targets");
 
 impl<I, V> RebornServices<I, V>
 where

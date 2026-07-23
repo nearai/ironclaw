@@ -22,6 +22,8 @@ layer = "app"
 # test-support.
 test-support = [
     "ironclaw_host_runtime/test-support",
+    "ironclaw_outbound/test-support",
+    "ironclaw_product_workflow/test-support",
     "ironclaw_runner/test-support",
 ]
 [dependencies]

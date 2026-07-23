@@ -307,7 +307,7 @@ impl AdminUserService for RejectingAdminUserService {
 // --- Wire contract (WebChat v2 admin routes) ---------------------------------
 
 /// Query params for `GET /admin/users`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RebornAdminUserListQuery {
     #[serde(default)]
     pub status: Option<AdminUserStatus>,
@@ -321,6 +321,12 @@ pub struct RebornAdminUserListQuery {
     pub cursor: Option<String>,
 }
 
+/// Request for routes addressing one admin-managed user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminUserRequest {
+    pub user_id: UserId,
+}
+
 /// Response for `GET /admin/users`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminUserListResponse {
@@ -332,7 +338,7 @@ pub struct RebornAdminUserListResponse {
 }
 
 /// Body for `POST /admin/users`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminCreateUserRequest {
     #[serde(default)]
     pub email: Option<String>,
@@ -343,14 +349,14 @@ pub struct RebornAdminCreateUserRequest {
 
 /// Response for `POST /admin/users` — carries the one-time API token in
 /// plaintext. This is the ONLY response that ever exposes it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminUserCreatedResponse {
     pub user: AdminUserRecord,
     pub api_token: String,
 }
 
 /// Body for `PATCH /admin/users/{id}` — partial profile update.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RebornAdminUpdateUserRequest {
     #[serde(default)]
     pub display_name: Option<String>,
@@ -358,15 +364,39 @@ pub struct RebornAdminUpdateUserRequest {
     pub metadata: Option<BTreeMap<String, String>>,
 }
 
+/// ProductSurface mutation input for `PATCH /admin/users/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminUpdateUserProductRequest {
+    pub user_id: UserId,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<BTreeMap<String, String>>,
+}
+
 /// Body for `POST /admin/users/{id}/status`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminSetStatusRequest {
     pub status: AdminUserStatus,
 }
 
+/// ProductSurface mutation input for `POST /admin/users/{id}/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminSetStatusProductRequest {
+    pub user_id: UserId,
+    pub status: AdminUserStatus,
+}
+
 /// Body for `POST /admin/users/{id}/role`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminSetRoleRequest {
+    pub role: AdminUserRole,
+}
+
+/// ProductSurface mutation input for `POST /admin/users/{id}/role`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminSetRoleProductRequest {
+    pub user_id: UserId,
     pub role: AdminUserRole,
 }
 
@@ -390,9 +420,24 @@ pub struct RebornAdminUserSecretsListResponse {
 }
 
 /// Body for `PUT /admin/users/{id}/secrets/{handle}` (handle is in the path).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminPutSecretRequest {
     pub value: String,
+}
+
+/// ProductSurface mutation input for `PUT /admin/users/{id}/secrets/{handle}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminPutSecretProductRequest {
+    pub user_id: UserId,
+    pub handle: String,
+    pub value: String,
+}
+
+/// ProductSurface mutation input for `DELETE /admin/users/{id}/secrets/{handle}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminDeleteSecretProductRequest {
+    pub user_id: UserId,
+    pub handle: String,
 }
 
 /// Response for `PUT /admin/users/{id}/secrets/{handle}`.

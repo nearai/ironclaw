@@ -514,6 +514,33 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["key", "enabled", "tenant_id", "user_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/operator_config_set_tool_permission.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "capability_id": { "type": "string", "maxLength": 512 },
+                "state": {
+                    "type": "string",
+                    "enum": ["default", "always_allow", "ask_each_time", "disabled"]
+                }
+            },
+            "required": ["capability_id", "state"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/operator_config_set_tool_permission.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string", "maxLength": 517 },
+                "capability_id": { "type": "string", "maxLength": 512 },
+                "state": {
+                    "type": "string",
+                    "enum": ["default", "always_allow", "ask_each_time", "disabled"]
+                },
+                "tenant_id": { "type": "string", "maxLength": 128 },
+                "user_id": { "type": "string", "maxLength": 128 }
+            },
+            "required": ["key", "capability_id", "state", "tenant_id", "user_id"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/outbound_preferences_set.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -877,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_config_auto_approve_schemas_are_registered() {
+    fn operator_config_schemas_are_registered() {
         let input = resolve_builtin_input_schema_ref(
             "schemas/builtin/operator_config_set_auto_approve.input.v1.json",
         )
@@ -891,6 +918,23 @@ mod tests {
         assert_eq!(
             output["properties"]["key"]["const"],
             "agent.auto_approve_tools"
+        );
+        let tool_input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_tool_permission.input.v1.json",
+        )
+        .expect("operator config tool-permission input schema is registered");
+        let tool_output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_tool_permission.output.v1.json",
+        )
+        .expect("operator config tool-permission output schema is registered");
+
+        assert_eq!(
+            tool_input["properties"]["state"]["enum"],
+            serde_json::json!(["default", "always_allow", "ask_each_time", "disabled"])
+        );
+        assert_eq!(
+            tool_output["required"],
+            serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
         );
     }
 

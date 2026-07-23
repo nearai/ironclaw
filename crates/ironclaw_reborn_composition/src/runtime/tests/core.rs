@@ -520,10 +520,11 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
-    ProductCapabilityInput, RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSkillListResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    CREATE_THREAD_OPERATION, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
+    LifecycleReadinessBlocker, ProductCapabilityInput, RESOLVE_GATE_OPERATION,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, SUBMIT_TURN_OPERATION,
     WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_gate_ref,
@@ -1130,13 +1131,19 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
 
 static RUNTIME_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct RuntimeEnvGuardEntry {
+    name: &'static str,
+    effective: Option<String>,
+    snapshot: ironclaw_common::env_helpers::RuntimeEnvSnapshot,
+}
+
 struct RuntimeEnvGuard {
     // Serializes tokio tests that mutate the runtime env overlay. The
     // set/remove helpers lock only the separate override map, not
     // ENV_MUTEX, so restoration can safely run while this guard is held.
     _async_lock: tokio::sync::MutexGuard<'static, ()>,
     _env_lock: std::sync::MutexGuard<'static, ()>,
-    previous: Vec<(&'static str, Option<String>)>,
+    previous: Vec<RuntimeEnvGuardEntry>,
 }
 
 impl RuntimeEnvGuard {
@@ -1149,12 +1156,16 @@ impl RuntimeEnvGuard {
         let env_lock = ironclaw_common::env_helpers::lock_env();
         let previous = vars
             .iter()
-            .map(|(name, _)| (*name, ironclaw_common::env_helpers::env_or_override(name)))
+            .map(|(name, _)| RuntimeEnvGuardEntry {
+                name,
+                effective: ironclaw_common::env_helpers::env_or_override(name),
+                snapshot: ironclaw_common::env_helpers::snapshot_runtime_env(name),
+            })
             .collect::<Vec<_>>();
         for (name, value) in vars {
             match value {
                 Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                None => ironclaw_common::env_helpers::mask_runtime_env(name),
             }
         }
         Self {
@@ -1167,16 +1178,14 @@ impl RuntimeEnvGuard {
 
 impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
-        for (name, previous) in self.previous.iter().rev() {
-            match previous {
-                Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(name),
-            }
+        for previous in self.previous.iter().rev() {
+            ironclaw_common::env_helpers::restore_runtime_env(previous.snapshot.clone());
             if !std::thread::panicking() {
                 debug_assert_eq!(
-                    ironclaw_common::env_helpers::env_or_override(name),
-                    previous.clone(),
-                    "RuntimeEnvGuard failed to restore {name}"
+                    ironclaw_common::env_helpers::env_or_override(previous.name),
+                    previous.effective.clone(),
+                    "RuntimeEnvGuard failed to restore {}",
+                    previous.name
                 );
             }
         }
@@ -1863,8 +1872,12 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
 
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2005,8 +2018,12 @@ async fn nearai_mcp_runtime_access_secret(
 
 #[tokio::test]
 async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2495,8 +2512,12 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     // by `RebornLlmReloadAdapter::reload`) sets exactly that field from the
     // seeded key below. So the session/auth-url defaults are constructed but
     // never read from disk or contacted over the network.
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
     let root = tempfile::tempdir().expect("tempdir");
@@ -3379,7 +3400,7 @@ async fn send_user_message_persists_personal_owner_for_webui() {
 /// gap by asserting the *rendered* origin appears in the captured model
 /// request.
 #[tokio::test]
-async fn send_user_message_renders_webui_origin_in_model_request() {
+async fn send_user_message_renders_cli_origin_in_model_request() {
     let root = tempfile::tempdir().expect("tempdir");
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
@@ -3442,11 +3463,11 @@ async fn send_user_message_renders_webui_origin_in_model_request() {
             .clone()
     };
 
-    // Exact string produced by LoopRuntimeContext::render_model_content
-    // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+    // Exact string produced by LoopRuntimeContext::render_model_content for
+    // local runtime chat, which stamps the first-party source channel as CLI.
     assert!(
-        runtime_context_content.contains("Run origin: WebUI chat; replies render in this chat."),
-        "runtime-context system message must contain the WebUI origin line, \
+        runtime_context_content.contains("Run origin: CLI chat; replies render in this session."),
+        "runtime-context system message must contain the CLI origin line, \
              got: {runtime_context_content:?}"
     );
 
@@ -4937,9 +4958,9 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         Some(AgentId::new("runtime-webui-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-stream-thread".to_string()),
@@ -4949,9 +4970,9 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         )
         .await
         .expect("create webui thread");
-    let submitted = bundle
-        .api
-        .submit_turn(
+    let submitted = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-webui-stream-message".to_string()),
@@ -5529,15 +5550,16 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
         UserId::new("runtime-webui-diagnostics-owner").unwrap(),
         Some(AgentId::new("runtime-webui-diagnostics-agent").unwrap()),
         None,
-    );
+    )
+    .with_operator_webui_config(true);
     let router = webui_v2_router(WebUiV2State::new(
         bundle.api,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
+    .layer(axum::Extension(caller))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
-    }))
-    .layer(axum::Extension(caller));
+    }));
 
     let response = router
         .oneshot(
@@ -5753,9 +5775,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         Some(AgentId::new("runtime-webui-approval-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-approval-thread".to_string()),
@@ -5767,9 +5789,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         .expect("create thread");
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
 
-    let err = bundle
-        .api
-        .resolve_gate(
+    let err = RESOLVE_GATE_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-approval-gate".to_string()),
@@ -5824,9 +5846,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         Some(AgentId::new("runtime-webui-auth-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-auth-thread".to_string()),
@@ -5837,9 +5859,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         .await
         .expect("create thread");
 
-    let err = bundle
-        .api
-        .resolve_gate(
+    let err = RESOLVE_GATE_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-auth-gate".to_string()),
@@ -5910,9 +5932,9 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-skill-thread".to_string()),
@@ -5922,9 +5944,9 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         )
         .await
         .expect("create thread");
-    let submitted = bundle
-        .api
-        .submit_turn(
+    let submitted = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiSendMessageRequest {
                 client_action_id: Some("send-webui-skill-message".to_string()),
@@ -6261,9 +6283,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     );
 
     // Create the thread via WebUI so the thread record exists.
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-rejected-busy-thread".to_string()),
@@ -6304,9 +6326,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     } = submitted_a;
 
     // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
-    let response_b = bundle
-        .api
-        .submit_turn(
+    let response_b = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-rejected-busy-b".to_string()),
@@ -6415,9 +6437,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     );
 
     // Submit message C — thread is free again, must be Submitted.
-    let response_c = bundle
-        .api
-        .submit_turn(
+    let response_c = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-rejected-busy-c".to_string()),

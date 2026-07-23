@@ -104,6 +104,15 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   §5.10 vocabulary tightened around product terminals vs external channel
   adapters. §14 refreshed against current `origin/main` after #6386 / #6396 /
   #6430 / #6432 / #6116 / #6438 / #6447.
+- **r12** 2026-07-23 — status-only update for channel ingress: extension/channel
+  ingress now admits verified normalized messages directly through
+  `ProductSurface` as the host-only `channel.admit_inbound` operation instead
+  of using a separate product workflow facade or constructing
+  `ProductInboundPayload` directly. `ProductInboundEnvelope` now carries `source_channel`, so WebUI,
+  CLI, and external channels converge on one source-channel stamp instead of a
+  separate channel-specific envelope. Slack gate/auth interaction classifiers
+  now return the channel-classification DTO consumed by ProductSurface
+  admission.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -1532,7 +1541,9 @@ More precisely, direct terminals (WebUI, CLI) may hold an actor-bound
 OpenAI-compat-style ingress) terminate protocol-specific ingress/egress first,
 then feed `ProductSurface` through their host/ingress path. Both converge before
 turn submission, capability invocation, gates, projections, and delivery-status
-recording.
+recording. The shared inbound envelope carries `source_channel`; first-party
+terminals stamp `webui` or `cli`, while vendor channels usually stamp the
+adapter/channel name (`slack`, `telegram`, etc.).
 
 At proposal time the opposite held: product host concerns were split across
 dedicated crates *and* hand-wired into the composition god-crate. WebUI alone was
@@ -2480,6 +2491,13 @@ loop-facing capability result and every result mirror is deleted.
   `ProductSurface::invoke` -> descriptor-declared first-party handler or
   product-workflow-owned API capability -> authoritative `query` read-back where
   an authoritative read model exists.
+  Channel ingress now follows the same facade direction: transport verification,
+  pairing, and pure adapter normalization stay in composition, then the generic
+  channel sink calls `ProductSurface::execute_command` with the host-only
+  `channel.admit_inbound` operation. Workflow-backed ProductSurface
+  implementations convert into the shared `ProductInboundEnvelope` with
+  `source_channel` stamped before delegating to the durable workflow commit path
+  until that implementation is renamed or collapsed.
   Remaining facade methods still need migration or explicit turn-lifecycle
   classification before the trait can collapse to the §5.2 end state.
 - **§5.2.10 causal routing / product-terminal path** — design added here and

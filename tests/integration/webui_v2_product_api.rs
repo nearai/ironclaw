@@ -33,7 +33,7 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
     ProductSurface, RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices,
-    RebornServicesApi, RebornStreamEventsRequest, WebUiAuthenticatedCaller,
+    RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
@@ -1735,7 +1735,7 @@ output_schema_ref = "schemas/run.output.json"
     writer.finish().expect("finish zip").into_inner()
 }
 
-/// W5-WEBUI-API-1 scenario 2: drives `RebornServicesApi::stream_events`
+/// W5-WEBUI-API-1 scenario 2: drives `ProductSurface::stream_events`
 /// directly (SSE handler is a polling wrapper over the same drain, per
 /// W5-WEBUI-SPIKE). Proves a lifecycle event delivers once and reconnect
 /// with `after_cursor` past it doesn't redeliver. Uses Enabler A's narrowed
@@ -1821,7 +1821,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
 /// turn-state-converged `ApprovalInteractionService`
 /// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`
-/// wires into `DefaultProductWorkflow`) and the production event-stream
+/// wires into `DefaultProductSurface`) and the production event-stream
 /// recipe `sse_activity_stream_replay_and_reconnect` above already pins.
 ///
 /// "Refresh" is simulated the same way that precedent does: a fresh
@@ -1855,7 +1855,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 
     // Wire the REAL approval interaction service over the group's own shared
     // turn-state store — same test-support seam
-    // `with_real_gate_dispatch_services` uses for `DefaultProductWorkflow`,
+    // `with_real_gate_dispatch_services` uses for `DefaultProductSurface`,
     // applied here directly to a webui-level `RebornServices` instead.
     let capability_harness = group
         .capability_harness()

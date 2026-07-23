@@ -21,13 +21,9 @@ use ironclaw_auth::{
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, rejecting_reborn_services_error,
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornServicesError, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, WebUiAuthenticatedCaller, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -77,39 +73,7 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl RebornServicesApi for UnusedServices {
-    async fn create_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
+impl ProductSurface for UnusedServices {
     async fn stream_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -125,28 +89,11 @@ impl RebornServicesApi for UnusedServices {
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
-
-    async fn cancel_run(
+    async fn execute_command(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        _request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 }

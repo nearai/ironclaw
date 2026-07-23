@@ -10,18 +10,17 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
-    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, ExecutionContext, ExtensionId,
-    FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId, InvocationOrigin,
-    MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef, ProcessWaypoint,
-    ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress,
-    ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint,
-    ToolVerdict, TrustClass,
+    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, EffectKind, ExecutionContext,
+    ExtensionId, FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId,
+    InvocationOrigin, MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef,
+    ProcessWaypoint, ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta,
+    ResultProgress, ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension,
+    TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
-    EXTENSION_ACTIVATE_CAPABILITY_ID, ProductCapabilityInvoker, RebornServicesError,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, RebornServicesError, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
 };
 
 use crate::RebornRuntime;
@@ -172,8 +171,7 @@ fn product_gesture_grant(
             network_targets.push(credential.audience.clone());
         }
     }
-    let network = if product_gesture_requires_dev_wildcard_egress(&descriptor.id)
-        && network_targets.is_empty()
+    let network = if descriptor.effects.contains(&EffectKind::Network) && network_targets.is_empty()
     {
         crate::builtin_capability_policy::dev_wildcard_network_policy()
     } else {
@@ -205,13 +203,6 @@ fn product_gesture_grant(
             max_invocations: Some(1),
         },
     }
-}
-
-fn product_gesture_requires_dev_wildcard_egress(capability_id: &CapabilityId) -> bool {
-    matches!(
-        capability_id.as_str(),
-        SKILL_INSTALL_CAPABILITY_ID | EXTENSION_ACTIVATE_CAPABILITY_ID
-    )
 }
 
 fn product_invocation_mounts(
@@ -461,12 +452,9 @@ mod tests {
     }
 
     #[test]
-    fn product_gesture_grant_allows_extension_activation_discovery_egress() {
-        let descriptor = descriptor_with_id_and_network(
-            EXTENSION_ACTIVATE_CAPABILITY_ID,
-            Vec::new(),
-            Vec::new(),
-        );
+    fn product_gesture_grant_uses_dev_wildcard_for_networked_gesture_without_targets() {
+        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
+        descriptor.effects.push(EffectKind::Network);
 
         let grant = product_gesture_grant(
             &descriptor,
@@ -538,20 +526,8 @@ mod tests {
         network_targets: Vec<NetworkTargetPattern>,
         runtime_credentials: Vec<RuntimeCredentialRequirement>,
     ) -> CapabilityDescriptor {
-        descriptor_with_id_and_network(
-            "builtin.product-gesture-test",
-            network_targets,
-            runtime_credentials,
-        )
-    }
-
-    fn descriptor_with_id_and_network(
-        id: &str,
-        network_targets: Vec<NetworkTargetPattern>,
-        runtime_credentials: Vec<RuntimeCredentialRequirement>,
-    ) -> CapabilityDescriptor {
         CapabilityDescriptor {
-            id: CapabilityId::new(id).unwrap(),
+            id: CapabilityId::new("builtin.product-gesture-test").unwrap(),
             provider: ExtensionId::new("builtin").unwrap(),
             runtime: RuntimeKind::FirstParty,
             trust_ceiling: TrustClass::UserTrusted,

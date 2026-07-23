@@ -45,80 +45,26 @@ struct RecordingServices {
     calls: Mutex<Vec<OperatorConfigCall>>,
 }
 
+impl RecordingServices {
+    async fn set_operator_config_key(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(OperatorConfigCall::Set {
+                key,
+                value: request.value,
+            });
+        Err(service_unavailable_error())
+    }
+}
+
 #[async_trait]
-impl RebornServicesApi for RecordingServices {
-    async fn create_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn stream_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
+impl ProductSurface for RecordingServices {
     async fn query(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -140,20 +86,31 @@ impl RebornServicesApi for RecordingServices {
         Err(service_unavailable_error())
     }
 
-    async fn set_operator_config_key(
+    async fn execute_command(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        key: String,
-        request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push(OperatorConfigCall::Set {
-                key,
-                value: request.value,
-            });
-        Err(service_unavailable_error())
+        caller: WebUiAuthenticatedCaller,
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
+            .ok_or_else(service_unavailable_error)?;
+        match operation_id {
+            ProductOperationId::OperatorConfigSetKey => {
+                let request: RebornOperatorConfigSetProductRequest =
+                    serde_json::from_value(request.input)
+                        .map_err(RebornServicesError::internal_from)?;
+                ProductOperationResponse::json(
+                    self.set_operator_config_key(
+                        caller,
+                        request.key,
+                        RebornOperatorConfigSetRequest {
+                            value: request.value,
+                        },
+                    )
+                    .await?,
+                )
+            }
+            _ => Err(service_unavailable_error()),
+        }
     }
 }
 

@@ -17,19 +17,15 @@ use ironclaw_reborn_traces::contribution::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ProductCapabilityInvoker, RebornServices, RebornServicesError, RebornViewDescriptor,
-    RebornViewProvider, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, ProductView, RebornServices, RebornServicesError, RebornViewProvider,
+    WebUiAuthenticatedCaller,
 };
 
-pub const TRACE_CREDITS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "trace_credits",
-    paginated: false,
-};
+pub const TRACE_CREDITS_VIEW: ProductView<serde_json::Value, RebornTraceCreditsResponse> =
+    ProductView::unpaginated("trace_credits");
 
-pub const TRACE_ACCOUNT_TRACES_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "trace_account_traces",
-    paginated: false,
-};
+pub const TRACE_ACCOUNT_TRACES_VIEW: ProductView<serde_json::Value, RebornAccountTracesResponse> =
+    ProductView::unpaginated("trace_account_traces");
 
 /// Server-authoritative framing returned with every credits response.
 /// Mirrors the note `builtin.trace_commons.credits` reports.

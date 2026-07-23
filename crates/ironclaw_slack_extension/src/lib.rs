@@ -2,7 +2,7 @@
 //!
 //! This crate owns Slack protocol parsing/rendering only. Hosts verify Slack
 //! request signatures, stamp trusted inbound context, and route through
-//! ProductWorkflow. The adapter never sees raw Slack signing secrets or bot
+//! ProductSurface admission. The adapter never sees raw Slack signing secrets or bot
 //! tokens.
 //!
 //! * [`channel`] — the generic-ingress `ChannelAdapter` (live inbound/outbound,
@@ -26,8 +26,9 @@ pub const SLACK_V2_ADAPTER_ID: &str = "slack_v2";
 pub use channel::SlackChannelAdapter;
 pub use payload::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackInboundEvent, SlackPayloadParseError,
-    SlackUrlVerificationChallenge, classify_interaction_resolution, normalize_slack_event,
-    parse_slack_event, parse_slack_url_verification_challenge,
+    SlackUrlVerificationChallenge, classify_channel_interaction_resolution,
+    classify_interaction_resolution, normalize_slack_event, parse_slack_event,
+    parse_slack_url_verification_challenge,
 };
 pub use preference_targets::{
     SlackPreferenceTargetCodec, SlackReplyTargetError,

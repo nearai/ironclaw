@@ -94,12 +94,9 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
-use ironclaw_outbound::CommunicationPreferenceRepository;
+use ironclaw_outbound::{CommunicationPreferenceRepository, OutboundError};
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_product_workflow::{
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
-};
+use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::UserProfileContext;
 
@@ -121,8 +118,9 @@ use crate::factory::{
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
@@ -137,8 +135,8 @@ use ironclaw_secrets::SecretStore;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    summary: RebornOutboundDeliveryTargetSummary,
-    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    summary: OutboundDeliveryTargetSummary,
+    capabilities: DeliveryTargetCapabilities,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -147,8 +145,8 @@ struct StaticOutboundDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         // Static test/QA fixture available to whichever caller asks: it claims
         // the querying caller as owner so it always survives the registry's
         // caller-scoping filter. Real providers derive the owner from the
@@ -157,7 +155,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+            owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
 }
@@ -469,7 +467,7 @@ struct SubmittedTurn {
 /// production [`RebornRuntime::send_user_message`] submit path but returns when
 /// the run first reaches a terminal status *or* parks on a `Blocked*` gate,
 /// instead of waiting only for a terminal status. Gate *resolution* stays on
-/// the WebUI `RebornServicesApi` facade (`resolve_gate`) per the #3094 seam;
+/// the WebUI `ProductSurface` facade (`resolve_gate`) per the #3094 seam;
 /// this type only observes where a run paused.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
@@ -554,8 +552,6 @@ pub struct RebornRuntime {
     pub(crate) project_service: Arc<dyn ironclaw_product_workflow::ProjectService>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
-    pub(crate) trigger_conversation_services:
-        tokio::sync::OnceCell<RebornFilesystemConversationServices>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
@@ -1406,19 +1402,6 @@ impl RebornRuntime {
         )
     }
 
-    pub(crate) async fn durable_trigger_conversation_services(
-        &self,
-    ) -> Result<RebornFilesystemConversationServices, ironclaw_conversations::InboundTurnError>
-    {
-        let filesystem = Arc::clone(&self.scoped_filesystem);
-        self.trigger_conversation_services
-            .get_or_try_init(|| async move {
-                RebornFilesystemConversationServices::new(filesystem).await
-            })
-            .await
-            .cloned()
-    }
-
     fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
@@ -1817,7 +1800,12 @@ impl RebornRuntime {
         description: Option<&str>,
         reply_target_binding_ref: ReplyTargetBindingRef,
     ) -> Result<(), RebornRuntimeError> {
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let target_id = OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("invalid outbound delivery target id: {error}"),
+            }
+        })?;
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             channel,
             display_name,
@@ -1830,10 +1818,12 @@ impl RebornRuntime {
             provider_key,
             Arc::new(StaticOutboundDeliveryTargetProvider {
                 summary,
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                capabilities: DeliveryTargetCapabilities {
                     final_replies: true,
+                    progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
             }),
@@ -1958,8 +1948,8 @@ impl RebornRuntime {
     /// returned reply will surface that failure via `status = Failed`
     /// and `text = None`.
     ///
-    /// **WebUI-only origin contract**: this task-level send path resolves
-    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// **CLI origin contract**: this task-level send path resolves
+    /// the turn's product-context source channel as CLI chat (`resolve_cli`).
     /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
     /// this method for its submissions; it must resolve its own origin at
     /// that ingress instead.
@@ -2265,7 +2255,7 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                product_context: Some(ironclaw_product_context::resolve_cli(
                     scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
                 )),
             })
@@ -2645,7 +2635,7 @@ impl RebornRuntime {
     /// gate and reports the pause, instead of sitting in the non-terminal
     /// `BlockedAuth` state until `RunTimeout` (a real recorder hang this method
     /// exists to eliminate). This method only *observes* where the run paused;
-    /// gate *resolution* stays on the WebUI `RebornServicesApi` facade
+    /// gate *resolution* stays on the WebUI `ProductSurface` facade
     /// (`resolve_gate`) per the #3094 seam — do not add a resolution path here.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn send_user_message_until_gate(
@@ -4110,7 +4100,6 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         project_service,
         trigger_repository: trigger_repository.clone(),
         broadcast_budget_event_sink,
-        trigger_conversation_services: tokio::sync::OnceCell::new(),
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),
         tool_permission_overrides: services.tool_permission_overrides.clone(),

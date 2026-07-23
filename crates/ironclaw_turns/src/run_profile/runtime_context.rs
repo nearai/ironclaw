@@ -18,7 +18,7 @@ pub struct LoopRuntimeContext {
     /// `None` means no communication (channel/delivery) slice was populated for this run;
     /// `product_context`, when present, still renders the run-origin line independently.
     pub communication: Option<CommunicationRuntimeContext>,
-    /// Per-turn run-origin context (origin kind, surface, adapter, owner).
+    /// Per-turn run-origin context (origin kind, surface, adapter, source channel, owner).
     /// Rendered directly from here rather than routed through the communication provider.
     pub product_context: Option<ProductTurnContext>,
     /// Host-resolved user agent-context profile (timezone/locale/location),
@@ -327,15 +327,16 @@ impl LoopRuntimeContext {
 /// slice and is emitted by the caller only when delivery state is known.
 fn render_origin_line(ctx: &ProductTurnContext) -> String {
     match ctx.origin {
-        TurnOriginKind::WebUi => "Run origin: WebUI chat; replies render in this chat.".to_string(),
+        TurnOriginKind::WebUi => render_first_party_chat_origin_line(ctx),
         TurnOriginKind::Inbound => {
-            let adapter_str = ctx
-                .adapter
+            let source_str = ctx
+                .source_channel
                 .as_ref()
+                .or(ctx.adapter.as_ref())
                 .map(|a| model_safe_label(a.as_str(), "a connected product"))
                 .unwrap_or_else(|| "unknown".to_string());
             format!(
-                "Run origin: inbound message via {adapter_str}; replies post back to that \
+                "Run origin: inbound message via {source_str}; replies post back to that \
                  conversation automatically \u{2014} do not also send your reply with messaging \
                  capabilities.",
             )
@@ -348,6 +349,17 @@ fn render_origin_line(ctx: &ProductTurnContext) -> String {
              creator's own conversation (their DM with you, or wherever they asked to receive \
              results), it is already covered by that automatic delivery \u{2014} skip the send."
                 .to_string()
+        }
+    }
+}
+
+fn render_first_party_chat_origin_line(ctx: &ProductTurnContext) -> String {
+    match ctx.source_channel.as_ref().map(|channel| channel.as_str()) {
+        Some("cli") => "Run origin: CLI chat; replies render in this session.".to_string(),
+        Some("webui") | None => "Run origin: WebUI chat; replies render in this chat.".to_string(),
+        Some(source_channel) => {
+            let source_channel = model_safe_label(source_channel, "a source channel");
+            format!("Run origin: {source_channel} chat; replies render in this chat.")
         }
     }
 }
@@ -1055,6 +1067,33 @@ mod tests {
     }
 
     #[test]
+    fn renders_origin_cli_chat_from_source_channel() {
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::Unknown,
+                delivery_tools_visible: false,
+            }),
+            product_context: Some(ProductTurnContext::new_with_source_channel(
+                TurnOriginKind::WebUi,
+                None,
+                None,
+                Some(crate::RunOriginAdapter::new("cli").unwrap()),
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+            user_profile: None,
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            text.contains("Run origin: CLI chat; replies render in this session."),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn renders_origin_product_inbound() {
         let ctx = LoopRuntimeContext {
             loop_started_at_utc: stamp(),
@@ -1081,6 +1120,34 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn inbound_origin_prefers_source_channel_over_adapter() {
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::Unknown,
+                delivery_tools_visible: false,
+            }),
+            product_context: Some(ProductTurnContext::new_with_source_channel(
+                TurnOriginKind::Inbound,
+                None,
+                Some(crate::RunOriginAdapter::new("legacy_adapter").unwrap()),
+                Some(crate::RunOriginAdapter::new("slack").unwrap()),
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+            user_profile: None,
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            text.contains("Run origin: inbound message via slack;"),
+            "{text}"
+        );
+        assert!(!text.contains("legacy_adapter"), "{text}");
     }
 
     #[test]

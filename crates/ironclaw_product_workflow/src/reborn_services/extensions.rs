@@ -12,10 +12,10 @@ use crate::{
     ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, RebornAccountBindingSource, RebornAuthAccount,
+    LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
-    RebornServicesError, RebornVendorAuthAccounts, RebornViewDescriptor, WebUiAuthenticatedCaller,
+    RebornServicesError, RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
     WebUiInboundValidationCode,
 };
 
@@ -30,15 +30,11 @@ use super::{
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
 
-pub const EXTENSIONS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "extensions",
-    paginated: false,
-};
+pub const EXTENSIONS_VIEW: ProductView<serde_json::Value, RebornExtensionListResponse> =
+    ProductView::unpaginated("extensions");
 
-pub const EXTENSION_REGISTRY_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "extension_registry",
-    paginated: false,
-};
+pub const EXTENSION_REGISTRY_VIEW: ProductView<serde_json::Value, RebornExtensionRegistryResponse> =
+    ProductView::unpaginated("extension_registry");
 
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,

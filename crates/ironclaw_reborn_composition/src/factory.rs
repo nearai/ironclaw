@@ -50,9 +50,13 @@ use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
+use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound::outbound_preferences_capability::{
     extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
     insert_handler as insert_outbound_preferences_handler,
+};
+use crate::outbound::{
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
 };
 use crate::product_auth::credentials::product_auth_providers::{
     OAuthProviderComposition, compose_provider_client,
@@ -958,7 +962,7 @@ async fn validate_trigger_delivery_target_against_registry(
         kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
         reason,
     };
-    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
+    let target_id = crate::outbound::OutboundDeliveryTargetId::new(target.as_str())
         .map_err(|error| {
             tracing::debug!(
                 target = "ironclaw::reborn::trigger_create",
@@ -967,11 +971,9 @@ async fn validate_trigger_delivery_target_against_registry(
             );
             invalid("delivery target id is not a valid outbound target id".to_string())
         })?;
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let caller = crate::outbound::OutboundDeliveryTargetScope::new(
         scope.tenant_id.clone(),
         scope.user_id.clone(),
-        scope.agent_id.clone(),
-        scope.project_id.clone(),
     );
     use crate::outbound::OutboundDeliveryTargetProvider as _;
     match registry
@@ -4043,7 +4045,41 @@ async fn build_backend_production(
     })?;
     let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
         Arc::clone(&auto_approve_settings) as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>;
-    insert_operator_config_handler(&mut first_party_registry, operator_auto_approve_settings)
+    let operator_tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::ToolPermissionOverrideStore,
+    > = Arc::clone(&tool_permission_overrides)
+        as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>;
+    let operator_persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+    > = Arc::clone(&stores.persistent_approval_policies)
+        as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>;
+    let operator_synthetic_tools = {
+        let provider = outbound_delivery_synthetic_provider().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+            }
+        })?;
+        vec![
+            outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("outbound delivery operator tool is invalid: {error}"),
+                }
+            })?,
+        ]
+    };
+    let operator_tool_catalog: Arc<dyn ironclaw_product_workflow::RebornOperatorToolCatalog> =
+        Arc::new(ActiveRegistryOperatorToolCatalog::new(
+            services.shared_extension_registry(),
+            operator_synthetic_tools,
+            Some(Arc::clone(&extension_management)),
+        ));
+    insert_operator_config_handler(
+        &mut first_party_registry,
+        operator_auto_approve_settings,
+        operator_tool_permission_overrides,
+        operator_persistent_approval_policies,
+        operator_tool_catalog,
+    )
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("operator configuration handler is invalid: {error}"),
         })?;
