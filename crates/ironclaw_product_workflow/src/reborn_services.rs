@@ -158,12 +158,7 @@ pub use outbound_delivery_capability_surface::{
     parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
     set_outbound_delivery_target_for_model,
 };
-pub use outbound_preferences::{
-    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
-    OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetRegistry,
-    RebornOutboundPreferencesFacade,
-};
+pub use outbound_preferences::RebornOutboundPreferencesFacade;
 pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,

@@ -3166,8 +3166,8 @@ async fn validate_trigger_delivery_target_against_registry(
         kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
         reason,
     };
-    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
-        .map_err(|error| {
+    let target_id =
+        ironclaw_outbound::OutboundDeliveryTargetId::new(target.as_str()).map_err(|error| {
             tracing::debug!(
                 target = "ironclaw::reborn::trigger_create",
                 %error,
@@ -3175,11 +3175,9 @@ async fn validate_trigger_delivery_target_against_registry(
             );
             invalid("delivery target id is not a valid outbound target id".to_string())
         })?;
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let caller = ironclaw_outbound::OutboundDeliveryTargetScope::new(
         scope.tenant_id.clone(),
         scope.user_id.clone(),
-        scope.agent_id.clone(),
-        scope.project_id.clone(),
     );
     use crate::outbound::OutboundDeliveryTargetProvider as _;
     match registry

@@ -231,13 +231,11 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
 #[tokio::test]
 async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
     use crate::outbound::{
-        MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
-        OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+        DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
+        OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
     };
-    use ironclaw_product_workflow::{
-        RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-        RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
-    };
+    use ironclaw_outbound::OutboundError;
 
     struct OneTargetProvider {
         entry: OutboundDeliveryTargetEntry,
@@ -247,15 +245,15 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
     impl OutboundDeliveryTargetProvider for OneTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             // Fixture available to whichever caller asks: claim the querying
             // caller as owner so it survives the registry caller-scoping filter.
             Ok(vec![OutboundDeliveryTargetEntry {
                 summary: self.entry.summary.clone(),
                 capabilities: self.entry.capabilities.clone(),
                 reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
-                owner: OutboundDeliveryTargetOwner::for_caller(caller),
+                owner: OutboundDeliveryTargetOwner::for_scope(caller),
             }])
         }
     }
@@ -287,17 +285,19 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
 
     // Registered provider that resolves the id for the caller → accept.
     let entry = OutboundDeliveryTargetEntry {
-        summary: RebornOutboundDeliveryTargetSummary::new(
-            RebornOutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
+        summary: OutboundDeliveryTargetSummary::new(
+            OutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
             "slack",
             "Slack DM".to_string(),
             None,
         )
         .expect("summary"),
-        capabilities: RebornOutboundDeliveryTargetCapabilities {
+        capabilities: DeliveryTargetCapabilities {
             final_replies: true,
+            progress: false,
             gate_prompts: true,
             auth_prompts: true,
+            modalities: Vec::new(),
         },
         reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
             "reply:registry-validation",
