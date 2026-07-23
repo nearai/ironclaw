@@ -692,8 +692,11 @@ export function submitManualToken({
 
 // --- Extension setup ---
 
-export function setupExtension(extensionName, { action, payload } = {}) {
-  const body = {};
+export function setupExtension(
+  extensionName,
+  { action, payload, clientActionId: clientId } = {},
+) {
+  const body = { client_action_id: clientId || clientActionId() };
   if (action) body.action = action;
   if (payload !== undefined) body.payload = payload;
   return apiFetch(

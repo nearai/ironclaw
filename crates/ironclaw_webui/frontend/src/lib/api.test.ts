@@ -14,6 +14,7 @@ import {
   pauseAutomation,
   renameAutomation,
   resumeAutomation,
+  setupExtension,
 } from "./api";
 
 function withCryptoGlobal(replacement, run) {
@@ -174,6 +175,36 @@ test("automation mutations use encoded v2 automation routes", async () => {
   );
   assert.equal(calls[3].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
+});
+
+test("setupExtension includes a client action id", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await setupExtension("web-access", {
+    clientActionId: "setup-action-1",
+    action: "submit",
+    payload: { fields: {} },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/extensions/web-access/setup");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    client_action_id: "setup-action-1",
+    action: "submit",
+    payload: { fields: {} },
+  });
 });
 
 test("automation state mutations reject before fetch when automation id is missing", async () => {

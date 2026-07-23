@@ -720,6 +720,15 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        let absent_remove = invoke_json(
+            &services,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "web-access"}),
+        )
+        .await
+        .expect("already-absent remove succeeds");
+        assert_eq!(absent_remove["payload"]["removed"], false);
+
         let search = invoke_json(
             &services,
             EXTENSION_SEARCH_CAPABILITY_ID,

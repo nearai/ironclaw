@@ -359,6 +359,8 @@ pub struct WebUiRenameAutomationRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiSetupExtensionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
@@ -596,6 +598,12 @@ impl WebUiInboundValidationError {
 }
 
 fn parse_client_action_id(
+    value: Option<String>,
+) -> Result<IdempotencyKey, WebUiInboundValidationError> {
+    parse_webui_client_action_id(value)
+}
+
+pub fn parse_webui_client_action_id(
     value: Option<String>,
 ) -> Result<IdempotencyKey, WebUiInboundValidationError> {
     let value = required_text(

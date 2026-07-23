@@ -2181,6 +2181,12 @@ impl RebornLocalExtensionManagementPort {
         }
         let previous_state = installation.activation_state();
         let lifecycle_package = self.lifecycle_package(&extension_id).await?;
+        let active_package_for_unpublish = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .cloned()
+            .unwrap_or_else(|| lifecycle_package.clone());
         if let Err(error) = self
             .installation_store
             .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
@@ -2203,7 +2209,10 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
         self.unpublish_from_generic_host(&extension_id).await;
-        if let Err(error) = self.active_extensions.unpublish(&lifecycle_package) {
+        if let Err(error) = self
+            .active_extensions
+            .unpublish(&active_package_for_unpublish)
+        {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
@@ -2245,7 +2254,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(&active_package_for_unpublish, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete installation and active publication restore failed",
@@ -2282,7 +2291,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(&active_package_for_unpublish, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete files and active publication restore failed",
@@ -5378,6 +5387,126 @@ supports_threads = true
             ]
         );
         assert_eq!(egress.credential_counts(), vec![1, 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_remove_unpublishes_discovered_active_package_after_absent_cleanup() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
+
+        let absent_remove = port
+            .remove(
+                package_ref.clone(),
+                &removal_scope,
+                Some(&removal_scope.user_id),
+            )
+            .await
+            .expect("already-absent remove is idempotent");
+        assert!(matches!(
+            absent_remove.payload.as_ref(),
+            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+        ));
+
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install Notion MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-remove-discovered"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+            },
+        )
+        .await
+        .expect("activate with discovery");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_some(),
+            "discovered active package must publish before removal"
+        );
+
+        let removed = port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("remove unpublishes the discovered active package");
+        assert_eq!(removed.phase, InstallationState::Removed);
+        let extension_id = ExtensionId::new("notion").expect("valid extension id");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none(),
+            "active registry entry must be removed"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none(),
+            "successful finalization removes the cleanup tombstone"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_party_extension_remove_succeeds_after_absent_cleanup_reinstall_and_activate() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
+            .expect("valid ref");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
+
+        port.remove(
+            package_ref.clone(),
+            &removal_scope,
+            Some(&removal_scope.user_id),
+        )
+        .await
+        .expect("already-absent remove is idempotent");
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install Web Access");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate Web Access");
+
+        port.remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("remove Web Access after reinstall");
+        let extension_id = ExtensionId::new("web-access").expect("valid extension id");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none(),
+            "active registry entry must be removed"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none(),
+            "successful finalization removes the cleanup tombstone"
+        );
     }
 
     #[tokio::test]

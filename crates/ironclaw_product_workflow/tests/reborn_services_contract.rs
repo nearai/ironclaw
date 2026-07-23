@@ -9553,6 +9553,7 @@ async fn setup_extension_rejects_blank_required_manual_secret() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9581,6 +9582,7 @@ async fn setup_extension_rejects_unknown_secret_name() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9609,6 +9611,7 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
         caller(),
         "google",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9724,6 +9727,7 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "secrets": {
@@ -9779,6 +9783,7 @@ async fn setup_extension_rejects_unknown_channel_config_field() {
         caller(),
         "github",
         WebUiSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "fields": {

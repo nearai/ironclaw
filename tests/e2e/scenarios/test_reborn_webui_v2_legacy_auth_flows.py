@@ -382,7 +382,7 @@ async def test_reborn_legacy_manual_token_cancel_resolves_gate_without_token_sub
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/manual-token-cancel-gate/resolve" in (
             resolve_requests[0]["url"]
         )
-        assert resolve_requests[0]["body"]["resolution"] == "cancelled"
+        assert resolve_requests[0]["body"]["resolution"] == "declined"
         assert resolve_requests[0]["body"]["always"] is False
         assert resolve_requests[0]["body"]["client_action_id"]
     finally:
@@ -648,7 +648,7 @@ async def test_reborn_legacy_oauth_prompt_opens_https_authorization_only(
         await gate.get_by_role("button", name="Cancel").click()
         await expect(gate).to_be_hidden(timeout=5000)
         assert len(resolve_requests) == 1
-        assert resolve_requests[0]["body"]["resolution"] == "cancelled"
+        assert resolve_requests[0]["body"]["resolution"] == "declined"
     finally:
         await context.close()
 

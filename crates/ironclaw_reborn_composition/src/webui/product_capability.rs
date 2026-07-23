@@ -19,9 +19,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REMOVE_CAPABILITY_ID, ProductCapabilityInvoker, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    WebUiAuthenticatedCaller,
 };
 
 use crate::factory::{
@@ -247,6 +249,10 @@ fn product_invocation_mounts(
     let Some(descriptor) = descriptor else {
         return Ok(MountView::default());
     };
+    if is_extension_lifecycle_capability(&descriptor.id) {
+        return crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+            .map_err(RebornServicesError::internal_from);
+    }
     if !is_skill_management_capability(&descriptor.id) {
         return Ok(MountView::default());
     }
@@ -267,6 +273,15 @@ fn is_skill_management_capability(capability: &CapabilityId) -> bool {
             | SKILL_UPDATE_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+    )
+}
+
+fn is_extension_lifecycle_capability(capability: &CapabilityId) -> bool {
+    matches!(
+        capability.as_str(),
+        EXTENSION_INSTALL_CAPABILITY_ID
+            | EXTENSION_ACTIVATE_CAPABILITY_ID
+            | EXTENSION_REMOVE_CAPABILITY_ID
     )
 }
 
@@ -578,6 +593,75 @@ mod tests {
             grant.constraints.secrets,
             vec![SecretHandle::new("oauth_token").unwrap()]
         );
+    }
+
+    #[test]
+    fn product_invocation_mounts_grants_extension_lifecycle_mounts() {
+        for capability in [
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            let descriptor = descriptor_with_id(capability);
+            let mounts = product_invocation_mounts(
+                &resource_scope(),
+                Some(&descriptor),
+                ProductCapabilityMounts::LocalDev,
+            )
+            .expect("extension lifecycle product mounts");
+
+            assert_eq!(
+                mounts,
+                crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+                    .expect("expected extension lifecycle mounts")
+            );
+        }
+    }
+
+    #[test]
+    fn product_invocation_mounts_keeps_skill_mounts_scoped() {
+        let scope = resource_scope();
+        let descriptor = descriptor_with_id(SKILL_REMOVE_CAPABILITY_ID);
+        let mounts =
+            product_invocation_mounts(&scope, Some(&descriptor), ProductCapabilityMounts::LocalDev)
+                .expect("skill product mounts");
+
+        assert_eq!(
+            mounts,
+            crate::local_dev_mounts::scoped_skill_management_mount_view(&scope)
+                .expect("expected skill mounts")
+        );
+    }
+
+    #[test]
+    fn product_invocation_mounts_leaves_unclassified_capabilities_empty() {
+        let descriptor = descriptor_with_id("builtin.product-gesture-test");
+        let mounts = product_invocation_mounts(
+            &resource_scope(),
+            Some(&descriptor),
+            ProductCapabilityMounts::LocalDev,
+        )
+        .expect("product mounts");
+
+        assert_eq!(mounts, MountView::default());
+    }
+
+    fn descriptor_with_id(id: &str) -> CapabilityDescriptor {
+        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
+        descriptor.id = CapabilityId::new(id).unwrap();
+        descriptor
+    }
+
+    fn resource_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("tenant-test").unwrap(),
+            user_id: ironclaw_host_api::UserId::new("user-test").unwrap(),
+            agent_id: Some(ironclaw_host_api::AgentId::new("agent-test").unwrap()),
+            project_id: Some(ironclaw_host_api::ProjectId::new("project-test").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
     }
 
     fn descriptor_with_network(

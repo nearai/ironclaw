@@ -324,6 +324,6 @@ pub use webui_inbound::{
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiSetupExtensionRequest, parse_webui_client_action_id, webui_attachment_capabilities,
 };
 pub use workflow::DefaultProductSurface;

@@ -17,6 +17,30 @@ def _package_ref(package_id: str) -> dict:
     return {"kind": "extension", "id": package_id}
 
 
+def _assert_client_action_id(body: dict) -> None:
+    assert isinstance(body.get("client_action_id"), str)
+    assert body["client_action_id"]
+
+
+def _assert_install_requests(requests: list[dict], *package_ids: str) -> None:
+    assert len(requests) == len(package_ids)
+    for request, package_id in zip(requests, package_ids, strict=True):
+        assert request.get("package_ref") == _package_ref(package_id)
+        _assert_client_action_id(request)
+
+
+def _assert_setup_submit_requests(
+    requests: list[dict], expected: list[dict]
+) -> None:
+    assert len(requests) == len(expected)
+    for request, expected_request in zip(requests, expected, strict=True):
+        assert request["package_id"] == expected_request["package_id"]
+        body = dict(request["body"])
+        _assert_client_action_id(body)
+        body.pop("client_action_id")
+        assert body == expected_request["body"]
+
+
 # Product taxonomy travels in `surfaces` (NEA-25): a channel is a surface an
 # extension declares, and `runtime` is an implementation badge only. The
 # retired extension `kind` wire string (`wasm_tool` / `mcp_server` /
@@ -526,9 +550,7 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
         await registry_tool_card.get_by_role("button", name="Install").click()
         await expect(page.get_by_text("Registry Tool installed")).to_be_visible(timeout=5000)
 
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "registry-tool")
         await expect(page.get_by_text("Installed").first).to_be_visible(timeout=5000)
     finally:
         await harness["context"].close()
@@ -647,9 +669,9 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
             timeout=5000
         )
         # A registry failure blocks only the registry tab; on the channels tab
-        # the installed data still renders and the failure stays visible (and
-        # retryable) through the partial-catalog banner.
-        await expect(error_banner).to_contain_text("Some extension data is unavailable")
+        # the installed data still renders and the failure banner remains tied
+        # to the catalog failure cause.
+        await expect(error_banner).to_contain_text("Extension catalog unavailable")
 
         failed_request_count = registry_requests
         registry_available = True
@@ -861,10 +883,9 @@ async def test_reborn_legacy_extensions_multiple_installs_remain_listed(
             timeout=5000
         )
 
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")},
-            {"package_ref": _package_ref("registry-mcp")},
-        ]
+        _assert_install_requests(
+            harness["install_requests"], "registry-tool", "registry-mcp"
+        )
 
         installed_tool = _card_by_title(page, "Registry Tool")
         installed_mcp = _card_by_title(page, "Registry MCP Server")
@@ -906,9 +927,7 @@ async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_ava
         await expect(
             page.get_by_text("Registry Tool is not available for this workspace.")
         ).to_be_visible(timeout=5000)
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "registry-tool")
 
         await expect(card.get_by_text("available", exact=True)).to_be_visible(timeout=5000)
         await expect(card.get_by_role("button", name="Install")).to_have_count(1)
@@ -959,9 +978,7 @@ async def test_reborn_legacy_extensions_install_auth_url_opens_popup(
         )
         opened = await page.evaluate("() => window.__openedUrls")
         assert opened[-1].lower().startswith("https://example.com/oauth"), opened
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "registry-tool")
     finally:
         await harness["context"].close()
 
@@ -1003,9 +1020,7 @@ async def test_reborn_legacy_extensions_install_auth_url_requires_https(
             timeout=5000
         )
         assert await page.evaluate("() => window.__openedUrls") == []
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "registry-tool")
     finally:
         await harness["context"].close()
 
@@ -1055,9 +1070,7 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
         await expect(page.get_by_text("Slack Channel installed")).to_be_visible(
             timeout=5000
         )
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("slack-channel")}
-        ]
+        _assert_install_requests(harness["install_requests"], "slack-channel")
         await expect(
             page.get_by_role("heading", name="Configure Slack Channel")
         ).to_be_visible(timeout=5000)
@@ -1283,9 +1296,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         await expect(available_card.get_by_role("button", name="Install")).to_be_visible()
         await available_card.get_by_role("button", name="Install").click()
         await expect(page.get_by_text("Config Tool installed")).to_be_visible(timeout=5000)
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("config-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "config-tool")
 
         reinstalled_card = _card_by_title(page, "Config Tool")
         await expect(reinstalled_card.get_by_text("setup needed")).to_be_visible(
@@ -1306,7 +1317,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1317,7 +1328,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1845,7 +1856,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         await page.get_by_role("button", name="Save").click()
 
         await expect(page.get_by_role("heading", name="Configure Config Tool")).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1859,7 +1870,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2052,7 +2063,7 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
         await modal.get_by_role("button", name="Save").click()
 
         await expect(modal).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": package_id,
                 "body": {
@@ -2063,7 +2074,7 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2122,7 +2133,7 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -2133,7 +2144,7 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2341,7 +2352,7 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -2352,7 +2363,7 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2401,8 +2412,8 @@ async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
         ).to_be_visible(timeout=5000)
         modal = page.get_by_label("Configure Telegram")
 
-        # The modal hosts the pairing panel, not a bot-token secret form.
-        await expect(modal.get_by_test_id("telegram-pairing-panel")).to_be_visible(
+        # The modal hosts the pairing panel controls, not a bot-token secret form.
+        await expect(modal.get_by_role("button", name="Get a new code")).to_be_visible(
             timeout=5000
         )
         await expect(modal.get_by_text("Telegram Bot Token")).to_have_count(0)
