@@ -3894,23 +3894,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         class FakeProcess:
             pass
 
-        def fake_popen(*_args, **kwargs):
+        async def fake_start_serve(**kwargs):
             captured["env"] = kwargs["env"]
-            captured["cwd"] = kwargs["cwd"]
-            kwargs["stdout"].close()
-            kwargs["stderr"].close()
-            return FakeProcess()
-
-        async def fake_wait_for_ready(url: str, *, timeout: float) -> None:
-            captured["health_url"] = url
-            captured["timeout"] = timeout
+            captured["port"] = kwargs["port"]
+            return FakeProcess(), f"http://127.0.0.1:{kwargs['port']}"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             with (
                 patch.object(run_live_qa, "reserve_loopback_port", return_value=38555),
-                patch.object(run_live_qa.subprocess, "Popen", side_effect=fake_popen),
-                patch.object(run_live_qa, "wait_for_ready", side_effect=fake_wait_for_ready),
+                patch.object(
+                    run_live_qa,
+                    "start_serve",
+                    side_effect=fake_start_serve,
+                ),
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
@@ -3926,7 +3923,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertIsInstance(proc, FakeProcess)
         self.assertEqual(base_url, "http://127.0.0.1:38555")
-        self.assertEqual(captured["health_url"], "http://127.0.0.1:38555/api/health")
+        self.assertEqual(captured["port"], 38555)
         env = captured["env"]
         self.assertIsInstance(env, dict)
         self.assertEqual(
@@ -3943,15 +3940,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         class FakeProcess:
             pass
 
-        def fake_popen(*_args, **kwargs):
+        async def fake_start_serve(**kwargs):
             captured["env"] = kwargs["env"]
-            kwargs["stdout"].close()
-            kwargs["stderr"].close()
-            return FakeProcess()
-
-        async def fake_wait_for_ready(url: str, *, timeout: float) -> None:
-            captured["health_url"] = url
-            captured["timeout"] = timeout
+            return FakeProcess(), f"http://127.0.0.1:{kwargs['port']}"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -3982,8 +3973,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, env, clear=False),
                 patch.object(run_live_qa, "reserve_loopback_port", return_value=38555),
-                patch.object(run_live_qa.subprocess, "Popen", side_effect=fake_popen),
-                patch.object(run_live_qa, "wait_for_ready", side_effect=fake_wait_for_ready),
+                patch.object(
+                    run_live_qa,
+                    "start_serve",
+                    side_effect=fake_start_serve,
+                ),
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(

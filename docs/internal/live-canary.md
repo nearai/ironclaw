@@ -141,29 +141,21 @@ Run a private OAuth lane on the dedicated runner:
 LANE=private-oauth scripts/live-canary/run.sh
 ```
 
-Run the auth smoke lane:
+The former `auth-smoke`, `auth-full`, and `auth-channels` lanes are retired.
+Run their `ironclaw serve` replacement scenarios from
+`tests/e2e/scenarios/`; see `scripts/live-canary/MIGRATION.md`.
 
-```bash
-LANE=auth-smoke scripts/live-canary/run.sh
-```
+Live product-auth coverage now runs through the
+`reborn-webui-v2-live-qa` lane; see `scripts/live-canary/MIGRATION.md`.
 
-Run the seeded auth live lane:
-
-```bash
-LANE=auth-live-seeded scripts/live-canary/run.sh
-```
-
-Run the browser-consent auth lane:
-
-```bash
-LANE=auth-browser-consent scripts/live-canary/run.sh
-```
+Browser-consent coverage now runs through the
+`reborn-webui-v2-live-qa` lane; see `scripts/live-canary/MIGRATION.md`.
 
 Run selected auth provider cases only:
 
 ```bash
-LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
-LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
+LANE=reborn-webui-v2-live-qa CASES=qa_2a_gmail_connect,qa_4b_github_connect \
+  scripts/live-canary/run.sh
 ```
 
 ## Artifact Policy

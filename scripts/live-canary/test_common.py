@@ -64,5 +64,23 @@ class InstallPlaywrightTests(unittest.TestCase):
                 common.install_playwright(Path("/venv/bin/python"), "plain")
 
 
+class CargoBuildTests(unittest.TestCase):
+    def test_builds_the_shipping_ironclaw_binary(self):
+        with patch.object(common, "run") as run:
+            common.cargo_build()
+
+        run.assert_called_once_with(
+            [
+                "cargo",
+                "build",
+                "-p",
+                "ironclaw",
+                "--bin",
+                "ironclaw",
+            ],
+            cwd=common.ROOT,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

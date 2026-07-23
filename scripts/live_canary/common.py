@@ -103,9 +103,9 @@ def cargo_build() -> None:
             "cargo",
             "build",
             "-p",
-            "ironclaw_legacy",
+            "ironclaw",
             "--bin",
-            "ironclaw-legacy",
+            "ironclaw",
         ],
         cwd=ROOT,
     )
@@ -436,7 +436,9 @@ async def start_gateway_stack(
     oauth_proxy: bool = False,
     log_dir: Path | None = None,
 ) -> GatewayStack:
-    secrets_master_key = secrets_master_key or generate_secrets_master_key()
+    # Kept in the compatibility signature until #6562 removes the retired
+    # callers. The shipping runtime owns its encrypted filesystem key.
+    _ = secrets_master_key or generate_secrets_master_key()
     python = venv_python(venv_dir)
     # Race-free port acquisition: `mock_llm.py --port 0` binds the
     # kernel-assigned port itself and prints `MOCK_LLM_PORT=<N>` on
@@ -486,50 +488,73 @@ async def start_gateway_stack(
             }
             extra_gateway_env = {**(extra_gateway_env or {}), **proxy_env}
 
-        gateway_port = reserve_loopback_port()
+        serve_port = reserve_loopback_port()
         http_port = reserve_loopback_port()
         gateway_token = f"{gateway_token_prefix}-{uuid.uuid4().hex[:12]}"
-        db_path = Path(db_tmp.name) / "canary.db"
-        home_dir = Path(home_tmp.name)
-        env = build_gateway_env(
-            owner_user_id=owner_user_id,
-            gateway_port=gateway_port,
-            http_port=http_port,
-            gateway_token=gateway_token,
-            db_path=db_path,
-            home_dir=home_dir,
-            tools_dir=Path(tools_tmp.name),
-            channels_dir=Path(channels_tmp.name),
-            mock_llm_url=mock_llm_url,
-            secrets_master_key=secrets_master_key,
-            extra_env=extra_gateway_env,
-        )
-        gateway_proc = subprocess.Popen(
-            [str(ROOT / "target" / "debug" / "ironclaw-legacy"), "--no-onboard"],
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        # Same deadlock guard as mock_llm above — drain ironclaw's
-        # stdout/stderr so a chatty `RUST_LOG=info` doesn't fill the pipe
-        # buffer and freeze the request handler mid-response.
-        if log_dir is not None and gateway_proc.stdout is not None:
-            log_dir.mkdir(parents=True, exist_ok=True)
-            _drain_to_file(gateway_proc.stdout, log_dir / "gateway.log")
-        base_url = f"http://127.0.0.1:{gateway_port}"
-        await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
+        process_home = Path(home_tmp.name)
+        ironclaw_home = process_home / "ironclaw-home"
+        ironclaw_home.mkdir(parents=True, exist_ok=True)
+        (ironclaw_home / "config.toml").write_text(
+            f"""api_version = "ironclaw.runtime/v1"
 
-        # Pin the LLM provider via the settings API. Setting LLM_BACKEND /
-        # LLM_BASE_URL / LLM_MODEL via env is not enough — IronClaw's DB
-        # setting takes priority over env, and the freshly-seeded DB
-        # defaults llm_backend to `nearai`, so the env config is ignored
-        # and the agent attempts an interactive NearAI auth flow that
-        # never completes in CI. Mirrors the pattern documented in
-        # tests/e2e/CLAUDE.md.
-        await _pin_mock_llm_settings(base_url, gateway_token, mock_llm_url)
+[boot]
+profile = "local-dev"
+
+[identity]
+default_owner = "{owner_user_id}"
+tenant = "live-canary"
+default_agent = "live-canary-agent"
+
+[webui]
+env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+
+[llm.default]
+provider_id = "openai"
+model = "mock-model"
+api_key_env = "MOCK_LLM_API_KEY"
+base_url = "{mock_llm_url}/v1"
+""",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(process_home),
+                "IRONCLAW_REBORN_HOME": str(ironclaw_home),
+                "IRONCLAW_REBORN_PROFILE": "local-dev",
+                "IRONCLAW_REBORN_WEBUI_TOKEN": gateway_token,
+                "IRONCLAW_REBORN_WEBUI_USER_ID": owner_user_id,
+                "MOCK_LLM_API_KEY": "mock-api-key",
+                "NO_PROXY": "127.0.0.1,localhost,::1",
+                "no_proxy": "127.0.0.1,localhost,::1",
+                "RUST_BACKTRACE": "1",
+                "RUST_LOG": os.environ.get(
+                    "RUST_LOG",
+                    "ironclaw=warn,ironclaw_runner=warn",
+                ),
+            }
+        )
+        if extra_gateway_env:
+            env.update(
+                {
+                    key: value
+                    for key, value in extra_gateway_env.items()
+                    if value
+                }
+            )
+
+        from scripts.live_canary.serve_harness import start_serve
+
+        serve_log_dir = log_dir or process_home / "logs"
+        gateway_proc, base_url = await start_serve(
+            binary=ROOT / "target" / "debug" / "ironclaw",
+            port=serve_port,
+            env=env,
+            output_dir=serve_log_dir,
+            readiness_timeout=60.0,
+        )
+        db_path = ironclaw_home / "local-dev" / "reborn-local-dev.db"
         return GatewayStack(
             base_url=base_url,
             gateway_token=gateway_token,

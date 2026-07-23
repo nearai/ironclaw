@@ -43,6 +43,10 @@ from scripts.live_canary.common import (  # noqa: E402
     wait_for_ready,
     write_results,
 )
+from scripts.live_canary.serve_harness import (  # noqa: E402
+    ServeLaunchError,
+    start_serve,
+)
 from scripts.reborn_webui_v2_live_qa.case_matrix import (  # noqa: E402
     CaseFn,
     CaseSpec,
@@ -850,44 +854,21 @@ async def start_reborn_server(
         process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
             f"{base_url}/api/reborn/product-auth/oauth/{_slack_auth_provider()}/callback"
         )
-    stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
-    stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
-    workspace_dir = output_dir / "workspace"
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    out = stdout_path.open("a", encoding="utf-8")
-    err = stderr_path.open("a", encoding="utf-8")
-    separator = f"\n--- ironclaw serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
-    out.write(separator)
-    err.write(separator)
-    out.flush()
-    err.flush()
-    proc = subprocess.Popen(
-        [
-            str(binary),
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=out,
-        stderr=err,
-        text=True,
-        env=server_env(reborn_home, output_dir / "os-home", process_extra_env),
-        cwd=workspace_dir,
-    )
     try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=90.0)
-    except Exception as exc:
-        stop_process(proc)
-        tail = ""
-        if stderr_path.exists():
-            tail = "\n".join(stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
-        raise LiveQaError(
-            f"ironclaw serve did not become healthy at {base_url}: {exc}\n{tail}"
-        ) from exc
-    return proc, base_url
+        return await start_serve(
+            binary=binary,
+            port=port,
+            env=server_env(
+                reborn_home,
+                output_dir / "os-home",
+                process_extra_env,
+            ),
+            output_dir=output_dir,
+            readiness_timeout=90.0,
+            log_stem="ironclaw-reborn-serve",
+        )
+    except ServeLaunchError as exc:
+        raise LiveQaError(str(exc)) from exc
 
 
 def _extension_setup_submission(

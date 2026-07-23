@@ -63,6 +63,62 @@ class RunShDispatchTests(unittest.TestCase):
         self.assertIn("--case qa_8b_hn_keyword_live_chat", result.stdout)
         self.assertNotIn("--all-cases", result.stdout)
 
+    def test_retired_legacy_gateway_lanes_are_not_dispatchable(self):
+        retired_lanes = (
+            "auth-smoke",
+            "auth-full",
+            "auth-channels",
+            "auth-live-seeded",
+            "auth-browser-consent",
+            "workflow-canary",
+        )
+
+        for lane in retired_lanes:
+            with self.subTest(lane=lane), tempfile.TemporaryDirectory() as tmpdir:
+                env = {
+                    **os.environ,
+                    "ARTIFACT_ROOT": tmpdir,
+                    "LANE": lane,
+                    "PROVIDER": "mock",
+                    "PYTHON_BIN": "echo",
+                    "TIMESTAMP": "dispatch-test",
+                }
+                result = subprocess.run(
+                    [str(RUN_SH)],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"Unknown live canary lane: {lane}", result.stdout)
+                self.assertIn("MIGRATION.md", result.stdout)
+                self.assertNotIn("scripts/auth_canary/", result.stdout)
+                self.assertNotIn("scripts/auth_live_canary/", result.stdout)
+                self.assertNotIn("scripts/workflow_canary/", result.stdout)
+
+    def test_workflow_exposes_only_retained_dispatch_choices(self):
+        workflow = (ROOT / ".github" / "workflows" / "live-canary.yml").read_text(
+            encoding="utf-8"
+        )
+        choices = workflow.split("options:", 1)[1].split("scenario:", 1)[0]
+
+        for lane in (
+            "auth-smoke",
+            "auth-full",
+            "auth-channels",
+            "auth-live-seeded",
+            "auth-browser-consent",
+            "workflow-canary",
+        ):
+            with self.subTest(lane=lane):
+                self.assertNotIn(f"- {lane}", choices)
+
+        self.assertIn("- reborn-webui-v2-live-qa", choices)
+
 
 if __name__ == "__main__":
     unittest.main()
