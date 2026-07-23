@@ -28,11 +28,9 @@ use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
-    extension_host::lifecycle::{
-        RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
-    },
+    extension_host::lifecycle::{LifecycleFacade, SkillManagementPort, SkillManagementPortError},
     extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
-    observability::RebornLocalServiceLifecycle,
+    observability::OperatorServiceLifecycle,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
@@ -237,8 +235,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
                 Some(runtime.extension_management.clone()),
             )),
         );
-        let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
+        let mut lifecycle_facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
         lifecycle_facade =
             lifecycle_facade.with_extension_management(runtime.extension_management.clone());
         lifecycle_facade = lifecycle_facade.with_channel_config(runtime.channel_config.clone());
@@ -300,7 +297,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
-            RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+            OperatorServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
                 runtime.owner_user_id.clone(),
                 webui_boot_config,
@@ -374,7 +371,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 }
 
 struct LocalSkillsProductFacade {
-    skill_management: Arc<RebornLocalSkillManagementPort>,
+    skill_management: Arc<SkillManagementPort>,
     // `RebornRuntimeStores::skill_auto_activate_learned`); the read facade
     // reports it for the skills view. Writes go through the first-party
     // `builtin.skill_auto_activate_learned_set` capability. `None` when no
@@ -389,7 +386,7 @@ struct LocalSkillsProductFacade {
 
 impl LocalSkillsProductFacade {
     fn new(
-        skill_management: Arc<RebornLocalSkillManagementPort>,
+        skill_management: Arc<SkillManagementPort>,
         auto_activate_learned: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
@@ -518,10 +515,10 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
     }
 }
 
-fn map_skill_management_error(error: RebornLocalSkillManagementError) -> ProductSurfaceError {
+fn map_skill_management_error(error: SkillManagementPortError) -> ProductSurfaceError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { .. } => internal_skill_error(),
-        RebornLocalSkillManagementError::Skill(error) => match error.kind() {
+        SkillManagementPortError::InvalidContext { .. } => internal_skill_error(),
+        SkillManagementPortError::Skill(error) => match error.kind() {
             ironclaw_skills::SkillManagementErrorKind::NotFound => ProductSurfaceError {
                 code: ProductSurfaceErrorCode::NotFound,
                 kind: ProductSurfaceErrorKind::NotFound,

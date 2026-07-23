@@ -112,7 +112,9 @@ full-path Emulate tests still start the legacy gateway binary.
 | File | What it tests |
 |------|--------------|
 | `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
+| `test_provider_fault_proxy.py` | Harness self-tests for reusable provider status, response, timeout, connection-reset, and lost-acknowledgement profiles plus safe request evidence and reset |
 | `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
+| `test_reborn_qa_trace_full_path.py` | Harvested and typed provider operations through standalone Reborn and Emulate, including representative read/idempotent-write/non-idempotent-write fault cases with provider readback |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
 | `test_extension_uninstall_cleanup.py` | Install/remove for WASM tools/channels, shared Google tools, MCP; uninstall deletes secrets, preserves shared creds |
@@ -143,6 +145,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, Sheets, and Slides. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
 | `emulate_slack_server` | Starts the selected Emulate CLI with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions, including `search.messages` with the pinned CI fork. |
 | `emulate_github_server` | Starts the selected Emulate CLI with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
+| `provider_fault_proxy_world` | Module-scoped. Starts one transparent aiohttp proxy per resettable Emulate provider. Reborn traffic crosses these proxies; setup and provider readback continue to use direct Emulate URLs. Faults and the safe request ledger reset independently from provider state. |
 | `ironclaw_server` | Starts the ironclaw binary with a minimal env (see below), waits for `/api/health` (timeout 60s). Yields the base URL. On teardown sends **SIGINT** (not SIGTERM) so the tokio ctrl_c handler triggers a graceful shutdown and LLVM coverage data is flushed. |
 | `hosted_oauth_refresh_server` | Starts a second ironclaw instance with a dedicated libSQL DB and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id`, while still pointing `IRONCLAW_OAUTH_EXCHANGE_URL` at `mock_llm.py`. Yields a dict with `base_url`, `db_path`, and `mock_llm_url` for hosted refresh scenarios that do not need provider API calls. |
 | `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com`, `www.googleapis.com`, and `slides.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
@@ -157,6 +160,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | Fixture | What it does |
 |---------|-------------|
 | `reborn_qa_emulate_provider_server` | Restores providers mutated by a QA journey while reusing the session-built binary and one module-scoped Reborn process. Google mutation cases restart the seeded provider on its stable port; Slack deliveries are deleted by provider-issued timestamp so the OAuth account remains valid. Read-only providers stay warm. |
+| `reborn_provider_fault_server` | Clears provider fault rules and request evidence before and after each representative fault case, then restores the affected seeded provider. |
 | `page` | Legacy gateway. Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
 | `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
@@ -198,6 +202,14 @@ success plus provider readback rather than recorded final-answer wording.
 baseline, and readback cases for operations not yet present in harvested
 journeys. These cases reuse the same Reborn process and reset only their mutable
 provider world.
+`ProviderFaultProfile` places a transparent proxy between that Reborn process
+and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
+timeout, connection reset, malformed/truncated/missing-field responses, and a
+provider commit followed by a lost acknowledgement. The full-path matrix uses
+representative read, idempotent-write, and non-idempotent-write operations,
+asserts one wire attempt, and reads Emulate directly to distinguish no effect
+from an unacknowledged committed effect. The proxy stores credential
+fingerprints and body digests, never raw credentials or request bodies.
 Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
 loopback IP socket targets after the original destination has passed the normal
 network policy and DNS checks. Release binaries fail startup if that test-only

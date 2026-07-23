@@ -12,7 +12,7 @@ use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::deployment::TrafficPolicy;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
-use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
+use crate::extension_host::lifecycle::SkillManagementPort;
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
@@ -22,7 +22,7 @@ use crate::extension_host::{
     },
     available_extensions::{AdminConfigurationCatalogUse, AvailableExtensionCatalog},
     extension_lifecycle::{
-        ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
+        ActiveExtensionPublisher, ExtensionCredentialCleanup, ExtensionManagementPort,
         restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
@@ -40,8 +40,8 @@ use crate::extension_host::{
     },
 };
 use crate::input::{
-    LibsqlConnectionConfig, PostgresPoolSource, RebornLocalRuntimeIdentity,
-    RebornRuntimeProcessBinding, RebornStorageInput,
+    LibsqlConnectionConfig, PostgresPoolSource, RebornRuntimeProcessBinding, RebornStorageInput,
+    RuntimeOwnerIdentity,
 };
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_mounts::{
@@ -375,7 +375,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
-    pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    pub(crate) skill_management: Arc<SkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) owner_user_id: UserId,
     pub(crate) approval_requests: Arc<ComposedApprovalRequestStore>,
@@ -394,7 +394,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
-    pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
+    pub(crate) extension_management: Arc<ExtensionManagementPort>,
     pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
@@ -814,7 +814,7 @@ fn production_config(
 /// keeps its historical local filesystem/libSQL default.
 fn local_dev_extension_lifecycle_surface_context(
     owner_user_id: UserId,
-    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
+    local_runtime_identity: Option<&RuntimeOwnerIdentity>,
 ) -> Result<LifecycleProductSurfaceContext, RebornBuildError> {
     let default_identity = RebornRuntimeIdentity::reborn_cli();
     let default_tenant_id =
@@ -874,7 +874,7 @@ fn default_runtime_owner_scope(
 
 fn configured_runtime_owner_scope(
     owner_user_id: UserId,
-    local_runtime_identity: &RebornLocalRuntimeIdentity,
+    local_runtime_identity: &RuntimeOwnerIdentity,
 ) -> ResourceScope {
     owner_scope_from_runtime_identity(
         owner_user_id,
@@ -2826,7 +2826,7 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     owner_id: String,
-    local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
+    local_runtime_identity: Option<RuntimeOwnerIdentity>,
     turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
     /// The pre-minted scheduler wake wiring to carry to `RebornRuntimeStores` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
@@ -3515,7 +3515,7 @@ async fn build_backend_production(
             .map_err(RebornBuildError::Mount)?;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
         owner_user_id.clone(),
         skill_management_filesystem,
         Arc::new(production_skill_management_mount_view),
@@ -4028,7 +4028,7 @@ async fn build_backend_production(
         std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>,
     > = Arc::new(std::sync::OnceLock::new());
     let extension_management = Arc::new(
-        RebornLocalExtensionManagementPort::new(
+        ExtensionManagementPort::new(
             extension_filesystem,
             available_extensions,
             extension_installation_store,

@@ -54,7 +54,7 @@ pub struct RefreshingCapabilityPortTestParts {
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
     /// [`build_extension_management_for_test`]. Wraps the
-    /// crate-private (`pub(crate)`) `RebornLocalExtensionManagementPort` so it
+    /// crate-private (`pub(crate)`) `ExtensionManagementPort` so it
     /// never appears in this (public, `test-support`-gated) struct's field
     /// types; mirrors `skill_activation_source` above. Active-extension
     /// registry (installed/activated extensions like `github`, `gmail`, MCP
@@ -109,31 +109,28 @@ pub struct RefreshingCapabilityPortTestParts {
 }
 
 /// Opaque handle (harness-port-seam P1 Change 3) carrying the crate-private
-/// `RebornLocalExtensionManagementPort`. Hides the type from the
+/// `ExtensionManagementPort`. Hides the type from the
 /// integration-test crate, which cannot name it (it is only `pub(crate)`
 /// inside `ironclaw_reborn_composition`); the private type is recovered
 /// internally via [`ExtensionManagementTestHandle::extension_management`]
 /// when forwarding to the production factory. Mirrors `SkillActivationTestSource`.
 #[cfg(feature = "test-support")]
 pub struct ExtensionManagementTestHandle {
-    extension_management: std::sync::Arc<
-        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
-    >,
+    extension_management:
+        std::sync::Arc<crate::extension_host::extension_lifecycle::ExtensionManagementPort>,
 }
 
 #[cfg(feature = "test-support")]
 impl ExtensionManagementTestHandle {
     /// Crate-internal accessor for the wrapped port. Kept `pub(crate)` (never
-    /// `pub`) so the crate-private `RebornLocalExtensionManagementPort` type
+    /// `pub`) so the crate-private `ExtensionManagementPort` type
     /// never appears in this crate's public API; only `runtime::local_dev`'s
     /// test-support constructor (which already names the type) may call this.
     /// For tests only -- gated behind `test-support`, ships zero bytes in
     /// production builds.
     pub(crate) fn extension_management(
         &self,
-    ) -> std::sync::Arc<
-        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
-    > {
+    ) -> std::sync::Arc<crate::extension_host::extension_lifecycle::ExtensionManagementPort> {
         self.extension_management.clone()
     }
 }

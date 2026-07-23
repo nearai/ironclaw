@@ -436,7 +436,7 @@ impl RebornRuntimeStores {
     /// not wire up local-dev extension management.
     ///
     /// Mirrors the `installation_store` that `build_local_runtime` wires into
-    /// `RebornLocalExtensionManagementPort`. For tests only — zero bytes
+    /// `ExtensionManagementPort`. For tests only — zero bytes
     /// shipped in production builds.
     #[cfg(feature = "test-support")]
     pub(crate) fn extension_installation_store_for_test(
@@ -700,7 +700,7 @@ pub struct ActiveExtensionAuthorityForTest {
 
 #[cfg(feature = "test-support")]
 pub(crate) async fn active_extension_authority_for_test(
-    extension_management: &RebornLocalExtensionManagementPort,
+    extension_management: &ExtensionManagementPort,
     grantee: &ExtensionId,
 ) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError> {
     let active_capabilities = extension_management

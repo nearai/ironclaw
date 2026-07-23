@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
+    ExtensionActivationMode, ExtensionManagementPort,
 };
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
@@ -47,7 +47,7 @@ pub(crate) fn extend_builtin_first_party_package(
 
 pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<ExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
@@ -142,7 +142,7 @@ fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 }
 
 struct ExtensionLifecycleToolHandler {
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<ExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
 }
 
@@ -1524,7 +1524,7 @@ mod tests {
     }
 
     async fn active_extension_capability_ids(
-        extension_management: &RebornLocalExtensionManagementPort,
+        extension_management: &ExtensionManagementPort,
     ) -> Vec<String> {
         extension_management
             .active_model_visible_capabilities()

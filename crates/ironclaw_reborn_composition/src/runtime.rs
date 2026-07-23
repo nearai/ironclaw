@@ -106,8 +106,8 @@ use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
+use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
+use crate::extension_host::lifecycle::SkillManagementPort;
 use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
     available_extensions::AdminConfigurationCatalogUse,
@@ -544,7 +544,7 @@ pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
-    pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    pub(crate) skill_management: Arc<SkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStore>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -559,7 +559,7 @@ pub struct RebornRuntime {
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
+    pub(crate) extension_management: Arc<ExtensionManagementPort>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
@@ -663,7 +663,7 @@ pub(crate) struct InteractionServiceTestParts {
     system_extensions_lifecycle_mounts: MountView,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<ExtensionManagementPort>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
 }
 
@@ -3771,10 +3771,9 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
-            let mut lifecycle_facade =
-                crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
-                    &local_runtime.skill_management,
-                ));
+            let mut lifecycle_facade = crate::extension_host::lifecycle::LifecycleFacade::new(
+                Arc::clone(&local_runtime.skill_management),
+            );
             lifecycle_facade = lifecycle_facade
                 .with_extension_management(Arc::clone(&local_runtime.extension_management));
             Some(Arc::new(
@@ -4438,7 +4437,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     };
     // Fill the composition's late-bound channel-connection facade slot (§6.4)
     // now the runtime's serving tenant is known: extension removal
-    // (`RebornLocalExtensionManagementPort::remove`) disconnects the caller's
+    // (`ExtensionManagementPort::remove`) disconnects the caller's
     // channel identity through this facade, and the identity-binding write
     // hook is only reachable from runtime-backed compositions — so filling
     // here keeps "wherever a binding can be written, removal disconnects it".

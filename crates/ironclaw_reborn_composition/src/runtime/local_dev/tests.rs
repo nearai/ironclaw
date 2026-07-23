@@ -685,7 +685,7 @@ mod tests {
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::LifecycleFacade::new(
             runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -5208,7 +5208,7 @@ mod tests {
             let operator = extension_management
                 .tenant_operator_user_id_for_test()
                 .clone();
-            let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+            let facade = crate::extension_host::lifecycle::LifecycleFacade::new(
                 runtime_surfaces.skill_management.clone(),
             )
             .with_extension_management(extension_management)
@@ -5310,7 +5310,7 @@ mod tests {
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::LifecycleFacade::new(
             runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -5521,7 +5521,7 @@ mod tests {
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::LifecycleFacade::new(
             runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)

@@ -31,6 +31,7 @@ from helpers import (
     wait_for_port_line,
     wait_for_ready,
 )
+from provider_fault_proxy import ProviderFaultProxyWorld
 
 # Project root (two levels up from tests/e2e/)
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -807,6 +808,22 @@ class ResettableEmulateProviderWorld:
 async def resettable_emulate_provider_world():
     """Keep stable provider URLs while restoring seed state per journey."""
     world = ResettableEmulateProviderWorld()
+    try:
+        await world.start()
+        yield world
+    finally:
+        await world.close()
+
+
+@pytest.fixture(scope="module")
+async def provider_fault_proxy_world(resettable_emulate_provider_world):
+    """Proxy stable Emulate worlds through independently resettable faults."""
+    world = ProviderFaultProxyWorld(
+        {
+            service: server["url"]
+            for service, server in resettable_emulate_provider_world.servers.items()
+        }
+    )
     try:
         await world.start()
         yield world

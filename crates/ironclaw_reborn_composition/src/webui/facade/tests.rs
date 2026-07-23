@@ -30,7 +30,7 @@ use ironclaw_product::{
 };
 use std::time::Duration;
 
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 #[tokio::test]
@@ -164,7 +164,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
         ironclaw_trust::HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
             .expect("trust policy"),
     );
-    let port = Arc::new(RebornLocalExtensionManagementPort::new(
+    let port = Arc::new(ExtensionManagementPort::new(
         Arc::new(DiskFilesystem::new()),
         AvailableExtensionCatalog::from_packages(Vec::new()),
         installation_store,
@@ -562,7 +562,7 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
@@ -620,7 +620,7 @@ async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_i
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
@@ -656,7 +656,7 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),

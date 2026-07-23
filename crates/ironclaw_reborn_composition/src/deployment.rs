@@ -254,7 +254,7 @@ pub struct DeploymentConfig {
     /// Late-overridable via [`DeploymentConfig::with_owner_id`] (WebChat serve
     /// pins the authenticated user after the disclosure gate is built).
     pub(crate) owner_id: String,
-    pub(crate) local_runtime_identity: Option<crate::input::RebornLocalRuntimeIdentity>,
+    pub(crate) local_runtime_identity: Option<crate::input::RuntimeOwnerIdentity>,
     /// Resolved runtime policy. Populated late (the yolo host-access disclosure
     /// is not known at preset-construction time); the profile→bindings bridge
     /// installs the accurate value.
