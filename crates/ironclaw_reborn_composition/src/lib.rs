@@ -113,6 +113,11 @@ pub use input::{
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
 /// test — the type must travel through this facade instead.
 pub use ironclaw_auth::OAuthRedirectUri;
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountStatus, CredentialOwnership, Timestamp,
+};
 /// First-party capability-wiring vocabulary re-exported so the assembling
 /// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
 /// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy

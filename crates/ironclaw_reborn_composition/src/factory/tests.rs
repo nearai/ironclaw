@@ -52,6 +52,49 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
 }
 
 #[tokio::test]
+async fn production_store_bundle_new_validates_runtime_storage_before_store_assembly() {
+    let filesystem = empty_composite_filesystem();
+    let error = match ProductionStoreBundle::new(
+        Arc::clone(&filesystem),
+        filesystem_resource_governor(&filesystem),
+        test_secret_master_key(),
+        ironclaw_reborn_event_store::RebornEventStoreConfig::InMemory,
+    )
+    .await
+    {
+        Ok(_) => panic!("missing runtime storage plane must fail bundle construction"),
+        Err(error) => error,
+    };
+
+    assert_runtime_storage_validation_error(&error);
+}
+
+#[tokio::test]
+async fn production_store_bundle_with_secret_credentials_validates_runtime_storage_first() {
+    let credential_filesystem = empty_composite_filesystem();
+    let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
+        crate::wrap_scoped(Arc::clone(&credential_filesystem)),
+        test_secret_master_key(),
+    )
+    .expect("test secret stores should construct");
+    let filesystem = empty_composite_filesystem();
+
+    let error = match ProductionStoreBundle::with_secret_credentials(
+        Arc::clone(&filesystem),
+        filesystem_resource_governor(&filesystem),
+        secret_credentials,
+        ironclaw_reborn_event_store::RebornEventStoreConfig::InMemory,
+    )
+    .await
+    {
+        Ok(_) => panic!("missing runtime storage plane must fail bundle construction"),
+        Err(error) => error,
+    };
+
+    assert_runtime_storage_validation_error(&error);
+}
+
+#[tokio::test]
 async fn production_turn_state_store_uses_row_layout() {
     let view = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("turns mount alias"),
@@ -73,6 +116,31 @@ async fn production_turn_state_store_uses_row_layout() {
 
     let snapshot = store.persistence_snapshot().await.expect("read snapshot");
     assert!(snapshot.runs.is_empty());
+}
+
+fn empty_composite_filesystem() -> Arc<CompositeRootFilesystem> {
+    Arc::new(CompositeRootFilesystem::new())
+}
+
+fn filesystem_resource_governor(
+    filesystem: &Arc<CompositeRootFilesystem>,
+) -> ComposedResourceGovernor {
+    FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(filesystem)))
+}
+
+fn test_secret_master_key() -> ironclaw_secrets::SecretMaterial {
+    ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901")
+}
+
+fn assert_runtime_storage_validation_error(error: &RebornBuildError) {
+    assert!(
+        matches!(
+            error,
+            RebornBuildError::InvalidConfig { reason }
+                if reason.contains("runtime storage plane `tenant scoped state` requires `/tenants`")
+        ),
+        "{error}"
+    );
 }
 
 #[test]

@@ -31,7 +31,6 @@ prompt_doc_ref = "prompts/gmail/list_messages.md"
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
 ]
@@ -57,7 +56,6 @@ prompt_doc_ref = "prompts/gmail/get_message.md"
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
 ]
@@ -83,7 +81,6 @@ prompt_doc_ref = "prompts/gmail/send_message.md"
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
 ]
@@ -109,7 +106,6 @@ prompt_doc_ref = "prompts/gmail/create_draft.md"
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
 ]
@@ -135,7 +131,6 @@ prompt_doc_ref = "prompts/gmail/reply_to_message.md"
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
 ]
@@ -161,7 +156,6 @@ prompt_doc_ref = "prompts/gmail/trash_message.md"
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
 ]

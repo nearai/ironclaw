@@ -30,7 +30,6 @@ prompt_doc_ref = "prompts/google-calendar/list_calendars.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -56,7 +55,6 @@ prompt_doc_ref = "prompts/google-calendar/list_events.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -82,7 +80,6 @@ prompt_doc_ref = "prompts/google-calendar/get_event.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -108,7 +105,6 @@ prompt_doc_ref = "prompts/google-calendar/find_free_slots.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -134,7 +130,6 @@ prompt_doc_ref = "prompts/google-calendar/create_event.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -160,7 +155,6 @@ prompt_doc_ref = "prompts/google-calendar/update_event.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -186,7 +180,6 @@ prompt_doc_ref = "prompts/google-calendar/delete_event.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -212,7 +205,6 @@ prompt_doc_ref = "prompts/google-calendar/add_attendees.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },
@@ -238,7 +230,6 @@ prompt_doc_ref = "prompts/google-calendar/set_reminder.md"
 
 network_targets = [
   { scheme = "https", host_pattern = "www.googleapis.com" },
-  { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "calendar.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
   { scheme = "https", host_pattern = "accounts.google.com" },

@@ -60,9 +60,6 @@ impl RebornRuntime {
         &self,
         _turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
-        if false {
-            return Ok(None);
-        }
         Ok(Some(Arc::clone(&self.approval_interaction_service)))
     }
 

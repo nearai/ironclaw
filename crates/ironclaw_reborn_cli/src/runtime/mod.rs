@@ -9,9 +9,9 @@ use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings,
-    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
+    FirstPartyPackageBundle, KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer,
+    PollSettings, RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
@@ -538,7 +538,7 @@ pub(crate) fn build_runtime_input_with_options(
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
 
-    let services_input = with_binary_host_extension_bindings(runtime_services.services_input);
+    let services_input = with_binary_host_extension_bindings(runtime_services.services_input)?;
 
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_build_input(services_input)
@@ -601,7 +601,7 @@ pub(crate) fn build_runtime_input_with_options(
 
 pub(crate) fn with_binary_host_extension_bindings(
     services_input: RebornHostBindings,
-) -> RebornHostBindings {
+) -> anyhow::Result<RebornHostBindings> {
     // The binary assembles the native extension factory registry and the
     // channel-adapter bindings (DEL-7's target shape); composition receives
     // them as input and never links a concrete extension crate.
@@ -613,8 +613,15 @@ pub(crate) fn with_binary_host_extension_bindings(
     // LLM resolution so lifecycle-only commands can expose the production
     // extension catalog without requiring run-time model config.
     let first_party_bundles = crate::first_party::bundled_first_party_bundles();
-    crate::first_party::assert_first_party_bundles_present(&first_party_bundles);
-    services_input
+    with_binary_host_extension_bindings_from_bundles(services_input, first_party_bundles)
+}
+
+fn with_binary_host_extension_bindings_from_bundles(
+    services_input: RebornHostBindings,
+    first_party_bundles: Vec<FirstPartyPackageBundle>,
+) -> anyhow::Result<RebornHostBindings> {
+    crate::first_party::assert_first_party_bundles_present(&first_party_bundles)?;
+    Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
         .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors())
@@ -622,7 +629,7 @@ pub(crate) fn with_binary_host_extension_bindings(
         .with_first_party_registrars(crate::first_party::bundled_first_party_registrars())
         .with_credential_account_visibility_policy(
             crate::first_party::first_party_credential_account_visibility_policy(),
-        )
+        ))
 }
 
 pub(crate) struct RuntimeServicesInput {
@@ -1426,7 +1433,7 @@ mod tests {
 
     use ironclaw_reborn_composition::TriggerFireAccessPolicy;
     use ironclaw_reborn_composition::{
-        KeepaliveSweepSettings, RebornCompositionProfile, TurnStatus,
+        KeepaliveSweepSettings, RebornCompositionProfile, RebornHostBindings, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
     use ironclaw_reborn_config::RebornBootConfig;
@@ -1441,6 +1448,7 @@ mod tests {
         resolve_google_oauth_config, resolve_google_oauth_config_state,
         resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
+        with_binary_host_extension_bindings_from_bundles,
     };
     use ironclaw_reborn_config::GoogleSection;
     // Only the hosted-volume tests consume this.
@@ -1472,6 +1480,24 @@ mod tests {
             &std::path::PathBuf::from("/test/config.toml"),
         )
         .expect("must parse")
+    }
+
+    #[test]
+    fn binary_extension_bindings_fail_when_first_party_inventory_is_empty() {
+        let error = match with_binary_host_extension_bindings_from_bundles(
+            RebornHostBindings::disabled("owner"),
+            Vec::new(),
+        ) {
+            Ok(_) => panic!("empty first-party bundle inventory must fail assembly"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("must inject the first-party package inventory"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

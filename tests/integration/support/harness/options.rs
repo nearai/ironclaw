@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountView, NetworkPolicy, SecretHandle, TenantId, UserId,
+    AgentId, CapabilityId, EffectKind, ExtensionId, MountView, NetworkPolicy, SecretHandle,
+    TenantId, UserId,
 };
 use ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER;
 use ironclaw_network::NetworkHttpEgress;
@@ -14,6 +15,11 @@ use super::{HarnessResult, HostRuntimeCapabilityHarness};
 pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) mounts: MountView,
     pub(crate) runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    /// Override the local runtime tenant/agent before the composed runtime is
+    /// built. Group harnesses set this to the canonical product scope so
+    /// runtime-owned facades keyed by tenant (for example channel connections)
+    /// match the turns that dispatch through the group.
+    pub(crate) local_runtime_identity: Option<(TenantId, AgentId)>,
     pub(crate) seed_extension_credentials: bool,
     /// Tenant the E-SKILL skill context source is constructed under, when this
     /// harness surfaces the synthetic `skill_activate` capability. Only
@@ -125,6 +131,7 @@ impl HostRuntimeHarnessOptions {
         Self {
             mounts,
             runtime_policy,
+            local_runtime_identity: None,
             seed_extension_credentials: false,
             skill_activation_tenant: None,
             outbound_target_facade: None,
@@ -152,6 +159,15 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_seed_extension_credentials(mut self) -> Self {
         self.seed_extension_credentials = true;
+        self
+    }
+
+    pub(crate) fn with_local_runtime_identity(
+        mut self,
+        tenant_id: TenantId,
+        agent_id: AgentId,
+    ) -> Self {
+        self.local_runtime_identity = Some((tenant_id, agent_id));
         self
     }
 

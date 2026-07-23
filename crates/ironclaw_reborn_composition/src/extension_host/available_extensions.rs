@@ -2295,23 +2295,13 @@ handle = "web_token"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
-            b"not parsed because gmail is host-bundled",
-        )
-        .await
-        .unwrap();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
-            b"not parsed because slack is host-bundled",
-        )
-        .await
-        .unwrap();
+        write_valid_filesystem_extension(&fs, "gmail").await;
+        write_valid_filesystem_extension(&fs, "slack").await;
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
-            &[],
+            &["gmail".to_string(), "slack".to_string()],
         )
         .await
         .unwrap();
@@ -2459,6 +2449,50 @@ credential_handle = "channel_ext_token"
 
     fn test_extension_package() -> AvailableExtensionPackage {
         test_extension_package_with_wasm_bytes(b"wasm")
+    }
+
+    async fn write_valid_filesystem_extension(fs: &InMemoryBackend, id: &str) {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "shadowing fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.search"
+description = "Search"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+        );
+        fs.write_file(
+            &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
+            manifest.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new(format!("/system/extensions/{id}/wasm/{id}.wasm")).unwrap(),
+            b"wasm",
+        )
+        .await
+        .unwrap();
     }
 
     fn test_extension_package_with_wasm_bytes(wasm_bytes: &[u8]) -> AvailableExtensionPackage {

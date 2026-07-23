@@ -107,12 +107,11 @@ pub(crate) fn first_party_reserved_extension_ids(
 /// catalog and trust policy without the binary. Production sources the bundles
 /// from the injected build input.
 ///
-/// Gated `#[cfg(test)]` (not `test-support`): it names
-/// `ironclaw_first_party_extensions`, a dev-dependency unavailable when a
-/// downstream consumer builds the crate with the `test-support` feature.
-/// Integration tests build their bundles directly from the dev-dependency (see
-/// `tests/support/first_party.rs`).
-#[cfg(test)]
+/// Gated to crate tests and `test-support`: it names the concrete
+/// `ironclaw_first_party_extensions` crate, which is a dev-dependency for
+/// composition's own tests and an optional dependency enabled only by
+/// `test-support` for downstream integration harnesses.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn first_party_bundles_from_inventory() -> Vec<FirstPartyPackageBundle> {
     use ironclaw_first_party_extensions::is_gsuite_extension_id;
     use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
@@ -184,8 +183,8 @@ pub(crate) fn first_party_bundles_from_inventory() -> Vec<FirstPartyPackageBundl
 /// input. Composition's own unit tests re-derive the same wiring here through
 /// the dev-dependency so a test can install/activate/dispatch the first-party
 /// extensions through the production registrar seam without the binary. Gated
-/// `#[cfg(test)]` for the same reason as `first_party_bundles_from_inventory`.
-#[cfg(test)]
+/// for the same reason as `first_party_bundles_from_inventory`.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     use std::sync::Arc;
 

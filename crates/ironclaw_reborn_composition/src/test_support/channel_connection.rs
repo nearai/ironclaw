@@ -117,13 +117,13 @@ pub fn build_channel_connection_for_test(
         runtime.channel_pairing.clone(),
     ));
     let disconnect_slot = &runtime.channel_facade_slot;
-    if disconnect_slot.set(Arc::clone(&facade)).is_err() {
-        return Err(
-            "channel connection facade slot is already occupied; extension-removal cleanup \
-             would dispatch to a different facade than this bundle"
-                .to_string(),
-        );
-    }
+    let facade = match disconnect_slot.get() {
+        Some(existing) => Arc::clone(existing),
+        None => {
+            let _ = disconnect_slot.set(Arc::clone(&facade));
+            facade
+        }
+    };
 
     // Same assembly as `RebornRuntime::channel_identity_binding_config`: the
     // generic post-OAuth binding hook over the same installation + identity

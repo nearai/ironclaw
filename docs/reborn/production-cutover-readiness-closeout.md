@@ -21,17 +21,19 @@ traffic cannot reach a partially wired Reborn graph.
 ## Source Of Truth
 
 Production cutover is controlled by `RebornCompositionProfile` plus typed
-`RebornHostBindings` / `RebornRuntimeInput`:
+`RebornHostBindings` / `RebornRuntimeInput`, assembled through the current
+`build_runtime` composition factory (`crates/ironclaw_reborn_composition/src/runtime.rs`;
+bindings/errors live in `src/input.rs` and `src/error.rs`):
 
 | Profile | Runtime behavior |
 | --- | --- |
-| `disabled` | Default-off. `build_reborn_services` returns no runtime facades and a blocking disabled readiness diagnostic. `build_reborn_runtime` rejects live traffic. |
+| `disabled` | Default-off. `RebornHostBindings::disabled` returns no runtime facades and a blocking disabled readiness diagnostic. `build_runtime` rejects live traffic. |
 | `local-dev` | Local-only development profile. Readiness is `DevOnly` and carries a blocking non-production diagnostic. |
 | `local-dev-yolo` | Explicit trusted-laptop profile. Readiness is `DevOnly`; host access requires an explicit disclosure/confirmation path. |
 | `migration-dry-run` | Builds and validates the production-shaped graph, reports readiness/diagnostics, and rejects live runtime traffic. |
 | `production` | Builds production-shaped storage/runtime services and starts live runtime traffic only when readiness is `ProductionValidated` with no blocking diagnostics. |
 
-The live runtime boundary is `build_reborn_runtime`. CLI/WebUI entrypoints reach
+The live runtime boundary is `build_runtime`. CLI/WebUI entrypoints reach
 that boundary through `ironclaw_reborn_composition`; they do not reconstruct
 lower-level stores, `TurnCoordinator`, or host-runtime handles at the route
 layer.
@@ -42,9 +44,9 @@ layer.
 | --- | --- | --- | --- |
 | Stable readiness diagnostic vocabulary | #4617 | #4626 | `readiness_serializes_diagnostics_with_stable_redacted_vocabulary`, `readiness_diagnostic_unknown_wire_variants_round_trip_losslessly` |
 | Production wiring report -> readiness mapping | #4618 | #4627 | `production_wiring_report_maps_through_public_readiness_entrypoint`, stable component/reason mapping tests |
-| Production cutover gate before serving traffic | #4619 | #4682 | Runtime cutover-gate tests and `build_reborn_runtime` caller-path coverage |
+| Production cutover gate before serving traffic | #4619 | #4682 | Runtime cutover-gate tests and `build_runtime` caller-path coverage |
 | PostgreSQL production storage config | #4551 | #4631 | Production Postgres factory tests in `facade_factory.rs` |
-| Production `build_reborn_runtime` launch | #4615 | #4645 | Production runtime launch path and readiness checks |
+| Production `build_runtime` launch | #4615 | #4645 | Production runtime launch path and readiness checks |
 | Backend-parity readiness coverage | #4620 | #4713 | `libsql_substrate_readiness_diagnostics_cover_required_backend_gaps`, `postgres_substrate_readiness_diagnostics_cover_required_backend_gaps`, `build_reborn_runtime_allows_validated_production_readiness` |
 | Operator status/config surfaces consuming readiness | #4595, #4593 | #4737, #4736 | `docs/reborn/contracts/operator-observability-backends.md`, `docs/reborn/contracts/operator-effective-config.md` |
 
@@ -53,7 +55,7 @@ layer.
 | #3026 criterion | Closeout evidence |
 | --- | --- |
 | Explicit typed production profile/config path | `RebornCompositionProfile`, `RebornHostBindings`, `RebornRuntimeInput`, profile parsing tests, and `run_honors_boot_profile_from_config_file`. |
-| Disabled mode exposes no partial Reborn production services | `RebornServices::disabled`, `disabled_returns_empty_services`, `disabled_readiness_is_redaction_safe`, and `runtime_rejects_disabled_profile_before_local_substrate_lookup`. |
+| Disabled mode exposes no partial Reborn production services | `RebornHostBindings::disabled`, `disabled_returns_empty_services`, `disabled_readiness_is_redaction_safe`, and `runtime_rejects_disabled_profile_before_local_substrate_lookup`. |
 | Local-dev/local-yolo are visibly non-production | `dev_only_profiles_are_visible_non_production_in_readiness`, `local_dev_factory_readiness_includes_non_production_diagnostic`, and `local_dev_yolo_factory_readiness_includes_non_production_diagnostic`. |
 | Migration-dry-run validates but does not switch live traffic | `migration_dry_run_validates_libsql_shape`, process-port fail-closed tests, and `runtime_rejects_migration_dry_run_before_live_traffic`. |
 | Production fails closed on missing/local-only/unverified/unsupported services | `build_production_shaped` wiring validation, `ProductionWiringReport` mapping tests, and required-backend parity tests for libSQL/PostgreSQL. |

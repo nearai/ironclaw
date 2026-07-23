@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use anyhow::{Result, bail};
 use ironclaw_reborn_composition::{
     FirstPartyHandlerRegistrar, FirstPartyPackageBundle, RuntimeCredentialAccountVisibilityPolicy,
 };
@@ -43,10 +44,14 @@ pub(crate) fn first_party_credential_account_visibility_policy()
 /// Assert the neutral bundle set is non-empty at assembly time, so an
 /// accidentally-empty inventory (which compiles) cannot silently drop every
 /// first-party extension from the catalog.
-pub(crate) fn assert_first_party_bundles_present(bundles: &[FirstPartyPackageBundle]) {
-    debug_assert!(
-        !bundles.is_empty(),
-        "the binary must inject the first-party package inventory; an empty bundle set silently \
-         removes every first-party extension, trust grant, and vendor auth recipe"
-    );
+pub(crate) fn assert_first_party_bundles_present(
+    bundles: &[FirstPartyPackageBundle],
+) -> Result<()> {
+    if bundles.is_empty() {
+        bail!(
+            "the binary must inject the first-party package inventory; an empty bundle set silently \
+             removes every first-party extension, trust grant, and vendor auth recipe"
+        );
+    }
+    Ok(())
 }

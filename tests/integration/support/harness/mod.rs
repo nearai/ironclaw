@@ -619,6 +619,7 @@ impl HostRuntimeCapabilityHarness {
         let HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
+            local_runtime_identity,
             seed_extension_credentials,
             skill_activation_tenant,
             outbound_target_facade,
@@ -662,9 +663,13 @@ impl HostRuntimeCapabilityHarness {
         } else {
             ironclaw_reborn_composition::local_dev_build_input(service_label, storage_root)
         };
+        if let Some((tenant_id, agent_id)) = &local_runtime_identity {
+            input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
+        }
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
         }
+        input = input.with_bundled_first_party_for_test();
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
@@ -699,7 +704,17 @@ impl HostRuntimeCapabilityHarness {
             input =
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
-        let services = build_runtime(RebornRuntimeInput::from_build_input(input)).await?;
+        let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        if let Some((tenant_id, agent_id)) = local_runtime_identity {
+            runtime_input =
+                runtime_input.with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: service_label.to_string(),
+                    reply_target_binding_id: service_label.to_string(),
+                });
+        }
+        let services = build_runtime(runtime_input).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }

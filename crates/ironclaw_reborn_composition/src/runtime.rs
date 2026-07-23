@@ -565,6 +565,12 @@ pub struct RebornRuntime {
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStore>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
     pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
     pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
@@ -576,10 +582,15 @@ pub struct RebornRuntime {
         Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
     pub(crate) extension_ingress:
         Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_pairing:
         Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver:
         Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+    #[cfg(feature = "test-support")]
+    pub(crate) channel_egress_credential_bridges:
+        Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     /// Generic channel host assembly (extension-runtime P6 S2): the
     /// per-extension inbound-channel reconcile loop over the generic host's
@@ -1335,6 +1346,215 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<dyn CommunicationPreferenceRepository>> {
         Some(Arc::clone(&self.outbound_preferences))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::type_complexity)]
+    pub fn outbound_delivery_stores_for_test(
+        &self,
+    ) -> Option<(
+        Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
+        Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+    )> {
+        Some((
+            Arc::clone(&self.outbound_state),
+            Arc::clone(&self.delivered_gate_routes),
+            Arc::clone(&self.outbound_preferences),
+        ))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn delivery_coordinator(
+        &self,
+    ) -> Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>> {
+        self.delivery_coordinator.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn channel_config_facade(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConfigFacade>> {
+        Some(Arc::new(
+            crate::extension_host::channel_config::RebornChannelConfigFacade::new(Arc::clone(
+                &self.channel_config,
+            )),
+        ))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_channel_host_assembly_for_test(
+        &self,
+        wiring: crate::ChannelHostAssemblyTestWiring,
+    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+        use crate::extension_host::channel_host::{
+            FilesystemChannelWorkflowStateFactory, GenericChannelHostDeps,
+        };
+
+        let crate::ChannelHostAssemblyTestWiring {
+            thread_service,
+            turn_coordinator,
+            identity,
+            run_delivery_settings,
+        } = wiring;
+        let generic_host = self.extension_management.generic_host()?;
+        let ingress = self.extension_ingress.as_ref()?;
+        let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
+            &self.extension_filesystem,
+        )));
+        let delivery = self.delivery_coordinator.clone().map(|coordinator| {
+            crate::extension_host::channel_host::ChannelHostDeliveryDeps {
+                coordinator,
+                outbound_store: Arc::clone(&self.outbound_state),
+                route_store: Arc::clone(&self.delivered_gate_routes),
+                communication_preferences: Arc::clone(&self.outbound_preferences),
+                approval_context: None,
+                blocked_auth_prompts: None,
+                auth_flow_cancel: None,
+                settings: run_delivery_settings,
+            }
+        });
+        let identity_lookup = Some(Arc::clone(&self.channel_identity_store)
+            as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>);
+        Some(
+            crate::extension_host::channel_host::GenericChannelHostAssembly::start(
+                GenericChannelHostDeps {
+                    watch: generic_host.snapshot_watch(),
+                    deployment_channels: Arc::clone(&self.deployment_channels),
+                    registry: Arc::clone(&ingress.registry),
+                    channel_config: Arc::clone(&self.channel_config),
+                    workflow_state,
+                    thread_service,
+                    turn_coordinator,
+                    approval_interaction: None,
+                    auth_interaction: None,
+                    identity,
+                    identity_lookup,
+                    delivery,
+                    channel_pairing: self.channel_pairing.clone(),
+                },
+            ),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_mint_for_test(
+        &self,
+        extension_id: &str,
+        user_id: &ironclaw_host_api::UserId,
+    ) -> Option<String> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        service
+            .issue_or_rotate(user_id)
+            .await
+            .ok()
+            .map(|issue| issue.code.as_str().to_string())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_issue_for_test(
+        &self,
+        extension_id: &str,
+        user_id: &ironclaw_host_api::UserId,
+    ) -> Option<(String, Option<String>, chrono::DateTime<chrono::Utc>)> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        service.issue_or_rotate(user_id).await.ok().map(|issue| {
+            (
+                issue.code.as_str().to_string(),
+                issue.deep_link,
+                issue.expires_at,
+            )
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_consume_for_test<F>(
+        &self,
+        extension_id: &str,
+        authenticated_installation_id: &str,
+        raw_code: &str,
+        actor: (&str, &str, Option<&str>, &str),
+        turn_world: (
+            Arc<dyn ironclaw_turns::TurnCoordinator>,
+            Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+            ironclaw_host_api::TenantId,
+        ),
+    ) -> Result<Option<ironclaw_host_api::UserId>, String>
+    where
+        F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+    {
+        let (actor_kind, external_actor_id, conversation_space_id, conversation_id) = actor;
+        let Some(service) = self
+            .channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get(extension_id))
+        else {
+            return Ok(None);
+        };
+        let installation_id =
+            ironclaw_product_adapters::AdapterInstallationId::new(authenticated_installation_id)
+                .map_err(|error| error.to_string())?;
+        let outcome = service
+            .consume(
+                &installation_id,
+                raw_code,
+                actor_kind,
+                external_actor_id,
+                conversation_space_id,
+                conversation_id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let paired_user = match outcome {
+            crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::Paired {
+                user_id,
+            }
+            | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
+                user_id,
+            } => Some(user_id),
+            crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
+            | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
+        };
+        if let Some(user_id) = paired_user.as_ref() {
+            let (turn_coordinator, turn_state, tenant_id) = turn_world;
+            let continuation = crate::factory::auth_continuation_dispatcher(
+                turn_coordinator,
+                Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            );
+            service
+                .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(paired_user)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_connected_for_test(
+        &self,
+        extension_id: &str,
+        user_id: &ironclaw_host_api::UserId,
+    ) -> Option<bool> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        service
+            .status_for(user_id)
+            .await
+            .ok()
+            .map(|status| status.connected)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn register_static_channel_egress_credentials_for_test(
+        &self,
+        entries: Vec<(String, String, ironclaw_secrets::SecretMaterial)>,
+    ) -> bool {
+        let Some(bridges) = &self.channel_egress_credential_bridges else {
+            return false;
+        };
+        bridges.register(Arc::new(
+            crate::extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
+        ));
+        true
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -4165,6 +4385,12 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         extension_filesystem: services.extension_filesystem.clone(),
         workspace_mounts: services.workspace_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        outbound_state: services.outbound_state.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        delivered_gate_routes: services.delivered_gate_routes.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        delivery_coordinator: services.delivery_coordinator.clone(),
         channel_facade_slot: services.channel_disconnect_slot.clone(),
         channel_config: services.channel_config.clone(),
         admin_configuration: services.admin_configuration.clone(),
@@ -4172,8 +4398,12 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         channel_identity_store: services.channel_identity_store.clone(),
         channel_dm_target_store: services.channel_dm_target_store.clone(),
         extension_ingress: services.extension_ingress.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        deployment_channels: services.deployment_channels.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
+        #[cfg(feature = "test-support")]
+        channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,
         channel_host_assembly,
         turn_state_flush,

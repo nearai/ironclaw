@@ -922,9 +922,10 @@ impl RebornHostBindings {
     /// Composition's own unit tests need the same surface to install / activate /
     /// dispatch first-party extensions through the production seam, so this
     /// mirrors the binary's assembly from the dev-dependency inventory. Gated
-    /// `#[cfg(test)]` for the same reason as `first_party_bundles_from_inventory`.
-    #[cfg(test)]
-    pub(crate) fn with_bundled_first_party_for_test(self) -> Self {
+    /// `test-support` because integration harnesses compile composition as a
+    /// dependency, not under composition's own `cfg(test)`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_bundled_first_party_for_test(self) -> Self {
         self.with_first_party_bundles(
             crate::extension_host::first_party::first_party_bundles_from_inventory(),
         )

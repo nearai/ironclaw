@@ -187,10 +187,25 @@ fn gsuite_credential_requirements(
         find_gsuite_capability(capability_id.as_str()).ok_or_else(|| {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
         })?;
-    let requester_extension = ExtensionId::new(package.extension_id)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
+    let requester_extension = ExtensionId::new(package.extension_id).map_err(|error| {
+        tracing::debug!(
+            capability_id = %capability_id.as_str(),
+            package_extension_id = package.extension_id,
+            error = %error,
+            "failed to construct GSuite requester extension for auth requirement"
+        );
+        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+    })?;
     let requirements = runtime_credentials(capability, package)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
+        .map_err(|error| {
+            tracing::debug!(
+                capability_id = %capability_id.as_str(),
+                package_extension_id = package.extension_id,
+                error = %error,
+                "failed to construct GSuite runtime credential requirement"
+            );
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+        })?
         .into_iter()
         .filter(|credential| credential.required)
         .filter_map(|credential| {
@@ -262,7 +277,11 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 #[cfg(test)]
 mod tests {
     use ironclaw_first_party_extensions::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
-    use ironclaw_reborn_composition::RuntimeDispatchErrorKind;
+    use ironclaw_reborn_composition::{
+        AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+        CredentialAccountStatus, CredentialOwnership, RuntimeDispatchErrorKind, Timestamp,
+        host_api::{InvocationId, ResourceScope, UserId},
+    };
 
     use super::*;
 
@@ -287,5 +306,100 @@ mod tests {
         let requirement = &credential_requirements[0];
         assert_eq!(requirement.provider.as_str(), GOOGLE_PROVIDER_ID);
         assert_eq!(requirement.requester_extension.as_str(), "gmail");
+    }
+
+    #[test]
+    fn visibility_policy_defers_non_google_providers_to_requester_authorization() {
+        let policy = GsuiteRuntimeCredentialAccountVisibilityPolicy;
+        let account = credential_account(
+            CredentialOwnership::SharedAdminManaged,
+            None,
+            vec![ExtensionId::new("gmail").unwrap()],
+        );
+        let visible_request = selection_request("other-provider").for_extension(gmail_extension());
+        let hidden_request =
+            selection_request("other-provider").for_extension(calendar_extension());
+
+        assert!(policy.account_visible_to_requester(&account, &visible_request));
+        assert!(!policy.account_visible_to_requester(&account, &hidden_request));
+    }
+
+    #[test]
+    fn visibility_policy_without_google_requester_uses_plain_authorization() {
+        let policy = GsuiteRuntimeCredentialAccountVisibilityPolicy;
+        let reusable_account =
+            credential_account(CredentialOwnership::UserReusable, None, Vec::new());
+        let extension_owned_account = credential_account(
+            CredentialOwnership::ExtensionOwned,
+            Some(gmail_extension()),
+            Vec::new(),
+        );
+        let request = selection_request(GOOGLE_PROVIDER_ID);
+
+        assert!(policy.account_visible_to_requester(&reusable_account, &request));
+        assert!(!policy.account_visible_to_requester(&extension_owned_account, &request));
+    }
+
+    #[test]
+    fn visibility_policy_uses_gsuite_family_helper_for_google_provider() {
+        let policy = GsuiteRuntimeCredentialAccountVisibilityPolicy;
+        let account = credential_account(
+            CredentialOwnership::ExtensionOwned,
+            Some(gmail_extension()),
+            Vec::new(),
+        );
+        let request = selection_request(GOOGLE_PROVIDER_ID).for_extension(calendar_extension());
+
+        assert!(policy.account_visible_to_requester(&account, &request));
+    }
+
+    fn selection_request(provider: &str) -> CredentialAccountSelectionRequest {
+        CredentialAccountSelectionRequest::new(
+            test_scope(),
+            AuthProviderId::new(provider).expect("test provider id is valid"),
+        )
+    }
+
+    fn credential_account(
+        ownership: CredentialOwnership,
+        owner_extension: Option<ExtensionId>,
+        granted_extensions: Vec<ExtensionId>,
+    ) -> CredentialAccount {
+        let now = Timestamp::from_timestamp(0, 0).expect("test timestamp is valid");
+        CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: test_scope(),
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("google provider is valid"),
+            label: CredentialAccountLabel::new("google").expect("test label is valid"),
+            status: CredentialAccountStatus::Configured,
+            ownership,
+            owner_extension,
+            granted_extensions,
+            access_secret: None,
+            refresh_secret: None,
+            scopes: Vec::new(),
+            provider_identity: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn test_scope() -> AuthProductScope {
+        AuthProductScope::new(
+            ResourceScope::local_default(
+                UserId::new("gsuite-policy-user").expect("test user is valid"),
+                InvocationId::new(),
+            )
+            .expect("test resource scope is valid"),
+            AuthSurface::Api,
+        )
+    }
+
+    fn gmail_extension() -> ExtensionId {
+        ExtensionId::new("gmail").expect("gmail extension id is valid")
+    }
+
+    fn calendar_extension() -> ExtensionId {
+        ExtensionId::new("google-calendar").expect("calendar extension id is valid")
     }
 }

@@ -707,7 +707,7 @@ pub(crate) async fn build_runtime_substrate(
     }
 }
 
-fn auth_continuation_dispatcher(
+pub(crate) fn auth_continuation_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
@@ -3729,10 +3729,6 @@ async fn build_backend_production(
     .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores(event_stores)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
-    let host_http_egress_body_store = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&stores.filesystem),
-        runtime_workspace_mounts.clone(),
-    ));
     // Honor an injected test egress (hosted-MCP discovery / DM provisioning over
     // a fake transport) when present; otherwise the real policy egress. Restores
     // the consumer dropped in commit 975bcd2ce — without it every local-dev test
@@ -3740,20 +3736,13 @@ async fn build_backend_production(
     // `Arc<dyn NetworkHttpEgress>` to the generic method bound.
     #[cfg(any(test, feature = "test-support"))]
     let services = match network_http_egress_for_test {
-        Some(test_egress) => services.try_with_host_http_egress_with_body_store(
-            TestNetworkHttpEgress(test_egress),
-            host_http_egress_body_store,
-        )?,
-        None => services.try_with_host_http_egress_with_body_store(
-            default_host_http_egress()?,
-            host_http_egress_body_store,
-        )?,
+        Some(test_egress) => {
+            services.try_with_host_http_egress(TestNetworkHttpEgress(test_egress))?
+        }
+        None => services.try_with_host_http_egress(default_host_http_egress()?)?,
     };
     #[cfg(not(any(test, feature = "test-support")))]
-    let services = services.try_with_host_http_egress_with_body_store(
-        default_host_http_egress()?,
-        host_http_egress_body_store,
-    )?;
+    let services = services.try_with_host_http_egress(default_host_http_egress()?)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
     let channel_config_credential_slot =

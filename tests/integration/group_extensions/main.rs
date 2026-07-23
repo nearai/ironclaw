@@ -28,17 +28,18 @@ mod scenario_google_family_install_gate_and_shared_account;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
-// DEFERRED (task #8): drives channel config via the removed
-// `channel_config_facade` test-support accessor; re-enable with the channel
-// delivery/pairing test rewrite.
-// mod scenario_slack_channel_lifecycle_state_machine;
+mod scenario_slack_channel_lifecycle_state_machine;
 mod scenario_slack_state_survives_reopen;
 mod scenario_uninstalled_tool_call_denied_until_activated;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
-#[tokio::test]
-async fn extensions_group_e2e() {
+#[test]
+fn extensions_group_e2e() {
+    run_async_test_with_stack("extensions_group_e2e", extensions_group_e2e_inner);
+}
+
+async fn extensions_group_e2e_inner() {
     let g = RebornIntegrationGroup::extension_lifecycle()
         .await
         .expect("group builds");
@@ -119,14 +120,17 @@ async fn extensions_group_e2e() {
     // install → activate → connect → use → remove (real personal-connection
     // cleanup) → reconnect → reinstall → use again, asserting connection
     // state, durable bindings, lifecycle phase, and tool dispatchability stay
-    // consistent at every transition. Uses "slack" (untouched by 1-5).
+    // consistent at every transition. Uses the delivery-profile group because
+    // Slack's channel binding is assembled there.
     // dependent: must pass before scenario 8 consumes its reconnected end
     // state — `.expect()` (not `report.record`) so a lifecycle regression is
     // reported HERE, not misattributed to the restart-survival probe.
-    // DEFERRED (task #8): re-enable with the channel delivery/pairing rewrite.
-    // scenario_slack_channel_lifecycle_state_machine::run(&g)
-    //     .await
-    //     .expect("slack_channel_lifecycle_state_machine");
+    let slack_g = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("slack delivery group builds");
+    scenario_slack_channel_lifecycle_state_machine::run(&slack_g)
+        .await
+        .expect("slack_channel_lifecycle_state_machine");
 
     // Scenario 7 (issue #6105, T3): exit edges for a credential-injection
     // extension — activate → use → remove (#6029's wedged edge) → surfaces
@@ -148,7 +152,7 @@ async fn extensions_group_e2e() {
     // end state this consumes.
     report.record(
         "slack_state_survives_reopen",
-        scenario_slack_state_survives_reopen::run(&g).await,
+        scenario_slack_state_survives_reopen::run(&slack_g).await,
     );
 
     // Scenario 9 (issue #6105 bucket-3 arms): activation-time re-auth gate —
@@ -175,4 +179,25 @@ async fn extensions_group_e2e() {
     );
 
     report.assert_all_passed();
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
