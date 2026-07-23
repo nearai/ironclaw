@@ -9,7 +9,7 @@ from provider_operation_github_common import (
     OWNER,
     REPO,
     REPO_PATH,
-    request,
+    github_request,
     seed_branch,
 )
 from provider_operation_types import ProviderOperationCase
@@ -23,19 +23,19 @@ BASE_ARGS = {"owner": OWNER, "repo": REPO}
 
 
 async def _repo_baseline(emulate_url: str) -> None:
-    repo = await request(emulate_url, "GET", REPO_PATH)
+    repo = await github_request(emulate_url, "GET", REPO_PATH)
     assert isinstance(repo, dict)
     assert repo["full_name"] == f"{OWNER}/{REPO}", repo
 
 
 async def _empty_release_baseline(emulate_url: str) -> None:
     await _repo_baseline(emulate_url)
-    releases = await request(emulate_url, "GET", f"{REPO_PATH}/releases")
+    releases = await github_request(emulate_url, "GET", f"{REPO_PATH}/releases")
     assert releases == [], releases
 
 
 async def _seeded_user_repo(emulate_url: str) -> None:
-    await request(
+    await github_request(
         emulate_url,
         "POST",
         "/user/repos",
@@ -49,7 +49,7 @@ async def _seed_code(emulate_url: str) -> None:
 
 
 async def _create_branch_outcome(emulate_url: str, preview: dict) -> None:
-    branches = await request(emulate_url, "GET", f"{REPO_PATH}/branches")
+    branches = await github_request(emulate_url, "GET", f"{REPO_PATH}/branches")
     assert isinstance(branches, list)
     assert {branch["name"] for branch in branches} == {
         "main",
@@ -59,7 +59,7 @@ async def _create_branch_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _list_branches_outcome(emulate_url: str, preview: dict) -> None:
-    branches = await request(emulate_url, "GET", f"{REPO_PATH}/branches")
+    branches = await github_request(emulate_url, "GET", f"{REPO_PATH}/branches")
     assert isinstance(branches, list)
     assert {branch["name"] for branch in branches} == {"main", BRANCH}, branches
     rendered = json.dumps(preview)
@@ -68,14 +68,14 @@ async def _list_branches_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _create_release_outcome(emulate_url: str, preview: dict) -> None:
-    releases = await request(emulate_url, "GET", f"{REPO_PATH}/releases")
+    releases = await github_request(emulate_url, "GET", f"{REPO_PATH}/releases")
     assert isinstance(releases, list)
     assert [release["tag_name"] for release in releases] == [RELEASE_TAG], releases
     assert RELEASE_TAG in json.dumps(preview), preview
 
 
 async def _create_repo_outcome(emulate_url: str, preview: dict) -> None:
-    repo = await request(
+    repo = await github_request(
         emulate_url, "GET", f"/repos/reborn-dev/{CREATED_REPO}"
     )
     assert isinstance(repo, dict)
@@ -84,14 +84,14 @@ async def _create_repo_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _fork_outcome(emulate_url: str, preview: dict) -> None:
-    fork = await request(emulate_url, "GET", f"/repos/reborn-dev/{FORK_NAME}")
+    fork = await github_request(emulate_url, "GET", f"/repos/reborn-dev/{FORK_NAME}")
     assert isinstance(fork, dict)
     assert fork["fork"] is True, fork
     assert FORK_NAME in json.dumps(preview), preview
 
 
 async def _list_repos_outcome(emulate_url: str, preview: dict) -> None:
-    repos = await request(emulate_url, "GET", "/user/repos")
+    repos = await github_request(emulate_url, "GET", "/user/repos")
     assert isinstance(repos, list)
     assert any(repo["name"] == SEEDED_REPO for repo in repos), repos
     assert SEEDED_REPO in json.dumps(preview), preview
@@ -105,7 +105,7 @@ async def _search_repo_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _search_code_outcome(emulate_url: str, preview: dict) -> None:
-    result = await request(
+    result = await github_request(
         emulate_url,
         "GET",
         "/search/code",
@@ -118,7 +118,7 @@ async def _search_code_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _workflow_runs_outcome(emulate_url: str, preview: dict) -> None:
-    result = await request(
+    result = await github_request(
         emulate_url, "GET", f"{REPO_PATH}/actions/runs"
     )
     assert result == {"total_count": 0, "workflow_runs": []}, result

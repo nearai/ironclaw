@@ -10,7 +10,7 @@ from provider_operation_github_common import (
     REPO,
     REPO_PATH,
     pull_request,
-    request,
+    github_request,
     seed_branch,
     seed_pull_request,
 )
@@ -25,7 +25,7 @@ BASE_ARGS = {"owner": OWNER, "repo": REPO}
 
 async def _seeded_branch(emulate_url: str) -> None:
     await seed_branch(emulate_url)
-    pulls = await request(emulate_url, "GET", f"{REPO_PATH}/pulls")
+    pulls = await github_request(emulate_url, "GET", f"{REPO_PATH}/pulls")
     assert pulls == [], pulls
 
 
@@ -35,7 +35,7 @@ async def _seeded_pull(emulate_url: str) -> None:
 
 async def _seeded_review(emulate_url: str) -> None:
     await seed_pull_request(emulate_url)
-    await request(
+    await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/pulls/1/reviews",
@@ -46,7 +46,7 @@ async def _seeded_review(emulate_url: str) -> None:
 
 async def _seeded_inline_comment(emulate_url: str) -> None:
     await seed_pull_request(emulate_url)
-    await request(
+    await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/pulls/1/reviews",
@@ -85,7 +85,7 @@ async def _updated_pull_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _pull_files_outcome(emulate_url: str, preview: dict) -> None:
-    files = await request(emulate_url, "GET", f"{REPO_PATH}/pulls/1/files")
+    files = await github_request(emulate_url, "GET", f"{REPO_PATH}/pulls/1/files")
     assert isinstance(files, list)
     # Emulate currently models this successful empty state but not generated
     # pull-request diffs. The seeded branch still proves the PR is real.
@@ -94,7 +94,7 @@ async def _pull_files_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _create_review_outcome(emulate_url: str, preview: dict) -> None:
-    reviews = await request(
+    reviews = await github_request(
         emulate_url, "GET", f"{REPO_PATH}/pulls/1/reviews"
     )
     assert isinstance(reviews, list)
@@ -103,7 +103,7 @@ async def _create_review_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _list_comments_outcome(emulate_url: str, preview: dict) -> None:
-    comments = await request(
+    comments = await github_request(
         emulate_url, "GET", f"{REPO_PATH}/pulls/1/comments"
     )
     assert isinstance(comments, list)

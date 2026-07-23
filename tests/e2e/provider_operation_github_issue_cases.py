@@ -8,7 +8,7 @@ from provider_operation_github_common import (
     REPO,
     REPO_PATH,
     issue,
-    request,
+    github_request,
     seed_issue,
 )
 from provider_operation_types import ProviderOperationCase
@@ -23,7 +23,7 @@ BASE_ARGS = {"owner": OWNER, "repo": REPO}
 
 
 async def _empty_issues(emulate_url: str) -> None:
-    items = await request(emulate_url, "GET", f"{REPO_PATH}/issues")
+    items = await github_request(emulate_url, "GET", f"{REPO_PATH}/issues")
     assert items == [], items
 
 
@@ -33,7 +33,7 @@ async def _seeded_issue(emulate_url: str) -> None:
 
 async def _seeded_label_issue(emulate_url: str, *, assigned: bool) -> None:
     await seed_issue(emulate_url)
-    await request(
+    await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/labels",
@@ -41,7 +41,7 @@ async def _seeded_label_issue(emulate_url: str, *, assigned: bool) -> None:
         expected_status=201,
     )
     if assigned:
-        await request(
+        await github_request(
             emulate_url,
             "POST",
             f"{REPO_PATH}/issues/1/labels",
@@ -60,7 +60,7 @@ async def _label_remove_baseline(emulate_url: str) -> None:
 async def _seeded_assignee_issue(emulate_url: str, *, assigned: bool) -> None:
     await seed_issue(emulate_url)
     if assigned:
-        await request(
+        await github_request(
             emulate_url,
             "POST",
             f"{REPO_PATH}/issues/1/assignees",
@@ -78,7 +78,7 @@ async def _assignee_remove_baseline(emulate_url: str) -> None:
 
 async def _seeded_comment_baseline(emulate_url: str) -> None:
     await seed_issue(emulate_url)
-    await request(
+    await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/issues/1/comments",
@@ -108,7 +108,7 @@ async def _updated_issue_outcome(emulate_url: str, preview: dict) -> None:
 
 def _comment_outcome(marker: str):
     async def assert_outcome(emulate_url: str, preview: dict) -> None:
-        comments = await request(
+        comments = await github_request(
             emulate_url, "GET", f"{REPO_PATH}/issues/1/comments"
         )
         assert isinstance(comments, list)

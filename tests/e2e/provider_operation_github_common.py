@@ -14,7 +14,7 @@ CODE_PATH = "docs/provider-case.md"
 CODE_MARKER = "REBORN_PROVIDER_CASE_CODE_MARKER"
 
 
-async def request(
+async def github_request(
     emulate_url: str,
     method: str,
     path: str,
@@ -36,7 +36,7 @@ async def request(
 
 
 async def seed_issue(emulate_url: str, *, title: str = ISSUE_TITLE) -> dict:
-    result = await request(
+    result = await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/issues",
@@ -49,22 +49,22 @@ async def seed_issue(emulate_url: str, *, title: str = ISSUE_TITLE) -> dict:
 
 
 async def issue(emulate_url: str) -> dict:
-    result = await request(emulate_url, "GET", f"{REPO_PATH}/issues/1")
+    result = await github_request(emulate_url, "GET", f"{REPO_PATH}/issues/1")
     assert isinstance(result, dict)
     return result
 
 
 async def seed_branch(emulate_url: str, *, branch: str = BRANCH) -> dict:
-    main_ref = await request(
+    main_ref = await github_request(
         emulate_url, "GET", f"{REPO_PATH}/git/ref/heads/main"
     )
     assert isinstance(main_ref, dict)
     main_sha = main_ref["object"]["sha"]
-    main_commit = await request(
+    main_commit = await github_request(
         emulate_url, "GET", f"{REPO_PATH}/git/commits/{main_sha}"
     )
     assert isinstance(main_commit, dict)
-    blob = await request(
+    blob = await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/git/blobs",
@@ -72,7 +72,7 @@ async def seed_branch(emulate_url: str, *, branch: str = BRANCH) -> dict:
         expected_status=201,
     )
     assert isinstance(blob, dict)
-    tree = await request(
+    tree = await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/git/trees",
@@ -90,7 +90,7 @@ async def seed_branch(emulate_url: str, *, branch: str = BRANCH) -> dict:
         expected_status=201,
     )
     assert isinstance(tree, dict)
-    commit = await request(
+    commit = await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/git/commits",
@@ -102,7 +102,7 @@ async def seed_branch(emulate_url: str, *, branch: str = BRANCH) -> dict:
         expected_status=201,
     )
     assert isinstance(commit, dict)
-    result = await request(
+    result = await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/git/refs",
@@ -115,7 +115,7 @@ async def seed_branch(emulate_url: str, *, branch: str = BRANCH) -> dict:
 
 async def seed_pull_request(emulate_url: str) -> dict:
     await seed_branch(emulate_url)
-    result = await request(
+    result = await github_request(
         emulate_url,
         "POST",
         f"{REPO_PATH}/pulls",
@@ -133,6 +133,6 @@ async def seed_pull_request(emulate_url: str) -> dict:
 
 
 async def pull_request(emulate_url: str) -> dict:
-    result = await request(emulate_url, "GET", f"{REPO_PATH}/pulls/1")
+    result = await github_request(emulate_url, "GET", f"{REPO_PATH}/pulls/1")
     assert isinstance(result, dict)
     return result

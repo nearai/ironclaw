@@ -2,13 +2,28 @@
 
 import json
 
-from provider_operation_google_common import google_json
+from emulate_provider import google_json
 from provider_operation_types import ProviderOperationCase
 
 CALENDAR_ID = "primary"
 EVENT_ID = "evt_reborn_planning_sync"
+CREATED_EVENT = "REBORN_PROVIDER_CASE_CREATED_EVENT"
 UPDATED_SUMMARY = "REBORN_PROVIDER_CASE_UPDATED_EVENT"
 ADDED_ATTENDEE = "provider-case-attendee@example.com"
+
+
+async def _events(emulate_url: str, query: str | None = None) -> list[dict]:
+    params: dict[str, str | int] = {"maxResults": 100}
+    if query is not None:
+        params["q"] = query
+    result = await google_json(
+        emulate_url,
+        "GET",
+        f"/calendar/v3/calendars/{CALENDAR_ID}/events",
+        params=params,
+    )
+    assert isinstance(result, dict)
+    return result.get("items", [])
 
 
 async def _event(emulate_url: str) -> dict:
@@ -24,6 +39,35 @@ async def _event(emulate_url: str) -> dict:
 async def _seeded_event_baseline(emulate_url: str) -> None:
     event = await _event(emulate_url)
     assert event["summary"] == "Reborn planning sync", event
+
+
+async def _create_event_baseline(emulate_url: str) -> None:
+    assert not await _events(emulate_url, CREATED_EVENT)
+
+
+async def _create_event_outcome(emulate_url: str, preview: dict) -> None:
+    matches = await _events(emulate_url, CREATED_EVENT)
+    assert len(matches) == 1, matches
+    event = matches[0]
+    assert event["summary"] == CREATED_EVENT, event
+    assert event["description"] == "Created by the provider operation runner.", event
+    assert event["start"]["dateTime"] == "2026-07-30T09:00:00.000Z", event
+    assert event["end"]["dateTime"] == "2026-07-30T09:30:00.000Z", event
+    assert [attendee["email"] for attendee in event["attendees"]] == [
+        "teammate@example.com"
+    ], event
+    assert CREATED_EVENT in json.dumps(preview), preview
+
+
+async def _delete_event_baseline(emulate_url: str) -> None:
+    matching_ids = {event["id"] for event in await _events(emulate_url)}
+    assert EVENT_ID in matching_ids, matching_ids
+
+
+async def _delete_event_outcome(emulate_url: str, preview: dict) -> None:
+    matching_ids = {event["id"] for event in await _events(emulate_url)}
+    assert EVENT_ID not in matching_ids, matching_ids
+    assert EVENT_ID in json.dumps(preview), preview
 
 
 async def _get_event_outcome(emulate_url: str, preview: dict) -> None:
@@ -66,6 +110,37 @@ async def _set_reminder_outcome(emulate_url: str, preview: dict) -> None:
 
 
 GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
+    ProviderOperationCase(
+        case_id="google_calendar_create_event",
+        provider_service="google",
+        capability_id="google-calendar.create_event",
+        arguments={
+            "calendar_id": CALENDAR_ID,
+            "event": {
+                "summary": CREATED_EVENT,
+                "description": "Created by the provider operation runner.",
+                "start": {
+                    "dateTime": "2026-07-30T09:00:00.000Z",
+                    "timeZone": "UTC",
+                },
+                "end": {
+                    "dateTime": "2026-07-30T09:30:00.000Z",
+                    "timeZone": "UTC",
+                },
+                "attendees": [{"email": "teammate@example.com"}],
+            },
+        },
+        assert_baseline=_create_event_baseline,
+        assert_outcome=_create_event_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_calendar_delete_event",
+        provider_service="google",
+        capability_id="google-calendar.delete_event",
+        arguments={"calendar_id": CALENDAR_ID, "event_id": EVENT_ID},
+        assert_baseline=_delete_event_baseline,
+        assert_outcome=_delete_event_outcome,
+    ),
     ProviderOperationCase(
         case_id="google_calendar_get_event",
         provider_service="google",

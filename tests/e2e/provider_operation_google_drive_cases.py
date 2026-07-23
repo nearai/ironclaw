@@ -2,10 +2,15 @@
 
 import json
 
-from provider_operation_google_common import google_json
+import httpx
+
+from emulate_provider import google_headers, google_json
 from provider_operation_types import ProviderOperationCase
 
 FILE_ID = "drv_reborn_qa_brief"
+CREATED_FOLDER = "REBORN_PROVIDER_CASE_CREATED_FOLDER"
+UPLOADED_CONTENT = "Uploaded through the reusable provider operation runner."
+UPLOADED_FILE = "REBORN_PROVIDER_CASE_UPLOADED_FILE.txt"
 SEEDED_PERMISSION_ID = "perm_reborn_reader"
 SHARED_DRIVE_ID = "shared_reborn_engineering"
 SHARED_EMAIL = "provider-case-reader@example.com"
@@ -32,13 +37,76 @@ async def _permissions(emulate_url: str) -> list[dict]:
     return result["permissions"]
 
 
-async def _baseline(emulate_url: str) -> None:
+async def _files_named(emulate_url: str, name: str) -> list[dict]:
+    result = await google_json(
+        emulate_url,
+        "GET",
+        "/drive/v3/files",
+        params={"q": f"name = '{name}' and trashed = false", "pageSize": 100},
+    )
+    assert isinstance(result, dict)
+    return result.get("files", [])
+
+
+async def _media(emulate_url: str, file_id: str) -> str:
+    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
+        response = await client.get(
+            f"{emulate_url}/drive/v3/files/{file_id}",
+            params={"alt": "media"},
+        )
+    response.raise_for_status()
+    return response.text
+
+
+async def _seeded_file_baseline(emulate_url: str) -> None:
     file = await _file(emulate_url)
     assert file["name"] == "Reborn QA Brief", file
+
+
+async def _baseline(emulate_url: str) -> None:
+    await _seeded_file_baseline(emulate_url)
     permissions = await _permissions(emulate_url)
     assert [permission["id"] for permission in permissions] == [
         SEEDED_PERMISSION_ID
     ], permissions
+
+
+async def _get_file_outcome(emulate_url: str, preview: dict) -> None:
+    await _seeded_file_baseline(emulate_url)
+    assert "Reborn QA Brief" in json.dumps(preview), preview
+
+
+async def _update_file_outcome(emulate_url: str, preview: dict) -> None:
+    file = await _file(emulate_url)
+    assert file["name"] == "REBORN_PROVIDER_CASE_UPDATED_FILE", file
+    assert "REBORN_PROVIDER_CASE_UPDATED_FILE" in json.dumps(preview), preview
+
+
+async def _create_folder_baseline(emulate_url: str) -> None:
+    assert not await _files_named(emulate_url, CREATED_FOLDER)
+
+
+async def _create_folder_outcome(emulate_url: str, preview: dict) -> None:
+    matches = await _files_named(emulate_url, CREATED_FOLDER)
+    assert len(matches) == 1, matches
+    assert matches[0]["mimeType"] == "application/vnd.google-apps.folder", matches[0]
+    assert matches[0]["parents"] == ["root"], matches[0]
+    assert CREATED_FOLDER in json.dumps(preview), preview
+
+
+async def _upload_file_baseline(emulate_url: str) -> None:
+    assert not await _files_named(emulate_url, UPLOADED_FILE)
+
+
+async def _upload_file_outcome(emulate_url: str, preview: dict) -> None:
+    matches = await _files_named(emulate_url, UPLOADED_FILE)
+    assert len(matches) == 1, matches
+    uploaded = matches[0]
+    assert uploaded["mimeType"] == "text/plain", uploaded
+    assert uploaded["parents"] == ["root"], uploaded
+    assert uploaded["size"] == str(len(UPLOADED_CONTENT.encode())), uploaded
+    assert await _media(emulate_url, uploaded["id"]) == UPLOADED_CONTENT
+    assert UPLOADED_FILE in json.dumps(preview), preview
 
 
 async def _delete_outcome(emulate_url: str, preview: dict) -> None:
@@ -93,6 +161,46 @@ async def _shared_drives_outcome(emulate_url: str, preview: dict) -> None:
 
 
 GOOGLE_DRIVE_PROVIDER_OPERATION_CASES = (
+    ProviderOperationCase(
+        case_id="google_drive_get_file",
+        provider_service="google",
+        capability_id="google-drive.get_file",
+        arguments={"file_id": FILE_ID},
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=_get_file_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_update_file",
+        provider_service="google",
+        capability_id="google-drive.update_file",
+        arguments={
+            "file_id": FILE_ID,
+            "name": "REBORN_PROVIDER_CASE_UPDATED_FILE",
+        },
+        assert_baseline=_seeded_file_baseline,
+        assert_outcome=_update_file_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_create_folder",
+        provider_service="google",
+        capability_id="google-drive.create_folder",
+        arguments={"name": CREATED_FOLDER, "parent_id": "root"},
+        assert_baseline=_create_folder_baseline,
+        assert_outcome=_create_folder_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_drive_upload_file",
+        provider_service="google",
+        capability_id="google-drive.upload_file",
+        arguments={
+            "name": UPLOADED_FILE,
+            "content": UPLOADED_CONTENT,
+            "mime_type": "text/plain",
+            "parent_id": "root",
+        },
+        assert_baseline=_upload_file_baseline,
+        assert_outcome=_upload_file_outcome,
+    ),
     ProviderOperationCase(
         case_id="google_drive_delete_file",
         provider_service="google",

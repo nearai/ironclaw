@@ -2,7 +2,7 @@
 
 import json
 
-from provider_operation_google_common import google_json
+from emulate_provider import google_json
 from provider_operation_types import ProviderOperationCase
 
 SPREADSHEET_ID = "sheet_reborn_abc"
