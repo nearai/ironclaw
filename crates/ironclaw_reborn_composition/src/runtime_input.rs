@@ -1,6 +1,6 @@
 //! Input DTO for the assembled Reborn runtime (`build_reborn_runtime`).
 //!
-//! `RebornRuntimeInput` extends `RebornBuildInput` (which is substrate-only)
+//! `RebornRuntimeInput` extends `RebornHostBindings` (which is substrate-only)
 //! with the additional knobs needed to assemble a runnable agent:
 //!
 //! - **LLM configuration** (optional).
@@ -36,7 +36,7 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -471,7 +471,7 @@ impl TriggerPollerSettings {
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
 pub struct RebornRuntimeInput {
-    pub services: Option<RebornBuildInput>,
+    pub services: Option<RebornHostBindings>,
     pub llm: Option<ResolvedRebornLlm>,
     /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
@@ -547,7 +547,7 @@ impl RebornRuntimeInput {
     /// provided — there is no in-memory-only fallback at this layer because
     /// the substrate decisions (local-dev root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
-    pub fn from_build_input(services: RebornBuildInput) -> Self {
+    pub fn from_build_input(services: RebornHostBindings) -> Self {
         Self {
             services: Some(services),
             llm: None,

@@ -17,7 +17,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::{TurnActor, TurnScope};
 
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::runtime_input::{RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings};
 use crate::{RebornProductAuthServicePorts, RebornRuntimeProcessBinding};
 
@@ -86,7 +86,7 @@ async fn build_runtime(
     storage_root: PathBuf,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
 ) -> Result<RebornRuntime, super::RebornRuntimeError> {
-    let mut services = RebornBuildInput::local_dev(owner, storage_root)
+    let mut services = RebornHostBindings::local_dev(owner, storage_root)
         .with_runtime_policy(local_dev_runtime_policy())
         .with_runtime_process_binding(RebornRuntimeProcessBinding::None);
     if let Some(ports) = product_auth_ports {

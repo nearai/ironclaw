@@ -30,7 +30,7 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornHostBindings, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
     RebornReadinessDiagnostic, RebornReadinessState, build_reborn_runtime,
 };
 use ironclaw_reborn_composition::{
@@ -57,7 +57,7 @@ use tokio::sync::Mutex;
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn build_runtime_for_test(
-    input: RebornBuildInput,
+    input: RebornHostBindings,
 ) -> Result<RebornRuntime, RebornBuildError> {
     build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
         .await
@@ -593,7 +593,7 @@ async fn start_postgres_container() -> Option<(
 
 #[tokio::test]
 async fn disabled_returns_empty_services() {
-    let error = match build_runtime_for_test(RebornBuildInput::disabled("test-owner")).await {
+    let error = match build_runtime_for_test(RebornHostBindings::disabled("test-owner")).await {
         Ok(_) => panic!("disabled profile no longer produces a runtime handle"),
         Err(error) => error,
     };
@@ -608,7 +608,7 @@ async fn disabled_returns_empty_services() {
 async fn local_dev_builds_facades_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
+        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
             ironclaw_reborn_composition::local_dev_runtime_policy()
                 .expect("local-dev runtime policy resolves"),
         ),
@@ -686,7 +686,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
 async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
+        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
             ironclaw_reborn_composition::local_dev_runtime_policy()
                 .expect("local-dev runtime policy resolves"),
         ),
@@ -756,7 +756,7 @@ fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
 async fn local_dev_runtime_policy_exposes_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
+        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf())
             .with_runtime_policy(local_only_runtime_policy()),
     )
     .await
@@ -790,7 +790,7 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
 async fn local_dev_runtime_policy_hides_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
+        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf())
             .with_runtime_policy(network_denied_runtime_policy()),
     )
     .await
@@ -826,7 +826,7 @@ async fn production_requires_configured_trust_policy() {
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -851,7 +851,7 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -888,7 +888,7 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -952,7 +952,7 @@ async fn production_rejects_empty_trust_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -984,7 +984,7 @@ async fn production_self_mints_turn_wake_wiring() {
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1012,7 +1012,7 @@ async fn production_requires_runtime_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1043,7 +1043,7 @@ async fn production_rejects_local_only_runtime_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1127,7 +1127,7 @@ async fn production_rejects_memory_libsql_event_store() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1164,7 +1164,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql_with_resolved_secret_master_key(
+        RebornHostBindings::libsql_with_resolved_secret_master_key(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1254,7 +1254,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1285,7 +1285,7 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             Arc::clone(&db),
@@ -1323,7 +1323,7 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
 async fn local_dev_services_dispatch_trigger_management_through_composed_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
+        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf())
             .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await
@@ -1409,7 +1409,7 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornBuildInput::postgres(
+        RebornHostBindings::postgres(
             RebornCompositionProfile::Production,
             "test-owner",
             pool.clone(),
@@ -1445,7 +1445,7 @@ async fn production_postgres_services_wire_first_party_runtime_http_egress() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::postgres(
+        RebornHostBindings::postgres(
             RebornCompositionProfile::Production,
             "test-owner",
             pool,
@@ -1476,7 +1476,7 @@ async fn production_postgres_secure_default_builds_without_process_port() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornBuildInput::postgres(
+        RebornHostBindings::postgres(
             RebornCompositionProfile::Production,
             "test-owner",
             pool,
@@ -1508,7 +1508,7 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1542,7 +1542,7 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1577,7 +1577,7 @@ async fn production_postgres_services_require_process_port_for_first_party_runti
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::postgres(
+        RebornHostBindings::postgres(
             RebornCompositionProfile::Production,
             "test-owner",
             pool,
@@ -1610,7 +1610,7 @@ async fn migration_dry_run_validates_libsql_shape() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
@@ -1653,7 +1653,7 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
@@ -1686,7 +1686,7 @@ async fn migration_dry_run_requires_postgres_process_port_for_first_party_runtim
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornBuildInput::postgres(
+        RebornHostBindings::postgres(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             pool,

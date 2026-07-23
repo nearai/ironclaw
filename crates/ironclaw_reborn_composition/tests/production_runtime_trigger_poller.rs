@@ -62,7 +62,7 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornHostBindings, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, TriggerPollerSettings, build_reborn_runtime,
 };
 
@@ -148,7 +148,7 @@ async fn build_production_runtime_with_poller(
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             USER,
             db,

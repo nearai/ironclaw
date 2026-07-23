@@ -215,7 +215,7 @@ async fn local_dev_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
     let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::RebornBuildInput::local_dev(
+    let input = ironclaw_reborn_composition::RebornHostBindings::local_dev(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )

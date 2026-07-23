@@ -21,7 +21,7 @@ traffic cannot reach a partially wired Reborn graph.
 ## Source Of Truth
 
 Production cutover is controlled by `RebornCompositionProfile` plus typed
-`RebornBuildInput` / `RebornRuntimeInput`:
+`RebornHostBindings` / `RebornRuntimeInput`:
 
 | Profile | Runtime behavior |
 | --- | --- |
@@ -52,7 +52,7 @@ layer.
 
 | #3026 criterion | Closeout evidence |
 | --- | --- |
-| Explicit typed production profile/config path | `RebornCompositionProfile`, `RebornBuildInput`, `RebornRuntimeInput`, profile parsing tests, and `run_honors_boot_profile_from_config_file`. |
+| Explicit typed production profile/config path | `RebornCompositionProfile`, `RebornHostBindings`, `RebornRuntimeInput`, profile parsing tests, and `run_honors_boot_profile_from_config_file`. |
 | Disabled mode exposes no partial Reborn production services | `RebornServices::disabled`, `disabled_returns_empty_services`, `disabled_readiness_is_redaction_safe`, and `runtime_rejects_disabled_profile_before_local_substrate_lookup`. |
 | Local-dev/local-yolo are visibly non-production | `dev_only_profiles_are_visible_non_production_in_readiness`, `local_dev_factory_readiness_includes_non_production_diagnostic`, and `local_dev_yolo_factory_readiness_includes_non_production_diagnostic`. |
 | Migration-dry-run validates but does not switch live traffic | `migration_dry_run_validates_libsql_shape`, process-port fail-closed tests, and `runtime_rejects_migration_dry_run_before_live_traffic`. |

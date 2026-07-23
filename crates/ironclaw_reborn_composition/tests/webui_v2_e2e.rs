@@ -42,7 +42,7 @@ use ironclaw_loop_host::{
     HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
+    OAuthClientConfig, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
     RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
 use ironclaw_turns::run_profile::{
@@ -111,7 +111,7 @@ impl WebuiAuthenticator for TwoUserTokens {
 fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
     // Mirrors the policy the in-mod runtime tests use. Avoids the
     // public `local_dev_runtime_policy()` helper because that returns a
-    // `ResolvedRuntimePolicy` shape; `RebornBuildInput::with_runtime_policy`
+    // `ResolvedRuntimePolicy` shape; `RebornHostBindings::with_runtime_policy`
     // takes the `EffectiveRuntimePolicy` shape and the two are not
     // interchangeable in this direction yet.
     EffectiveRuntimePolicy {
@@ -690,7 +690,7 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     google_oauth_backend: Option<OAuthClientConfig>,
 ) -> Harness {
     let mut build_input =
-        RebornBuildInput::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy);
+        RebornHostBindings::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy);
     if let Some(google_oauth_backend) = google_oauth_backend {
         build_input = build_input
             .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
@@ -759,7 +759,7 @@ async fn build_two_user_harness(
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
+        RebornHostBindings::local_dev(USER, storage_root).with_runtime_policy(policy),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -1975,7 +1975,7 @@ mod operator_llm_config {
 
         let gateway = Arc::new(ToolCallingGateway::default());
         let input = RebornRuntimeInput::from_build_input(
-            RebornBuildInput::local_dev(USER, storage_root)
+            RebornHostBindings::local_dev(USER, storage_root)
                 .with_runtime_policy(local_dev_effective_policy()),
         )
         .with_identity(RebornRuntimeIdentity {

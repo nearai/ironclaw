@@ -19,7 +19,7 @@ use ironclaw_product_workflow::{
     ResolveApprovalInteractionRequest,
 };
 use ironclaw_reborn_composition::{
-    HooksActivationConfig, PollSettings, RebornBuildInput, RebornRuntimeError,
+    HooksActivationConfig, PollSettings, RebornHostBindings, RebornRuntimeError,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, RebornTurnDriveOutcome,
     TurnRunnerSettings, build_reborn_runtime,
 };
@@ -50,7 +50,7 @@ async fn runtime_composition_test_guard() -> tokio::sync::MutexGuard<'static, ()
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let input =
-        RebornRuntimeInput::from_build_input(RebornBuildInput::disabled("runtime-disabled-owner"));
+        RebornRuntimeInput::from_build_input(RebornHostBindings::disabled("runtime-disabled-owner"));
 
     let error = match build_reborn_runtime(input).await {
         Ok(_) => panic!("disabled profile is not a runnable REPL runtime"),
@@ -72,7 +72,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
             .await
             .unwrap(),
     );
-    let input = RebornRuntimeInput::from_build_input(RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(RebornHostBindings::libsql(
         ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
         "runtime-migration-dry-run-owner",
         db,
@@ -102,7 +102,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
 #[tokio::test]
 async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_build_input(RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(RebornHostBindings::local_dev(
         "runtime-policy-owner",
         root.path().join("local-dev"),
     ));
@@ -157,7 +157,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("runtime-test-owner", root.path().join("local-dev"))
+        RebornHostBindings::local_dev("runtime-test-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -265,7 +265,7 @@ async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("wb-durable-owner", root.path().join("local-dev"))
+        RebornHostBindings::local_dev("wb-durable-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -314,7 +314,7 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("runtime-cancel-owner", root.path().join("local-dev"))
+        RebornHostBindings::local_dev("runtime-cancel-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -366,7 +366,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     .unwrap();
     std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
+        RebornHostBindings::local_dev("runtime-skill-execution-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -470,7 +470,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     .unwrap();
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("runtime-hooks-owner", storage_root)
+        RebornHostBindings::local_dev("runtime-hooks-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -591,7 +591,7 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
 
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("cap-wiring-owner", root.path().join("local-dev"))
+        RebornHostBindings::local_dev("cap-wiring-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -665,7 +665,7 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
 
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("multi-worker-guard-owner", root.path().join("local-dev"))
+        RebornHostBindings::local_dev("multi-worker-guard-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -710,7 +710,7 @@ async fn local_dev_test_support_interaction_service_accessors_build_real_service
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev(
+        RebornHostBindings::local_dev(
             "test-support-accessors-owner",
             root.path().join("local-dev"),
         )
@@ -917,7 +917,7 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
     let root = tempfile::tempdir().unwrap();
     let tag = "coordinator-spy";
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev(format!("{tag}-owner"), root.path().join("local-dev"))
+        RebornHostBindings::local_dev(format!("{tag}-owner"), root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {

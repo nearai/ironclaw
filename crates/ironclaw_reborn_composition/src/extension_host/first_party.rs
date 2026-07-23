@@ -5,7 +5,7 @@
 //! code, so the binary (`ironclaw_reborn_cli`) converts the concrete
 //! `ironclaw_first_party_extensions::packages::PackageBundle` inventory into
 //! these neutral, data-only [`FirstPartyPackageBundle`]s and injects them on the
-//! [`crate::RebornBuildInput`]. Likewise it supplies concrete first-party
+//! [`crate::RebornHostBindings`]. Likewise it supplies concrete first-party
 //! capability executors (GSuite, web tooling) as [`FirstPartyHandlerRegistrar`]s;
 //! composition owns the generic registration loop and the
 //! [`FirstPartyRegistrarContext`] each registrar consumes.

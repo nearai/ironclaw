@@ -180,7 +180,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+        RebornHostBindings, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
         RebornRuntimeInput, build_reborn_runtime,
     };
 
@@ -192,7 +192,7 @@ mod tests {
         let agent = "extension-lifecycle-command-agent";
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_build_input(
-                RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
+                RebornHostBindings::local_dev(owner, dir.path().join("local-dev"))
                     .with_runtime_policy(
                         crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
                     ),

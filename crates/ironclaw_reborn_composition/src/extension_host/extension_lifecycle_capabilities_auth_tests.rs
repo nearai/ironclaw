@@ -16,12 +16,12 @@ use crate::extension_host::extension_lifecycle_capabilities::{
 };
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
-use crate::{RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
+use crate::{RebornHostBindings, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
 #[tokio::test]
 async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornHostBindings::local_dev(
         "3eee560a-7fe5-474c-965a-67cb69df3d04",
         dir.path().join("local-dev"),
     ))
@@ -145,7 +145,7 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_for_sso_user() {
     let dir = tempfile::tempdir().expect("tempdir");
     let owner_id = "3eee560a-7fe5-474c-965a-67cb69df3d04";
-    let services = build_runtime_substrate(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornHostBindings::local_dev(
         owner_id,
         dir.path().join("local-dev"),
     ))

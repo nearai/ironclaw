@@ -1,5 +1,5 @@
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
+    RebornHostBindings, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornRuntime, RebornRuntimeInput,
     RebornRuntimeProfileOptions, RebornWorkerReadiness, build_reborn_runtime,
@@ -15,7 +15,7 @@ use ironclaw_host_runtime::{
 use ironclaw_runtime_policy::ResolveError;
 use serde_json::json;
 
-async fn build_runtime_for_test(input: RebornBuildInput) -> RebornRuntime {
+async fn build_runtime_for_test(input: RebornHostBindings) -> RebornRuntime {
     build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
         .await
         .expect("runtime should build")

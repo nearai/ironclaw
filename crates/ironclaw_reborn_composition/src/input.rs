@@ -34,7 +34,7 @@ const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
 
 /// Composition-time OAuth client metadata.
 ///
-/// `RebornBuildInput` owns this seam for product/bootstrap-provided values
+/// `RebornHostBindings` owns this seam for product/bootstrap-provided values
 /// until a settings-backed source exists.
 #[derive(Clone)]
 pub struct OAuthClientConfig {
@@ -159,7 +159,7 @@ impl RebornRuntimeProcessBinding {
     }
 }
 
-pub struct RebornBuildInput {
+pub struct RebornHostBindings {
     /// The deployment this build assembles, as data (§4.4/§5.6). Carries the
     /// substrate, traffic, readiness, and storage-shape axes every consumer
     /// reads instead of re-deriving them from a profile name.
@@ -168,7 +168,7 @@ pub struct RebornBuildInput {
     /// `new` builds the config without a yolo host-access disclosure (it is not
     /// known at construction), so callers that hold the operator's confirmation
     /// install the accurate config through
-    /// [`RebornBuildInput::with_deployment`] — `local_runtime_build_input_with_options`
+    /// [`RebornHostBindings::with_deployment`] — `local_runtime_build_input_with_options`
     /// is the one that does.
     pub(crate) deployment: DeploymentConfig,
     pub(crate) owner_id: String,
@@ -238,7 +238,7 @@ pub struct RebornBuildInput {
 /// One channel extension's binary-assembled vendor binding
 /// (extension-runtime DEL-7): the adapter linked into this deployment plus
 /// the composition extras the generic channel host consumes.
-/// Supplied through [`RebornBuildInput::with_channel_extension_bindings`] by
+/// Supplied through [`RebornHostBindings::with_channel_extension_bindings`] by
 /// the assembling binary — composition itself never names a concrete
 /// extension crate.
 #[derive(Clone)]
@@ -266,7 +266,7 @@ pub(crate) struct RebornLocalRuntimeIdentity {
 /// Declarative PostgreSQL connection config (Phase B): the pure-data inputs
 /// needed to open a pool at *build* time. Deliberately carries no live
 /// `deadpool_postgres::Pool` handle — production resolves these values at
-/// `RebornBuildInput` construction (reading env), but the pool is opened later
+/// `RebornHostBindings` construction (reading env), but the pool is opened later
 /// inside `build_production_shaped`.
 #[derive(Clone)]
 pub(crate) struct PostgresConnectionConfig {
@@ -328,9 +328,9 @@ pub(crate) enum RebornStorageInput {
     },
 }
 
-impl RebornBuildInput {
+impl RebornHostBindings {
     /// Selected composition profile — a display/telemetry label. Behaviour
-    /// comes from [`RebornBuildInput::deployment`].
+    /// comes from [`RebornHostBindings::deployment`].
     pub fn profile(&self) -> RebornCompositionProfile {
         self.deployment.profile()
     }
@@ -343,7 +343,7 @@ impl RebornBuildInput {
     /// Replace the deployment this input was constructed with.
     ///
     /// Test-only: production builds the deployment at construction
-    /// (`RebornBuildInput::new` takes it, and `local_runtime_build_input_with_options`
+    /// (`RebornHostBindings::new` takes it, and `local_runtime_build_input_with_options`
     /// supplies one built where the operator's yolo disclosure is known). This
     /// exists so tests can construct a deliberately mismatched
     /// deployment/storage pairing and drive the fail-closed guard in
@@ -813,7 +813,7 @@ impl RebornBuildInput {
     /// Record deployment OAuth client material for one vendor id. The vendor's
     /// manifest recipe names the client-credential handles these values fill.
     ///
-    /// `RebornBuildInput` owns this composition seam until a settings-backed
+    /// `RebornHostBindings` owns this composition seam until a settings-backed
     /// source exists.
     pub fn with_vendor_oauth_client(
         mut self,
@@ -1222,7 +1222,7 @@ mod tests {
         ));
 
         let input =
-            RebornBuildInput::disabled("test-owner").with_product_auth_ports(product_auth.clone());
+            RebornHostBindings::disabled("test-owner").with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
     }

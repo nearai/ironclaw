@@ -31,7 +31,7 @@ use ironclaw_product_workflow::{
     WebUiListAutomationsRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornHostBindings, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
 };
 
@@ -76,7 +76,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "runtime-automation-prod-owner",
             db,

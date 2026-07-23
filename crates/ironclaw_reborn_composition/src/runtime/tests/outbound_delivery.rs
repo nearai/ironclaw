@@ -18,7 +18,7 @@ use ironclaw_turns::{
 };
 
 use crate::RebornCompositionProfile;
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::outbound::outbound_preferences::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
 };
@@ -186,7 +186,7 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     let gateway = Arc::new(OutboundDeliveryTriggerGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "runtime-outbound-trigger-owner",
             root.path().join("local-dev"),

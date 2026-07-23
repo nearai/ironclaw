@@ -36,7 +36,7 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
-    ExternalSubjectId, ProviderKind, RebornBuildInput, RebornCompositionProfile,
+    ExternalSubjectId, ProviderKind, RebornHostBindings, RebornCompositionProfile,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProcessBinding,
     ResolveExternalIdentity, SurfaceKind, build_reborn_runtime,
 };
@@ -96,7 +96,7 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::libsql(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "prod-identity-owner",
             db,

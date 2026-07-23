@@ -11,7 +11,7 @@ use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornHostBindings, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornWebuiBundle, TriggerFireAccessPolicy, build_reborn_runtime,
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
@@ -739,9 +739,9 @@ fn reject_non_loopback_privileged_local_runtime(
 }
 
 fn with_notion_dcr_oauth_backend(
-    services: RebornBuildInput,
+    services: RebornHostBindings,
     callback_origin: &str,
-) -> anyhow::Result<RebornBuildInput> {
+) -> anyhow::Result<RebornHostBindings> {
     services
         .with_dcr_oauth_callback(callback_origin)
         .map_err(|error| anyhow!("OAuth callback origin rejected: {error}"))
@@ -1578,7 +1578,7 @@ slack_user_id = "U123"
     async fn webui_serve_wires_notion_dcr_into_runtime_services() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            RebornHostBindings::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
             "http://127.0.0.1:3000",
         )
         .expect("notion dcr wiring");
@@ -1602,7 +1602,7 @@ slack_user_id = "U123"
     async fn webui_serve_wires_notion_dcr_with_canonical_host_origin() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            RebornHostBindings::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
                 None,
@@ -1649,7 +1649,7 @@ slack_user_id = "U123"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            RebornHostBindings::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
             &callback_origin,
         )
         .expect("notion dcr wiring");

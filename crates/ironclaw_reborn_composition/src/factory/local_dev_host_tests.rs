@@ -12,7 +12,7 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     std::fs::create_dir_all(&host_home).expect("host home root");
 
     let services = build_runtime_substrate(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             storage_root,
@@ -62,7 +62,7 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     std::fs::create_dir_all(&workspace_root).expect("workspace root");
 
     let services = build_runtime_substrate(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             storage_root,
@@ -107,7 +107,7 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
     std::os::unix::fs::symlink(&host_home, &host_home_link).expect("host home symlink"); // safety: test-only setup in #[cfg(test)] module.
 
     let services = build_runtime_substrate(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             storage_root,
@@ -144,7 +144,7 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
 async fn local_yolo_policy_requires_confirmed_host_home_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let error = build_runtime_substrate(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             dir.path().join("local-dev"),
@@ -164,7 +164,7 @@ async fn confirmed_host_home_root_is_rejected_without_matching_policy() {
     std::fs::create_dir_all(&host_home).expect("host home root");
 
     let error = build_runtime_substrate(
-        RebornBuildInput::local_dev("local-dev-host-owner", dir.path().join("local-dev"))
+        RebornHostBindings::local_dev("local-dev-host-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy())
             .with_local_dev_confirmed_host_home_root(host_home),
     )
@@ -181,7 +181,7 @@ async fn local_yolo_policy_rejects_confirmed_host_home_file() {
     std::fs::write(&host_home_file, "not a directory").expect("host home file");
 
     let error = build_runtime_substrate(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             dir.path().join("local-dev"),
@@ -199,7 +199,7 @@ async fn local_yolo_policy_rejects_confirmed_host_home_file() {
 async fn local_yolo_policy_rejects_confirmed_host_home_filesystem_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let error = build_runtime_substrate(
-        RebornBuildInput::local_dev_with_profile(
+        RebornHostBindings::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             dir.path().join("local-dev"),

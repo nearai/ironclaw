@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::RebornCompositionProfile;
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::readiness::{
     RebornReadinessDiagnostic, RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus,
     RebornReadinessState,
@@ -171,7 +171,7 @@ pub struct ReadinessContract {
 ///
 /// Absent for deployments that assemble no local runtime policy: the disabled
 /// profile and the production-shaped profiles, which carry an operator-supplied
-/// policy on `RebornBuildInput` instead.
+/// policy on `RebornHostBindings` instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimePolicyRequest {
     /// Where IronClaw is running and who owns the machine boundary.
@@ -460,7 +460,7 @@ impl DeploymentConfig {
     ///
     /// `Ok(None)` for deployments that make no policy request — disabled and
     /// the production-shaped profiles, which carry an operator-supplied policy
-    /// on `RebornBuildInput` instead. Distinguishing "no request" from "a
+    /// on `RebornHostBindings` instead. Distinguishing "no request" from "a
     /// request that failed" keeps the fail-closed resolver error visible
     /// rather than collapsing both into an absent policy.
     pub(crate) fn resolve(&self) -> Result<Option<EffectiveRuntimePolicy>, ResolveError> {
@@ -535,7 +535,7 @@ pub fn local_runtime_build_input(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     local_runtime_build_input_with_options(
         profile,
         owner_id,
@@ -551,7 +551,7 @@ pub fn local_runtime_build_input_with_options(
     owner_id: impl Into<String>,
     root: PathBuf,
     options: RebornRuntimeProfileOptions,
-) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     if profile == RebornCompositionProfile::HostedSingleTenantVolume {
         return hosted_single_tenant_volume_build_input(owner_id, root);
     }
@@ -564,7 +564,7 @@ pub fn local_runtime_build_input_with_options(
         .resolve()?
         .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })?;
     Ok(
-        RebornBuildInput::local_dev_from_deployment(deployment, owner_id, root)
+        RebornHostBindings::local_dev_from_deployment(deployment, owner_id, root)
             .with_runtime_policy(policy),
     )
 }
@@ -574,10 +574,10 @@ pub fn local_runtime_build_input_with_options(
 pub(crate) fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
+) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    Ok(RebornBuildInput::local_dev_with_profile(
+    Ok(RebornHostBindings::local_dev_with_profile(
         RebornCompositionProfile::HostedSingleTenantVolume,
         owner_id,
         root,
@@ -925,7 +925,7 @@ mod local_runtime_profile_tests {
     fn yolo_disclosure_reaches_both_the_carried_deployment_and_the_resolved_policy() {
         // This module is the one place that holds the operator's host-access
         // confirmation, so it must be the place that builds the deployment.
-        // The hazard being pinned: `RebornBuildInput::new` cannot know the
+        // The hazard being pinned: `RebornHostBindings::new` cannot know the
         // disclosure, so a config built there would carry
         // `yolo_disclosure_acknowledged: false` and resolve fail-closed. The
         // input must carry the config built *here* instead.

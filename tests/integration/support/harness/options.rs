@@ -34,7 +34,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
         bool,
     )>,
     /// C-JOURNEY: override the local-dev host network HTTP egress
-    /// (`RebornBuildInput::with_network_http_egress_for_test`). Without this,
+    /// (`RebornHostBindings::with_network_http_egress_for_test`). Without this,
     /// `build_local_runtime` defaults to a REAL `ReqwestNetworkTransport`
     /// (`factory.rs`), so any harness dispatching a bundled WASM capability
     /// that crosses HTTP (e.g. `github.*`) on the `new_with_options` path MUST
@@ -61,17 +61,17 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// (the invented-vendor fixture, overview §8).
     pub(crate) fixture_extension_dirs: Vec<(std::path::PathBuf, String)>,
     /// `first_party` extension factories the harness assembles into the
-    /// composition input (`RebornBuildInput::with_native_extension_factories`
+    /// composition input (`RebornHostBindings::with_native_extension_factories`
     /// — the same seam the binary uses).
     pub(crate) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     /// Channel-adapter bindings for non-`first_party`-runtime channel
-    /// extensions (`RebornBuildInput::with_channel_extension_bindings` — the
+    /// extensions (`RebornHostBindings::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
     pub(crate) channel_extension_bindings:
         Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
     /// Binary-parity account-setup declarations (extension-runtime §5.5),
-    /// the `RebornBuildInput::with_account_setup_descriptors` seam.
+    /// the `RebornHostBindings::with_account_setup_descriptors` seam.
     pub(crate) account_setup_descriptors:
         Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
     /// Typed handle for the recording network egress when the profile wants
@@ -106,9 +106,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Opt-in; every other harness stays byte-identical.
     pub(crate) trigger_active_run_lookup_requested: bool,
     /// Provider-instance readiness map, "config set" + restart arm: when
-    /// `true`, registers a dummy Google OAuth backend on the `RebornBuildInput`
+    /// `true`, registers a dummy Google OAuth backend on the `RebornHostBindings`
     /// via the SAME generic production builder
-    /// (`RebornBuildInput::with_vendor_oauth_client`)
+    /// (`RebornHostBindings::with_vendor_oauth_client`)
     /// that `ironclaw config set google.client_id`/`client_secret` feeds in
     /// production — proving the readiness-map check clears once an operator
     /// configures the instance, with no test-only bypass. `false` (the
@@ -208,7 +208,7 @@ impl HostRuntimeHarnessOptions {
 
     /// Binary-parity channel-adapter binding for channel extensions whose
     /// runtime is NOT `first_party` (extension-runtime P6): mirrors
-    /// `RebornBuildInput::with_channel_extension_bindings` the same way the
+    /// `RebornHostBindings::with_channel_extension_bindings` the same way the
     /// native factories mirror the CLI assembly. Without it, composition
     /// binds the transitional `HostServedChannelBridge`, whose `inbound`
     /// rejects every verified request with `ChannelError::Unsupported`.
@@ -221,7 +221,7 @@ impl HostRuntimeHarnessOptions {
     }
 
     /// Binary-parity account-setup declaration (extension-runtime §5.5):
-    /// mirrors `RebornBuildInput::with_account_setup_descriptors` the same
+    /// mirrors `RebornHostBindings::with_account_setup_descriptors` the same
     /// way the native factories mirror the CLI assembly.
     pub(crate) fn with_account_setup_descriptor(
         mut self,

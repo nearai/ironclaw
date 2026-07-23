@@ -9,7 +9,7 @@ use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornHostBindings,
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
@@ -619,7 +619,7 @@ pub(crate) fn build_runtime_input_with_options(
 }
 
 pub(crate) struct RuntimeServicesInput {
-    pub(crate) services_input: RebornBuildInput,
+    pub(crate) services_input: RebornHostBindings,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
@@ -690,7 +690,7 @@ fn build_standalone_local_runtime_services_input(
     owner_id: &str,
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
-) -> anyhow::Result<RebornBuildInput> {
+) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
     let workspace_root = std::env::current_dir()
         .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
@@ -720,13 +720,13 @@ fn build_hosted_single_tenant_services_input(
     owner_id: &str,
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<RebornBuildInput> {
+) -> anyhow::Result<RebornHostBindings> {
     let workspace_root = std::env::current_dir()
         .context("failed to resolve current directory for hosted single-tenant workspace")?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
-        RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
+        RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
             composition_profile(profile),
             owner_id,
             local_runtime_storage_root(config, profile),
@@ -745,8 +745,8 @@ fn build_production_services_input(
     profile: RebornProfile,
     owner_id: &str,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<RebornBuildInput> {
-    RebornBuildInput::postgres_from_config_and_env(
+) -> anyhow::Result<RebornHostBindings> {
+    RebornHostBindings::postgres_from_config_and_env(
         composition_profile(profile),
         owner_id,
         config_file,

@@ -64,7 +64,7 @@ use crate::runtime_input::RebornRuntimeIdentity;
 use crate::storage_catalog::validate_reborn_runtime_storage;
 use crate::support::fs::RebornProjectService;
 use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornAuthContinuationDispatcher, RebornBuildError, RebornHostBindings, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
@@ -654,7 +654,7 @@ where
 }
 
 pub(crate) async fn build_runtime_substrate(
-    input: RebornBuildInput,
+    input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     tracing::debug!(
         profile = %input.profile(),
@@ -2323,16 +2323,16 @@ fn nearai_allowed_effects() -> Vec<ironclaw_host_api::EffectKind> {
 }
 
 async fn build_production_shaped(
-    input: RebornBuildInput,
+    input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
-    let RebornBuildInput {
+    let RebornHostBindings {
         deployment,
         owner_id,
         local_runtime_identity,
         storage,
         production_trust_policy,
         runtime_policy,
-        // The notifier field on `RebornBuildInput` is kept for backward
+        // The notifier field on `RebornHostBindings` is kept for backward
         // compatibility with test callers that pre-mint one, but the
         // production-shaped build now mints its own notifier internally so the
         // coordinator and scheduler always share the exact same channel.

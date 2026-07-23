@@ -32,7 +32,7 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
+    AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
     RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
 use ironclaw_webui::{
@@ -138,20 +138,20 @@ struct AdminHarness {
 async fn build_admin_harness() -> AdminHarness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root: PathBuf = root.path().join("local-dev");
-    let build_input = RebornBuildInput::local_dev(OPERATOR_USER, storage_root)
+    let build_input = RebornHostBindings::local_dev(OPERATOR_USER, storage_root)
         .with_runtime_policy(local_dev_effective_policy());
     build_admin_harness_from(root, build_input).await
 }
 
 /// Assemble the full admin HTTP harness over a caller-supplied
-/// `RebornBuildInput` (already carrying its profile, policy, trust, and process
+/// `RebornHostBindings` (already carrying its profile, policy, trust, and process
 /// binding). Everything above the substrate — the shared signed session store /
 /// minter / authenticator, the WebUI bundle, and the composed router — is
 /// profile-agnostic, so the local-dev and production-shaped runs share it and
 /// only differ in the build input.
 async fn build_admin_harness_from(
     root: tempfile::TempDir,
-    build_input: RebornBuildInput,
+    build_input: RebornHostBindings,
 ) -> AdminHarness {
     let tenant = TenantId::new(TENANT).expect("tenant");
 
@@ -940,7 +940,7 @@ async fn build_admin_harness_production() -> AdminHarness {
             .expect("libsql db"),
     );
     let events = root.path().join("events.db").to_string_lossy().to_string();
-    let build_input = RebornBuildInput::libsql(
+    let build_input = RebornHostBindings::libsql(
         RebornCompositionProfile::Production,
         OPERATOR_USER,
         db,

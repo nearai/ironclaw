@@ -9,7 +9,7 @@
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
 };
-use ironclaw_reborn_composition::{RebornBuildInput, RebornRuntimeInput, build_runtime};
+use ironclaw_reborn_composition::{RebornHostBindings, RebornRuntimeInput, build_runtime};
 
 /// Write survives a fresh libsql reopen of the same on-disk file. Failure
 /// class of PR #4782 (two stores over different mount views).
@@ -17,7 +17,7 @@ use ironclaw_reborn_composition::{RebornBuildInput, RebornRuntimeInput, build_ru
 async fn filesystem_outbound_state_store_persists_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime(RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev("w6-outbound-durability", dir.path().join("local-dev")),
+        RebornHostBindings::local_dev("w6-outbound-durability", dir.path().join("local-dev")),
     ))
     .await
     .expect("services build");

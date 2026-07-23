@@ -42,7 +42,7 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornTurnDriveOutcome, build_reborn_runtime,
 };
 use ironclaw_reborn_config::BudgetDefaults;
@@ -138,7 +138,7 @@ async fn build_runtime_with_pause_inducing_setup(
 ) -> (RebornRuntime, Arc<BudgetTestGateway>) {
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 5, 5));
     let input = RebornRuntimeInput::from_build_input(
-        RebornBuildInput::local_dev(format!("{tag}-owner"), root)
+        RebornHostBindings::local_dev(format!("{tag}-owner"), root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {

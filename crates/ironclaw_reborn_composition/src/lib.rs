@@ -100,7 +100,7 @@ pub use factory::production_first_party_trust_policy;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
-    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+    ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its

@@ -46,7 +46,7 @@ use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornHostBindings,
     RebornProductAuthServices, RebornRuntimeInput, build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
@@ -656,7 +656,7 @@ impl HostRuntimeCapabilityHarness {
             )?
             .with_local_dev_confirmed_host_home_root(host_home_root)
         } else {
-            RebornBuildInput::local_dev(service_label, storage_root)
+            RebornHostBindings::local_dev(service_label, storage_root)
         };
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
