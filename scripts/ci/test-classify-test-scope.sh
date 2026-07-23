@@ -10,6 +10,7 @@ assert_scope() {
   local expected="$3"
   local actual
 
+  expected="$(printf '%s\n' "$expected" | sort)"
   actual="$(printf '%s\n' "$files" | "$classifier" | sort)"
 
   if [ "$actual" != "$expected" ]; then
@@ -28,6 +29,7 @@ assert_scope_no_trailing_newline() {
   local expected="$3"
   local actual
 
+  expected="$(printf '%s\n' "$expected" | sort)"
   actual="$(printf '%s' "$files" | "$classifier" | sort)"
 
   if [ "$actual" != "$expected" ]; then
@@ -44,6 +46,7 @@ assert_empty_scope() {
   local expected="$1"
   local actual
 
+  expected="$(printf '%s\n' "$expected" | sort)"
   actual="$(printf '' | "$classifier" | sort)"
 
   if [ "$actual" != "$expected" ]; then
