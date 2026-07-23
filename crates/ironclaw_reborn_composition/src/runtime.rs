@@ -94,7 +94,11 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
-use ironclaw_outbound::{CommunicationPreferenceRepository, OutboundError};
+use ironclaw_outbound::CommunicationPreferenceRepository;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_outbound::OutboundError;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::ExternalToolCatalog;
@@ -115,8 +119,6 @@ use crate::factory::{
     ComposedToolPermissionOverrideStore, builtin_extension_registry,
     filesystem_reborn_identity_store,
 };
-#[cfg(any(test, feature = "test-support"))]
-use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
@@ -625,10 +627,7 @@ pub struct RebornRuntime {
     outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::observability::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
-    /// Mints the one-time API bearer on admin user creation. Read by
-    /// `build_webui_services` when wiring the admin surface. `None` leaves the
-    /// admin create path reporting the token minter unavailable.
-    admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
+    admin_login_token_minter: Option<Arc<dyn crate::AdminLoginTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1843,6 +1842,30 @@ impl RebornRuntime {
         )
     }
 
+    pub(crate) fn admin_login_token_minter(&self) -> Option<Arc<dyn crate::AdminLoginTokenMinter>> {
+        self.admin_login_token_minter.clone()
+    }
+
+    pub(crate) fn reborn_login_policy(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornLoginPolicy>> {
+        Some(ironclaw_reborn_identity::login_policy(
+            self.reborn_user_directory(),
+        ))
+    }
+
+    /// Current-state validator for reusable private-user login credentials.
+    /// Host ingress uses this facade instead of retaining lifecycle-directory
+    /// mutation access.
+    pub fn reusable_login_token_validator(
+        &self,
+    ) -> Option<Arc<dyn crate::ReusableLoginTokenValidator>> {
+        self.reborn_login_policy().map(|policy| {
+            Arc::new(crate::admin_login_token::RebornReusableLoginTokenValidator::new(policy))
+                as Arc<dyn crate::ReusableLoginTokenValidator>
+        })
+    }
+
     /// Test-only accessor for the admin user directory the WebUI facade wires.
     /// Mirrors the production call `build_webui_services` makes to
     /// [`Self::reborn_user_directory`] (`pub(crate)`), which integration tests
@@ -1870,12 +1893,6 @@ impl RebornRuntime {
         &self,
     ) -> Arc<dyn ironclaw_product_workflow::ProjectService> {
         Arc::clone(&self.project_service)
-    }
-
-    /// The admin API-token minter supplied via
-    /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
-    pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {
-        self.admin_api_token_minter.clone()
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -3199,7 +3216,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         budget_defaults,
         budget_event_observer,
         trajectory_observer,
-        admin_api_token_minter,
+        admin_login_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -4421,7 +4438,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
-        admin_api_token_minter,
+        admin_login_token_minter,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,

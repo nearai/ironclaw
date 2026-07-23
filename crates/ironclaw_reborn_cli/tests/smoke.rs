@@ -2149,8 +2149,8 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         .env(
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             // >=32 bytes: serve now enforces the session-signing entropy
-            // floor unconditionally (it signs admin-minted session tokens
-            // even without SSO).
+            // floor unconditionally (the CLI claim flow signs sessions even
+            // without SSO).
             "reborn-smoke-test-token-0123456789abcdef",
         )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
@@ -2239,8 +2239,8 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         "no-SSO serve must still expose empty provider discovery, got status line: {providers_status}"
     );
     assert!(
-        logout_status.contains(" 404 "),
-        "no-SSO env-bearer serve must not mount logout, got status line: {logout_status}"
+        logout_status.contains(" 204 "),
+        "no-SSO serve with signed-session support must mount logout, got status line: {logout_status}"
     );
     let config = std::fs::read_to_string(reborn_home.join("config.toml"))
         .expect("successful serve startup should seed config");
@@ -2452,8 +2452,8 @@ max_body_bytes_fallback = 0
             .env(
                 "IRONCLAW_REBORN_WEBUI_TOKEN",
                 // >=32 bytes: serve now enforces the session-signing entropy
-                // floor unconditionally (it signs admin-minted session tokens
-                // even without SSO).
+                // floor unconditionally (the CLI claim flow signs sessions even
+                // without SSO).
                 "reborn-smoke-test-token-0123456789abcdef",
             )
             .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
@@ -2515,9 +2515,9 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
 
 #[test]
 fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
-    // Regression for the offline HMAC-oracle gap: serve always wires the admin
-    // API token minter, which signs user-visible session tokens from the env
-    // bearer secret. A weak secret is therefore an offline forgery target even
+    // Regression for the offline HMAC-oracle gap: the CLI claim flow signs
+    // user-visible session tokens from the env bearer secret. A weak secret is
+    // therefore an offline forgery target even
     // when no SSO provider is configured, so the >=32-byte entropy floor must
     // fire unconditionally — not only when SSO startup is present.
     let temp = tempfile::tempdir().expect("tempdir");
@@ -6379,8 +6379,8 @@ fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
     .env(
         "IRONCLAW_REBORN_WEBUI_TOKEN",
         // >=32 bytes: serve now enforces the session-signing entropy
-        // floor unconditionally (it signs admin-minted session tokens
-        // even without SSO).
+        // floor unconditionally (the CLI claim flow signs sessions even
+        // without SSO).
         "reborn-smoke-test-token-0123456789abcdef",
     )
     .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
@@ -6417,8 +6417,8 @@ listen_host = "0.0.0.0"
         .env(
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             // >=32 bytes: serve now enforces the session-signing entropy
-            // floor unconditionally (it signs admin-minted session tokens
-            // even without SSO).
+            // floor unconditionally (the CLI claim flow signs sessions even
+            // without SSO).
             "reborn-smoke-test-token-0123456789abcdef",
         )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")

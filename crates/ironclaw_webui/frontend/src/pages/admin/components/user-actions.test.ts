@@ -34,6 +34,14 @@ function findByType(root, type) {
   return found;
 }
 
+function findWithProp(root, prop) {
+  let found = null;
+  visit(root, (node) => {
+    if (!found && typeof node === "object" && node.props?.[prop]) found = node;
+  });
+  return found;
+}
+
 function collectScalars(root) {
   const scalars = [];
   visit(root, (value) => {
@@ -115,8 +123,10 @@ function baseAdminState(overrides = {}) {
     activateError: null,
     activatingUserId: null,
     resetActionErrors: () => {},
-    newToken: null,
-    clearToken: () => {},
+    createManagedAgent: async () => {},
+    isCreatingManagedAgent: false,
+    createManagedAgentError: null,
+    resetCreateManagedAgent: () => {},
     ...overrides,
   };
 }
@@ -124,7 +134,7 @@ function baseAdminState(overrides = {}) {
 function loadUsersView(harness) {
   return runVmModuleForTest(
     "./users-tab.tsx",
-    ["AdminUsersTabView", "ConfirmModal", "UserRow"],
+    ["AdminUsersTabView", "ConfirmModal", "CreateManagedAgentForm", "CreateUserForm", "UserRow"],
     {
       React: harness.React,
       useT: () => translate,
@@ -153,6 +163,107 @@ function loadUsersView(harness) {
     import.meta.url,
   );
 }
+
+test("private-user form opts into and renders the one-time login token", async () => {
+  const harness = createReactHarness();
+  const { CreateUserForm } = loadUsersView(harness);
+  const createdPayloads = [];
+  const props = {
+    onCreate: async (payload) => {
+      createdPayloads.push(payload);
+      return { id: "user-token", login_token: "signed-user-session" };
+    },
+    isCreating: false,
+    error: null,
+    resetError: () => {},
+  };
+
+  let rendered = harness.render(CreateUserForm, props);
+  // Button functions do not retain identity in the VM harness, so invoke the
+  // first button's click handler discovered from the rendered tree.
+  let openButton = null;
+  visit(rendered, (node) => {
+    if (!openButton && typeof node === "object" && node.props?.onClick) openButton = node;
+  });
+  openButton.props.onClick();
+
+  rendered = harness.render(CreateUserForm, props);
+  findByTestId(rendered, "admin-user-issue-login-token").props.onChange({
+    currentTarget: { checked: true },
+  });
+  const inputs = [];
+  visit(rendered, (node) => {
+    if (typeof node === "object" && node.type === "input") inputs.push(node);
+  });
+  inputs[0].props.onChange({ currentTarget: { value: "Token User" } });
+  rendered = harness.render(CreateUserForm, props);
+  await findByType(rendered, "form").props.onSubmit({ preventDefault() {} });
+
+  assert.equal(createdPayloads[0].issue_login_token, true);
+  rendered = harness.render(CreateUserForm, props);
+  assert.ok(findByTestId(rendered, "admin-user-login-token"));
+  assert.ok(collectScalars(rendered).includes("signed-user-session"));
+});
+
+test("private-user form does not submit without an email or login-token opt-in", async () => {
+  const harness = createReactHarness();
+  const { CreateUserForm } = loadUsersView(harness);
+  const createdPayloads = [];
+  const props = {
+    onCreate: async (payload) => createdPayloads.push(payload),
+    isCreating: false,
+    error: null,
+    resetError: () => {},
+  };
+  let rendered = harness.render(CreateUserForm, props);
+  findWithProp(rendered, "onClick").props.onClick();
+  rendered = harness.render(CreateUserForm, props);
+  const inputs = [];
+  visit(rendered, (node) => {
+    if (typeof node === "object" && node.type === "input") inputs.push(node);
+  });
+  inputs[0].props.onChange({ currentTarget: { value: "No Login Path" } });
+  rendered = harness.render(CreateUserForm, props);
+  await findByType(rendered, "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(createdPayloads, []);
+});
+
+test("managed-agent form opens, submits the dedicated payload, and closes", async () => {
+  const harness = createReactHarness();
+  const { CreateManagedAgentForm } = loadUsersView(harness);
+  const createdPayloads = [];
+  const props = {
+    onCreate: async (payload) => createdPayloads.push(payload),
+    isCreating: false,
+    error: null,
+    resetError: () => {},
+  };
+  let rendered = harness.render(CreateManagedAgentForm, props);
+  findWithProp(rendered, "onClick").props.onClick();
+  rendered = harness.render(CreateManagedAgentForm, props);
+  const input = findByType(rendered, "input");
+  input.props.onChange({ currentTarget: { value: "Build Agent" } });
+  rendered = harness.render(CreateManagedAgentForm, props);
+  await findByType(rendered, "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(createdPayloads.length, 1);
+  assert.equal(createdPayloads[0].display_name, "Build Agent");
+  rendered = harness.render(CreateManagedAgentForm, props);
+  assert.equal(findByType(rendered, "form"), null);
+});
+
+test("empty users view presents creation choices without irrelevant search filters", () => {
+  const harness = createReactHarness();
+  const { AdminUsersTabView: View } = loadUsersView(harness);
+  const rendered = harness.render(View, {
+    onSelectUser: () => {},
+    adminState: baseAdminState({ users: [] }),
+  });
+
+  assert.ok(findByTestId(rendered, "admin-user-create-actions"));
+  assert.ok(collectScalars(rendered).includes("admin.dashboard.noUsers"));
+  assert.ok(collectScalars(rendered).includes("admin.users.emptyDescription"));
+  assert.equal(findByType(rendered, "input"), null);
+});
 
 function loadDetailModule(harness) {
   return runVmModuleForTest(
@@ -343,6 +454,26 @@ test("user detail surfaces status and role failures", () => {
   })));
   assert.ok(findByTestId(roleFailure, "admin-user-detail-role-error"));
   assert.ok(collectScalars(roleFailure).includes("admin.users.actionFailed:cannot demote last admin"));
+});
+
+test("managed-agent detail explains its fixed member role instead of rendering role controls", () => {
+  const harness = createReactHarness();
+  const View = loadDetailView(harness);
+  const managedAgent = {
+    ...baseAdminState().users[0],
+    role: "member",
+    content_access_policy: "tenant_admin_managed",
+  };
+  const rendered = harness.render(View, {
+    onBack: () => {},
+    userQuery: { isLoading: false, error: null, data: managedAgent },
+    usageQuery: { data: { usage: [] } },
+    adminState: baseAdminState(),
+  });
+
+  assert.ok(findByTestId(rendered, "admin-user-managed-role-policy"));
+  assert.ok(collectScalars(rendered).includes("admin.user.managedRoleLocked"));
+  assert.equal(findByTestId(rendered, "admin-user-detail-save-role"), null);
 });
 
 test("delete failure keeps the dialog open and does not navigate away", async () => {

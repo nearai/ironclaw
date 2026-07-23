@@ -170,6 +170,9 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
             <div className="mt-2 flex items-center gap-2">
               <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
               <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
+              {user.content_access_policy === "tenant_admin_managed" && (
+                <StatusPill tone="muted" label={t("admin.users.managedAgent")} />
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
@@ -222,23 +225,37 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
 
       <Panel className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.roleManagement")}</h3>
-        <div className="flex items-end gap-3">
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.user.currentRole")}</label>
-            <SelectMenu
-              value={role || user.role}
-              options={roleOptions}
-              onChange={handleRoleChange}
-              disabled={isActionPending}
-              ariaLabel={t("admin.user.currentRole")}
-              className="!min-w-0 w-36"
-              buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
-            />
+        {user.content_access_policy === "tenant_admin_managed" ? (
+          <div
+            className="max-w-2xl rounded-lg border border-iron-700 bg-iron-800/40 px-4 py-3"
+            data-testid="admin-user-managed-role-policy"
+          >
+            <p className="text-sm font-medium text-iron-100">
+              {t("admin.users.managedAgent")}
+            </p>
+            <p className="mt-1 text-sm leading-6 text-iron-300">
+              {t("admin.user.managedRoleLocked")}
+            </p>
           </div>
-          <Button data-testid="admin-user-detail-save-role" onClick={handleSaveRole} loading={isUpdating} disabled={isActionPending || !role || role === user.role}>
-            {isUpdating ? t("common.saving") : t("admin.user.saveRole")}
-          </Button>
-        </div>
+        ) : (
+          <div className="flex items-end gap-3">
+            <div>
+              <label className="mb-1 block text-xs text-iron-300">{t("admin.user.currentRole")}</label>
+              <SelectMenu
+                value={role || user.role}
+                options={roleOptions}
+                onChange={handleRoleChange}
+                disabled={isActionPending}
+                ariaLabel={t("admin.user.currentRole")}
+                className="!min-w-0 w-36"
+                buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
+              />
+            </div>
+            <Button data-testid="admin-user-detail-save-role" onClick={handleSaveRole} loading={isUpdating} disabled={isActionPending || !role || role === user.role}>
+              {isUpdating ? t("common.saving") : t("admin.user.saveRole")}
+            </Button>
+          </div>
+        )}
         {updateError && (
           <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-detail-role-error">
             {adminUserActionErrorMessage(updateError, t)}
@@ -246,7 +263,9 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
         )}
       </Panel>
 
-      <UserSecretsPanel key={user.id} userId={user.id} />
+      {user.content_access_policy === "tenant_admin_managed" && (
+        <UserSecretsPanel key={user.id} userId={user.id} />
+      )}
 
       <Panel className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.usage30Days")}</h3>

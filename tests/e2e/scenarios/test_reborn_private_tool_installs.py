@@ -34,6 +34,7 @@ from reborn_webui_harness import (
     reborn_bearer_headers,
     reborn_v2_private_installs_yolo_server,  # noqa: F401 - imported fixture
     send_and_settle,
+    signed_test_user_session,
     wait_for_capability_preview,
 )
 
@@ -93,7 +94,9 @@ async def _create_member_user(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    return {"user_id": body["user"]["user_id"], "token": body["api_token"]}
+    user_id = body["user"]["user_id"]
+    assert "api_token" not in body
+    return {"user_id": user_id, "token": signed_test_user_session(user_id)}
 
 
 def _user_client(base_url: str, token: str) -> httpx.AsyncClient:

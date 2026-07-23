@@ -90,17 +90,30 @@ stack; the boundary tests still allow no new edge).
   `tenant_id`; a record with **no** persisted tenant is treated as belonging to
   the deployment's single configured tenant (only single-tenant deployments have
   such pre-admin records).
-- `create_user` — admin-mint an active user with **no external identity**. Writes
-  only the `users/` record — no verified-email index — so it does not weaken
-  invariant 1's OAuth-surface index gate. (Consequence: a later OAuth login with
-  the same email mints a *separate* user; admin-created users are token/API
-  users, not pre-linked SSO accounts. Linking them is a future `link_email`
-  action via `adopt_migrated_identity`, deliberately out of scope here.)
+- `create_user` — creates an active user with **no external identity** and an
+  immutable content-access policy. `Private` is the compatibility-safe default
+  and normally uses the verified login/claim path. An administrator may
+  explicitly request one reusable signed login credential while creating a
+  private user. `TenantAdminManaged` creates a non-login, Member-only subject
+  for administrator management and can never receive that credential. A
+  private user's email reserves the same tenant-scoped claim index used by SSO,
+  but only a provider-verified OAuth identity can bind to it; managed subjects
+  write no login index.
+- `RebornLoginPolicy` — the narrow, read-only policy used at credential
+  issuance and on every reusable-credential authentication. Authentication
+  requires an active, explicitly same-tenant `Private` record, so suspension,
+  deletion, cross-tenant use, and managed subjects fail closed without exposing
+  directory mutation methods to ingress.
 - `update_profile` / `update_status` / `update_role` — partial mutations through
   the shared `ironclaw_filesystem::cas_update` helper (never a per-record mutex;
   `ironclaw_filesystem/CLAUDE.md` invariant 2). Each bumps `updated_at`.
 - `record_last_login` — sets `last_login_at` only; deliberately does **not** bump
-  `updated_at`, which tracks profile edits rather than login activity.
+  `updated_at`, which tracks profile edits rather than login activity. Managed
+  subjects reject this operation.
+- `authorize_admin_managed_target` — the canonical administrator-on-behalf
+  decision. It requires an active Admin/Owner actor, explicit same-tenant
+  ownership for actor and subject, `TenantAdminManaged` target policy, and an
+  explicitly modeled operation. Tenantless legacy records fail closed here.
 - `delete_user` — **cascades** (see invariant 5 below).
 - `count_active_admins` — supports last-admin protection in the facade.
 

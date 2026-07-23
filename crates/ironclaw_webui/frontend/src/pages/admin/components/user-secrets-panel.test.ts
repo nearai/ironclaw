@@ -64,6 +64,7 @@ function createHarness(overrides = {}) {
     {
       Button: function Button() {},
       Input: function Input() {},
+      Icon: function Icon() {},
       Modal: function Modal() {},
       ModalBody: function ModalBody() {},
       ModalFooter: function ModalFooter() {},
@@ -108,6 +109,23 @@ test("secrets panel renders handles without exposing returned secret material", 
   assert.ok(scalars.includes("openai_api_key"));
   assert.ok(!scalars.includes(sensitive));
   assert.ok(findByTestId(rendered, "admin-secret-row", "openai_api_key"));
+});
+
+test("secrets panel explains the operator boundary and hides credential inputs on forbidden", () => {
+  const participantDenied = Object.assign(new Error("Participant denied"), {
+    status: 403,
+    payload: { kind: "participant_denied" },
+  });
+  const harness = createHarness({
+    query: { isLoading: false, error: participantDenied },
+  });
+
+  const rendered = harness.render();
+  assert.ok(findByTestId(rendered, "admin-user-secrets-access-boundary"));
+  assert.ok(collectScalars(rendered).includes("admin.user.secrets.adminRequired"));
+  assert.equal(findByTestId(rendered, "admin-secret-handle"), null);
+  assert.equal(findByTestId(rendered, "admin-secret-value"), null);
+  assert.ok(!collectScalars(rendered).includes("Participant denied"));
 });
 
 test("secrets panel saves an exact write-only value and clears the form on success", async () => {

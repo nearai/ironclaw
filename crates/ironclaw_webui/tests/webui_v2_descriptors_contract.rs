@@ -7,6 +7,7 @@
 //! limit, rate limit max/window/scope, CORS, websocket origin, streaming
 //! mode, audit class, or allowed effect path is a behavior change the
 //! host cannot enforce silently.
+// arch-exempt: large_file, locked route table remains centralized pending table decomposition, plan #5499
 
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -19,12 +20,12 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use ironclaw_webui::webui_v2::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
-    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
-    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,
-    WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS, WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
-    WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
-    WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS, WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
-    WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
+    WEBUI_V2_ROUTE_ADMIN_CREATE_MANAGED_USER, WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
+    WEBUI_V2_ROUTE_ADMIN_GET_USER, WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
+    WEBUI_V2_ROUTE_ADMIN_LIST_USERS, WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
+    WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE, WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS,
+    WEBUI_V2_ROUTE_ADMIN_UPDATE_USER, WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_PROJECT,
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_DELETE_AUTOMATION,
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_PROJECT,
@@ -1507,6 +1508,23 @@ fn expected_table() -> Vec<Expected> {
             route_id: WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
             method: NetworkMethod::Post,
             pattern: "/api/webchat/v2/admin/users",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: body_limit_kib(16),
+            rate_limit_max: 60,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_ADMIN_CREATE_MANAGED_USER,
+            method: NetworkMethod::Post,
+            pattern: "/api/webchat/v2/admin/agents",
             listener_class: ListenerClass::LocalGateway,
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,

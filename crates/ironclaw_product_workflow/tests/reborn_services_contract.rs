@@ -127,8 +127,10 @@ use ironclaw_product_workflow::{
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    AdminCreateManagedUserFields, AdminCreatePrivateUserFields, AdminCreatedUser,
+    AdminIssuedLoginToken, AdminManagedResourceService, AdminUserContentAccessPolicy,
+    AdminUserError, AdminUserLoginTokenIssuer, AdminUserRecord, AdminUserRole, AdminUserSecretMeta,
+    AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
@@ -14182,9 +14184,8 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
 // Drives the facade methods through a fake `AdminUserService` port so the
 // load-bearing NEW logic — role-based authorization (read every request),
 // operator bypass, and last-admin protection — is tested through the caller.
-// The composition adapter over the real identity store is thin mapping;
-// crate-tier is the reachable tier here because the integration harness does
-// not wire the admin service (no token minter in-harness).
+// The composition integration suite separately drives the real identity store
+// and managed-resource authorization gate over HTTP.
 // ---------------------------------------------------------------------------
 
 fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> AdminUserRecord {
@@ -14194,6 +14195,7 @@ fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> 
         display_name: None,
         status,
         role,
+        content_access_policy: AdminUserContentAccessPolicy::Private,
         created_at: "2026-07-07T00:00:00Z".to_string(),
         updated_at: "2026-07-07T00:00:00Z".to_string(),
         created_by: None,
@@ -14202,9 +14204,9 @@ fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> 
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FakeAdminUsers {
-    users: Mutex<HashMap<String, AdminUserRecord>>,
+    users: Arc<Mutex<HashMap<String, AdminUserRecord>>>,
 }
 
 impl FakeAdminUsers {
@@ -14214,7 +14216,7 @@ impl FakeAdminUsers {
             .map(|record| (record.user_id.as_str().to_string(), record))
             .collect();
         Self {
-            users: Mutex::new(map),
+            users: Arc::new(Mutex::new(map)),
         }
     }
 }
@@ -14255,21 +14257,43 @@ impl AdminUserService for FakeAdminUsers {
         Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
     }
 
-    async fn create_user(
+    async fn create_private_user(
         &self,
         _tenant: &TenantId,
         _actor: &UserId,
-        fields: AdminCreateUserFields,
+        fields: AdminCreatePrivateUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
-        let record = admin_record("created-user", fields.role, AdminUserStatus::Active);
+        let user_id = fields
+            .user_id
+            .unwrap_or_else(|| UserId::new("created-user").expect("user"));
+        let mut record = admin_record(user_id.as_str(), fields.role, AdminUserStatus::Active);
+        record.email = fields.email;
+        record.display_name = fields.display_name;
         self.users
             .lock()
             .unwrap()
-            .insert("created-user".to_string(), record.clone());
-        Ok(AdminCreatedUser {
-            record,
-            api_token: SecretString::from("minted-token"),
-        })
+            .insert(user_id.as_str().to_string(), record.clone());
+        Ok(AdminCreatedUser { record })
+    }
+
+    async fn create_managed_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        fields: AdminCreateManagedUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        let mut record = admin_record(
+            "created-managed-user",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        );
+        record.display_name = fields.display_name;
+        record.content_access_policy = AdminUserContentAccessPolicy::TenantAdminManaged;
+        self.users
+            .lock()
+            .unwrap()
+            .insert(record.user_id.as_str().to_string(), record.clone());
+        Ok(AdminCreatedUser { record })
     }
 
     async fn update_profile(
@@ -14335,22 +14359,29 @@ impl AdminUserService for FakeAdminUsers {
             .filter(|record| record.status == AdminUserStatus::Active && record.role.is_admin())
             .count())
     }
+}
 
+#[async_trait]
+impl AdminManagedResourceService for FakeAdminUsers {
     async fn list_secrets(
         &self,
         _tenant: &TenantId,
-        _user_id: &UserId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        authorize_fake_managed_resource(&self.users, actor_user_id, subject_user_id)?;
         Ok(Vec::new())
     }
 
     async fn put_secret(
         &self,
         _tenant: &TenantId,
-        _user_id: &UserId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
         handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        authorize_fake_managed_resource(&self.users, actor_user_id, subject_user_id)?;
         Ok(AdminUserSecretMeta {
             handle: handle.as_str().to_string(),
             created_at: None,
@@ -14361,10 +14392,73 @@ impl AdminUserService for FakeAdminUsers {
     async fn delete_secret(
         &self,
         _tenant: &TenantId,
-        _user_id: &UserId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
+        authorize_fake_managed_resource(&self.users, actor_user_id, subject_user_id)?;
         Ok(true)
+    }
+}
+
+#[async_trait]
+impl AdminUserLoginTokenIssuer for FakeAdminUsers {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        actor_user_id: &UserId,
+        actor_is_operator: bool,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        let users = self.users.lock().unwrap();
+        if !actor_is_operator {
+            let actor = users
+                .get(actor_user_id.as_str())
+                .ok_or(AdminUserError::Forbidden)?;
+            if !actor.role.is_admin() {
+                return Err(AdminUserError::Forbidden);
+            }
+        }
+        let subject_user_id = UserId::new("issued-private-user").expect("user");
+        Ok(AdminIssuedLoginToken {
+            subject_user_id: subject_user_id.clone(),
+            token: SecretString::from(format!("login-for-{}", subject_user_id.as_str())),
+        })
+    }
+}
+
+struct FailingLoginTokenIssuer;
+
+#[async_trait]
+impl AdminUserLoginTokenIssuer for FailingLoginTokenIssuer {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        _actor_user_id: &UserId,
+        _actor_is_operator: bool,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+}
+
+fn authorize_fake_managed_resource(
+    users: &Mutex<HashMap<String, AdminUserRecord>>,
+    actor_user_id: &UserId,
+    subject_user_id: &UserId,
+) -> Result<(), AdminUserError> {
+    let users = users.lock().unwrap();
+    let actor = users
+        .get(actor_user_id.as_str())
+        .ok_or(AdminUserError::Forbidden)?;
+    let subject = users
+        .get(subject_user_id.as_str())
+        .ok_or(AdminUserError::Forbidden)?;
+    if actor.role.is_admin()
+        && actor.status == AdminUserStatus::Active
+        && subject.content_access_policy == AdminUserContentAccessPolicy::TenantAdminManaged
+    {
+        Ok(())
+    } else {
+        Err(AdminUserError::Forbidden)
     }
 }
 
@@ -14373,7 +14467,9 @@ fn admin_services(fake: FakeAdminUsers) -> RebornServices {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_admin_user_service(Arc::new(fake))
+    .with_admin_user_service(Arc::new(fake.clone()))
+    .with_admin_user_login_token_issuer(Arc::new(fake.clone()))
+    .with_admin_managed_resource_service(Arc::new(fake))
 }
 
 fn assert_forbidden(err: RebornServicesError) {
@@ -14383,11 +14479,19 @@ fn assert_forbidden(err: RebornServicesError) {
 
 #[tokio::test]
 async fn admin_users_are_available_as_product_views_and_capabilities() {
+    let mut managed = admin_record(
+        "user-managed",
+        AdminUserRole::Member,
+        AdminUserStatus::Active,
+    );
+    managed.content_access_policy = AdminUserContentAccessPolicy::TenantAdminManaged;
     let services = admin_services(FakeAdminUsers::with([
         admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
         admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+        managed,
     ]));
     let target = UserId::new("user-beta").expect("user");
+    let managed_target = UserId::new("user-managed").expect("managed user");
 
     // safety: these are ProductSurface facade query calls in a contract test;
     // no database transaction is involved.
@@ -14397,7 +14501,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
             ADMIN_USERS_VIEW
                 .query(
                     RebornAdminUserListQuery {
-                        limit: Some(2),
+                        limit: Some(3),
                         ..Default::default()
                     },
                     None,
@@ -14408,9 +14512,9 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
         .expect("admin users view");
     let users: RebornAdminUserListResponse =
         serde_json::from_value(users.payload).expect("admin users payload");
-    assert_eq!(users.users.len(), 2);
+    assert_eq!(users.users.len(), 3);
     assert_eq!(users.users[1].user_id.as_str(), "user-beta");
-    assert_eq!(users.next_cursor.as_deref(), Some("user-beta"));
+    assert_eq!(users.next_cursor.as_deref(), Some("user-managed"));
 
     let user = services
         .query(
@@ -14436,7 +14540,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
             ADMIN_USER_SECRETS_VIEW
                 .query(
                     RebornAdminUserRequest {
-                        user_id: target.clone(),
+                        user_id: managed_target.clone(),
                     },
                     None,
                 )
@@ -14493,7 +14597,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
             CapabilityId::new(ADMIN_USER_PUT_SECRET_CAPABILITY_ID).expect("capability id"),
             ProductCapabilityInput::json(
                 serde_json::to_value(RebornAdminPutSecretProductRequest {
-                    user_id: target.clone(),
+                    user_id: managed_target.clone(),
                     handle: "openai_api_key".to_string(),
                     value: "sk-test".to_string(),
                 })
@@ -14514,7 +14618,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
             CapabilityId::new(ADMIN_USER_DELETE_SECRET_CAPABILITY_ID).expect("capability id"),
             ProductCapabilityInput::json(
                 serde_json::to_value(RebornAdminDeleteSecretProductRequest {
-                    user_id: target.clone(),
+                    user_id: managed_target,
                     handle: "openai_api_key".to_string(),
                 })
                 .expect("admin secret delete input"),
@@ -14662,7 +14766,9 @@ async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
                     email: None,
                     display_name: None,
                     role: AdminUserRole::Member,
-                },
+                    issue_login_token: false,
+                }
+                .into(),
             )
             .await
             .expect_err("create"),
@@ -14797,7 +14903,7 @@ async fn admin_suspended_admin_is_forbidden_on_every_verb() {
 }
 
 #[tokio::test]
-async fn admin_caller_lists_and_creates_with_one_time_token() {
+async fn admin_caller_lists_and_creates_private_user_without_a_token() {
     let services = admin_services(FakeAdminUsers::with([admin_record(
         "user-alpha",
         AdminUserRole::Admin,
@@ -14814,11 +14920,110 @@ async fn admin_caller_lists_and_creates_with_one_time_token() {
                 email: Some("new@acme.com".to_string()),
                 display_name: Some("New".to_string()),
                 role: AdminUserRole::Member,
-            },
+                issue_login_token: false,
+            }
+            .into(),
         )
         .await
         .expect("an admin may create a user");
-    assert_eq!(created.api_token, "minted-token");
+    let encoded = serde_json::to_value(created).expect("creation response serializes");
+    assert!(
+        encoded.get("login_token").is_none(),
+        "private-user creation must omit a bearer unless explicitly requested"
+    );
+}
+
+#[tokio::test]
+async fn private_user_requires_an_email_or_explicit_login_token() {
+    let fake = FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]);
+    let services = admin_services(fake.clone());
+    let error = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("   ".to_string()),
+                display_name: Some("Unclaimable".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: false,
+            }
+            .into(),
+        )
+        .await
+        .expect_err("credential-free private user needs a claimable email");
+    assert_eq!(error.status_code, 400);
+    assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(
+        fake.users.lock().unwrap().len(),
+        1,
+        "validation must run before persistence"
+    );
+}
+
+#[tokio::test]
+async fn login_token_signing_failure_persists_no_private_user() {
+    let fake = FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]);
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(fake.clone()))
+    .with_admin_user_login_token_issuer(Arc::new(FailingLoginTokenIssuer))
+    .with_admin_managed_resource_service(Arc::new(fake.clone()));
+
+    let error = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: None,
+                display_name: Some("Token User".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: true,
+            }
+            .into(),
+        )
+        .await
+        .expect_err("signing failure must fail before user creation");
+    assert_eq!(error.status_code, 503);
+    assert_eq!(
+        fake.users.lock().unwrap().len(),
+        1,
+        "pre-issuance failure must leave no partial user to compensate"
+    );
+}
+
+#[tokio::test]
+async fn explicit_login_token_and_created_user_share_the_preallocated_user_id() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let created = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: None,
+                display_name: Some("Token User".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: true,
+            }
+            .into(),
+        )
+        .await
+        .expect("explicit token creation");
+    assert_eq!(created.user.user_id.as_str(), "issued-private-user");
+    assert_eq!(
+        created.login_token.as_deref(),
+        Some("login-for-issued-private-user")
+    );
 }
 
 #[tokio::test]

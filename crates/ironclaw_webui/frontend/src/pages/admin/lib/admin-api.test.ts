@@ -20,6 +20,7 @@ import {
   fetchAdminUsers,
   fetchAdminUser,
   createAdminUser,
+  createManagedAgent,
   updateAdminUser,
   deleteAdminUser,
   suspendAdminUser,
@@ -27,7 +28,6 @@ import {
   fetchUserSecrets,
   putUserSecret,
   deleteUserSecret,
-  createUserToken,
   fetchExtensionAdminConfiguration,
   replaceExtensionAdminConfiguration,
 } from "./admin-api";
@@ -206,10 +206,14 @@ test("deleteAdminUser DELETEs the URL-encoded user route", async () => {
   assert.equal(calls[0].init.method, "DELETE");
 });
 
-test("createAdminUser POSTs the payload, defaults role, and surfaces the one-time token", async () => {
+test("createAdminUser POSTs a private user payload and returns no login credential", async () => {
   stubFetch(() => ({
-    user: { user_id: "u-9", email: "new@example.com", display_name: "New" },
-    api_token: "one-time-bearer-abc",
+    user: {
+      user_id: "u-9",
+      email: "new@example.com",
+      display_name: "New",
+      content_access_policy: "private",
+    },
   }));
 
   const result = await createAdminUser({
@@ -225,17 +229,53 @@ test("createAdminUser POSTs the payload, defaults role, and surfaces the one-tim
     email: "new@example.com",
     display_name: "New",
     role: "member",
+    issue_login_token: false,
   });
 
-  assert.equal(result.token, "one-time-bearer-abc");
   assert.equal(result.id, "u-9");
   assert.equal(result.user_id, "u-9");
+  assert.equal(result.content_access_policy, "private");
+  assert.equal(result.login_token, null);
+});
+
+test("createAdminUser requests and returns an explicit one-time login token", async () => {
+  stubFetch(() => ({
+    user: { user_id: "u-token", content_access_policy: "private" },
+    login_token: "signed-user-session",
+  }));
+
+  const result = await createAdminUser({
+    display_name: "Token User",
+    role: "member",
+    issue_login_token: true,
+  });
+
+  assert.equal(jsonBody(calls[0]).issue_login_token, true);
+  assert.equal(result.login_token, "signed-user-session");
 });
 
 test("createAdminUser passes an explicit role through unchanged", async () => {
-  stubFetch(() => ({ user: { user_id: "u-10" }, api_token: "tok" }));
+  stubFetch(() => ({ user: { user_id: "u-10" } }));
   await createAdminUser({ email: "x@example.com", display_name: "X", role: "admin" });
   assert.equal(jsonBody(calls[0]).role, "admin");
+});
+
+test("createManagedAgent uses the separate endpoint and only sends a display name", async () => {
+  stubFetch(() => ({
+    user: {
+      user_id: "managed-1",
+      role: "member",
+      content_access_policy: "tenant_admin_managed",
+    },
+  }));
+
+  const result = await createManagedAgent({ display_name: "Build Agent" });
+
+  assert.equal(calls[0].path, "/api/webchat/v2/admin/agents");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(jsonBody(calls[0]), { display_name: "Build Agent" });
+  assert.equal(result.id, "managed-1");
+  assert.equal(result.role, "member");
 });
 
 test("updateAdminUser with { role } POSTs the dedicated role endpoint", async () => {
@@ -347,10 +387,4 @@ test("deleteUserSecret DELETEs the same URL-encoded secret path", async () => {
     "/api/webchat/v2/admin/users/u%201/secrets/open%20ai%2Fkey",
   );
   assert.equal(calls[0].init.method, "DELETE");
-});
-
-test("createUserToken rejects (re-issue is not yet supported) without any request", async () => {
-  stubFetch(() => ({}));
-  await assert.rejects(() => createUserToken("u-1", "my token"), /re-issue not yet supported/);
-  assert.equal(calls.length, 0);
 });

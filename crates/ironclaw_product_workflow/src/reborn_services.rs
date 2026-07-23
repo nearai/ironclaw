@@ -101,11 +101,15 @@ pub use admin_configuration::{
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
 use admin_users::{
-    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminManagedResourceService,
+    RejectingAdminUserLoginTokenIssuer, RejectingAdminUserService,
 };
 pub use admin_users::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    AdminCreateManagedUserFields, AdminCreatePrivateUserFields, AdminCreatedUser,
+    AdminIssuedLoginToken, AdminManagedResourceService, AdminUserContentAccessPolicy,
+    AdminUserCreationRequest, AdminUserError, AdminUserLoginTokenIssuer, AdminUserRecord,
+    AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+    RebornAdminCreateManagedUserRequest, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
@@ -375,7 +379,7 @@ pub const LLM_NEARAI_WALLET_LOGIN_OPERATION: ProductOperation<
 pub const LLM_CODEX_LOGIN_OPERATION: ProductOperation<serde_json::Value, CodexLoginStart> =
     ProductOperation::new(ProductOperationId::LlmCodexLogin);
 pub const ADMIN_USER_CREATE_OPERATION: ProductOperation<
-    RebornAdminCreateUserRequest,
+    AdminUserCreationRequest,
     RebornAdminUserCreatedResponse,
 > = ProductOperation::new(ProductOperationId::AdminUserCreate);
 pub const ADMIN_USER_DELETE_SECRET_OPERATION: ProductOperation<
@@ -2475,6 +2479,8 @@ pub struct RebornServices<
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     admin_users: Arc<dyn AdminUserService>,
+    admin_user_login_tokens: Arc<dyn AdminUserLoginTokenIssuer>,
+    admin_managed_resources: Arc<dyn AdminManagedResourceService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
@@ -2555,6 +2561,8 @@ where
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             admin_users: Arc::new(RejectingAdminUserService),
+            admin_user_login_tokens: Arc::new(RejectingAdminUserLoginTokenIssuer),
+            admin_managed_resources: Arc::new(RejectingAdminManagedResourceService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
@@ -2940,6 +2948,22 @@ where
         self
     }
 
+    pub fn with_admin_user_login_token_issuer(
+        mut self,
+        issuer: Arc<dyn AdminUserLoginTokenIssuer>,
+    ) -> Self {
+        self.admin_user_login_tokens = issuer;
+        self
+    }
+
+    pub fn with_admin_managed_resource_service(
+        mut self,
+        service: Arc<dyn AdminManagedResourceService>,
+    ) -> Self {
+        self.admin_managed_resources = service;
+        self
+    }
+
     pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
     where
         F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
@@ -3079,6 +3103,9 @@ fn map_admin_user_error(error: AdminUserError) -> RebornServicesError {
         // never a 500: the input is at fault, not the backend.
         AdminUserError::InvalidInput => {
             RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+        }
+        AdminUserError::Forbidden => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
         }
         // Transient backend failure — the browser may retry.
         AdminUserError::Unavailable => RebornServicesError::service_unavailable(true),
@@ -3358,26 +3385,71 @@ where
     pub async fn create_admin_user(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornAdminCreateUserRequest,
+        request: AdminUserCreationRequest,
     ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
-        let created = self
-            .admin_users
-            .create_user(
-                &caller.tenant_id,
-                &caller.user_id,
-                AdminCreateUserFields {
-                    email: request.email,
-                    display_name: request.display_name,
-                    role: request.role,
-                },
-            )
-            .await
-            .map_err(map_admin_user_error)?;
+        let (created, login_token) = match request {
+            AdminUserCreationRequest::Private(request) => {
+                let email = request
+                    .email
+                    .map(|email| email.trim().to_string())
+                    .filter(|email| !email.is_empty());
+                if email.is_none() && !request.issue_login_token {
+                    return Err(RebornServicesError::from_status(
+                        RebornServicesErrorCode::InvalidRequest,
+                        400,
+                        false,
+                    ));
+                }
+                let issued = if request.issue_login_token {
+                    Some(
+                        self.admin_user_login_tokens
+                            .issue_login_token(
+                                &caller.tenant_id,
+                                &caller.user_id,
+                                caller.operator_webui_config,
+                            )
+                            .await
+                            .map_err(map_admin_user_error)?,
+                    )
+                } else {
+                    None
+                };
+                let created = self
+                    .admin_users
+                    .create_private_user(
+                        &caller.tenant_id,
+                        &caller.user_id,
+                        AdminCreatePrivateUserFields {
+                            user_id: issued.as_ref().map(|issued| issued.subject_user_id.clone()),
+                            email,
+                            display_name: request.display_name,
+                            role: request.role,
+                        },
+                    )
+                    .await
+                    .map_err(map_admin_user_error)?;
+                let login_token = issued.map(|issued| issued.token.expose_secret().to_string());
+                (created, login_token)
+            }
+            AdminUserCreationRequest::Managed(request) => {
+                let created = self
+                    .admin_users
+                    .create_managed_user(
+                        &caller.tenant_id,
+                        &caller.user_id,
+                        AdminCreateManagedUserFields {
+                            display_name: request.display_name,
+                        },
+                    )
+                    .await
+                    .map_err(map_admin_user_error)?;
+                (created, None)
+            }
+        };
         Ok(RebornAdminUserCreatedResponse {
             user: created.record,
-            // Exposed exactly once, here. The DTO carries it in no other path.
-            api_token: created.api_token.expose_secret().to_string(),
+            login_token,
         })
     }
 
@@ -3483,12 +3555,9 @@ where
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
     ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
-        self.authorize_admin(&caller).await?;
-        self.require_admin_target(&caller.tenant_id, &user_id)
-            .await?;
         let secrets = self
-            .admin_users
-            .list_secrets(&caller.tenant_id, &user_id)
+            .admin_managed_resources
+            .list_secrets(&caller.tenant_id, &caller.user_id, &user_id)
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminUserSecretsListResponse { secrets })
@@ -3501,13 +3570,11 @@ where
         handle: SecretHandle,
         request: RebornAdminPutSecretRequest,
     ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
-        self.authorize_admin(&caller).await?;
-        self.require_admin_target(&caller.tenant_id, &user_id)
-            .await?;
         let secret = self
-            .admin_users
+            .admin_managed_resources
             .put_secret(
                 &caller.tenant_id,
+                &caller.user_id,
                 &user_id,
                 handle,
                 SecretString::from(request.value),
@@ -3523,14 +3590,11 @@ where
         user_id: UserId,
         handle: SecretHandle,
     ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
-        self.authorize_admin(&caller).await?;
-        self.require_admin_target(&caller.tenant_id, &user_id)
-            .await?;
         // Echo the parsed, canonical handle back on the wire as a plain string.
         let handle_str = handle.as_str().to_string();
         let deleted = self
-            .admin_users
-            .delete_secret(&caller.tenant_id, &user_id, handle)
+            .admin_managed_resources
+            .delete_secret(&caller.tenant_id, &caller.user_id, &user_id, handle)
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminSecretDeletedResponse {

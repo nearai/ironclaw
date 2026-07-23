@@ -59,7 +59,7 @@ pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
     ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
-    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
+    signed_session_webui_v2_auth_mount, webui_v2_auth_router,
 };
 // Host-owned CLI-token bootstrap login (`GET /login?token=`); shares the
 // OAuth surface's bearer/ticket-exchange contract (`POST
@@ -70,7 +70,7 @@ pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,
 };
-pub use session::{SessionAuthenticator, SessionRecord, SessionStoreError};
+pub use session::{SessionAuthenticator, SessionCredentialKind, SessionRecord, SessionStoreError};
 // Host-owned signed-token login surface (production-suitable, non-dev):
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.

@@ -4,6 +4,7 @@
 //! handler from [`crate::webui_v2::handlers`] under each descriptor's pattern. The
 //! descriptor is the contract: changing a route's policy here changes what
 //! host composition enforces before the handler runs.
+// arch-exempt: large_file, admin descriptors extracted; remaining route-family split tracked, plan #5499
 
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
@@ -13,7 +14,20 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use std::num::{NonZeroU32, NonZeroU64};
 
+mod admin_users;
 mod run_action_descriptors;
+
+pub use admin_users::{
+    WEBUI_V2_PATTERN_ADMIN_MANAGED_USERS, WEBUI_V2_PATTERN_ADMIN_USER,
+    WEBUI_V2_PATTERN_ADMIN_USER_ROLE, WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
+    WEBUI_V2_PATTERN_ADMIN_USER_SECRETS, WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
+    WEBUI_V2_PATTERN_ADMIN_USERS, WEBUI_V2_ROUTE_ADMIN_CREATE_MANAGED_USER,
+    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,
+    WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS, WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
+    WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
+    WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS, WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
+};
 
 pub use run_action_descriptors::{
     WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RETRY_RUN,
@@ -108,16 +122,6 @@ pub const WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS: &str = "webui.v2.list_project_mem
 pub const WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER: &str = "webui.v2.add_project_member";
 pub const WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER: &str = "webui.v2.update_project_member";
 pub const WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER: &str = "webui.v2.remove_project_member";
-pub const WEBUI_V2_ROUTE_ADMIN_LIST_USERS: &str = "webui.v2.admin.list_users";
-pub const WEBUI_V2_ROUTE_ADMIN_CREATE_USER: &str = "webui.v2.admin.create_user";
-pub const WEBUI_V2_ROUTE_ADMIN_GET_USER: &str = "webui.v2.admin.get_user";
-pub const WEBUI_V2_ROUTE_ADMIN_UPDATE_USER: &str = "webui.v2.admin.update_user";
-pub const WEBUI_V2_ROUTE_ADMIN_DELETE_USER: &str = "webui.v2.admin.delete_user";
-pub const WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS: &str = "webui.v2.admin.set_user_status";
-pub const WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE: &str = "webui.v2.admin.set_user_role";
-pub const WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS: &str = "webui.v2.admin.list_user_secrets";
-pub const WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET: &str = "webui.v2.admin.put_user_secret";
-pub const WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET: &str = "webui.v2.admin.delete_user_secret";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -148,14 +152,6 @@ pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK: &str =
     "/api/webchat/v2/traces/account-login-link";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
-pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
-pub const WEBUI_V2_PATTERN_ADMIN_USER: &str = "/api/webchat/v2/admin/users/{user_id}";
-pub const WEBUI_V2_PATTERN_ADMIN_USER_STATUS: &str = "/api/webchat/v2/admin/users/{user_id}/status";
-pub const WEBUI_V2_PATTERN_ADMIN_USER_ROLE: &str = "/api/webchat/v2/admin/users/{user_id}/role";
-pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRETS: &str =
-    "/api/webchat/v2/admin/users/{user_id}/secrets";
-pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRET: &str =
-    "/api/webchat/v2/admin/users/{user_id}/secrets/{handle}";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
@@ -222,7 +218,7 @@ pub const WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL: &str =
 /// against its own mount table, and refuses to bind any route whose policy
 /// the host cannot enforce.
 pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
-    vec![
+    let mut routes = vec![
         get_session_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
@@ -305,17 +301,9 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         add_project_member_descriptor(),
         update_project_member_descriptor(),
         remove_project_member_descriptor(),
-        admin_list_users_descriptor(),
-        admin_create_user_descriptor(),
-        admin_get_user_descriptor(),
-        admin_update_user_descriptor(),
-        admin_delete_user_descriptor(),
-        admin_set_user_status_descriptor(),
-        admin_set_user_role_descriptor(),
-        admin_list_user_secrets_descriptor(),
-        admin_put_user_secret_descriptor(),
-        admin_delete_user_secret_descriptor(),
-    ]
+    ];
+    routes.extend(admin_users::descriptors());
+    routes
 }
 
 /// Returns whether a route id belongs to any operator-wide WebUI config surface.
@@ -396,146 +384,6 @@ fn send_message_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,
-        ),
-    )
-}
-
-fn admin_list_users_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_ADMIN_USERS,
-        read_policy(
-            read_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-            StreamingMode::None,
-        ),
-    )
-}
-
-fn admin_create_user_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_ADMIN_USERS,
-        mutation_policy(
-            body_limit_kib(16),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-        ),
-    )
-}
-
-fn admin_get_user_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_GET_USER,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_ADMIN_USER,
-        read_policy(
-            read_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-            StreamingMode::None,
-        ),
-    )
-}
-
-fn admin_update_user_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
-        NetworkMethod::Patch,
-        WEBUI_V2_PATTERN_ADMIN_USER,
-        mutation_policy(
-            body_limit_kib(16),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-        ),
-    )
-}
-
-fn admin_delete_user_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
-        NetworkMethod::Delete,
-        WEBUI_V2_PATTERN_ADMIN_USER,
-        mutation_policy(
-            BodyLimitPolicy::NoBody,
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-        ),
-    )
-}
-
-fn admin_set_user_status_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
-        mutation_policy(
-            body_limit_kib(4),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-        ),
-    )
-}
-
-fn admin_set_user_role_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_ADMIN_USER_ROLE,
-        mutation_policy(
-            body_limit_kib(4),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-        ),
-    )
-}
-
-fn admin_list_user_secrets_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_ADMIN_USER_SECRETS,
-        read_policy(
-            read_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-            StreamingMode::None,
-        ),
-    )
-}
-
-fn admin_put_user_secret_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
-        NetworkMethod::Put,
-        WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
-        mutation_policy(
-            body_limit_kib(16),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
-        ),
-    )
-}
-
-fn admin_delete_user_secret_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
-        NetworkMethod::Delete,
-        WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
-        mutation_policy(
-            BodyLimitPolicy::NoBody,
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }

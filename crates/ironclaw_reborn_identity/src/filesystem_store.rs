@@ -51,8 +51,8 @@ use crate::{
 };
 use paths::{identity_path, user_path, user_tombstone_path, verified_email_path};
 use record::{
-    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
-    StoredVerifiedEmailIndex,
+    StoredExternalIdentity, StoredUser, StoredUserContentAccessPolicy, StoredUserRole,
+    StoredUserStatus, StoredUserTombstone, StoredVerifiedEmailIndex,
 };
 
 /// Canonical identity store backed by a host scoped filesystem.
@@ -181,6 +181,11 @@ where
         };
         if user.status == StoredUserStatus::Suspended {
             return Err(RebornIdentityError::UserSuspended(
+                user_id.as_str().to_string(),
+            ));
+        }
+        if user.content_access_policy == StoredUserContentAccessPolicy::TenantAdminManaged {
+            return Err(RebornIdentityError::ManagedUserLoginDisabled(
                 user_id.as_str().to_string(),
             ));
         }
@@ -372,6 +377,7 @@ where
                 // per-tenant path partition on user records.
                 status: StoredUserStatus::default(),
                 role: StoredUserRole::default(),
+                content_access_policy: StoredUserContentAccessPolicy::default(),
                 created_by: None,
                 last_login_at: None,
                 tenant_id: Some(tenant.to_string()),

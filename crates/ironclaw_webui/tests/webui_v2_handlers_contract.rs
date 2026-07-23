@@ -38,15 +38,15 @@ use ironclaw_product_workflow::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
-    AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus, CodexLoginStart,
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    AdminUserContentAccessPolicy, AdminUserCreationRequest, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserStatus, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY_ID,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
     OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
@@ -57,7 +57,7 @@ use ironclaw_product_workflow::{
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductOperationId,
     ProductOperationRequest, ProductOperationResponse, ProductSurface, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
     RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
@@ -1551,11 +1551,17 @@ impl ProductSurface for StubServices {
                 verification_uri: "https://openai.com/device".to_string(),
             }),
             ProductOperationId::AdminUserCreate => {
-                let request: RebornAdminCreateUserRequest =
+                let request: AdminUserCreationRequest =
                     serde_json::from_value(request.input).expect("input");
+                let user_id = match request {
+                    AdminUserCreationRequest::Private(request) => {
+                        request.email.unwrap_or_else(|| "user-admin".to_string())
+                    }
+                    AdminUserCreationRequest::Managed(_) => "managed-user".to_string(),
+                };
                 ProductOperationResponse::json(RebornAdminUserCreatedResponse {
-                    user: sample_admin_user(request.email.as_deref().unwrap_or("user-admin")),
-                    api_token: "token-test".to_string(),
+                    user: sample_admin_user(&user_id),
+                    login_token: None,
                 })
             }
             ProductOperationId::AdminUserDeleteSecret => {
@@ -7283,6 +7289,7 @@ fn sample_admin_user(user_id: &str) -> AdminUserRecord {
         display_name: Some("Admin User".to_string()),
         status: AdminUserStatus::Active,
         role: AdminUserRole::Admin,
+        content_access_policy: AdminUserContentAccessPolicy::Private,
         created_at: "2026-06-17T00:00:00Z".to_string(),
         updated_at: "2026-06-17T00:00:00Z".to_string(),
         created_by: Some(UserId::new("user-alpha").expect("user id")),

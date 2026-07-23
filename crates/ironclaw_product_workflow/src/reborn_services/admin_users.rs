@@ -1,8 +1,8 @@
 //! Admin user-management port + wire contract.
 //!
 //! The [`AdminUserService`] port is defined here (the contract owner) and
-//! implemented by an adapter in `ironclaw_reborn_composition` that wraps the
-//! identity user-directory and the per-user secret store. Defining the port
+//! implemented by lifecycle and managed-resource adapters in
+//! `ironclaw_reborn_composition`. Defining the ports
 //! here keeps `ironclaw_product_workflow` and `ironclaw_webui` free of a
 //! dependency on `ironclaw_reborn_identity` (the crate boundary the
 //! architecture tests enforce) — this is dependency inversion, a single-impl
@@ -44,6 +44,15 @@ impl AdminUserRole {
     }
 }
 
+/// Immutable user-owned content/login policy. Kept separate from RBAC role.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminUserContentAccessPolicy {
+    #[default]
+    Private,
+    TenantAdminManaged,
+}
+
 /// One user as seen by the admin surface — doubles as the domain record the
 /// port returns and the JSON body the WebUI renders. Never carries an API
 /// token: a freshly minted token is exposed exactly once via
@@ -57,6 +66,7 @@ pub struct AdminUserRecord {
     pub display_name: Option<String>,
     pub status: AdminUserStatus,
     pub role: AdminUserRole,
+    pub content_access_policy: AdminUserContentAccessPolicy,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,20 +87,35 @@ pub struct AdminUserSecretMeta {
     pub updated_at: Option<String>,
 }
 
-/// Fields for admin-minting a new user.
+/// Fields for creating a private human user record.
 #[derive(Debug, Clone)]
-pub struct AdminCreateUserFields {
+pub struct AdminCreatePrivateUserFields {
+    /// Identity-owned id preallocated when credential issuance is requested.
+    /// `None` lets the directory allocate the id during ordinary invitation
+    /// creation.
+    pub user_id: Option<UserId>,
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub role: AdminUserRole,
 }
 
-/// A newly created user plus its one-time API token. The token is a session
-/// bearer minted by the composition adapter; it is returned exactly once and
-/// never persisted in plaintext.
+/// Fields for creating a non-login tenant-admin-managed subject.
+#[derive(Debug, Clone)]
+pub struct AdminCreateManagedUserFields {
+    pub display_name: Option<String>,
+}
+
+/// A newly created user. Creation itself never manufactures a credential.
 pub struct AdminCreatedUser {
     pub record: AdminUserRecord,
-    pub api_token: SecretString,
+}
+
+/// Response value for an explicitly requested reusable private-user login
+/// credential. The plaintext bearer is shown once and never persisted by this
+/// contract.
+pub struct AdminIssuedLoginToken {
+    pub subject_user_id: UserId,
+    pub token: SecretString,
 }
 
 /// Failure modes of the admin user port. Deliberately coarse and free of
@@ -106,6 +131,8 @@ pub enum AdminUserError {
     /// Maps to a 400, not a 500 — it is the client's input at fault, not the
     /// backend.
     InvalidInput,
+    /// The authenticated actor is not permitted to act on the target.
+    Forbidden,
     /// A transient backend failure; the caller may retry.
     Unavailable,
     /// A backend inconsistency or unexpected failure; not retryable.
@@ -145,11 +172,18 @@ pub trait AdminUserService: Send + Sync {
         user_id: &UserId,
     ) -> Result<Option<AdminUserRecord>, AdminUserError>;
 
-    async fn create_user(
+    async fn create_private_user(
         &self,
         tenant: &TenantId,
         actor: &UserId,
-        fields: AdminCreateUserFields,
+        fields: AdminCreatePrivateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError>;
+
+    async fn create_managed_user(
+        &self,
+        tenant: &TenantId,
+        actor: &UserId,
+        fields: AdminCreateManagedUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError>;
 
     async fn update_profile(
@@ -177,17 +211,38 @@ pub trait AdminUserService: Send + Sync {
     async fn delete_user(&self, tenant: &TenantId, user_id: &UserId) -> Result<(), AdminUserError>;
 
     async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError>;
+}
 
+/// Narrow authentication port for preparing a credential and canonical
+/// `UserId` before a new private user is persisted. The bearer is not returned
+/// to the administrator unless creation of that exact subject succeeds.
+#[async_trait]
+pub trait AdminUserLoginTokenIssuer: Send + Sync {
+    async fn issue_login_token(
+        &self,
+        tenant: &TenantId,
+        actor_user_id: &UserId,
+        actor_is_operator: bool,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError>;
+}
+
+/// Narrow data-plane port for administrator-on-behalf access to managed-user
+/// resources. Implementations must invoke the canonical identity-domain gate
+/// with both actor and subject identities before every operation.
+#[async_trait]
+pub trait AdminManagedResourceService: Send + Sync {
     async fn list_secrets(
         &self,
         tenant: &TenantId,
-        user_id: &UserId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError>;
 
     async fn put_secret(
         &self,
         tenant: &TenantId,
-        user_id: &UserId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
         handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError>;
@@ -195,7 +250,8 @@ pub trait AdminUserService: Send + Sync {
     async fn delete_secret(
         &self,
         tenant: &TenantId,
-        user_id: &UserId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError>;
 }
@@ -227,11 +283,20 @@ impl AdminUserService for RejectingAdminUserService {
         Err(AdminUserError::Unavailable)
     }
 
-    async fn create_user(
+    async fn create_private_user(
         &self,
         _tenant: &TenantId,
         _actor: &UserId,
-        _fields: AdminCreateUserFields,
+        _fields: AdminCreatePrivateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn create_managed_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        _fields: AdminCreateManagedUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
@@ -275,11 +340,31 @@ impl AdminUserService for RejectingAdminUserService {
     async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
+}
 
+pub(crate) struct RejectingAdminManagedResourceService;
+
+pub(crate) struct RejectingAdminUserLoginTokenIssuer;
+
+#[async_trait]
+impl AdminUserLoginTokenIssuer for RejectingAdminUserLoginTokenIssuer {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        _actor_user_id: &UserId,
+        _actor_is_operator: bool,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+}
+
+#[async_trait]
+impl AdminManagedResourceService for RejectingAdminManagedResourceService {
     async fn list_secrets(
         &self,
         _tenant: &TenantId,
-        _user_id: &UserId,
+        _actor_user_id: &UserId,
+        _subject_user_id: &UserId,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
@@ -287,7 +372,8 @@ impl AdminUserService for RejectingAdminUserService {
     async fn put_secret(
         &self,
         _tenant: &TenantId,
-        _user_id: &UserId,
+        _actor_user_id: &UserId,
+        _subject_user_id: &UserId,
         _handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
@@ -297,7 +383,8 @@ impl AdminUserService for RejectingAdminUserService {
     async fn delete_secret(
         &self,
         _tenant: &TenantId,
-        _user_id: &UserId,
+        _actor_user_id: &UserId,
+        _subject_user_id: &UserId,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Unavailable)
@@ -345,14 +432,57 @@ pub struct RebornAdminCreateUserRequest {
     #[serde(default)]
     pub display_name: Option<String>,
     pub role: AdminUserRole,
+    /// Mint and return a reusable login bearer. Omitted/false preserves the
+    /// invitation-style default.
+    #[serde(default)]
+    pub issue_login_token: bool,
 }
 
-/// Response for `POST /admin/users` — carries the one-time API token in
-/// plaintext. This is the ONLY response that ever exposes it.
+/// Body for `POST /admin/agents`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RebornAdminCreateManagedUserRequest {
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Route-normalized creation intent. The HTTP route selects the variant, so
+/// request JSON cannot switch private-user creation into managed creation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "request")]
+pub enum AdminUserCreationRequest {
+    Private(RebornAdminCreateUserRequest),
+    Managed(RebornAdminCreateManagedUserRequest),
+}
+
+impl From<RebornAdminCreateUserRequest> for AdminUserCreationRequest {
+    fn from(request: RebornAdminCreateUserRequest) -> Self {
+        Self::Private(request)
+    }
+}
+
+impl From<RebornAdminCreateManagedUserRequest> for AdminUserCreationRequest {
+    fn from(request: RebornAdminCreateManagedUserRequest) -> Self {
+        Self::Managed(request)
+    }
+}
+
+/// Response for private-user or managed-agent creation. `login_token` is
+/// present only when explicitly requested for a private user.
+#[derive(Serialize, Deserialize)]
 pub struct RebornAdminUserCreatedResponse {
     pub user: AdminUserRecord,
-    pub api_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_token: Option<String>,
+}
+
+impl std::fmt::Debug for RebornAdminUserCreatedResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornAdminUserCreatedResponse")
+            .field("user", &self.user)
+            .field("login_token_issued", &self.login_token.is_some())
+            .finish()
+    }
 }
 
 /// Body for `PATCH /admin/users/{id}` — partial profile update.

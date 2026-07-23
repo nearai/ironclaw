@@ -14,9 +14,11 @@
 //! the composition root gets both surfaces from a single `Arc`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, UserId};
+use uuid::Uuid;
 
 use crate::RebornIdentityError;
 
@@ -31,6 +33,7 @@ pub struct RebornUser {
     pub display_name: Option<String>,
     pub status: RebornUserStatus,
     pub role: RebornUserRole,
+    pub content_access_policy: UserContentAccessPolicy,
     pub created_at: String,
     pub updated_at: String,
     /// The admin `UserId` that provisioned this account, if it was created
@@ -59,6 +62,35 @@ pub enum RebornUserRole {
     Member,
 }
 
+/// Immutable authority governing login and administrator-on-behalf access to
+/// user-owned content. This is deliberately independent of RBAC role.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum UserContentAccessPolicy {
+    /// A human account. Administrators may manage its lifecycle, but may not
+    /// read or mutate its user-owned resources on the user's behalf.
+    #[default]
+    Private,
+    /// A non-login subject intentionally created for tenant administrators to
+    /// manage. The subject remains a Member and receives no login credential.
+    TenantAdminManaged,
+}
+
+/// Closed set of administrator-on-behalf operations. Adding a new resource
+/// operation requires an explicit identity-domain policy decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminManagedUserOperation {
+    ManageSecrets,
+}
+
+/// Mint a fresh canonical user id for an identity record that has not yet been
+/// persisted. Callers may use this to prepare credentials before creation; a
+/// credential remains unusable until the corresponding active private user
+/// record exists.
+pub fn new_user_id() -> Result<UserId, RebornIdentityError> {
+    UserId::new(Uuid::new_v4().to_string())
+        .map_err(|error| RebornIdentityError::InvalidUserId(error.to_string()))
+}
+
 impl RebornUserRole {
     /// Whether this role clears the admin authorization boundary.
     pub fn is_admin(self) -> bool {
@@ -73,6 +105,19 @@ impl RebornUserRole {
 pub struct RebornUserProfileUpdate {
     pub display_name: Option<String>,
     pub metadata: Option<BTreeMap<String, String>>,
+}
+
+/// Complete identity-owned input for persisting a user whose canonical id was
+/// allocated before the write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreallocatedRebornUser {
+    pub user_id: UserId,
+    pub tenant_id: TenantId,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role: RebornUserRole,
+    pub content_access_policy: UserContentAccessPolicy,
+    pub created_by: UserId,
 }
 
 /// Admin CRUD over canonical user records. Implemented by
@@ -104,17 +149,24 @@ pub trait RebornUserDirectory: Send + Sync {
     /// One user by id, or `None` if no record exists.
     async fn get_user(&self, user_id: &UserId) -> Result<Option<RebornUser>, RebornIdentityError>;
 
-    /// Admin-mint a new active user with no external identity. Returns the
-    /// created record (carrying the freshly minted `UserId`). Unlike an SSO
-    /// first-login this writes only the `users/` record — no verified-email
-    /// index — so it does not weaken the resolver's OAuth-surface index gate.
+    /// Create a new active user with no external identity. A private user with
+    /// an email reserves the verified-email claim index, but an external
+    /// identity is linked only after the existing OAuth verification gate.
     async fn create_user(
         &self,
         tenant_id: &TenantId,
         email: Option<String>,
         display_name: Option<String>,
         role: RebornUserRole,
+        content_access_policy: UserContentAccessPolicy,
         created_by: &UserId,
+    ) -> Result<RebornUser, RebornIdentityError>;
+
+    /// Create a user using an identity-domain id allocated before persistence.
+    /// The same invariants as [`Self::create_user`] apply.
+    async fn create_user_with_id(
+        &self,
+        user: PreallocatedRebornUser,
     ) -> Result<RebornUser, RebornIdentityError>;
 
     /// Apply a partial profile update. Errors with
@@ -138,6 +190,18 @@ pub trait RebornUserDirectory: Send + Sync {
         user_id: &UserId,
         role: RebornUserRole,
     ) -> Result<RebornUser, RebornIdentityError>;
+
+    /// Canonical authorization decision for an administrator acting on a
+    /// managed target's user-owned resources. Requires an active admin actor,
+    /// same-tenant actor and target records, a managed target policy, and an
+    /// explicitly modeled operation.
+    async fn authorize_admin_managed_target(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
+        operation: AdminManagedUserOperation,
+    ) -> Result<bool, RebornIdentityError>;
 
     /// Record a successful login. Updates `last_login_at` only — it does not
     /// bump `updated_at`, which tracks profile mutations, not login activity.
@@ -163,4 +227,71 @@ pub trait RebornUserDirectory: Send + Sync {
     /// active admin).
     async fn count_active_admins(&self, tenant_id: &TenantId)
     -> Result<usize, RebornIdentityError>;
+}
+
+/// Narrow identity-owned policy used to issue and authenticate reusable login
+/// credentials without exposing the lifecycle directory to host ingress.
+#[async_trait]
+pub trait RebornLoginPolicy: Send + Sync {
+    /// Whether `actor_user_id` may issue a reusable credential for a new
+    /// private user in `tenant_id`.
+    async fn authorize_admin_login_token_issuance(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+    ) -> Result<bool, RebornIdentityError>;
+
+    /// Whether a reusable credential may currently authenticate its subject.
+    /// Requires an active, explicitly same-tenant private user record.
+    async fn authorize_reusable_login_token(
+        &self,
+        tenant_id: &TenantId,
+        subject_user_id: &UserId,
+    ) -> Result<bool, RebornIdentityError>;
+}
+
+/// Build the canonical login policy over the lifecycle directory without
+/// exposing directory mutation methods to authentication callers.
+pub fn login_policy(directory: Arc<dyn RebornUserDirectory>) -> Arc<dyn RebornLoginPolicy> {
+    Arc::new(DirectoryLoginPolicy { directory })
+}
+
+struct DirectoryLoginPolicy {
+    directory: Arc<dyn RebornUserDirectory>,
+}
+
+#[async_trait]
+impl RebornLoginPolicy for DirectoryLoginPolicy {
+    async fn authorize_admin_login_token_issuance(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+    ) -> Result<bool, RebornIdentityError> {
+        let Some(actor) = self.directory.get_user(actor_user_id).await? else {
+            return Ok(false);
+        };
+        Ok(actor
+            .tenant_id
+            .as_ref()
+            .is_some_and(|owner| owner == tenant_id)
+            && actor.status == RebornUserStatus::Active
+            && actor.role.is_admin()
+            && actor.content_access_policy == UserContentAccessPolicy::Private)
+    }
+
+    async fn authorize_reusable_login_token(
+        &self,
+        tenant_id: &TenantId,
+        subject_user_id: &UserId,
+    ) -> Result<bool, RebornIdentityError> {
+        let Some(subject) = self.directory.get_user(subject_user_id).await? else {
+            return Ok(false);
+        };
+        Ok(subject
+            .tenant_id
+            .as_ref()
+            .is_some_and(|owner| owner == tenant_id)
+            && subject.status == RebornUserStatus::Active
+            && subject.content_access_policy == UserContentAccessPolicy::Private)
+    }
 }

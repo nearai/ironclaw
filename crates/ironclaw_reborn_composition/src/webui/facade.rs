@@ -132,17 +132,26 @@ pub(crate) fn build_webui_services_with_channel_connection(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
-    // Admin user-management surface: the directory and secret provisioner are
-    // core runtime handles; only token minting is deployment-supplied.
-    if let Some(minter) = runtime.reborn_admin_token_minter() {
-        api = api.with_admin_user_service(Arc::new(
-            crate::admin_user_directory::RebornAdminUserDirectory::new(
-                runtime.reborn_user_directory(),
-                runtime.reborn_admin_secret_provisioner(),
-                minter,
-            ),
+    // Identity lifecycle is available whenever the canonical directory is.
+    // Managed-resource access is a separate, narrower port; both use the
+    // canonical runtime-owned identity directory.
+    let directory = runtime.reborn_user_directory();
+    api = api.with_admin_user_service(Arc::new(
+        crate::admin_user_directory::RebornAdminUserDirectory::new(Arc::clone(&directory)),
+    ));
+    if let Some(minter) = runtime.admin_login_token_minter()
+        && let Some(login_policy) = runtime.reborn_login_policy()
+    {
+        api = api.with_admin_user_login_token_issuer(Arc::new(
+            crate::admin_login_token::RebornAdminLoginTokenIssuer::new(login_policy, minter),
         ));
     }
+    api = api.with_admin_managed_resource_service(Arc::new(
+        crate::admin_managed_resources::RebornAdminManagedResources::new(
+            directory,
+            runtime.reborn_admin_secret_provisioner(),
+        ),
+    ));
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api
             .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(

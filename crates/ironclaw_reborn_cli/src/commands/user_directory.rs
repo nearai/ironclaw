@@ -146,7 +146,8 @@ impl UserDirectory for WebuiUserDirectory {
                 // session: fail closed with a 403 (login refused), never a 503.
                 // The admin who suspended them sees the account stay locked out
                 // even across a fresh SSO attempt.
-                RebornIdentityError::UserSuspended(_) => UserDirectoryError::Unknown,
+                RebornIdentityError::UserSuspended(_)
+                | RebornIdentityError::ManagedUserLoginDisabled(_) => UserDirectoryError::Unknown,
                 other => UserDirectoryError::Backend(other.to_string()),
             })?;
         Ok(user_id)

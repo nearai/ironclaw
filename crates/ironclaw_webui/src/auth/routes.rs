@@ -183,12 +183,16 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
     PublicRouteMount::new(router, sso_route_descriptors())
 }
 
-/// Build the inert auth discovery mount used when no SSO providers are
-/// configured. This deliberately does not mount the login/session/logout
-/// handlers because there is no revocable SSO session store in env-bearer mode.
-pub fn empty_webui_v2_auth_providers_mount() -> PublicRouteMount {
-    let router = axum::Router::new().route(PATH_PROVIDERS, get(empty_providers_handler));
-    PublicRouteMount::new(router, vec![providers_descriptor()])
+/// Build provider discovery plus logout for hosts that issue signed sessions
+/// without configuring an OAuth provider (CLI claim or explicit admin issue).
+pub fn signed_session_webui_v2_auth_mount(
+    session_store: Arc<SignedTokenSessionStore>,
+) -> PublicRouteMount {
+    let router = axum::Router::new()
+        .route(PATH_PROVIDERS, get(empty_providers_handler))
+        .route(PATH_LOGOUT, post(signed_session_logout_handler))
+        .with_state(session_store);
+    PublicRouteMount::new(router, vec![providers_descriptor(), logout_descriptor()])
 }
 
 // ── descriptors ───────────────────────────────────────────────────────
@@ -199,6 +203,20 @@ fn providers_descriptor() -> IngressRouteDescriptor {
         NetworkMethod::Get,
         PATH_PROVIDERS,
         public_policy(BodyLimitPolicy::NoBody, SSO_PROVIDERS_MAX_REQUESTS),
+    )
+}
+
+fn logout_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        ROUTE_ID_LOGOUT,
+        NetworkMethod::Post,
+        PATH_LOGOUT,
+        public_policy(
+            BodyLimitPolicy::Limited {
+                max_bytes: LOGOUT_BODY_LIMIT_BYTES,
+            },
+            SSO_LOGOUT_MAX_REQUESTS,
+        ),
     )
 }
 
@@ -232,17 +250,7 @@ fn sso_route_descriptors() -> Vec<IngressRouteDescriptor> {
                 SSO_EXCHANGE_MAX_REQUESTS,
             ),
         ),
-        descriptor(
-            ROUTE_ID_LOGOUT,
-            NetworkMethod::Post,
-            PATH_LOGOUT,
-            public_policy(
-                BodyLimitPolicy::Limited {
-                    max_bytes: LOGOUT_BODY_LIMIT_BYTES,
-                },
-                SSO_LOGOUT_MAX_REQUESTS,
-            ),
-        ),
+        logout_descriptor(),
     ]
 }
 
@@ -593,6 +601,16 @@ async fn logout_handler(
         return StatusCode::NO_CONTENT.into_response();
     };
     state.session_store.revoke(&token).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn signed_session_logout_handler(
+    State(session_store): State<Arc<SignedTokenSessionStore>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Some(token) = extract_bearer(&headers) {
+        session_store.revoke(&token).await;
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 

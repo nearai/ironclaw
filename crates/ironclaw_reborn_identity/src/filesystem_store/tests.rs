@@ -6,9 +6,12 @@
 //! durable substrate.
 
 use super::*;
+
+mod managed_policy;
 use crate::{
-    ExternalSubjectId, ProviderInstanceId, ProviderKind, RebornUserDirectory,
-    RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, SurfaceKind,
+    AdminManagedUserOperation, ExternalSubjectId, ProviderInstanceId, ProviderKind,
+    RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, SurfaceKind,
+    UserContentAccessPolicy,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
@@ -821,6 +824,11 @@ async fn legacy_stored_user_json_deserializes_with_defaults() {
         .expect("present");
     assert_eq!(user.status, RebornUserStatus::Active);
     assert_eq!(user.role, RebornUserRole::Member);
+    assert_eq!(
+        user.content_access_policy,
+        UserContentAccessPolicy::Private,
+        "records predating the policy must fail closed as private"
+    );
     assert_eq!(user.email.as_deref(), Some("a@x.com"));
     assert!(user.tenant_id.is_none(), "legacy record has no tenant");
     // A legacy record (no tenant) is enumerated for the single configured
@@ -844,6 +852,7 @@ async fn create_then_list_and_get_roundtrip() {
             Some("new@acme.com".to_string()),
             Some("New User".to_string()),
             RebornUserRole::Member,
+            UserContentAccessPolicy::Private,
             &admin,
         )
         .await
@@ -891,7 +900,14 @@ async fn list_users_paginates_by_user_id_cursor() {
     let by = UserId::new("bootstrap").unwrap();
     for _ in 0..5 {
         store
-            .create_user(&t, None, None, RebornUserRole::Member, &by)
+            .create_user(
+                &t,
+                None,
+                None,
+                RebornUserRole::Member,
+                UserContentAccessPolicy::Private,
+                &by,
+            )
             .await
             .expect("create");
     }
@@ -944,6 +960,7 @@ async fn update_status_role_and_profile() {
             None,
             Some("Before".to_string()),
             RebornUserRole::Member,
+            UserContentAccessPolicy::Private,
             &admin,
         )
         .await
@@ -1002,15 +1019,36 @@ async fn count_active_admins_tracks_role_and_status() {
     let t = tenant("acme");
     let by = UserId::new("bootstrap").unwrap();
     let admin_a = store
-        .create_user(&t, None, None, RebornUserRole::Admin, &by)
+        .create_user(
+            &t,
+            None,
+            None,
+            RebornUserRole::Admin,
+            UserContentAccessPolicy::Private,
+            &by,
+        )
         .await
         .expect("admin a");
     store
-        .create_user(&t, None, None, RebornUserRole::Owner, &by)
+        .create_user(
+            &t,
+            None,
+            None,
+            RebornUserRole::Owner,
+            UserContentAccessPolicy::Private,
+            &by,
+        )
         .await
         .expect("owner");
     store
-        .create_user(&t, None, None, RebornUserRole::Member, &by)
+        .create_user(
+            &t,
+            None,
+            None,
+            RebornUserRole::Member,
+            UserContentAccessPolicy::Private,
+            &by,
+        )
         .await
         .expect("member");
     assert_eq!(
@@ -1130,6 +1168,7 @@ async fn record_last_login_sets_field_without_bumping_updated_at() {
             None,
             None,
             RebornUserRole::Member,
+            UserContentAccessPolicy::Private,
             &UserId::new("by").unwrap(),
         )
         .await

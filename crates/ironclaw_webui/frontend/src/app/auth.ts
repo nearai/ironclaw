@@ -289,6 +289,10 @@ export function useAuthSession() {
     retrySessionCheck,
     isAuthenticated: Boolean(token && session),
     isAdmin: Boolean(session?.capabilities?.operator_webui_config),
+    canManageUsers: Boolean(
+      session?.capabilities?.operator_webui_config ||
+      session?.admin_user_management
+    ),
     // Deployment feature gate (not a per-user capability): the Reborn
     // Projects surface is hidden until the server sets
     // IRONCLAW_REBORN_PROJECTS, while the surface is being finished.

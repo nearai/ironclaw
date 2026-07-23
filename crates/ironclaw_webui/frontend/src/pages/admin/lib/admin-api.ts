@@ -45,10 +45,21 @@ export async function createAdminUser(payload) {
       email: payload?.email,
       display_name: payload?.display_name,
       role: payload?.role || "member",
+      issue_login_token: payload?.issue_login_token === true,
     }),
   });
-  // The one-time API bearer is exposed exactly once, here.
-  return { ...normalizeUser(response?.user), token: response?.api_token };
+  return {
+    ...normalizeUser(response?.user),
+    login_token: response?.login_token ?? null,
+  };
+}
+
+export async function createManagedAgent(payload) {
+  const response = await apiFetch(`${ADMIN_BASE}/agents`, {
+    method: "POST",
+    body: JSON.stringify({ display_name: payload?.display_name }),
+  });
+  return normalizeUser(response?.user);
 }
 
 // Role changes route to the dedicated role endpoint; any other profile change
@@ -90,21 +101,6 @@ export async function activateAdminUser(id) {
     body: JSON.stringify({ status: "active" }),
   });
   return normalizeUser(response?.user);
-}
-
-// This port issues the one-time API bearer only at user creation (a long-lived
-// signed session bearer). Re-issuing a token for an existing user needs a
-// dedicated endpoint that does not exist yet, so this rejects with a clear
-// message rather than hitting a missing route. Tracked as a follow-up.
-//
-// The admin UI no longer calls this: the re-issue "Create Token" controls were
-// removed from the existing-user views (user-detail + users-tab) so an admin
-// can't trigger a guaranteed rejection. The export is kept only so the
-// contract stays covered by admin-api.test.ts until a real endpoint lands.
-export function createUserToken(_userId, _name) {
-  return Promise.reject(
-    new Error("API tokens are issued only when a user is created (re-issue not yet supported)"),
-  );
 }
 
 // --- Per-user secret provisioning -------------------------------------------

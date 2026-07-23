@@ -520,10 +520,9 @@ pub struct RebornRuntimeInput {
     /// run, so a downstream caller can reconstruct the full step-by-step
     /// trajectory (the sealed runtime otherwise exposes only the final reply).
     pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    /// Mints the one-time API bearer returned when an admin creates a user. The
-    /// serve layer supplies a session-store-backed minter; when unset, the admin
-    /// user-management surface stays unwired (create reports unavailable).
-    pub admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
+    /// Optional host signer for explicitly requested private-user login tokens.
+    // arch-exempt: optional_arc, host credential signing is optional and an explicit request fails closed when unwired, plan #6527
+    pub admin_login_token_minter: Option<Arc<dyn crate::AdminLoginTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -567,7 +566,7 @@ impl RebornRuntimeInput {
             budget_defaults: None,
             budget_event_observer: None,
             trajectory_observer: None,
-            admin_api_token_minter: None,
+            admin_login_token_minter: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -623,17 +622,6 @@ impl RebornRuntimeInput {
         self
     }
 
-    /// Install the admin API-token minter used when an admin creates a user.
-    /// The serve layer builds a session-store-backed minter; without it the
-    /// admin user-management surface stays unwired.
-    pub fn with_admin_api_token_minter(
-        mut self,
-        minter: Arc<dyn crate::AdminApiTokenMinter>,
-    ) -> Self {
-        self.admin_api_token_minter = Some(minter);
-        self
-    }
-
     /// Install a trajectory observer that receives each capability/tool call +
     /// result during a run (for downstream step-by-step trajectory capture).
     ///
@@ -659,6 +647,16 @@ impl RebornRuntimeInput {
                 observer,
             ),
         );
+        self
+    }
+
+    /// Install the host signer used only for explicitly requested private-user
+    /// login credentials. Issuance fails closed when no signer is installed.
+    pub fn with_admin_login_token_minter(
+        mut self,
+        minter: Arc<dyn crate::AdminLoginTokenMinter>,
+    ) -> Self {
+        self.admin_login_token_minter = Some(minter);
         self
     }
 

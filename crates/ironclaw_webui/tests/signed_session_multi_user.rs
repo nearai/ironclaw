@@ -190,10 +190,15 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
         )
         .expect("env authenticator"),
     );
+    let tenant_id = TenantId::new(TENANT).expect("tenant");
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
-        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        session_store: ironclaw_webui::signed_session_store(
+            &SecretString::from("operator-secret".to_string()),
+            &tenant_id,
+        ),
+        reusable_login_token_validator: None,
+        tenant_id,
         user_directory: Arc::new(DistinctUserDirectory),
-        operator_secret: SecretString::from("operator-secret".to_string()),
         base_url: "https://gateway.example".to_string(),
         providers: vec![QueueProvider::new(profiles) as Arc<dyn OAuthProvider>],
         env_authenticator,

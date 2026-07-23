@@ -1,4 +1,4 @@
-//! Stateless, HMAC-signed session login wiring.
+//! HMAC-signed session login wiring.
 //!
 //! [`build_signed_session_login`] assembles the pieces the
 //! `ironclaw-reborn serve` binary needs to mount the OAuth login
@@ -11,13 +11,12 @@
 //!
 //! - [`SignedTokenSessionStore`] — a session backend whose bearer token
 //!   carries the tenant/user/expiry, HMAC-SHA256-signed with a key
-//!   derived from the operator secret. Validation needs no persistence,
-//!   so tokens survive a restart as long as the operator secret is
-//!   stable. Revocation IS honored within a process via an in-memory
-//!   denylist, so `POST /auth/logout` truly invalidates the presented
-//!   bearer rather than returning `204` while the token stays live. The
-//!   denylist is process-local and clears on restart, after which a
-//!   not-yet-expired revoked token would validate again.
+//!   derived from the operator secret. Tokens survive a restart as long as
+//!   the operator secret is stable. Ordinary sessions honor process-local revocation via an
+//!   in-memory denylist. Explicit reusable authentication credentials carry a
+//!   signed purpose claim and deliberately survive logout so they can be used
+//!   for the next login. The denylist clears on restart, after which a
+//!   not-yet-expired revoked session would validate again.
 //! - The `user_directory` (host-supplied via `SignedSessionLoginConfig`)
 //!   maps each authenticated OAuth profile to a `UserId`. A multi-user
 //!   host injects a DB-backed directory (a distinct user per identity);
@@ -45,7 +44,9 @@ use uuid::Uuid;
 use crate::auth::{
     OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, webui_v2_auth_router,
 };
+use crate::session::SessionCredentialKind;
 use crate::session::{SessionAuthenticator, SessionId, SessionRecord, SessionStoreError};
+use ironclaw_reborn_composition::ReusableLoginTokenValidator;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -58,9 +59,12 @@ pub struct SignedSessionLoginConfig {
     /// directory (distinct user per identity); a single-operator host
     /// can inject one that always resolves to the operator.
     pub user_directory: Arc<dyn UserDirectory>,
-    /// Operator secret the session-token HMAC key is derived from. The
-    /// same value typically backs the env-bearer authenticator.
-    pub operator_secret: SecretString,
+    /// Host-owned signed-session store shared with every session issuer so
+    /// logout revocation is observed consistently within this process.
+    pub session_store: Arc<SignedTokenSessionStore>,
+    /// Identity-backed current-state validator for reusable login credentials.
+    /// `None` rejects those credentials while ordinary sessions still work.
+    pub reusable_login_token_validator: Option<Arc<dyn ReusableLoginTokenValidator>>,
     /// Public base URL used to build provider callback URLs.
     pub base_url: String,
     /// Configured OAuth providers. An empty list disables the login
@@ -91,10 +95,13 @@ pub fn build_signed_session_login(
         return None;
     }
 
-    let session_store =
-        SignedTokenSessionStore::from_operator_secret(&config.operator_secret, &config.tenant_id);
-    let session_authenticator: Arc<dyn WebuiAuthenticator> =
-        Arc::new(SessionAuthenticator::new(session_store.clone()));
+    let session_store = config.session_store;
+    let mut session_authenticator = SessionAuthenticator::new(session_store.clone());
+    if let Some(validator) = config.reusable_login_token_validator {
+        session_authenticator =
+            session_authenticator.with_reusable_login_token_validator(validator);
+    }
+    let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(session_authenticator);
 
     let router_config = OAuthRouterConfig::new(
         config.tenant_id,
@@ -124,9 +131,8 @@ pub fn build_signed_session_login(
 /// `exp`).
 const MAX_REVOKED_ENTRIES: usize = 4096;
 
-/// Stateless session backend whose "record" is the cryptographic
-/// signature itself (HMAC-SHA256 over the base64url payload), plus a
-/// process-local denylist that makes `revoke` (logout) effective.
+/// Signed-token backend whose bearer metadata is self-contained, plus
+/// process-local revocation state that makes ordinary-session logout effective.
 pub struct SignedTokenSessionStore {
     key: Vec<u8>,
     /// Host tenant this store is bound to. The signing key is derived from
@@ -141,12 +147,12 @@ pub struct SignedTokenSessionStore {
 }
 
 /// Build a signed-token store for minting/validating bearers from an
-/// operator secret + tenant. The store is stateless and deterministic in the
-/// signing key, so an instance built here mints tokens that validate under any
-/// other instance sharing the same operator secret + tenant (e.g. the SSO login
-/// surface's own store). Used by the admin user-management surface to mint the
-/// one-time API bearer on user create, which must be wired before the login
-/// surface (and its own store) is composed.
+/// operator secret + tenant. Signing is deterministic, so another instance
+/// sharing the same secret and tenant can verify the token, but logout state is
+/// process- and instance-local. Issuers and authenticators that require
+/// coherent revocation must share this `Arc`. Authenticated login/claim flows
+/// mint revocable sessions; explicit administrator issuance mints reusable
+/// user credentials whose current identity state is checked separately.
 pub fn signed_session_store(
     operator_secret: &SecretString,
     tenant_id: &TenantId,
@@ -212,6 +218,43 @@ impl SignedTokenSessionStore {
         lifetime: ChronoDuration,
         operator: bool,
     ) -> Result<SecretString, SessionStoreError> {
+        self.create_token(
+            tenant_id,
+            user_id,
+            lifetime,
+            operator,
+            TokenPurpose::Session,
+        )
+        .await
+    }
+
+    /// Mint a reusable user authentication credential. Unlike a temporary
+    /// session, ordinary logout does not invalidate this bearer; the client
+    /// may present it again to log back in.
+    pub async fn create_reusable_auth_token(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        lifetime: ChronoDuration,
+    ) -> Result<SecretString, SessionStoreError> {
+        self.create_token(
+            tenant_id,
+            user_id,
+            lifetime,
+            false,
+            TokenPurpose::ReusableAuth,
+        )
+        .await
+    }
+
+    async fn create_token(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        lifetime: ChronoDuration,
+        operator: bool,
+        purpose: TokenPurpose,
+    ) -> Result<SecretString, SessionStoreError> {
         // A non-positive lifetime would mint a token whose `exp <= iat`;
         // `lookup` then rejects it immediately, so the caller would get
         // `Ok(token)` for an already-dead session. Fail loud instead.
@@ -231,6 +274,7 @@ impl SignedTokenSessionStore {
             iat: now.timestamp(),
             exp: expires_at.timestamp(),
             op: operator,
+            purpose,
         };
         let payload_json = serde_json::to_vec(&payload)
             .map_err(|err| SessionStoreError::Backend(format!("encode token payload: {err}")))?;
@@ -282,6 +326,10 @@ impl SignedTokenSessionStore {
             created_at,
             expires_at,
             operator: payload.op,
+            credential_kind: match payload.purpose {
+                TokenPurpose::Session => SessionCredentialKind::Session,
+                TokenPurpose::ReusableAuth => SessionCredentialKind::ReusableLoginToken,
+            },
         }))
     }
 
@@ -290,6 +338,9 @@ impl SignedTokenSessionStore {
         // id worth denying; a garbage or already-expired bearer has nothing
         // to revoke, so logout is a silent success.
         if let Some(payload) = self.verify(candidate) {
+            if payload.purpose == TokenPurpose::ReusableAuth {
+                return;
+            }
             let now = Utc::now().timestamp();
             if payload.exp <= now {
                 return;
@@ -331,6 +382,18 @@ struct TokenPayload {
     /// retroactively escalating.
     #[serde(default)]
     op: bool,
+    /// Credential purpose. Missing means an ordinary revocable session so
+    /// tokens issued before this field existed preserve their logout behavior.
+    #[serde(default, rename = "p")]
+    purpose: TokenPurpose,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TokenPurpose {
+    #[default]
+    Session,
+    ReusableAuth,
 }
 
 /// `WebuiAuthenticator` that accepts a bearer recognized by EITHER the
@@ -339,9 +402,8 @@ struct TokenPayload {
 /// keeps working while a browser SSO login mints a signed session token.
 ///
 /// Public so the CLI can compose the same env-OR-session pair on the **no-SSO**
-/// serve path: `ironclaw-reborn serve` always mints admin-API session tokens
-/// (the user-create bearer), so their `SessionAuthenticator` must be wired even
-/// when no SSO provider is configured, or those tokens would never validate.
+/// serve path: the CLI claim/login route still issues non-operator sessions
+/// when no SSO provider is configured.
 /// Operator-capability gating still follows the env token only (see
 /// [`WebuiAuthenticator::mounts_operator_webui_config_routes`] below), so a
 /// minted session bearer stays non-operator regardless of this reuse.
@@ -501,6 +563,7 @@ mod tests {
                 iat: now - 100,
                 exp: now - 10,
                 op: false,
+                purpose: TokenPurpose::Session,
             },
         );
         assert!(store.lookup(&token).await.expect("lookup").is_none());
@@ -527,6 +590,49 @@ mod tests {
         assert!(
             store.lookup(&raw).await.expect("lookup").is_none(),
             "a revoked token must no longer authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_does_not_invalidate_a_reusable_auth_token() {
+        let store = signed_store("operator-secret");
+        let token = store
+            .create_reusable_auth_token(
+                tenant(),
+                UserId::new("reusable-user").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let raw = token.expose_secret();
+
+        store.revoke(raw).await;
+        assert!(
+            store.lookup(raw).await.expect("lookup").is_some(),
+            "ordinary logout must leave the reusable authentication credential valid"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_without_a_purpose_claim_remains_a_revocable_session() {
+        let store = signed_store("operator-secret");
+        let now = Utc::now().timestamp();
+        let payload = serde_json::json!({
+            "sid": "legacy-session",
+            "tenant": tenant().as_str(),
+            "user": "legacy-user",
+            "iat": now,
+            "exp": now + 3600,
+            "op": false
+        });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("payload"));
+        let token = format!("{payload_b64}.{}", store.sign(&payload_b64));
+
+        assert!(store.lookup(&token).await.expect("lookup").is_some());
+        store.revoke(&token).await;
+        assert!(
+            store.lookup(&token).await.expect("lookup").is_none(),
+            "pre-purpose tokens must retain ordinary session logout semantics"
         );
     }
 
@@ -594,6 +700,7 @@ mod tests {
                     iat: base,
                     exp,
                     op: false,
+                    purpose: TokenPurpose::Session,
                 },
             )
         };
@@ -687,6 +794,7 @@ mod tests {
                 iat: now,
                 exp: now + 3600,
                 op: false,
+                purpose: TokenPurpose::Session,
             },
         );
         let err = store
@@ -713,6 +821,7 @@ mod tests {
                 iat: now,
                 exp: now + 3600,
                 op: false,
+                purpose: TokenPurpose::Session,
             },
         );
         let err = store
@@ -854,10 +963,15 @@ mod tests {
     }
 
     fn login_config(providers: Vec<Arc<dyn OAuthProvider>>) -> SignedSessionLoginConfig {
+        let tenant_id = tenant();
         SignedSessionLoginConfig {
-            tenant_id: tenant(),
+            session_store: signed_session_store(
+                &SecretString::from("operator-secret".to_string()),
+                &tenant_id,
+            ),
+            reusable_login_token_validator: None,
+            tenant_id,
             user_directory: Arc::new(StubUserDirectory),
-            operator_secret: SecretString::from("operator-secret".to_string()),
             base_url: "https://app.example".to_string(),
             providers,
             env_authenticator: Arc::new(OneToken {

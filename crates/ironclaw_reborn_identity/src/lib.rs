@@ -32,7 +32,9 @@ mod user_directory;
 pub use filesystem_store::FilesystemRebornIdentityStore;
 pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
 pub use user_directory::{
-    RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,
+    AdminManagedUserOperation, PreallocatedRebornUser, RebornLoginPolicy, RebornUser,
+    RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,
+    UserContentAccessPolicy, login_policy, new_user_id,
 };
 
 use async_trait::async_trait;
@@ -124,6 +126,13 @@ pub enum RebornIdentityError {
     /// 503 backend fault: a suspended user must not mint a fresh session.
     #[error("user account is suspended: {0}")]
     UserSuspended(String),
+    /// An external login resolved to an admin-managed subject. Managed
+    /// subjects never receive a login identity or session credential.
+    #[error("admin-managed user cannot sign in: {0}")]
+    ManagedUserLoginDisabled(String),
+    /// An admin lifecycle request violates an immutable user policy.
+    #[error("user policy violation: {0}")]
+    UserPolicyViolation(&'static str),
     /// `resolve_or_create` was called for a `ChannelActor` identity. Channel
     /// actors are never mint-capable — the resolver contract routes them
     /// through [`lookup`](RebornIdentityResolver::lookup) /
