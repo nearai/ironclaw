@@ -171,7 +171,11 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
         raise
 
 async def _stop_process(
-    proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
+    proc: asyncio.subprocess.Process,
+    *,
+    sig: int | None = None,
+    timeout: float,
+    process_group: bool = False,
 ) -> None:
     """Signal a subprocess and wait briefly without masking exit races."""
     async def _drain_pipes() -> None:
@@ -180,12 +184,11 @@ async def _stop_process(
         except (asyncio.TimeoutError, ValueError):
             pass
 
-    if proc.returncode is not None:
-        await _drain_pipes()
-        return
-
+    signal_to_send = signal.SIGKILL if sig is None else sig
     try:
-        if sig is None:
+        if process_group:
+            os.killpg(proc.pid, signal_to_send)
+        elif sig is None:
             proc.kill()
         else:
             proc.send_signal(sig)
@@ -196,10 +199,11 @@ async def _stop_process(
             pass
         return
 
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+    if proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
     await _drain_pipes()
 
 
@@ -572,6 +576,7 @@ async def _run_emulate_server(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
 
     try:
@@ -610,9 +615,43 @@ async def _run_emulate_server(
         )
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=5)
-            if proc.returncode is None:
-                await _stop_process(proc, timeout=2)
+            await _stop_process(
+                proc, sig=signal.SIGINT, timeout=5, process_group=True
+            )
+        await _stop_process(proc, timeout=2, process_group=True)
+
+
+async def _bootstrap_emulate_github_access(
+    client: httpx.AsyncClient, url: str
+) -> None:
+    """Grant the primary fixture actor write access to the seeded org repo."""
+    headers = {"Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}"}
+    team = await client.post(
+        f"{url}/orgs/nearai/teams",
+        headers=headers,
+        json={
+            "name": "Provider Contract",
+            "permission": "push",
+            "privacy": "closed",
+        },
+        timeout=5,
+    )
+    if team.status_code != 201:
+        raise RuntimeError(
+            "Failed to create Emulate GitHub provider team: "
+            f"{team.status_code} {team.text[:400]}"
+        )
+    membership = await client.put(
+        f"{url}/orgs/nearai/teams/provider-contract/memberships/reborn-dev",
+        headers=headers,
+        json={"role": "maintainer"},
+        timeout=5,
+    )
+    if membership.status_code != 200:
+        raise RuntimeError(
+            "Failed to grant Emulate GitHub provider membership: "
+            f"{membership.status_code} {membership.text[:400]}"
+        )
 
 
 @asynccontextmanager
@@ -636,6 +675,26 @@ async def _emulate_service(
     async with aclosing(generator):
         async for server in generator:
             yield server
+
+
+@asynccontextmanager
+async def _emulate_github_service(
+    *, port: int | None = None
+) -> AsyncIterator[dict[str, str]]:
+    """Start GitHub Emulate and grant the seeded actor repository access."""
+    async with _emulate_service(
+        service="github",
+        seed_path=EMULATE_GITHUB_SEED,
+        ready_method="GET",
+        ready_path="/user",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+        },
+        port=port,
+    ) as server:
+        async with httpx.AsyncClient() as client:
+            await _bootstrap_emulate_github_access(client, server["url"])
+        yield server
 
 
 class ResettableEmulateProviderWorld:
@@ -691,16 +750,7 @@ class ResettableEmulateProviderWorld:
                     port=self._ports[service],
                 )
             elif service == "github":
-                context = _emulate_service(
-                    service=service,
-                    seed_path=EMULATE_GITHUB_SEED,
-                    ready_method="GET",
-                    ready_path="/user",
-                    ready_headers={
-                        "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
-                    },
-                    port=self._ports[service],
-                )
+                context = _emulate_github_service(port=self._ports[service])
             else:
                 raise ValueError(f"Unknown Emulate provider service: {service}")
             reservation = self._reservations.pop(service, None)
@@ -728,14 +778,29 @@ class ResettableEmulateProviderWorld:
             if stack is not None:
                 await stack.aclose()
             if reserve:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(("127.0.0.1", self._ports[service]))
-                self._reservations[service] = sock
+                self._reservations[service] = await self._reserve_service_port(
+                    service
+                )
         if services is None:
             reservations, self._reservations = self._reservations, {}
             for sock in reservations.values():
                 sock.close()
+
+    async def _reserve_service_port(self, service: str) -> socket.socket:
+        last_error: OSError | None = None
+        for _ in range(20):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", self._ports[service]))
+                return sock
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+                await asyncio.sleep(0.1)
+        raise last_error or OSError(
+            f"could not reserve Emulate {service} port {self._ports[service]}"
+        )
 
 
 @pytest.fixture(scope="module")
@@ -782,15 +847,7 @@ async def emulate_slack_server():
 @pytest.fixture(scope="session")
 async def emulate_github_server():
     """Start Emulate GitHub with a seeded user, org, and repository."""
-    async for server in _run_emulate_server(
-        service="github",
-        seed_path=EMULATE_GITHUB_SEED,
-        ready_method="GET",
-        ready_path="/user",
-        ready_headers={
-            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
-        },
-    ):
+    async with _emulate_github_service() as server:
         yield server
 
 
@@ -1139,6 +1196,7 @@ async def hosted_google_emulate_server(
     rewrite_map = {
         "gmail.googleapis.com": emulate_google_server["url"],
         "www.googleapis.com": emulate_google_server["url"],
+        "slides.googleapis.com": emulate_google_server["url"],
     }
     async for server in _run_hosted_oauth_refresh_server(
         ironclaw_binary,
@@ -1186,6 +1244,7 @@ async def hosted_provider_emulate_server(
     rewrite_map = {
         "gmail.googleapis.com": emulate_google_server["url"],
         "www.googleapis.com": emulate_google_server["url"],
+        "slides.googleapis.com": emulate_google_server["url"],
         "api.github.com": emulate_github_server["url"],
         "slack.com": emulate_slack_server["url"],
     }

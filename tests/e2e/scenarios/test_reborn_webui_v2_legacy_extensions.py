@@ -21,6 +21,30 @@ def _package_ref(package_id: str) -> dict:
     return {"kind": "extension", "id": package_id}
 
 
+def _assert_client_action_id(body: dict) -> None:
+    assert isinstance(body.get("client_action_id"), str)
+    assert body["client_action_id"]
+
+
+def _assert_install_requests(requests: list[dict], *package_ids: str) -> None:
+    assert len(requests) == len(package_ids)
+    for request, package_id in zip(requests, package_ids, strict=True):
+        assert request.get("package_ref") == _package_ref(package_id)
+        _assert_client_action_id(request)
+
+
+def _assert_setup_submit_requests(
+    requests: list[dict], expected: list[dict]
+) -> None:
+    assert len(requests) == len(expected)
+    for request, expected_request in zip(requests, expected, strict=True):
+        assert request["package_id"] == expected_request["package_id"]
+        body = dict(request["body"])
+        _assert_client_action_id(body)
+        body.pop("client_action_id")
+        assert body == expected_request["body"]
+
+
 # Product taxonomy travels in `surfaces` (NEA-25): a channel is a surface an
 # extension declares, and `runtime` is an implementation badge only. The
 # retired extension `kind` wire string (`wasm_tool` / `mcp_server` /
@@ -678,9 +702,9 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
             timeout=5000
         )
         # A registry failure blocks only the registry tab; on the channels tab
-        # the installed data still renders and the failure stays visible (and
-        # retryable) through the partial-catalog banner.
-        await expect(error_banner).to_contain_text("Some extension data is unavailable")
+        # the installed data still renders and the failure banner remains tied
+        # to the catalog failure cause.
+        await expect(error_banner).to_contain_text("Extension catalog unavailable")
 
         failed_request_count = registry_requests
         registry_available = True
@@ -1206,7 +1230,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1217,7 +1241,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1455,7 +1479,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         await page.get_by_role("button", name="Save").click()
 
         await expect(page.get_by_role("heading", name="Configure Config Tool")).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1469,7 +1493,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1662,7 +1686,7 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
         await modal.get_by_role("button", name="Save").click()
 
         await expect(modal).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": package_id,
                 "body": {
@@ -1673,7 +1697,7 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1728,7 +1752,7 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1739,7 +1763,7 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1947,7 +1971,7 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1958,7 +1982,7 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 

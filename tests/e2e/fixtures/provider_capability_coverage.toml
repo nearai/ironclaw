@@ -8,34 +8,48 @@ tested = [
   "github.add_issue_labels",
   "github.comment_issue",
   "github.create_branch",
+  "github.create_or_update_file",
   "github.create_issue",
   "github.create_issue_comment",
   "github.create_pr_review",
   "github.create_pull_request",
   "github.create_release",
   "github.create_repo",
+  "github.delete_file",
   "github.fork_repo",
   "github.get_authenticated_user",
+  "github.get_combined_status",
+  "github.get_file_content",
   "github.get_issue",
+  "github.get_job_logs",
   "github.get_pull_request",
   "github.get_pull_request_files",
   "github.get_pull_request_reviews",
   "github.get_repo",
+  "github.get_workflow_run_artifacts",
+  "github.get_workflow_run_jobs",
   "github.get_workflow_runs",
   "github.list_branches",
   "github.list_issue_comments",
   "github.list_issues",
   "github.list_pull_request_comments",
+  "github.list_pull_request_review_threads",
   "github.list_pull_requests",
   "github.list_releases",
   "github.list_repos",
   "github.merge_pull_request",
   "github.remove_issue_assignees",
   "github.remove_issue_label",
+  "github.reply_pull_request_comment",
+  "github.rerun_failed_workflow_run_jobs",
+  "github.rerun_workflow_job",
+  "github.resolve_review_thread",
   "github.search_code",
   "github.search_issues",
   "github.search_issues_pull_requests",
   "github.search_repositories",
+  "github.trigger_workflow",
+  "github.unresolve_review_thread",
   "github.update_issue",
   "github.update_pull_request",
   "gmail.create_draft",
@@ -87,6 +101,20 @@ tested = [
   "google-sheets.read_values",
   "google-sheets.rename_sheet",
   "google-sheets.write_values",
+  "google-slides.batch_update",
+  "google-slides.create_presentation",
+  "google-slides.create_shape",
+  "google-slides.create_slide",
+  "google-slides.delete_object",
+  "google-slides.delete_text",
+  "google-slides.format_paragraph",
+  "google-slides.format_text",
+  "google-slides.get_presentation",
+  "google-slides.get_thumbnail",
+  "google-slides.insert_image",
+  "google-slides.insert_text",
+  "google-slides.replace_all_text",
+  "google-slides.replace_shapes_with_image",
   "slack.get_conversation_history",
   "slack.get_conversation_info",
   "slack.get_thread_replies",
@@ -102,55 +130,11 @@ unsupported = []
 
 [[waivers]]
 owner = "@serrrfirat"
-reason = "Emulate lacks the matching GitHub route or seedable successful Actions state."
-issue = "#6524"
-review_condition = "Revisit when Emulate adds the missing route or seed configuration."
-capabilities = [
-  "github.create_or_update_file",
-  "github.delete_file",
-  "github.get_combined_status",
-  "github.get_file_content",
-  "github.get_job_logs",
-  "github.get_workflow_run_artifacts",
-  "github.get_workflow_run_jobs",
-  "github.list_pull_request_review_threads",
-  "github.reply_pull_request_comment",
-  "github.rerun_failed_workflow_run_jobs",
-  "github.rerun_workflow_job",
-  "github.resolve_review_thread",
-  "github.trigger_workflow",
-  "github.unresolve_review_thread",
-]
-
-[[waivers]]
-owner = "@serrrfirat"
 reason = "Webhook normalization is local logic and does not cross a provider boundary."
 issue = "#6524"
 review_condition = "Add a caller-path webhook ingress contract outside the Emulate provider runner."
 capabilities = [
   "github.handle_webhook",
-]
-
-[[waivers]]
-owner = "@serrrfirat"
-reason = "Emulate has no Google Slides provider routes."
-issue = "#6524"
-review_condition = "Revisit when a hermetic Slides provider double is available."
-capabilities = [
-  "google-slides.batch_update",
-  "google-slides.create_presentation",
-  "google-slides.create_shape",
-  "google-slides.create_slide",
-  "google-slides.delete_object",
-  "google-slides.delete_text",
-  "google-slides.format_paragraph",
-  "google-slides.format_text",
-  "google-slides.get_presentation",
-  "google-slides.get_thumbnail",
-  "google-slides.insert_image",
-  "google-slides.insert_text",
-  "google-slides.replace_all_text",
-  "google-slides.replace_shapes_with_image",
 ]
 
 [[waivers]]

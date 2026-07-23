@@ -8,8 +8,9 @@ use ironclaw_loop_host::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_outbound::{
-    DeliveryTargetCapabilities, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
-    OutboundError,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetScope,
+    OutboundDeliveryTargetSummary, OutboundError,
 };
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
@@ -21,7 +22,6 @@ use ironclaw_turns::{
 use crate::RebornCompositionProfile;
 use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
 };
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 

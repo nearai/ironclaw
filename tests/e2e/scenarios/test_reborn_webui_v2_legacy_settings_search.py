@@ -70,6 +70,22 @@ MOCK_SKILLS = [
     },
 ]
 
+CHANNEL_SURFACES = [
+    {
+        "kind": "channel",
+        "channel": "telegram",
+        "direction": "bidirectional",
+        "connection": {
+            "status": "connected",
+            "strategy": "oauth",
+            "action": {
+                "kind": "open_setup",
+                "submit_label": "Reconnect",
+            },
+        },
+    }
+]
+
 MOCK_CHANNEL_EXTENSION = {
     "package_ref": {"kind": "extension", "id": "telegram-channel"},
     "display_name": "Telegram Channel",
@@ -451,7 +467,7 @@ async def test_reborn_legacy_settings_channels_search(
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(page.get_by_text("Beta MCP", exact=True)).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Beta MCP", exact=True)).to_have_count(0)
 
         await search.fill("telegram")
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()

@@ -51,7 +51,7 @@ use crate::input::{
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+    skill_management_mount_view, workspace_mount_view,
 };
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound::outbound_preferences_capability::{
@@ -3477,6 +3477,15 @@ pub(crate) fn production_skill_management_mount_view(
     ])
 }
 
+pub(crate) fn production_system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError>
+{
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/system/extensions")?,
+        VirtualPath::new("/system/extensions")?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
 async fn build_backend_production(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle,
@@ -3609,11 +3618,9 @@ async fn build_backend_production(
                 reason: error.to_string(),
             }
         })?;
-    let system_extensions_lifecycle_mounts =
-        system_extensions_lifecycle_mount_view().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            }
+    let system_extensions_lifecycle_mounts = production_system_extensions_lifecycle_mount_view()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
         })?;
     let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
         &stores.scoped_filesystem,

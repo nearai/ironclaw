@@ -11,7 +11,7 @@ function extensionsApiSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, startExtensionOauth };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, removeExtension, submitExtensionSetup, startExtensionOauth };`;
 }
 
 test("installExtension assigns a fresh client idempotency key to each gesture", async () => {
@@ -48,6 +48,8 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
     },
     encodeURIComponent,
     globalThis: {},
+    redeemPairingCode: () => {},
+    clientActionId: () => "client-action-test",
     setupExtension: () => {},
   };
   vm.runInNewContext(extensionsApiSourceForTest(), context);
@@ -99,4 +101,58 @@ test("startExtensionOauth does not crash while a requirement projection is refre
   assert.equal(apiCalls.length, 1);
   const payload = JSON.parse(apiCalls[0].options.body);
   assert.equal("requirement" in payload, false);
+});
+
+test("extension lifecycle mutations include a client action id", async () => {
+  const apiCalls = [];
+  const setupCalls = [];
+  const context = {
+    apiFetch: async (url, options) => {
+      apiCalls.push({ url, options });
+      return { success: true };
+    },
+    encodeURIComponent,
+    globalThis: {},
+    redeemPairingCode: () => {},
+    clientActionId: () => "client-action-test",
+    setupExtension: async (extensionName, options) => {
+      setupCalls.push({ extensionName, options });
+      return { success: true };
+    },
+  };
+  vm.runInNewContext(extensionsApiSourceForTest(), context);
+
+  const packageRef = { kind: "extension", id: "web-access" };
+  await context.globalThis.__testExports.installExtension(packageRef, {
+    clientActionId: "stable-install-action",
+  });
+  await context.globalThis.__testExports.activateExtension(packageRef, {
+    clientActionId: "stable-activate-action",
+  });
+  await context.globalThis.__testExports.removeExtension(packageRef, {
+    clientActionId: "stable-remove-action",
+  });
+  await context.globalThis.__testExports.submitExtensionSetup(
+    packageRef,
+    {},
+    {},
+    { clientActionId: "stable-setup-action" },
+  );
+
+  assert.deepEqual(JSON.parse(apiCalls[0].options.body), {
+    package_ref: packageRef,
+    client_action_id: "stable-install-action",
+  });
+  assert.deepEqual(JSON.parse(apiCalls[1].options.body), {
+    client_action_id: "stable-activate-action",
+  });
+  assert.deepEqual(JSON.parse(apiCalls[2].options.body), {
+    client_action_id: "stable-remove-action",
+  });
+  assert.equal(setupCalls[0].extensionName, "web-access");
+  assert.deepEqual(JSON.parse(JSON.stringify(setupCalls[0].options)), {
+    action: "submit",
+    payload: { secrets: {}, fields: {} },
+    clientActionId: "stable-setup-action",
+  });
 });

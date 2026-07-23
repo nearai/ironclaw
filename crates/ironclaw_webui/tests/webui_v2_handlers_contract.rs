@@ -3269,7 +3269,9 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3285,7 +3287,9 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":"slack-dm-beta","client_action_id":"outbound-save-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3305,7 +3309,10 @@ async fn set_outbound_preferences_dispatches_body_through_invoke() {
         invoke_calls[1].1,
         serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
     );
-    assert_eq!(invoke_calls[0].2, invoke_calls[1].2);
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "identical outbound preference retries should reuse ProductSurface activity ids"
+    );
     drop(invoke_calls);
     let view_ids: Vec<String> = services
         .view_queries
@@ -3335,7 +3342,9 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":null}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":null,"client_action_id":"outbound-clear-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3381,7 +3390,7 @@ async fn set_outbound_preferences_error_maps_to_http_status() {
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"final_reply_target_id":"target-does-not-exist"}"#,
+                    r#"{"final_reply_target_id":"target-does-not-exist","client_action_id":"outbound-error-1"}"#,
                 ))
                 .expect("request"),
         )
@@ -4969,6 +4978,23 @@ async fn skill_content_and_mutations_use_product_surface() {
     assert_eq!(install_response.status(), StatusCode::OK);
 
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let install_retry_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"demo-skill","content":"---\nname: demo-skill\n---\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(install_retry_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let update_response = router
         .clone()
         .oneshot(
@@ -5037,6 +5063,13 @@ async fn skill_content_and_mutations_use_product_surface() {
                 }),
             ),
             (
+                SKILL_INSTALL_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n",
+                }),
+            ),
+            (
                 SKILL_UPDATE_CAPABILITY_ID,
                 serde_json::json!({
                     "name": "demo-skill",
@@ -5056,6 +5089,14 @@ async fn skill_content_and_mutations_use_product_surface() {
             ),
         ]
     );
+    assert_ne!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "generic ProductSurface requests without client action ids must not reuse durable replay keys"
+    );
+    assert_ne!(
+        invoke_calls[0].2, invoke_calls[2].2,
+        "changed generic ProductSurface requests should also receive fresh activity ids"
+    );
 }
 
 #[tokio::test]
@@ -5065,13 +5106,14 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"}}"#,
+                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"},"client_action_id":"install-google-calendar"}"#,
                 ))
                 .expect("request"),
         )
@@ -5081,8 +5123,24 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["success"], true);
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"},"client_action_id":"install-nearai-mcp"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(invoke_calls.len(), 2);
     assert_eq!(
         invoke_calls[0].0,
         CapabilityId::new(EXTENSION_INSTALL_CAPABILITY_ID).expect("capability id")
@@ -5186,6 +5244,10 @@ async fn install_extension_uses_client_gesture_idempotency_not_permanent_input_d
     assert_ne!(
         calls[0].2, calls[1].2,
         "separate install gestures must never replay one permanent cached lifecycle outcome"
+    );
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "the client action id must survive response-lost retries as the ProductSurface activity id"
     );
 }
 
@@ -5354,7 +5416,10 @@ async fn remove_extension_decodes_path_package_id_to_lifecycle_path() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/google-calendar/activate")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"activate-google-calendar"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -5371,7 +5436,10 @@ async fn remove_extension_decodes_path_package_id_to_lifecycle_path() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/google-calendar/remove")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"remove-google-calendar"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -5432,12 +5500,15 @@ async fn setup_extension_invokes_product_surface_capability() {
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/telegram/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"action":"begin"}"#))
+                .body(Body::from(
+                    r#"{"client_action_id":"setup-telegram","action":"begin"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -5456,18 +5527,42 @@ async fn setup_extension_invokes_product_surface_capability() {
         "setup_extension must not expose legacy status aliases: {body}"
     );
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/telegram/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"setup-telegram","action":"begin"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let retry_body = read_json(retry_response).await;
+    assert_eq!(retry_body["package_ref"]["id"], "telegram");
+    assert_eq!(retry_body["package_ref"]["kind"], "extension");
+    assert_eq!(retry_body["phase"], "unsupported");
+
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0].0,
-        CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id")
-    );
-    assert_eq!(
-        invoke_calls[0].1,
-        serde_json::json!({
+    assert_eq!(invoke_calls.len(), 2);
+    let expected_capability =
+        CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id");
+    let expected_input = serde_json::json!({
             "extension_id": "telegram",
             "action": "begin"
-        })
+    });
+    assert_eq!(invoke_calls[0].0, expected_capability);
+    assert_eq!(invoke_calls[1].0, expected_capability);
+    assert_eq!(invoke_calls[0].1, expected_input);
+    assert_eq!(invoke_calls[1].1, expected_input);
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "the setup client action id must survive response-lost retries as the ProductSurface activity id"
     );
     let queries = services.view_queries.lock().expect("lock");
     assert!(
@@ -5570,7 +5665,7 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
                 .uri("/api/webchat/v2/llm/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1"}"#,
+                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1","client_action_id":"llm-upsert-acme-1"}"#,
                 ))
                 .expect("request"),
         )

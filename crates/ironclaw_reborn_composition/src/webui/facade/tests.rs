@@ -19,11 +19,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
-    TenantId, UserId, VirtualPath,
+    ActivityId, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
+    MountView, Resolution, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
-    OPERATOR_SERVICE_LIFECYCLE_OPERATION, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
+    OPERATOR_SERVICE_LIFECYCLE_OPERATION, ProductCapabilityDescriptor, RebornOperatorToolCatalog,
+    RebornOperatorToolInfo,
 };
 use std::time::Duration;
 
@@ -375,6 +377,71 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
 }
 
 #[tokio::test]
+async fn product_surface_extension_lifecycle_remove_succeeds_after_activation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = crate::RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "product-surface-extension-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy resolves")),
+    )
+    .with_identity(crate::RebornRuntimeIdentity {
+        tenant_id: "tenant-alpha".to_string(),
+        agent_id: "agent-alpha".to_string(),
+        source_binding_id: "webui-test-source".to_string(),
+        reply_target_binding_id: "webui-test-reply".to_string(),
+    });
+    let runtime = crate::build_reborn_runtime(input)
+        .await
+        .expect("runtime builds");
+    let bundle = build_webui_services(&runtime, None).expect("webui services build");
+    let caller = caller("product-surface-extension-owner");
+
+    let absent_remove = invoke_lifecycle_product_capability(
+        &bundle,
+        caller.clone(),
+        EXTENSION_REMOVE_CAPABILITY,
+        serde_json::json!({"extension_id": "web-access"}),
+    )
+    .await
+    .expect("already-absent remove resolves");
+    assert_success(absent_remove, "already-absent remove");
+
+    let install = invoke_lifecycle_product_capability(
+        &bundle,
+        caller.clone(),
+        EXTENSION_INSTALL_CAPABILITY,
+        serde_json::json!({"extension_id": "web-access"}),
+    )
+    .await
+    .expect("install resolves");
+    assert_success(install, "install");
+
+    let activate = invoke_lifecycle_product_capability(
+        &bundle,
+        caller.clone(),
+        EXTENSION_ACTIVATE_CAPABILITY,
+        serde_json::json!({"extension_id": "web-access"}),
+    )
+    .await
+    .expect("activate resolves");
+    assert_success(activate, "activate");
+
+    let remove = invoke_lifecycle_product_capability(
+        &bundle,
+        caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        serde_json::json!({"extension_id": "web-access"}),
+    )
+    .await
+    .expect("remove resolves");
+    assert_success(remove, "remove");
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
 async fn readiness_operator_status_service_generates_timestamp_per_call() {
     let service = ReadinessOperatorStatusService::new(RebornReadiness::disabled());
 
@@ -657,6 +724,24 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
 
 fn caller(user_id: &str) -> WebUiAuthenticatedCaller {
     caller_in_tenant("tenant-alpha", user_id)
+}
+
+async fn invoke_lifecycle_product_capability(
+    bundle: &RebornWebuiBundle,
+    caller: WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    input: serde_json::Value,
+) -> Result<Resolution, RebornServicesError> {
+    capability
+        .invoke_on(bundle.api.as_ref(), caller, input, ActivityId::new())
+        .await
+}
+
+fn assert_success(resolution: Resolution, label: &str) {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("{label} failed: {other:?}"),
+    }
 }
 
 fn test_extension_package(extension_id: &str, capability_name: &str) -> ExtensionPackage {

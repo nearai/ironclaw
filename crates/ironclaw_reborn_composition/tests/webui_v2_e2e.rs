@@ -1574,7 +1574,10 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
+            json!({
+                "package_ref": package_ref,
+                "client_action_id": "webui-v2-gmail-install-before-activate"
+            }),
         ))
         .await
         .expect("install Gmail oneshot");
@@ -1608,7 +1611,9 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/gmail/activate",
-            json!({}),
+            json!({
+                "client_action_id": "webui-v2-gmail-activate-after-setup"
+            }),
         ))
         .await
         .expect("activate Gmail oneshot");
@@ -1644,7 +1649,10 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
+            json!({
+                "package_ref": package_ref,
+                "client_action_id": "webui-v2-gmail-install-without-provider"
+            }),
         ))
         .await
         .expect("install Gmail oneshot");
@@ -1665,7 +1673,9 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/gmail/activate",
-            json!({}),
+            json!({
+                "client_action_id": "webui-v2-gmail-activate-without-provider"
+            }),
         ))
         .await
         .expect("activate Gmail oneshot");
@@ -1835,7 +1845,10 @@ async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
         .clone()
         .oneshot(bearer_post(
             "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
+            json!({
+                "package_ref": package_ref,
+                "client_action_id": "webui-v2-google-drive-install-before-setup"
+            }),
         ))
         .await
         .expect("install Google Drive oneshot");
@@ -2026,8 +2039,9 @@ mod operator_llm_config {
         }
     }
 
-    fn nearai_save_payload() -> Value {
+    fn nearai_save_payload(client_action_id: &str) -> Value {
         json!({
+            "client_action_id": client_action_id,
             "id": "nearai",
             "name": "NEAR AI",
             "adapter": "near_ai",
@@ -2059,7 +2073,7 @@ mod operator_llm_config {
             .clone()
             .oneshot(bearer_post(
                 "/api/webchat/v2/llm/providers",
-                nearai_save_payload(),
+                nearai_save_payload("nearai-save-e2e-1"),
             ))
             .await
             .expect("save request");
@@ -2084,7 +2098,7 @@ mod operator_llm_config {
             .clone()
             .oneshot(bearer_post(
                 "/api/webchat/v2/llm/providers",
-                nearai_save_payload(),
+                nearai_save_payload("nearai-save-e2e-2"),
             ))
             .await
             .expect("resave request");

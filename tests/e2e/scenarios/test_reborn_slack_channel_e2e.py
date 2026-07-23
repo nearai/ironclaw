@@ -47,6 +47,7 @@ import httpx
 import pytest
 
 from reborn_webui_harness import (
+    client_action_id,
     close_reborn_server,
     fetch_extension_oauth_requirement,
     reborn_bearer_headers,
@@ -310,7 +311,10 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         # ── install: user lifecycle remains separate from admin setup ──
         install = await client.post(
             f"{base_url}/api/webchat/v2/extensions/install",
-            json={"package_ref": SLACK_PACKAGE_REF},
+            json={
+                "package_ref": SLACK_PACKAGE_REF,
+                "client_action_id": client_action_id(),
+            },
             timeout=60,
         )
         install.raise_for_status()
@@ -396,6 +400,7 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         # ── remove: personal state clears; deployment ingress remains ──
         remove = await client.post(
             f"{base_url}/api/webchat/v2/extensions/slack/remove",
+            json={"client_action_id": client_action_id()},
             timeout=60,
         )
         remove.raise_for_status()

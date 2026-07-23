@@ -94,6 +94,8 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundError;
@@ -119,8 +121,6 @@ use crate::factory::{
     ComposedToolPermissionOverrideStore, builtin_extension_registry,
     filesystem_reborn_identity_store,
 };
-#[cfg(any(test, feature = "test-support"))]
-use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
@@ -574,6 +574,7 @@ pub struct RebornRuntime {
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
+    pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStore>,
@@ -4494,6 +4495,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
         workspace_mounts: services.workspace_mounts.clone(),
+        system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
         outbound_state: services.outbound_state.clone(),

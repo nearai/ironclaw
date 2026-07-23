@@ -457,10 +457,16 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
 
     let alice_id = UserId::new("alice").expect("alice id");
     let bob_id = UserId::new("bob").expect("bob id");
-    let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": "legacy-members"}
-    });
-    for (name, user_id) in [("Alice", alice_id.clone()), ("Bob", bob_id.clone())] {
+    let install_request = |client_action_id: &str| {
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "legacy-members"},
+            "client_action_id": client_action_id
+        })
+    };
+    for (name, user_id, client_action_id) in [
+        ("Alice", alice_id.clone(), "webui-api2-legacy-members-alice"),
+        ("Bob", bob_id.clone(), "webui-api2-legacy-members-bob"),
+    ] {
         let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
             tenant_id.clone(),
             user_id,
@@ -470,7 +476,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         let (status, body) = post_json(
             mount_webui_v2_router(Arc::clone(&webui.api), caller),
             "/api/webchat/v2/extensions/install",
-            install_request.clone(),
+            install_request(client_action_id),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
@@ -697,7 +703,8 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     assert_eq!(status, StatusCode::OK, "operator response: {body}");
     assert_eq!(body["success"], true);
     let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": "catalog-present"}
+        "package_ref": {"kind": "extension", "id": "catalog-present"},
+        "client_action_id": "webui-api2-catalog-present-operator-install"
     });
     let (status, body) = post_json(
         operator_router,
@@ -934,15 +941,18 @@ async fn users_and_operator_install_and_remove_independently_through_production_
             None,
         )
     };
-    let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": extension_id}
-    });
+    let install_request = |client_action_id: &str| {
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": extension_id},
+            "client_action_id": client_action_id
+        })
+    };
 
     // 1: alice installs -> private install created.
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
         "/api/webchat/v2/extensions/install",
-        install_request.clone(),
+        install_request("webui-api2-membership-alice-install"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "alice install response: {body}");
@@ -952,7 +962,7 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), caller_for(bob_id.clone())),
         "/api/webchat/v2/extensions/install",
-        install_request.clone(),
+        install_request("webui-api2-membership-bob-install"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "bob install response: {body}");
@@ -1001,7 +1011,9 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), caller_for(carol_id.clone())),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-carol-remove-private"
+        }),
     )
     .await;
     assert_ne!(
@@ -1025,7 +1037,7 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), operator_caller.clone()),
         "/api/webchat/v2/extensions/install",
-        install_request.clone(),
+        install_request("webui-api2-membership-operator-install"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "operator install response: {body}");
@@ -1071,7 +1083,9 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-alice-remove-shared"
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "alice remove response: {body}");
@@ -1093,7 +1107,9 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), operator_caller.clone()),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-operator-remove"
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "operator remove response: {body}");
@@ -1449,14 +1465,17 @@ async fn user_extension_removal_does_not_erase_admin_configuration() {
         fixture.member_router(),
         "/api/webchat/v2/extensions/install",
         serde_json::json!({
-            "package_ref": {"kind": "extension", "id": "telegram"}
+            "package_ref": {"kind": "extension", "id": "telegram"},
+            "client_action_id": "webui-api2-admin-config-member-install"
         }),
     )
     .await;
     let (remove_status, remove_body) = post_json(
         fixture.member_router(),
         "/api/webchat/v2/extensions/telegram/remove",
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-admin-config-member-remove"
+        }),
     )
     .await;
     let (read_status, read_body) = get_json(
@@ -1507,7 +1526,8 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
         fixture.member_router(),
         "/api/webchat/v2/extensions/install",
         serde_json::json!({
-            "package_ref": {"kind": "extension", "id": "telegram"}
+            "package_ref": {"kind": "extension", "id": "telegram"},
+            "client_action_id": "webui-api2-effective-consumer-member-install"
         }),
     )
     .await;

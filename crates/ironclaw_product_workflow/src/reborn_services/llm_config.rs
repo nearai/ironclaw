@@ -245,6 +245,8 @@ pub struct LlmActiveSelection {
 pub struct UpsertLlmProviderRequest {
     pub id: String,
     #[serde(default)]
+    pub client_action_id: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
     /// Protocol/adapter wire name.
     pub adapter: String,
