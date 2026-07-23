@@ -16,6 +16,7 @@ on:
   pull_request:
     branches:
       - main
+      - "release-fix-*"
   merge_group:
     branches:
       - main
