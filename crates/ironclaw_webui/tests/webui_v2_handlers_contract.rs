@@ -202,7 +202,6 @@ fn blocked_auth_resolution(activity_id: ActivityId) -> Resolution {
     ))))
 }
 
-type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
 type LlmUpsertCall = (String, bool);
 type LlmActiveCall = (String, Option<String>);

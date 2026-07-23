@@ -9,7 +9,7 @@ pub use extension_host::channel_identity::{
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
 pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
