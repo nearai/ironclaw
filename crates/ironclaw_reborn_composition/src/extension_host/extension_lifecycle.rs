@@ -2181,6 +2181,9 @@ impl RebornLocalExtensionManagementPort {
         }
         let previous_state = installation.activation_state();
         let lifecycle_package = self.lifecycle_package(&extension_id).await?;
+        // Hosted-MCP discovery can republish a package that differs from the
+        // lifecycle-registered package; unpublish the active-registry package
+        // and fall back only when nothing is currently active.
         let active_package_for_unpublish = self
             .active_extensions
             .snapshot()
