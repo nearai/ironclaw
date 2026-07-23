@@ -1,0 +1,22 @@
+name: zzz-repro-crossrepo-test
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  t:
+    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@main
+    with:
+      ironclaw-rev: main
+      pr-repo: nearai/ironclaw
+      pr-number: 6582
+      suite-name: ironclaw-smoke
+      dry-run: true
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
