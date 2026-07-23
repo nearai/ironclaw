@@ -730,8 +730,8 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
         .extension_management
         .clone();
     let user_id = UserId::new("alice").expect("user id");
-    let product_package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
-        ironclaw_product_workflow::LifecyclePackageKind::Extension,
+    let product_package_ref = ironclaw_product::LifecyclePackageRef::new(
+        ironclaw_product::LifecyclePackageKind::Extension,
         "github",
     )
     .expect("product package ref");
@@ -762,7 +762,7 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
         .expect("project GitHub after OAuth continuation");
     assert_eq!(
         projection.phase,
-        ironclaw_product_workflow::LifecyclePublicState::Active
+        ironclaw_product::LifecyclePublicState::Active
     );
 }
 

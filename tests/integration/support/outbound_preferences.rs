@@ -50,7 +50,7 @@ impl FakeOutboundPreferencesFacade {
             targets: vec![
                 target_option("slack:dm:alpha", "Slack DM Alpha"),
                 target_option("slack:channel:beta", "Slack Channel Beta"),
-                ironclaw_product_workflow::web_app_outbound_delivery_target_option()
+                ironclaw_product::web_app_outbound_delivery_target_option()
                     .expect("host-owned web_app target option"),
             ],
             state: Mutex::new(FakeOutboundState::default()),
