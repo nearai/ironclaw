@@ -164,6 +164,10 @@ async def _assert_gmail_reply_outcome(emulate_url: str, preview: dict) -> None:
     thread_messages = await _gmail_thread_messages(
         emulate_url, SEEDED_GMAIL_THREAD_ID
     )
+    assert len(thread_messages) == 2, thread_messages
+    assert any(
+        message["id"] == "msg_emulate_unread" for message in thread_messages
+    ), thread_messages
     replies = [
         message for message in thread_messages if "SENT" in message["labelIds"]
     ]
@@ -174,6 +178,7 @@ async def _assert_gmail_reply_outcome(emulate_url: str, preview: dict) -> None:
     assert gmail_header(reply, "Subject") == SEEDED_GMAIL_SUBJECT, reply
     assert gmail_header(reply, "In-Reply-To") == SEEDED_GMAIL_MESSAGE_ID, reply
     assert gmail_header(reply, "References") == SEEDED_GMAIL_MESSAGE_ID, reply
+    assert GMAIL_REPLY_MARKER in reply["snippet"], reply
     assert GMAIL_REPLY_MARKER in json.dumps(preview), preview
 
 
