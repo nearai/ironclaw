@@ -36,7 +36,8 @@ use ironclaw_extension_host::{
     RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 use ironclaw_extensions::{
-    ExtensionInstallationStore, ExtensionManifest, ExtensionPackage, ResolvedExtensionManifest,
+    ExtensionHealthStatus, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,
+    ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
     CapabilityId, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
@@ -169,6 +170,21 @@ pub(crate) async fn build_generic_extension_host(
         // bundled connection template at boot: the caller's idempotent
         // install/setup reconciliation must rediscover tools first.
         if crate::extension_host::mcp_discovery::is_hosted_http_mcp_package(&package) {
+            continue;
+        }
+        // A durable installation recorded as terminally unhealthy is the
+        // persisted `InstallationState::Failed` projection (overview.md §6.1):
+        // it "does not auto-retry". Boot restore must honor that contract —
+        // re-publishing here would silently re-run activation on every boot
+        // and, on success, mask the recorded failure as active. Skip it,
+        // leaving the membership installed-but-not-served and remediable via an
+        // explicit caller re-activation, without ever re-attempting activation.
+        // (Hosted-MCP rehydration is decided above and is unaffected.)
+        if installation.health().status() == ExtensionHealthStatus::Unhealthy {
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                "generic extension host skips boot re-publication of a terminally failed installation"
+            );
             continue;
         }
         // Deployment-owned non-secret values come only from the manifest's
@@ -498,6 +514,7 @@ mod tests {
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extension_host::test_support::{FakeEntrypoint, FakeToolAdapter};
     use ironclaw_extensions::{
+        ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus,
         ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
         ExtensionManifestRef, ExtensionRegistry, FilesystemExtensionInstallationStore,
         MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -724,6 +741,68 @@ input_schema_ref = "schemas/template.input.json"
                 .resolve_tool(&CapabilityId::new("hosted-mcp.template").expect("capability id"))
                 .is_none(),
             "the bundled connection template must never be exposed as a discovered MCP tool"
+        );
+    }
+
+    /// A durable installation persisted as terminally unhealthy is the §6.1
+    /// `InstallationState::Failed` projection ("does not auto-retry"). Boot
+    /// restore must not re-publish or re-activate it — that would re-run
+    /// activation every boot and, since the fixture factory activates cleanly,
+    /// mask the recorded failure as active. A healthy sibling still hydrates.
+    #[tokio::test]
+    async fn boot_hydration_skips_terminally_failed_installation() {
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+        seed_installation(&store, "h5-healthy").await;
+        seed_installation(&store, "h5-failed").await;
+        // Persist the durable terminal-failure health for one installation. In
+        // production the lifecycle facade records this on an activation failure;
+        // here it stands in for a boot that follows a prior failed activation.
+        store
+            .update_health(
+                &ExtensionInstallationId::new("h5-failed".to_string()).expect("installation id"),
+                ExtensionHealthSnapshot::new(
+                    ExtensionHealthStatus::Unhealthy,
+                    Some(ExtensionHealthMessage::new("activation failed")),
+                    chrono::Utc::now(),
+                ),
+            )
+            .await
+            .expect("persist terminal-failure health");
+
+        let generic = build_generic_extension_host(GenericExtensionHostParams {
+            binder: test_binder(),
+            native_factories: vec![Arc::new(FixtureNativeFactory)],
+            channel_adapters: Vec::new(),
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            admin_configuration_resolver: None,
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            reserved_capability_ids: BTreeSet::new(),
+            reserved_ingress_routes: BTreeSet::new(),
+            channel_egress_transport: None,
+        })
+        .await
+        .expect("generic host builds");
+
+        let snapshot = generic.host.snapshot().await;
+        assert!(
+            snapshot.extension("h5-healthy").is_some(),
+            "a healthy durable membership still restores at boot"
+        );
+        assert!(
+            snapshot.extension("h5-failed").is_none(),
+            "a terminally failed installation must not be re-published/re-activated at boot"
+        );
+        // Skipped, not re-attempted: the host holds no working activation record
+        // for the failed installation (a re-attempt would have either activated
+        // it into the snapshot above or recorded a fresh Failed error here).
+        assert!(
+            !generic
+                .host
+                .installation_errors()
+                .await
+                .expect("installation errors")
+                .contains_key("h5-failed"),
+            "boot restore must not re-run activation for a terminally failed installation"
         );
     }
 }

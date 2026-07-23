@@ -28,10 +28,10 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_host_api::{
-    ActivityId, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
-    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, ApprovalRequestId, Blocked, CapabilityId, EffectKind, ExtensionId,
+    GateWaypoint, InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId,
+    Resolution, ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary,
+    SecretHandle, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -1176,8 +1176,45 @@ impl ProductCapabilityInvoker for RecordingExtensionInstallInvoker {
         self.calls
             .lock()
             .expect("lock")
-            .push((caller, capability, input, activity_id.clone()));
+            .push((caller, capability, input, activity_id));
         Ok(operator_config_success_resolution(activity_id))
+    }
+}
+
+/// An install invoker whose capability resolves to a dispatch-time auth gate
+/// (`Blocked::Auth`) — the OAuth-extension "membership joined, credential setup
+/// still needed" resolution (§5.3.1). It records the invocation so a test can
+/// prove the capability was invoked before the membership readback decided the
+/// outcome.
+#[derive(Clone, Default)]
+struct BlockedAuthExtensionInstallInvoker {
+    calls: Arc<Mutex<Vec<ExtensionInstallInvokeCall>>>,
+}
+
+impl BlockedAuthExtensionInstallInvoker {
+    fn calls(&self) -> Vec<ExtensionInstallInvokeCall> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductCapabilityInvoker for BlockedAuthExtensionInstallInvoker {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((caller, capability, input, activity_id));
+        // `GateWaypoint` binds the host-api uuid `GateRef`; the crate-level
+        // `GateRef` import is the distinct `ironclaw_turns` string handle.
+        Ok(Resolution::Blocked(Blocked::Auth(GateWaypoint::new(
+            ironclaw_host_api::GateRef::new(),
+        ))))
     }
 }
 
@@ -6087,14 +6124,10 @@ async fn install_extension_operation_invokes_and_reads_back_exact_caller_members
     let package_ref = lifecycle_package_ref("github");
     let activity_id = ActivityId::new();
 
-    let response = install_extension_on_surface(
-        &services,
-        caller(),
-        package_ref.clone(),
-        activity_id.clone(),
-    )
-    .await
-    .expect("installed membership is authoritative");
+    let response =
+        install_extension_on_surface(&services, caller(), package_ref.clone(), activity_id)
+            .await
+            .expect("installed membership is authoritative");
 
     assert!(response.success);
     assert_eq!(response.message, "Extension installed.");
@@ -6169,6 +6202,87 @@ async fn install_extension_operation_rejects_membership_owned_by_another_user() 
 
     assert_eq!(error.status_code, 503);
     assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+}
+
+/// The OAuth-install path: the capability joins caller membership and then
+/// blocks on a dispatch-time auth gate (`Blocked::Auth`) because credential
+/// setup is still outstanding. The caller-scoped readback proves the exact
+/// package is now visible, so the install reports success and the "setup
+/// needed" auth step surfaces afterward. This pins the join-before-block
+/// ordering theme-1 depends on: were the capability to block on auth *before*
+/// joining membership, the readback below would miss the package and every
+/// OAuth extension install would 503 on first click.
+#[tokio::test]
+async fn install_extension_operation_blocked_on_auth_with_membership_reports_success() {
+    let invoker = BlockedAuthExtensionInstallInvoker::default();
+    let services = RebornServices::new_with_product_capability_invoker(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+        invoker.clone(),
+    )
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary("gmail", Vec::new(), None),
+            // An OAuth install that still needs credential setup rests in
+            // SetupNeeded; membership visibility, not phase, decides success.
+            phase: LifecyclePublicState::SetupNeeded,
+            install_scope: None,
+        },
+    }));
+    let package_ref = lifecycle_package_ref("gmail");
+
+    let response =
+        install_extension_on_surface(&services, caller(), package_ref.clone(), ActivityId::new())
+            .await
+            .expect("auth-blocked install with joined membership is success");
+
+    assert!(response.success);
+    assert_eq!(response.message, "Extension installed.");
+    // The install capability was dispatched, and its auth block was reconciled
+    // against the caller-scoped membership readback rather than surfaced as a
+    // failure.
+    let calls = invoker.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].2,
+        json!({ "extension_id": package_ref.id.as_str() })
+    );
+}
+
+/// The same auth-blocked resolution, but the caller-scoped readback does *not*
+/// show the requested package — the failure signature of a capability that
+/// blocks on auth *before* joining membership. Install must not paper the
+/// missing membership over as success; it returns the retryable
+/// 503/unavailable path so the first click is an honest transient error, not a
+/// silent no-op.
+#[tokio::test]
+async fn install_extension_operation_blocked_on_auth_without_membership_is_unavailable() {
+    let services = RebornServices::new_with_product_capability_invoker(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+        BlockedAuthExtensionInstallInvoker::default(),
+    )
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary("not-the-requested-extension", Vec::new(), None),
+            phase: LifecyclePublicState::SetupNeeded,
+            install_scope: None,
+        },
+    }));
+
+    let error = install_extension_on_surface(
+        &services,
+        caller(),
+        lifecycle_package_ref("gmail"),
+        ActivityId::new(),
+    )
+    .await
+    .expect_err("auth-blocked install without joined membership is not success");
+
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
 }
 
 #[tokio::test]
