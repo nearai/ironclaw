@@ -155,6 +155,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
+| `reborn_qa_emulate_provider_server` | Restores providers mutated by a QA journey while reusing the session-built binary and one module-scoped Reborn process. Google mutation cases restart the seeded provider on its stable port; Slack deliveries are deleted by provider-issued timestamp so the OAuth account remains valid. Read-only providers stay warm. |
 | `page` | Legacy gateway. Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
 | `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
@@ -181,7 +182,11 @@ instead of silently losing coverage. `test_reborn_qa_trace_full_path.py`
 discovers every manifest journey with an Emulate-supported provider call and
 executes that provider leg through standalone `ironclaw serve`, installed and
 authenticated first-party extensions, the credential/network boundaries, and
-the pinned Emulate fork. Cross-provider ordering is retained, fresh Docs and
+the pinned Emulate fork. Mutated provider state is reset or removed using
+provider-issued evidence while read-only providers, the built binary, and the
+Reborn process are reused; representative mutation journeys run a second time with
+clean-baseline assertions to prevent order-dependent passes.
+Cross-provider ordering is retained, fresh Docs and
 Sheets IDs are bound from earlier real tool results, redacted provider IDs are
 mapped to deterministic seeded resources, and assertions target capability
 success plus provider readback rather than recorded final-answer wording.

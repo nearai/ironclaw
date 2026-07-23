@@ -1,17 +1,15 @@
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeliveryStatus,
-    EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, FakeOutboundDeliverySink,
-    FakeProductWorkflow, FakeProjectionStream, FakeProtocolHttpEgress, InboundCommandPayload,
-    LinkedThreadActionPayload, OutboundDeliverySink, ParsedProductInbound, ProductAdapterId,
+    AdapterInstallationId, AuthRequirement, DeclaredEgressHost, EgressCredentialHandle,
+    EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, FakeProjectionStream, FakeProtocolHttpEgress,
+    InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound, ProductAdapterId,
     ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
     ProductProjectionItem, ProductProjectionState, ProductProjectionSubscribeInput,
     ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProductSurfaceKind,
-    ProductTriggerReason, ProductWorkflow, ProjectionCursor, ProjectionStream,
-    ProjectionSubscriptionPayload, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
-    ProtocolHttpEgress, ProtocolHttpEgressError, RedactedString, TrustedInboundContext,
-    UserMessagePayload,
+    ProductTriggerReason, ProjectionCursor, ProjectionStream, ProjectionSubscriptionPayload,
+    ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
+    ProtocolHttpEgressError, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
 
@@ -58,11 +56,6 @@ fn trusted_context() -> TrustedInboundContext {
         &evidence,
     )
     .expect("verified context")
-}
-
-fn envelope(event_id: &str, conversation: ExternalConversationRef) -> ProductInboundEnvelope {
-    ProductInboundEnvelope::from_trusted_parse(trusted_context(), parsed(event_id, conversation))
-        .expect("envelope")
 }
 
 fn envelope_with_payload(event_id: &str, payload: ProductInboundPayload) -> ProductInboundEnvelope {
@@ -305,94 +298,6 @@ fn egress_response_does_not_expose_raw_headers() {
 }
 
 #[tokio::test]
-async fn fakes_match_workflow_dedupe_and_delivery_semantics() {
-    let workflow = FakeProductWorkflow::new();
-    let first = envelope("update:42", conversation(Some("message-a")));
-    let second_same_event_different_source = envelope(
-        "update:42",
-        ExternalConversationRef::new(None, "67890", Some("topic-7"), Some("message-b"))
-            .expect("valid"),
-    );
-
-    workflow
-        .submit_inbound(first)
-        .await
-        .expect("first accepted");
-    workflow
-        .submit_inbound(second_same_event_different_source)
-        .await
-        .expect("different source accepted");
-    assert_eq!(workflow.accepted_count(), 2);
-
-    workflow.program_outcome(
-        ExternalEventId::new("update:reject").expect("valid"),
-        ProductInboundAck::Rejected(ProductRejection::permanent(
-            ProductRejectionKind::PolicyDenied,
-            "policy denied",
-        )),
-    );
-    let rejected = workflow
-        .submit_inbound(envelope("update:reject", conversation(Some("message-c"))))
-        .await
-        .expect("rejected ack");
-    assert!(matches!(rejected, ProductInboundAck::Rejected(_)));
-    assert_eq!(
-        workflow.accepted_count(),
-        2,
-        "rejected envelopes are not accepted"
-    );
-
-    workflow.program_outcome(
-        ExternalEventId::new("update:retryable").expect("valid"),
-        ProductInboundAck::Rejected(ProductRejection::retryable(
-            ProductRejectionKind::PolicyDenied,
-            "rate limited",
-        )),
-    );
-    let retryable_first = workflow
-        .submit_inbound(envelope(
-            "update:retryable",
-            conversation(Some("message-d")),
-        ))
-        .await
-        .expect("retryable rejection");
-    assert!(!retryable_first.is_durable_outcome());
-    let retryable_redelivery = workflow
-        .submit_inbound(envelope(
-            "update:retryable",
-            conversation(Some("message-d")),
-        ))
-        .await
-        .expect("retry redelivery");
-    assert!(
-        !matches!(retryable_redelivery, ProductInboundAck::Duplicate { .. }),
-        "retryable rejection should not be cached as duplicate prior outcome"
-    );
-
-    let sink = FakeOutboundDeliverySink::new();
-    let attempt_id = uuid::Uuid::new_v4();
-    let target_ref = ReplyTargetBindingRef::new("reply:dedupe").expect("valid");
-    sink.record(DeliveryStatus::Delivered {
-        attempt_id,
-        target: target_ref.clone(),
-        run_id: None,
-    })
-    .await;
-    sink.record(DeliveryStatus::FailedPermanent {
-        attempt_id,
-        target: target_ref,
-        run_id: None,
-        reason: RedactedString::new("message too long"),
-    })
-    .await;
-    assert_eq!(
-        sink.statuses().len(),
-        1,
-        "attempt_id dedupes status records"
-    );
-}
-
-#[tokio::test]
 async fn fake_egress_queues_same_host_responses_and_preserves_duplicate_headers() {
     let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
     egress.allow_credential_handle("telegram_bot_token");
@@ -493,11 +398,8 @@ async fn fake_projection_stream_filters_by_subscription_request() {
     );
 }
 
-#[tokio::test]
-async fn projection_resolution_uses_trusted_inbound_envelope_context() {
-    let workflow = FakeProductWorkflow::new();
-    let resolved = sample_subscription(None);
-    workflow.program_projection_resolution(resolved.clone());
+#[test]
+fn projection_input_uses_trusted_inbound_envelope_context() {
     let request_envelope = envelope_with_payload(
         "update:subscription",
         ProductInboundPayload::SubscriptionRequest(
@@ -508,16 +410,9 @@ async fn projection_resolution_uses_trusted_inbound_envelope_context() {
         request_envelope.auth_claim().subject(),
         "telegram_install_alpha"
     );
-    assert_eq!(
-        workflow
-            .subscribe_projection(
-                ProductProjectionSubscribeInput::from_inbound_envelope(&request_envelope)
-                    .expect("projection input"),
-            )
-            .await
-            .expect("resolved"),
-        resolved
-    );
+    let input = ProductProjectionSubscribeInput::from_inbound_envelope(&request_envelope)
+        .expect("projection input");
+    assert_eq!(input.thread_id_hint.as_deref(), Some("thread-1"));
 }
 
 fn sample_subscription(after_cursor: Option<ProjectionCursor>) -> ProjectionSubscriptionRequest {

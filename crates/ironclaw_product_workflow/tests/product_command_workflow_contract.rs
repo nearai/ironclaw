@@ -9,10 +9,10 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflow, ProtocolAuthEvidence, TrustedInboundContext,
+    ProtocolAuthEvidence, TrustedInboundContext,
 };
 use ironclaw_product_workflow::{
-    ActionDispatchKind, DefaultProductWorkflow, FakeConversationBindingService,
+    ActionDispatchKind, DefaultProductSurface, FakeConversationBindingService,
     FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePackageRef,
     LifecycleProductAction, LifecycleProductCommandService, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductResponse, ProductCommand, ProductCommandAdmission,
@@ -205,7 +205,7 @@ async fn command_payload_dispatches_through_command_service_not_inbound_turn_ser
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
         ProductInboundAck::NoOp,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service.clone());
     let envelope =
@@ -243,7 +243,7 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
     let command_service = Arc::new(LifecycleProductCommandService::new(
         lifecycle_facade.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope =
@@ -284,7 +284,7 @@ async fn malformed_known_lifecycle_command_rejects_before_admission() {
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
         ProductInboundAck::NoOp,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service.clone())
         .with_product_command_service(command_service.clone());
     let envelope = sample_command_envelope("command-extension-invalid", "extension_install", "{}");
@@ -317,7 +317,7 @@ async fn lifecycle_command_admission_rejects_before_facade_executes() {
     let command_service = Arc::new(LifecycleProductCommandService::new(
         lifecycle_facade.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope =
@@ -340,7 +340,7 @@ async fn lifecycle_command_service_rejects_non_lifecycle_commands_without_facade
     let command_service = Arc::new(LifecycleProductCommandService::new(
         lifecycle_facade.clone(),
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope("command-status-lifecycle-service", "status", "");
@@ -370,7 +370,7 @@ async fn lifecycle_facade_error_bubbles_and_releases_idempotency_lease() {
             },
         },
     )));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope(
@@ -398,7 +398,7 @@ async fn default_command_admission_rejects_before_command_service_executes() {
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
         ProductInboundAck::NoOp,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_service(command_service.clone());
     let envelope = sample_command_envelope("command-default-reject", "model", "gpt-5-mini");
 
@@ -423,7 +423,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
         ProductInboundAck::NoOp,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service.clone())
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope("command-context", "status", "");
@@ -468,7 +468,7 @@ async fn command_admission_error_releases_idempotency_lease() {
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
         ProductInboundAck::NoOp,
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service.clone());
     let envelope = sample_command_envelope("command-admission-error", "model", "gpt-5-mini");
@@ -496,7 +496,7 @@ async fn command_service_error_releases_idempotency_lease() {
             reason: "command backend unavailable".into(),
         },
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service.clone());
     let envelope = sample_command_envelope("command-service-error", "model", "gpt-5-mini");
@@ -519,7 +519,7 @@ async fn default_command_service_rejects_when_admission_is_supplied() {
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
     let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service);
     let envelope = sample_command_envelope("command-default-service-reject", "status", "");
 
@@ -546,7 +546,7 @@ async fn command_service_turn_ack_is_rejected_before_turn_dispatch_kind_is_recor
             submitted_run_id: TurnRunId::new(),
         },
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope("command-turn-ack", "status", "");
@@ -578,7 +578,7 @@ async fn command_service_rejected_busy_ack_yields_unsupported_action_kind_error(
             active_run_id: Some(TurnRunId::new()),
         },
     ));
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope("command-rejected-busy", "status", "");

@@ -14,6 +14,21 @@ The first implementation slice should expose the LLM default route through the e
 | `model.default` | yes | yes | string model id or `null` | active LLM selection | not redacted |
 | `provider.api_key` | yes | yes when active provider accepts API keys | redacted secret state | secret store or env metadata only | value always serialized as `null` |
 
+## ProductSurface mutation path
+
+Operator config reads are descriptor-backed ProductSurface query views:
+`operator_config_list` for the full projection and `operator_config_key` for a
+single key. The legacy `list_operator_config` and `get_operator_config_key`
+facade methods are compatibility wrappers over those same query paths while
+`RebornServicesApi` shrinks toward §5.2.
+
+The global approval toggle `agent.auto_approve_tools` is supported as a boolean
+operator config key. Its WebUI route still returns the typed operator config
+projection, but the write itself must dispatch through `ProductSurface::invoke`
+using the API-only first-party capability
+`builtin.operator_config_set_auto_approve`, then read back the authoritative
+tenant/user-scoped setting.
+
 ## Precedence
 
 Responses should include precedence metadata in this order:

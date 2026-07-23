@@ -274,6 +274,86 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the exact number of interactive, tool-capable calls observed by
+    /// the recoverable-failure provider wrapper. Text-only system-inference
+    /// calls used for compaction are intentionally excluded.
+    pub async fn assert_interactive_model_provider_call_count(
+        &self,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.interactive_calls();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected {expected} interactive model provider call(s), observed {actual}")
+                .into(),
+        )
+    }
+
+    /// Assert the exact number of times `needle` occurs across every request
+    /// seen by the recoverable-failure provider, including injected failures
+    /// that never reach the delegated `TraceLlm`.
+    pub async fn assert_model_message_content_occurrences(
+        &self,
+        needle: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.message_content_occurrences(needle);
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected model message content to contain {needle:?} {expected} time(s), observed {actual}"
+        )
+        .into())
+    }
+
+    /// Assert that at least `minimum` text-only provider calls occurred. These
+    /// are system-inference calls in the recovery scenarios, including context
+    /// compaction.
+    pub async fn assert_text_model_provider_call_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.text_calls();
+        if actual >= minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "expected at least {minimum} text-only model provider call(s), observed {actual}"
+        )
+        .into())
+    }
+
+    /// Assert no request seen by the recoverable-failure provider contains
+    /// `needle`, including requests rejected before `TraceLlm` delegation.
+    pub async fn assert_model_message_content_not_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        if !probe.message_content_contains(needle) {
+            return Ok(());
+        }
+        Err(format!("model message content unexpectedly contained {needle:?}").into())
+    }
+
     /// Assert some SINGLE model request contains EVERY needle in `needles`
     /// (all in one request, not spread across several) — the multi-turn "sees
     /// prior context" proof: an earlier-turn needle plus a current-turn needle

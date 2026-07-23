@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use super::{
     OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornLogEntry, RebornLogQueryRequest, RebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornViewDescriptor,
-    RebornViewProvider, WebUiAuthenticatedCaller, bounded_log_query, map_thread_error,
-    parse_run_id_field, parse_thread_id_field,
+    RebornServicesError, RebornServicesErrorCode, RebornViewDescriptor, RebornViewProvider,
+    WebUiAuthenticatedCaller, bounded_log_query, map_thread_error, parse_run_id_field,
+    parse_thread_id_field,
 };
 
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";

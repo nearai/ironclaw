@@ -222,6 +222,7 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         AgentLoopHostErrorKind::BudgetExceeded
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
+        | AgentLoopHostErrorKind::ContentFiltered
         | AgentLoopHostErrorKind::PolicyDenied => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
             detail: error.detail.clone(),

@@ -92,10 +92,9 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_product_workflow::{
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
-};
+use ironclaw_outbound::OutboundError;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
@@ -106,8 +105,9 @@ use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
@@ -122,8 +122,8 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    summary: RebornOutboundDeliveryTargetSummary,
-    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    summary: OutboundDeliveryTargetSummary,
+    capabilities: DeliveryTargetCapabilities,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -132,8 +132,8 @@ struct StaticOutboundDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         // Static test/QA fixture available to whichever caller asks: it claims
         // the querying caller as owner so it always survives the registry's
         // caller-scoping filter. Real providers derive the owner from the
@@ -142,7 +142,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+            owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
 }
@@ -473,7 +473,7 @@ struct SubmittedTurn {
 /// production [`RebornRuntime::send_user_message`] submit path but returns when
 /// the run first reaches a terminal status *or* parks on a `Blocked*` gate,
 /// instead of waiting only for a terminal status. Gate *resolution* stays on
-/// the WebUI `RebornServicesApi` facade (`resolve_gate`) per the #3094 seam;
+/// the WebUI `ProductSurface` facade (`resolve_gate`) per the #3094 seam;
 /// this type only observes where a run paused.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
@@ -1747,7 +1747,12 @@ impl RebornRuntime {
         description: Option<&str>,
         reply_target_binding_ref: ReplyTargetBindingRef,
     ) -> Result<(), RebornRuntimeError> {
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let target_id = OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("invalid outbound delivery target id: {error}"),
+            }
+        })?;
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             channel,
             display_name,
@@ -1760,10 +1765,12 @@ impl RebornRuntime {
             provider_key,
             Arc::new(StaticOutboundDeliveryTargetProvider {
                 summary,
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                capabilities: DeliveryTargetCapabilities {
                     final_replies: true,
+                    progress: false,
                     gate_prompts: false,
                     auth_prompts: false,
+                    modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
             }),
@@ -1988,8 +1995,8 @@ impl RebornRuntime {
     /// returned reply will surface that failure via `status = Failed`
     /// and `text = None`.
     ///
-    /// **WebUI-only origin contract**: this task-level send path resolves
-    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// **CLI origin contract**: this task-level send path resolves
+    /// the turn's product-context source channel as CLI chat (`resolve_cli`).
     /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
     /// this method for its submissions; it must resolve its own origin at
     /// that ingress instead.
@@ -2295,7 +2302,7 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                product_context: Some(ironclaw_product_context::resolve_cli(
                     scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
                 )),
             })
@@ -2677,7 +2684,7 @@ impl RebornRuntime {
     /// gate and reports the pause, instead of sitting in the non-terminal
     /// `BlockedAuth` state until `RunTimeout` (a real recorder hang this method
     /// exists to eliminate). This method only *observes* where the run paused;
-    /// gate *resolution* stays on the WebUI `RebornServicesApi` facade
+    /// gate *resolution* stays on the WebUI `ProductSurface` facade
     /// (`resolve_gate`) per the #3094 seam — do not add a resolution path here.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn send_user_message_until_gate(

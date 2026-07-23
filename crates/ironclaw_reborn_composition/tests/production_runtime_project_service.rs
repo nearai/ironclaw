@@ -5,7 +5,7 @@
 //! Regression for the bucket-2 production-parity gap (#5013 / audit #6389).
 //! Production profiles have `local_runtime: None`; `build_webui_services` only
 //! called `with_project_service` for the local substrate, so on production the
-//! WebUI project surface fell through to the `RebornServicesApi` default, which
+//! WebUI project surface fell through to the `ProductSurface` default, which
 //! returns `service_unavailable` for `create_project` / `list_projects`. The
 //! provisioner-style production fallback now sources the project service from
 //! the production store graph (`RebornProjectService` over
@@ -32,7 +32,8 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_product_workflow::{
-    RebornCreateProjectRequest, RebornListProjectsRequest, WebUiAuthenticatedCaller,
+    PROJECT_CREATE_OPERATION, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
+    WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -135,12 +136,15 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     );
 
     // (1) THE WIRING. Before the production fallback, the facade fell through to
-    // the `RebornServicesApi` default and this returned
+    // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let created = bundle
-        .api
-        .create_project(owner.clone(), create_request("Prod Project"))
+    let created = PROJECT_CREATE_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
+            owner.clone(),
+            create_request("Prod Project"),
+        )
         .await
         .expect("production project facade must be reachable (not service_unavailable)");
     assert_eq!(created.project.name, "Prod Project");
@@ -148,9 +152,13 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
 
     // (2) ROUND-TRIP over the production scoped filesystem: the created project
     // lists back for its owner.
-    let listed = bundle
-        .api
-        .list_projects(owner.clone(), RebornListProjectsRequest { limit: None })
+    let listed = PROJECTS_VIEW
+        .query_on(
+            bundle.api.as_ref(),
+            owner.clone(),
+            RebornListProjectsRequest { limit: None },
+            None,
+        )
         .await
         .expect("owner may list projects");
     assert!(
@@ -166,9 +174,13 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
-    let other_listed = bundle
-        .api
-        .list_projects(other_tenant, RebornListProjectsRequest { limit: None })
+    let other_listed = PROJECTS_VIEW
+        .query_on(
+            bundle.api.as_ref(),
+            other_tenant,
+            RebornListProjectsRequest { limit: None },
+            None,
+        )
         .await
         .expect("a foreign-tenant list is still reachable");
     assert!(

@@ -87,6 +87,13 @@ PROVIDER_TOOL_PREFIXES = (
 )
 ALL_EXTENSIONS = (*GOOGLE_EXTENSIONS, "github", "slack")
 TRACE_BOOTSTRAP_TOOLS = {"builtin__extension_search"}
+MUTATING_PROVIDER_TOOLS = {
+    "gmail__send_message": "google",
+    "google-docs__create_document": "google",
+    "google-sheets__create_spreadsheet": "google",
+    "google-sheets__append_values": "google",
+    "slack__send_message": "slack",
+}
 
 
 def _provider_journey_cases() -> tuple[str, ...]:
@@ -106,19 +113,50 @@ def _provider_journey_cases() -> tuple[str, ...]:
     return tuple(cases)
 
 
+def _mutating_provider_services(case: str) -> set[str]:
+    trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
+    return {
+        service
+        for step in trace["steps"]
+        for call in step["response"].get("tool_calls", [])
+        if (service := MUTATING_PROVIDER_TOOLS.get(call["name"])) is not None
+    }
+
+
 PROVIDER_JOURNEY_CASES = _provider_journey_cases()
+ISOLATION_REPEAT_CASES = (
+    "qa_5d_slack_strategy_doc_answer",
+    "qa_10f_slack_mention_encoding",
+)
+
+
+def _provider_journey_runs() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    runs = []
+    ids = []
+    for case in PROVIDER_JOURNEY_CASES:
+        runs.append(case)
+        ids.append(case)
+        if case in ISOLATION_REPEAT_CASES:
+            runs.append(case)
+            ids.append(f"{case}-isolated-repeat")
+    return tuple(runs), tuple(ids)
+
+
+PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = _provider_journey_runs()
 
 
 @pytest.fixture(scope="module")
-async def reborn_qa_emulate_provider_server(
+async def reborn_qa_emulate_runtime(
     ironclaw_reborn_binary,
     mock_llm_server,
-    emulate_google_server,
-    emulate_github_server,
-    emulate_slack_server,
+    resettable_emulate_provider_world,
     tmp_path_factory,
 ):
-    """Start standalone Reborn with every supported provider routed to Emulate."""
+    """Start one Reborn process against resettable provider URLs."""
+    provider_servers = resettable_emulate_provider_world.servers
+    emulate_google_server = provider_servers["google"]
+    emulate_github_server = provider_servers["github"]
+    emulate_slack_server = provider_servers["slack"]
     home_dir = tmp_path_factory.mktemp("reborn-qa-emulate-provider-home")
     mock_llm_address = urlparse(mock_llm_server)
     emulate_google_address = urlparse(emulate_google_server["url"])
@@ -179,6 +217,28 @@ async def reborn_qa_emulate_provider_server(
         }
     finally:
         await close_reborn_server(proc)
+
+
+@pytest.fixture
+async def reborn_qa_emulate_provider_server(
+    reborn_qa_emulate_runtime,
+    resettable_emulate_provider_world,
+    case,
+):
+    """Reset mutated providers while reusing the built binary and Reborn."""
+    services = _mutating_provider_services(case)
+    reset_services = services - {"slack"}
+    try:
+        yield reborn_qa_emulate_runtime
+    finally:
+        if "slack" in services:
+            await _cleanup_slack_provider_mutations(
+                reborn_qa_emulate_runtime["emulate_slack_url"],
+                reborn_qa_emulate_runtime["slack_state"],
+                case,
+            )
+        if reset_services:
+            await resettable_emulate_provider_world.reset(reset_services)
 
 
 async def _seed_google_account(
@@ -815,36 +875,245 @@ async def _assert_google_provider_outcome(
             assert "REBORN_QA_7E_BUG_ROW" in values.text, values.text
 
 
+async def _assert_google_provider_baseline(
+    emulate_url: str, case: str, trace: dict
+) -> None:
+    """Prove this journey cannot observe mutations from an earlier journey."""
+    calls = _recorded_provider_calls(trace)
+    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
+        send = next(
+            (call for call in calls if call["name"] == "gmail__send_message"),
+            None,
+        )
+        if send is not None:
+            subject = send["arguments"]["message"]["subject"]
+            listed = await client.get(
+                f"{emulate_url}/gmail/v1/users/me/messages",
+                params={"q": f"subject:{subject}"},
+            )
+            listed.raise_for_status()
+            assert not listed.json().get("messages"), (
+                f"provider world for {case} already contains sent mail {subject!r}"
+            )
+
+        create_call = next(
+            (
+                call
+                for call in calls
+                if call["name"]
+                in {
+                    "google-docs__create_document",
+                    "google-sheets__create_spreadsheet",
+                }
+            ),
+            None,
+        )
+        if create_call is None:
+            return
+        title = create_call["arguments"]["title"]
+        files = await client.get(
+            f"{emulate_url}/drive/v3/files",
+            params={"q": f"name = '{title}' and trashed = false"},
+        )
+        files.raise_for_status()
+        assert not [item for item in files.json()["files"] if item["name"] == title], (
+            f"provider world for {case} already contains Google resource {title!r}"
+        )
+
+
 async def _assert_slack_provider_outcome(
     emulate_url: str,
     slack_state: dict[str, str],
     trace: dict,
 ) -> None:
-    send = next(
-        (
-            call
-            for call in _recorded_provider_calls(trace)
-            if call["name"] == "slack__send_message"
-        ),
-        None,
-    )
-    if send is None:
+    sends = [
+        call
+        for call in _recorded_provider_calls(trace)
+        if call["name"] == "slack__send_message"
+    ]
+    if not sends:
         return
     async with httpx.AsyncClient(timeout=15) as client:
-        history = await slack_post(
+        for send in sends:
+            messages = await _slack_messages_for_send(
+                client, emulate_url, slack_state, send
+            )
+            assert any(
+                message.get("text") == send["arguments"]["text"]
+                for message in messages
+            ), messages
+
+
+async def _slack_messages_for_send(
+    client: httpx.AsyncClient,
+    emulate_url: str,
+    slack_state: dict[str, str],
+    send: dict,
+) -> list[dict]:
+    """Read a delivery from the Slack surface that can contain it."""
+    payload = {"channel": slack_state["channel_id"], "limit": 100}
+    thread_ts = send["arguments"].get("thread_ts")
+    if thread_ts is None:
+        method = "conversations.history"
+    else:
+        method = "conversations.replies"
+        payload["ts"] = thread_ts
+    page = await slack_post(client, emulate_url, method, payload)
+    return page.get("messages", [])
+
+
+async def _assert_slack_provider_baseline(
+    emulate_url: str,
+    slack_state: dict[str, str],
+    case: str,
+    trace: dict,
+) -> None:
+    """Prove an earlier journey did not leave the expected Slack mutation."""
+    sends = [
+        call
+        for call in _recorded_provider_calls(trace)
+        if call["name"] == "slack__send_message"
+    ]
+    if not sends:
+        return
+    async with httpx.AsyncClient(timeout=15) as client:
+        for send in sends:
+            messages = await _slack_messages_for_send(
+                client, emulate_url, slack_state, send
+            )
+            assert not any(
+                message.get("text") == send["arguments"]["text"]
+                for message in messages
+            ), f"provider world for {case} already contains the expected Slack delivery"
+
+
+async def _cleanup_slack_provider_mutations_from_trace(
+    emulate_url: str,
+    slack_state: dict[str, str],
+    trace: dict,
+) -> None:
+    sends = [
+        call
+        for call in _recorded_provider_calls(trace)
+        if call["name"] == "slack__send_message"
+    ]
+    if not sends:
+        return
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        matches = {}
+        for send in sends:
+            messages = await _slack_messages_for_send(
+                client, emulate_url, slack_state, send
+            )
+            expected_text = send["arguments"]["text"]
+            matches.update(
+                {
+                    message["ts"]: message
+                    for message in messages
+                    if message.get("text") == expected_text
+                }
+            )
+        for message in matches.values():
+            await slack_post(
+                client,
+                emulate_url,
+                "chat.delete",
+                {"channel": slack_state["channel_id"], "ts": message["ts"]},
+            )
+
+
+async def _cleanup_slack_provider_mutations(
+    emulate_url: str,
+    slack_state: dict[str, str],
+    case: str,
+) -> None:
+    """Remove messages created by one journey without rotating OAuth state."""
+    trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
+    _normalize_slack_arguments(trace, slack_state, case)
+    await _cleanup_slack_provider_mutations_from_trace(
+        emulate_url, slack_state, trace
+    )
+
+
+async def test_slack_mutation_cleanup_covers_thread_replies(
+    resettable_emulate_provider_world,
+) -> None:
+    """Threaded sends must be visible to baseline checks and cleanup."""
+    emulate_url = resettable_emulate_provider_world.servers["slack"]["url"]
+    async with httpx.AsyncClient(timeout=15) as client:
+        channels = await slack_post(
             client,
             emulate_url,
-            "conversations.history",
-            {"channel": slack_state["channel_id"], "limit": 100},
+            "conversations.list",
+            {"types": "public_channel", "exclude_archived": True},
         )
-    assert any(
-        message.get("text") == send["arguments"]["text"]
-        for message in history["messages"]
-    ), history
+        channel = next(
+            item for item in channels["channels"] if item["name"] == "reborn-alerts"
+        )
+        root = await slack_post(
+            client,
+            emulate_url,
+            "chat.postMessage",
+            {"channel": channel["id"], "text": "thread cleanup contract root"},
+        )
+        reply = await slack_post(
+            client,
+            emulate_url,
+            "chat.postMessage",
+            {
+                "channel": channel["id"],
+                "thread_ts": root["ts"],
+                "text": "thread cleanup contract reply",
+            },
+        )
+
+    trace = {
+        "steps": [
+            {
+                "response": {
+                    "tool_calls": [
+                        {
+                            "name": "slack__send_message",
+                            "arguments": {
+                                "channel": channel["id"],
+                                "thread_ts": root["ts"],
+                                "text": reply["message"]["text"],
+                            },
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    slack_state = {"channel_id": channel["id"]}
+    try:
+        await _assert_slack_provider_outcome(emulate_url, slack_state, trace)
+        with pytest.raises(AssertionError, match="already contains"):
+            await _assert_slack_provider_baseline(
+                emulate_url, slack_state, "thread-cleanup-contract", trace
+            )
+
+        await _cleanup_slack_provider_mutations_from_trace(
+            emulate_url, slack_state, trace
+        )
+        await _assert_slack_provider_baseline(
+            emulate_url, slack_state, "thread-cleanup-contract", trace
+        )
+    finally:
+        async with httpx.AsyncClient(timeout=15) as client:
+            for message in (reply, root):
+                await slack_post(
+                    client,
+                    emulate_url,
+                    "chat.delete",
+                    {"channel": channel["id"], "ts": message["ts"]},
+                    expect_ok=False,
+                )
 
 
 @pytest.mark.parametrize(
-    "case", PROVIDER_JOURNEY_CASES, ids=PROVIDER_JOURNEY_CASES
+    "case", PROVIDER_JOURNEY_RUNS, ids=PROVIDER_JOURNEY_RUN_IDS
 )
 async def test_qa_journey_provider_leg_replays_through_emulate(
     reborn_qa_emulate_provider_server,
@@ -862,6 +1131,16 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     )
     user_input = trace["steps"][0]["response"]["content"]
     expected_calls = _recorded_provider_calls(trace)
+
+    await _assert_google_provider_baseline(
+        reborn_qa_emulate_provider_server["emulate_google_url"], case, trace
+    )
+    await _assert_slack_provider_baseline(
+        reborn_qa_emulate_provider_server["emulate_slack_url"],
+        reborn_qa_emulate_provider_server["slack_state"],
+        case,
+        trace,
+    )
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, server)

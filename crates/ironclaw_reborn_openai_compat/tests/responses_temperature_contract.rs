@@ -14,11 +14,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_adapters::{
-    AuthRequirement, FakeProductWorkflow, ProductInboundEnvelope, ProductInboundPayload,
-    ProjectionReadRequest, ProtocolAuthEvidence,
-};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_adapters::{AuthRequirement, ProductInboundPayload, ProtocolAuthEvidence};
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs,
     OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatRouterState,
@@ -28,9 +25,11 @@ use ironclaw_reborn_openai_compat::{
     OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
     openai_compat_router_with_state,
 };
-use ironclaw_turns::{TurnActor, TurnRunId, TurnScope};
+use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
-use support::in_memory_openai_compat_ref_store;
+use support::{
+    FakeProductSurface, RecordedProductSurfaceSubmit, in_memory_openai_compat_ref_store,
+};
 use tower::ServiceExt;
 
 /// POST `/v1/responses` with `temperature` set must preserve it in the
@@ -38,7 +37,7 @@ use tower::ServiceExt;
 /// gateway writing `IncomingMessage.metadata["temperature"]`.
 #[tokio::test]
 async fn responses_request_temperature_lands_in_submitted_payload() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(workflow.clone());
 
     let response = router
@@ -68,11 +67,11 @@ async fn responses_request_temperature_lands_in_submitted_payload() {
 }
 
 /// POST `/v1/responses` with `temperature` outside the OpenAI-compatible
-/// `[0, 2]` range must reject with 400 before submitting to ProductWorkflow.
+/// `[0, 2]` range must reject with 400 before submitting to ProductSurface.
 #[tokio::test]
 async fn responses_request_temperature_out_of_range_rejects_and_does_not_submit() {
     for bad_temperature in [-0.5_f64, 2.5_f64] {
-        let workflow = Arc::new(FakeProductWorkflow::new());
+        let workflow = Arc::new(FakeProductSurface::new());
         let router = test_router(workflow.clone());
 
         let response = router
@@ -101,7 +100,7 @@ async fn responses_request_temperature_out_of_range_rejects_and_does_not_submit(
         assert_eq!(
             workflow.accepted_count(),
             0,
-            "bad temperature {bad_temperature} must not submit to ProductWorkflow"
+            "bad temperature {bad_temperature} must not submit to ProductSurface"
         );
     }
 }
@@ -110,7 +109,7 @@ async fn responses_request_temperature_out_of_range_rejects_and_does_not_submit(
 /// field. Downstream code treats presence as the per-request override signal.
 #[tokio::test]
 async fn responses_request_without_temperature_omits_payload_field() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(workflow.clone());
 
     let response = router
@@ -135,8 +134,7 @@ async fn responses_request_without_temperature_omits_payload_field() {
     );
 }
 
-fn test_router(workflow: Arc<FakeProductWorkflow>) -> axum::Router {
-    workflow.program_projection_read_resolution(sample_projection_read_request());
+fn test_router(workflow: Arc<FakeProductSurface>) -> axum::Router {
     let service = OpenAiResponsesWorkflow::new(
         workflow,
         in_memory_openai_compat_ref_store(),
@@ -165,7 +163,7 @@ async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("json")
 }
 
-fn submitted_user_message_json(envelope: &ProductInboundEnvelope) -> Value {
+fn submitted_user_message_json(envelope: &RecordedProductSurfaceSubmit) -> Value {
     let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
         panic!("expected user message payload");
     };
@@ -187,21 +185,6 @@ fn caller() -> OpenAiCompatAuthenticatedCaller {
         ),
     )
     .expect("caller")
-}
-
-fn sample_projection_read_request() -> ProjectionReadRequest {
-    ProjectionReadRequest {
-        actor: TurnActor::new(UserId::new("test-user").expect("user")),
-        scope: TurnScope::new_with_owner(
-            TenantId::new("tenant-a").expect("tenant"),
-            Some(AgentId::new("agent-a").expect("agent")),
-            Some(ProjectId::new("project-a").expect("project")),
-            ThreadId::new("thread-openai-response").expect("thread"),
-            Some(UserId::new("test-user").expect("user")),
-        ),
-        after_cursor: None,
-        limit: None,
-    }
 }
 
 struct StaticResponsesReader;

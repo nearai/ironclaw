@@ -3,6 +3,7 @@ use crate::{
     OpenAiCompatTurnRunRef,
 };
 use ironclaw_product_adapters::ProductInboundAck;
+use ironclaw_product_workflow::RebornSubmitTurnResponse;
 
 pub(crate) fn internal_refs_from_ack(
     ack: &ProductInboundAck,
@@ -29,6 +30,34 @@ pub(crate) fn internal_refs_from_ack(
             | ProductInboundAck::CommandResult { .. }
             | ProductInboundAck::NoOp => return Err(OpenAiCompatHttpError::internal()),
         }
+    }
+}
+
+pub(crate) fn product_ack_from_reborn_submit(
+    response: RebornSubmitTurnResponse,
+) -> ProductInboundAck {
+    match response {
+        RebornSubmitTurnResponse::Submitted {
+            accepted_message_ref,
+            run_id,
+            ..
+        }
+        | RebornSubmitTurnResponse::AlreadySubmitted {
+            accepted_message_ref,
+            run_id,
+            ..
+        } => ProductInboundAck::Accepted {
+            accepted_message_ref,
+            submitted_run_id: run_id,
+        },
+        RebornSubmitTurnResponse::RejectedBusy {
+            accepted_message_ref,
+            active_run_id,
+            ..
+        } => ProductInboundAck::RejectedBusy {
+            accepted_message_ref,
+            active_run_id,
+        },
     }
 }
 

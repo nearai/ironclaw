@@ -1,12 +1,12 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is compiled into
+//! [`ironclaw_product_workflow::ProductSurface`] facade. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
 //!
-//! - Handlers consume only [`RebornServicesApi`] for chat, run/gate,
+//! - Handlers consume only [`ProductSurface`] for chat, run/gate,
 //!   extension, and automation reads. They never reach into the dispatcher,
 //!   `HostRuntime`, run-state, DB stores, or any runtime lane.
 //! - Auth and CORS are **not** enforced here. Host composition runs the
@@ -21,7 +21,7 @@
 //! ## Streaming
 //!
 //! `stream_events` is exposed as SSE. The current
-//! [`RebornServicesApi::stream_events`] is drain-only, so the handler
+//! [`ProductSurface::stream_events`] is drain-only, so the handler
 //! drains once, renders each product envelope into a
 //! [`WebChatV2EventFrame`] SSE message with the projection cursor as the
 //! SSE id, then polls at a low cadence for newly-arrived events. When the
@@ -34,7 +34,7 @@
 //! maximum lifetime so leaked guards or stuck pollers cannot wedge a
 //! caller's slot indefinitely.
 //!
-//! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
+//! [`ProductSurface`]: ironclaw_product_workflow::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
 //! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor

@@ -1,6 +1,6 @@
 //! End-to-end coverage for the WebChat v2 admin user-management surface.
 //!
-//! Unlike the crate-tier facade tests (which drive `RebornServicesApi` against
+//! Unlike the crate-tier facade tests (which drive `ProductSurface` against
 //! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
 //! service wired (identity user-directory + admin secret provisioner), composes
 //! the full `webui_v2_app` with a real

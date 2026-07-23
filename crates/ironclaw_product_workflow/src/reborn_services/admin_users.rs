@@ -37,6 +37,13 @@ pub enum AdminUserRole {
     Member,
 }
 
+impl AdminUserRole {
+    /// Whether this role clears the admin authorization boundary.
+    pub fn is_admin(self) -> bool {
+        matches!(self, AdminUserRole::Owner | AdminUserRole::Admin)
+    }
+}
+
 /// Immutable user-owned content/login policy. Kept separate from RBAC role.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,13 +51,6 @@ pub enum AdminUserContentAccessPolicy {
     #[default]
     Private,
     TenantAdminManaged,
-}
-
-impl AdminUserRole {
-    /// Whether this role clears the admin authorization boundary.
-    pub fn is_admin(self) -> bool {
-        matches!(self, AdminUserRole::Owner | AdminUserRole::Admin)
-    }
 }
 
 /// One user as seen by the admin surface — doubles as the domain record the
@@ -87,7 +87,7 @@ pub struct AdminUserSecretMeta {
     pub updated_at: Option<String>,
 }
 
-/// Fields for creating a private human user record. No credential is issued.
+/// Fields for creating a private human user record.
 #[derive(Debug, Clone)]
 pub struct AdminCreatePrivateUserFields {
     pub email: Option<String>,
@@ -101,7 +101,7 @@ pub struct AdminCreateManagedUserFields {
     pub display_name: Option<String>,
 }
 
-/// A newly created user. Creation never returns a login credential.
+/// A newly created user. Creation itself never manufactures a credential.
 pub struct AdminCreatedUser {
     pub record: AdminUserRecord,
 }
@@ -387,7 +387,7 @@ impl AdminManagedResourceService for RejectingAdminManagedResourceService {
 // --- Wire contract (WebChat v2 admin routes) ---------------------------------
 
 /// Query params for `GET /admin/users`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RebornAdminUserListQuery {
     #[serde(default)]
     pub status: Option<AdminUserStatus>,
@@ -401,6 +401,12 @@ pub struct RebornAdminUserListQuery {
     pub cursor: Option<String>,
 }
 
+/// Request for routes addressing one admin-managed user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAdminUserRequest {
+    pub user_id: UserId,
+}
+
 /// Response for `GET /admin/users`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminUserListResponse {
@@ -412,30 +418,30 @@ pub struct RebornAdminUserListResponse {
 }
 
 /// Body for `POST /admin/users`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminCreateUserRequest {
     #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
     pub role: AdminUserRole,
-    /// Mint and return a login bearer exactly once. Omitted/false preserves
-    /// the safe invitation-style default.
+    /// Mint and return a reusable login bearer. Omitted/false preserves the
+    /// invitation-style default.
     #[serde(default)]
     pub issue_login_token: bool,
 }
 
 /// Body for `POST /admin/agents`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RebornAdminCreateManagedUserRequest {
     #[serde(default)]
     pub display_name: Option<String>,
 }
 
-/// Route-normalized creation intent carried through the existing admin-user
-/// facade operation. The HTTP route selects the variant, so request JSON
-/// cannot switch private-user creation into managed-subject creation.
-#[derive(Debug, Clone)]
+/// Route-normalized creation intent. The HTTP route selects the variant, so
+/// request JSON cannot switch private-user creation into managed creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "request")]
 pub enum AdminUserCreationRequest {
     Private(RebornAdminCreateUserRequest),
     Managed(RebornAdminCreateManagedUserRequest),
@@ -455,7 +461,7 @@ impl From<RebornAdminCreateManagedUserRequest> for AdminUserCreationRequest {
 
 /// Response for private-user or managed-agent creation. `login_token` is
 /// present only when explicitly requested for a private user.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RebornAdminUserCreatedResponse {
     pub user: AdminUserRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,7 +479,7 @@ impl std::fmt::Debug for RebornAdminUserCreatedResponse {
 }
 
 /// Body for `PATCH /admin/users/{id}` — partial profile update.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RebornAdminUpdateUserRequest {
     #[serde(default)]
     pub display_name: Option<String>,
@@ -481,15 +487,39 @@ pub struct RebornAdminUpdateUserRequest {
     pub metadata: Option<BTreeMap<String, String>>,
 }
 
+/// ProductSurface mutation input for `PATCH /admin/users/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminUpdateUserProductRequest {
+    pub user_id: UserId,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<BTreeMap<String, String>>,
+}
+
 /// Body for `POST /admin/users/{id}/status`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminSetStatusRequest {
     pub status: AdminUserStatus,
 }
 
+/// ProductSurface mutation input for `POST /admin/users/{id}/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminSetStatusProductRequest {
+    pub user_id: UserId,
+    pub status: AdminUserStatus,
+}
+
 /// Body for `POST /admin/users/{id}/role`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminSetRoleRequest {
+    pub role: AdminUserRole,
+}
+
+/// ProductSurface mutation input for `POST /admin/users/{id}/role`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminSetRoleProductRequest {
+    pub user_id: UserId,
     pub role: AdminUserRole,
 }
 
@@ -513,9 +543,24 @@ pub struct RebornAdminUserSecretsListResponse {
 }
 
 /// Body for `PUT /admin/users/{id}/secrets/{handle}` (handle is in the path).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminPutSecretRequest {
     pub value: String,
+}
+
+/// ProductSurface mutation input for `PUT /admin/users/{id}/secrets/{handle}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminPutSecretProductRequest {
+    pub user_id: UserId,
+    pub handle: String,
+    pub value: String,
+}
+
+/// ProductSurface mutation input for `DELETE /admin/users/{id}/secrets/{handle}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminDeleteSecretProductRequest {
+    pub user_id: UserId,
+    pub handle: String,
 }
 
 /// Response for `PUT /admin/users/{id}/secrets/{handle}`.

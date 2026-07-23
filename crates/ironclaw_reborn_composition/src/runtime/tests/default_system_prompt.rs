@@ -102,9 +102,9 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
-                && message.content.contains("Run origin: WebUI chat")
+                && message.content.contains("Run origin: CLI chat")
         }),
-        "local-dev runtime send_user_message should tag WebUiChat origin in runtime context"
+        "local-dev runtime send_user_message should tag CLI source-channel origin in runtime context"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");

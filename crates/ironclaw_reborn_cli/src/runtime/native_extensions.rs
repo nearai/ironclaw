@@ -29,7 +29,7 @@ pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBindin
             extension_id: "slack".to_string(),
             adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
             inbound_payload_classifier: Some(Arc::new(|message| {
-                ironclaw_slack_extension::classify_interaction_resolution(
+                ironclaw_slack_extension::classify_channel_interaction_resolution(
                     &message.text,
                     message.trigger,
                 )

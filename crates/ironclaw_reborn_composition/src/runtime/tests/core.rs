@@ -593,9 +593,9 @@ use ironclaw_events::{EventStreamKey, ReadScope};
 use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId, CorrelationId,
-    EffectKind, InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope,
-    TenantId, ThreadId, UserId,
+    Action, ActivityId, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
+    CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal, Resolution,
+    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -610,9 +610,11 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
-    RebornExtensionCredentialSetup, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    CREATE_THREAD_OPERATION, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
+    LifecycleReadinessBlocker, ProductCapabilityInput, RESOLVE_GATE_OPERATION,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, SUBMIT_TURN_OPERATION,
     WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_gate_ref,
@@ -1224,13 +1226,19 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
 
 static RUNTIME_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct RuntimeEnvGuardEntry {
+    name: &'static str,
+    effective: Option<String>,
+    snapshot: ironclaw_common::env_helpers::RuntimeEnvSnapshot,
+}
+
 struct RuntimeEnvGuard {
     // Serializes tokio tests that mutate the runtime env overlay. The
     // set/remove helpers lock only the separate override map, not
     // ENV_MUTEX, so restoration can safely run while this guard is held.
     _async_lock: tokio::sync::MutexGuard<'static, ()>,
     _env_lock: std::sync::MutexGuard<'static, ()>,
-    previous: Vec<(&'static str, Option<String>)>,
+    previous: Vec<RuntimeEnvGuardEntry>,
 }
 
 impl RuntimeEnvGuard {
@@ -1243,12 +1251,16 @@ impl RuntimeEnvGuard {
         let env_lock = ironclaw_common::env_helpers::lock_env();
         let previous = vars
             .iter()
-            .map(|(name, _)| (*name, ironclaw_common::env_helpers::env_or_override(name)))
+            .map(|(name, _)| RuntimeEnvGuardEntry {
+                name,
+                effective: ironclaw_common::env_helpers::env_or_override(name),
+                snapshot: ironclaw_common::env_helpers::snapshot_runtime_env(name),
+            })
             .collect::<Vec<_>>();
         for (name, value) in vars {
             match value {
                 Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                None => ironclaw_common::env_helpers::mask_runtime_env(name),
             }
         }
         Self {
@@ -1261,16 +1273,14 @@ impl RuntimeEnvGuard {
 
 impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
-        for (name, previous) in self.previous.iter().rev() {
-            match previous {
-                Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                None => ironclaw_common::env_helpers::remove_runtime_env(name),
-            }
+        for previous in self.previous.iter().rev() {
+            ironclaw_common::env_helpers::restore_runtime_env(previous.snapshot.clone());
             if !std::thread::panicking() {
                 debug_assert_eq!(
-                    ironclaw_common::env_helpers::env_or_override(name),
-                    previous.clone(),
-                    "RuntimeEnvGuard failed to restore {name}"
+                    ironclaw_common::env_helpers::env_or_override(previous.name),
+                    previous.effective.clone(),
+                    "RuntimeEnvGuard failed to restore {}",
+                    previous.name
                 );
             }
         }
@@ -1962,8 +1972,12 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
 
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2113,8 +2127,12 @@ async fn nearai_mcp_runtime_access_secret(
 
 #[tokio::test]
 async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2603,8 +2621,12 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     // by `RebornLlmReloadAdapter::reload`) sets exactly that field from the
     // seeded key below. So the session/auth-url defaults are constructed but
     // never read from disk or contacted over the network.
-    let _env_guard =
-        RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", None),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", None),
+    ])
+    .await;
     let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
     let root = tempfile::tempdir().expect("tempdir");
@@ -3565,7 +3587,7 @@ async fn send_user_message_persists_personal_owner_for_webui() {
 /// gap by asserting the *rendered* origin appears in the captured model
 /// request.
 #[tokio::test]
-async fn send_user_message_renders_webui_origin_in_model_request() {
+async fn send_user_message_renders_cli_origin_in_model_request() {
     let root = tempfile::tempdir().expect("tempdir");
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
@@ -3625,11 +3647,11 @@ async fn send_user_message_renders_webui_origin_in_model_request() {
             .clone()
     };
 
-    // Exact string produced by LoopRuntimeContext::render_model_content
-    // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+    // Exact string produced by LoopRuntimeContext::render_model_content for
+    // local runtime chat, which stamps the first-party source channel as CLI.
     assert!(
-        runtime_context_content.contains("Run origin: WebUI chat; replies render in this chat."),
-        "runtime-context system message must contain the WebUI origin line, \
+        runtime_context_content.contains("Run origin: CLI chat; replies render in this session."),
+        "runtime-context system message must contain the CLI origin line, \
              got: {runtime_context_content:?}"
     );
 
@@ -5061,9 +5083,9 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         Some(AgentId::new("runtime-webui-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-stream-thread".to_string()),
@@ -5073,9 +5095,9 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         )
         .await
         .expect("create webui thread");
-    let submitted = bundle
-        .api
-        .submit_turn(
+    let submitted = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-webui-stream-message".to_string()),
@@ -5241,6 +5263,58 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+async fn query_webui_extension_setup(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+) -> RebornSetupExtensionResponse {
+    let page = api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::EXTENSION_SETUP_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({ "package_id": package_id }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("setup extension lifecycle projection");
+    serde_json::from_value(page.payload).expect("setup extension payload")
+}
+
+async fn submit_webui_extension_setup(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+    request: WebUiSetupExtensionRequest,
+) -> RebornSetupExtensionResponse {
+    let mut input = serde_json::to_value(request).expect("setup request serializes");
+    input
+        .as_object_mut()
+        .expect("setup request serializes as object")
+        .insert(
+            "extension_id".to_string(),
+            serde_json::Value::String(package_id.to_string()),
+        );
+    let resolution = api
+        .invoke(
+            caller.clone(),
+            CapabilityId::new(ironclaw_product_workflow::EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
+                .expect("setup submit capability id"),
+            ProductCapabilityInput::json(input),
+            ActivityId::new(),
+        )
+        .await
+        .expect("submit extension setup");
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("extension setup submit did not succeed: {other:?}"),
+    }
+    query_webui_extension_setup(api, caller, package_id).await
+}
+
 #[tokio::test]
 async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5276,16 +5350,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         None,
     );
 
-    let setup = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
-        .await
-        .expect("setup extension lifecycle projection");
+    let setup = query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
     assert_eq!(setup.phase, InstallationState::Installed);
@@ -5299,16 +5364,8 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
-    let google_setup = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
-        .await
-        .expect("google setup extension lifecycle projection");
+    let google_setup =
+        query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
     let google_secret = &google_setup.secrets[0];
     assert_eq!(google_secret.provider, "google");
@@ -5391,22 +5448,129 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
 
     let cleared = bundle
         .api
-        .set_outbound_preferences(
+        .invoke(
             caller.clone(),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: None,
-            },
+            ironclaw_host_api::CapabilityId::new(
+                ironclaw_product_workflow::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+            )
+            .expect("outbound preferences capability id"),
+            ProductCapabilityInput::json(serde_json::json!({})),
+            ActivityId::new(),
         )
         .await
         .expect("outbound preference clear uses composed facade");
-    assert!(cleared.final_reply_target.is_none());
-
-    let targets = bundle
+    assert!(matches!(cleared, Resolution::Done(_)));
+    let cleared_page = bundle
         .api
-        .list_outbound_delivery_targets(caller)
+        .query(
+            caller.clone(),
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::OUTBOUND_PREFERENCES_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("outbound preference read-back uses composed view");
+    let cleared_preferences: RebornOutboundPreferencesResponse =
+        serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
+    assert!(cleared_preferences.final_reply_target.is_none());
+
+    let targets_page = bundle
+        .api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::OUTBOUND_DELIVERY_TARGETS_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("outbound target listing uses composed facade");
+    let targets: ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert!(targets.targets.is_empty());
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "webui skill ok".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("runtime-webui-skill-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-webui-skill-tenant".to_string(),
+        agent_id: "runtime-webui-skill-agent".to_string(),
+        source_binding_id: "runtime-webui-skill-source".to_string(),
+        reply_target_binding_id: "runtime-webui-skill-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(3),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("runtime-webui-skill-tenant").unwrap(),
+        UserId::new("runtime-webui-skill-owner").unwrap(),
+        Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+        None,
+    );
+
+    let installed = bundle
+        .api
+        .invoke(
+            caller.clone(),
+            ironclaw_host_api::CapabilityId::new(
+                ironclaw_product_workflow::SKILL_INSTALL_CAPABILITY_ID,
+            )
+            .expect("skill install capability id"),
+            ProductCapabilityInput::json(serde_json::json!({
+                "name": "product-surface-skill",
+                "content": "---\nname: product-surface-skill\n---\n# Product Surface\n"
+            })),
+            ActivityId::new(),
+        )
+        .await
+        .expect("skill install uses product capability path");
+    match installed {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("skill install did not succeed: {other:?}"),
+    }
+    let skills_page = bundle
+        .api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::SKILLS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("skill list uses product view");
+    let skills: RebornSkillListResponse =
+        serde_json::from_value(skills_page.payload).expect("skills payload");
+    assert!(
+        skills
+            .skills
+            .iter()
+            .any(|skill| skill.name == "product-surface-skill")
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -5514,15 +5678,16 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
         UserId::new("runtime-webui-diagnostics-owner").unwrap(),
         Some(AgentId::new("runtime-webui-diagnostics-agent").unwrap()),
         None,
-    );
+    )
+    .with_operator_webui_config(true);
     let router = webui_v2_router(WebUiV2State::new(
         bundle.api,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
+    .layer(axum::Extension(caller))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
-    }))
-    .layer(axum::Extension(caller));
+    }));
 
     let response = router
         .oneshot(
@@ -5601,7 +5766,15 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
 
     let error = bundle
         .api
-        .list_automations(caller, WebUiListAutomationsRequest::default())
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::AUTOMATIONS_VIEW.id.to_string(),
+                params: serde_json::to_value(WebUiListAutomationsRequest::default())
+                    .expect("automation list params"),
+                cursor: None,
+            },
+        )
         .await
         .expect_err("missing host runtime should leave automation facade unavailable");
 
@@ -5646,25 +5819,21 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
-    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
-
-    let first = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            package_ref.clone(),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(serde_json::json!({
-                    "secrets": {
-                        "github_runtime_token": "ghp_first_token"
-                    },
-                    "fields": {}
-                })),
-            },
-        )
-        .await
-        .expect("submit github runtime token");
+    let first = submit_webui_extension_setup(
+        bundle.api.as_ref(),
+        caller.clone(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(serde_json::json!({
+                "secrets": {
+                    "github_runtime_token": "ghp_first_token"
+                },
+                "fields": {}
+            })),
+        },
+    )
+    .await;
     assert_eq!(first.secrets.len(), 1);
     assert!(first.secrets[0].provided);
     let first_credential_ref = first.secrets[0]
@@ -5672,23 +5841,21 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         .clone()
         .expect("credential ref");
 
-    let second = bundle
-        .api
-        .setup_extension(
-            caller,
-            package_ref,
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(serde_json::json!({
-                    "secrets": {
-                        "github_runtime_token": "ghp_second_token"
-                    },
-                    "fields": {}
-                })),
-            },
-        )
-        .await
-        .expect("rotate github runtime token");
+    let second = submit_webui_extension_setup(
+        bundle.api.as_ref(),
+        caller,
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(serde_json::json!({
+                "secrets": {
+                    "github_runtime_token": "ghp_second_token"
+                },
+                "fields": {}
+            })),
+        },
+    )
+    .await;
     assert_eq!(second.secrets.len(), 1);
     assert!(second.secrets[0].provided);
     assert_eq!(
@@ -5734,9 +5901,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         Some(AgentId::new("runtime-webui-approval-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-approval-thread".to_string()),
@@ -5748,9 +5915,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         .expect("create thread");
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
 
-    let err = bundle
-        .api
-        .resolve_gate(
+    let err = RESOLVE_GATE_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-approval-gate".to_string()),
@@ -5802,9 +5969,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         Some(AgentId::new("runtime-webui-auth-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-auth-thread".to_string()),
@@ -5815,9 +5982,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         .await
         .expect("create thread");
 
-    let err = bundle
-        .api
-        .resolve_gate(
+    let err = RESOLVE_GATE_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-auth-gate".to_string()),
@@ -5870,9 +6037,9 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
         Some(AgentId::new("runtime-webui-audit-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-audit-thread".to_string()),
@@ -6001,9 +6168,9 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
         "blocked approval run should be visible as a gate prompt on the product event stream"
     );
 
-    bundle
-        .api
-        .resolve_gate(
+    RESOLVE_GATE_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-audit-gate".to_string()),
@@ -6097,9 +6264,9 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-skill-thread".to_string()),
@@ -6109,9 +6276,9 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         )
         .await
         .expect("create thread");
-    let submitted = bundle
-        .api
-        .submit_turn(
+    let submitted = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiSendMessageRequest {
                 client_action_id: Some("send-webui-skill-message".to_string()),
@@ -6454,9 +6621,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     );
 
     // Create the thread via WebUI so the thread record exists.
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-rejected-busy-thread".to_string()),
@@ -6497,9 +6664,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     } = submitted_a;
 
     // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
-    let response_b = bundle
-        .api
-        .submit_turn(
+    let response_b = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-rejected-busy-b".to_string()),
@@ -6608,9 +6775,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     );
 
     // Submit message C — thread is free again, must be Submitted.
-    let response_c = bundle
-        .api
-        .submit_turn(
+    let response_c = SUBMIT_TURN_OPERATION
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-rejected-busy-c".to_string()),

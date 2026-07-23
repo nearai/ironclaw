@@ -3,7 +3,7 @@
 //! This harness drives the product caller path used by the #3702 validation
 //! ports:
 //!
-//! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
+//! inbound bytes -> ProductAdapter -> DefaultProductSurface ->
 //! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
 //! Reborn planned agent loop -> model/capability/transcript evidence.
 //!
@@ -29,10 +29,9 @@ use ironclaw_loop_host::{
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_adapters::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflow,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
@@ -95,7 +94,7 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
-    workflow: DefaultProductWorkflow,
+    workflow: DefaultProductSurface,
     external_conversation_id: String,
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
@@ -901,7 +900,7 @@ impl RebornBinaryE2EHarness {
             composition.coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         Ok(Self::from_composition(
             ingress,
@@ -924,7 +923,7 @@ impl RebornBinaryE2EHarness {
     #[allow(clippy::too_many_arguments)]
     fn from_composition(
         ingress: RebornTestIngress,
-        workflow: DefaultProductWorkflow,
+        workflow: DefaultProductSurface,
         external_conversation_id: String,
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
