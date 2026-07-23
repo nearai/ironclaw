@@ -15,6 +15,8 @@ pub mod policy;
 pub mod render;
 pub(crate) mod sign;
 
+#[cfg(feature = "broadcast-http")]
+pub use broadcast::JsonRpcNearBroadcaster;
 pub use broadcast::{NearBroadcastOutcome, NearBroadcaster};
 pub use policy::check_network;
 pub use render::render_near;

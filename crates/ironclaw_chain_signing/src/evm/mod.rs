@@ -12,6 +12,8 @@ pub mod policy;
 pub mod render;
 pub(crate) mod sign;
 
+#[cfg(feature = "broadcast-http")]
+pub use broadcast::JsonRpcEvmBroadcaster;
 pub use broadcast::{EvmBroadcastOutcome, EvmBroadcaster};
 pub use policy::{
     EvmHiddenFields, EvmTokenMetadata, check_chain_id, check_token_metadata, hidden_fields,

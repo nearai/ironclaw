@@ -12,6 +12,12 @@ publish = false
 
 [package.metadata.ironclaw]
 layer = "app"
+default = []
+root-llm-provider = [
+webui-v2-beta = [
+libsql = [
+postgres = [
+attested-broadcast = ["ironclaw_attested_store/broadcast-http"]
 
 [features]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
@@ -30,6 +36,7 @@ base64 = "0.22"
 chrono = "0.4"
 deadpool-postgres = "0.14"
 futures = "0.3"
+ironclaw_attested_store = { path = "../ironclaw_attested_store" }
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }

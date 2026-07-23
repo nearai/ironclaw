@@ -64,6 +64,10 @@ pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use attested::{NoopBroadcaster, RebornAttestedComposition, RegisterAttestedGateError};
 pub use attested_continuation::RebornAttestedContinuation;
+#[cfg(all(feature = "libsql", feature = "attested-broadcast"))]
+pub use attested::LibSqlAttestedComposition;
+#[cfg(all(feature = "postgres", feature = "attested-broadcast"))]
+pub use attested::PostgresAttestedComposition;
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 pub use extension_host::channel_identity::{

@@ -36,6 +36,84 @@ pub trait EvmBroadcaster: Send + Sync {
     async fn send_raw(&self, signed_rlp: &[u8]) -> Result<EvmBroadcastOutcome, ChainSigningError>;
 }
 
+/// Live EVM broadcaster: submits the signed RLP via `eth_sendRawTransaction`
+/// over JSON-RPC to a configured endpoint.
+///
+/// It is a one-shot submitter of an *already-signed* payload: it never bumps
+/// the nonce, re-signs, or refreshes any field. A stuck transaction must be
+/// re-approved (new gate_ref + grant), which the [`crate::SigningLedger`]
+/// broadcast-idempotency guard enforces upstream. The RPC URL is supplied by
+/// the composition layer from config (subject to the network allowlist), never
+/// hard-coded.
+#[cfg(feature = "broadcast-http")]
+pub struct JsonRpcEvmBroadcaster {
+    client: reqwest::Client,
+    rpc_url: String,
+}
+
+#[cfg(feature = "broadcast-http")]
+impl JsonRpcEvmBroadcaster {
+    /// Build a broadcaster against a raw URL string, validating it through
+    /// [`crate::RpcEndpoint`] (rejects metadata/loopback/private/link-local
+    /// hosts and non-http schemes). The HTTP client is rustls-backed.
+    pub fn new(rpc_url: impl AsRef<str>) -> Result<Self, ChainSigningError> {
+        Self::with_endpoint(crate::RpcEndpoint::parse(rpc_url)?)
+    }
+
+    /// Build against a pre-validated [`crate::RpcEndpoint`].
+    pub fn with_endpoint(endpoint: crate::RpcEndpoint) -> Result<Self, ChainSigningError> {
+        let client = crate::broadcast_http::build_broadcast_client("evm")?;
+        Ok(Self {
+            client,
+            rpc_url: endpoint.as_str().to_string(),
+        })
+    }
+
+    /// Build over a pre-configured client and pre-validated endpoint (so callers
+    /// can inject timeouts / proxy / allowlist policy).
+    pub fn with_client(client: reqwest::Client, endpoint: crate::RpcEndpoint) -> Self {
+        Self {
+            client,
+            rpc_url: endpoint.as_str().to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "broadcast-http")]
+#[async_trait]
+impl EvmBroadcaster for JsonRpcEvmBroadcaster {
+    async fn send_raw(&self, signed_rlp: &[u8]) -> Result<EvmBroadcastOutcome, ChainSigningError> {
+        let broadcast = |reason: String| ChainSigningError::Broadcast {
+            chain: "evm",
+            reason,
+        };
+        let raw_hex = format!("0x{}", crate::broadcast_http::hex_encode(signed_rlp));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": crate::broadcast_http::RPC_REQUEST_ID,
+            "method": "eth_sendRawTransaction",
+            "params": [raw_hex],
+        });
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| broadcast(format!("request failed: {error}")))?;
+        let result = crate::broadcast_http::read_jsonrpc_result("evm", response).await?;
+        let result = result
+            .as_str()
+            .ok_or_else(|| broadcast("JSON-RPC result was not a string tx hash".to_string()))?;
+        let bytes = crate::broadcast_http::decode_hex(result.trim_start_matches("0x"))
+            .map_err(|reason| broadcast(format!("invalid tx hash in response: {reason}")))?;
+        let tx_hash: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| broadcast("tx hash was not 32 bytes".to_string()))?;
+        Ok(EvmBroadcastOutcome { tx_hash })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
