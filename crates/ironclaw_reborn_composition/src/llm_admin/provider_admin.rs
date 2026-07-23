@@ -156,7 +156,7 @@ impl RebornProviderAdmin {
             api_key_required: provider_def.is_some_and(|def| def.api_key_required),
             missing_api_key: provider_def.is_some_and(|def| {
                 def.api_key_env.as_deref().is_some_and(|api_key_env| {
-                    def.api_key_required && std::env::var_os(api_key_env).is_none()
+                    def.api_key_required && !runtime_env_has_nonempty_value(api_key_env)
                 })
             }),
             config_file: config_path,
@@ -265,7 +265,7 @@ impl RebornProviderAdmin {
             api_key_env: def.api_key_env.clone(),
             api_key_required: def.api_key_required,
             missing_api_key: def.api_key_env.as_deref().is_some_and(|api_key_env| {
-                def.api_key_required && std::env::var_os(api_key_env).is_none()
+                def.api_key_required && !runtime_env_has_nonempty_value(api_key_env)
             }),
             config_file: config_path,
             v1_state: RebornV1State::NotUsed,
@@ -757,6 +757,11 @@ fn known_provider_ids(registry: &ironclaw_llm::ProviderRegistry) -> Vec<String> 
         .into_iter()
         .map(|def| def.id.clone())
         .collect()
+}
+
+fn runtime_env_has_nonempty_value(name: &str) -> bool {
+    ironclaw_common::env_helpers::env_or_override(name)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn provider_info(
