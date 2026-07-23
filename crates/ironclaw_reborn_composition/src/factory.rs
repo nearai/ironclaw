@@ -772,7 +772,13 @@ struct ProductAuthServicesCompositionInput {
 
 fn compose_product_auth_services(
     input: ProductAuthServicesCompositionInput,
-) -> Result<Arc<RebornProductAuthServices>, RebornBuildError> {
+) -> Result<
+    (
+        RebornProductAuthServices,
+        Arc<dyn ironclaw_product_workflow::ProductAuthContinuationDispatcher>,
+    ),
+    RebornBuildError,
+> {
     let ProductAuthServicesCompositionInput {
         ports,
         turn_coordinator,
@@ -790,10 +796,11 @@ fn compose_product_auth_services(
         None if builder_owned_durable_auth => ports.with_current_provider_client(),
         None => ports,
     };
-    let mut services = ports.into_services(
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
-        secret_store,
-    );
+    // Returned alongside the core so the caller can wrap it with the
+    // lifecycle readiness reconciliation once the lifecycle facade exists.
+    let base_continuation =
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source);
+    let mut services = ports.into_services(Arc::clone(&base_continuation), secret_store);
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
@@ -812,7 +819,7 @@ fn compose_product_auth_services(
     if let Some(source) = flow_record_source {
         services = services.with_flow_record_source(source);
     }
-    Ok(Arc::new(services))
+    Ok((services, base_continuation))
 }
 
 /// Whether a Google OAuth backend is configured, from the composition-side
@@ -3865,7 +3872,13 @@ async fn build_backend_production(
         .engine
         .as_ref()
         .map(|engine| Arc::clone(engine.recipes()));
-    let product_auth_services =
+    // Two-phase product auth: the CORE is composed here so its
+    // dispatcher-independent services (credential selection/refresh, cleanup)
+    // can feed extension management, and the final services Arc is minted
+    // below with `lifecycle_auth_continuation_dispatcher` wrapped around the
+    // base dispatcher — extension-card OAuth (LifecycleActivation
+    // continuations) reconciles readiness before the fan-out.
+    let (product_auth_core, base_auth_continuation) =
         compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports: product_auth_ports,
             turn_coordinator: turn_coordinator.clone(),
@@ -3876,9 +3889,6 @@ async fn build_backend_production(
             // filesystem store directly.
             blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
                 as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
-            // This production builder wires no lifecycle-activation facade, so an
-            // empty slot leaves lifecycle-activation auth continuations unsupported
-            // here, preserving this builder's prior behavior.
             provider_composition,
             security_audit_sink,
             secret_store: Arc::clone(&secret_store),
@@ -3889,20 +3899,9 @@ async fn build_backend_production(
             credential_account_visibility_policy,
             flow_record_source: product_auth_flow_record_source,
         })?;
-    // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
-    // candidate source is present only when this path built a durable instance
-    // (no caller-supplied product_auth_ports); recipes are present only when
-    // the auth engine was composed; the leader lock and refresh port are
-    // always available here.
-    let credential_refresh_worker = match (credential_refresh_candidate_source, keepalive_recipes) {
-        (Some(candidate_source), Some(recipes)) => CredentialRefreshWorkerReady::Ready {
-            candidate_source,
-            recipes,
-            leader_lock,
-            refresh_port: Arc::clone(&product_auth_services),
-        },
-        _ => CredentialRefreshWorkerReady::Absent,
-    };
+    // Dispatcher-independent view sharing every inner service (including the
+    // continuation-dispatch inflight set) with the final wrapped Arc below.
+    let product_auth_dependencies = Arc::new(product_auth_core.clone());
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
     // host_runtime_for_production so WASM extensions whose manifest declares a
@@ -3911,8 +3910,8 @@ async fn build_backend_production(
     // always exists (durable filesystem fallback from #4234).
     let mut services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
-            product_auth_services.runtime_credential_account_selection_service(),
-            product_auth_services.runtime_credential_account_refresh_service(),
+            product_auth_dependencies.runtime_credential_account_selection_service(),
+            product_auth_dependencies.runtime_credential_account_refresh_service(),
         ),
     ));
     services = attach_wasm_runtime(services)?;
@@ -3921,8 +3920,9 @@ async fn build_backend_production(
     // Composition owns the loop and the shared context; the concrete executors
     // live in the assembling binary.
     let first_party_registrar_context = FirstPartyRegistrarContext {
-        credential_account_service: product_auth_services.credential_account_service(),
-        credential_account_record_source: product_auth_services.credential_account_record_source(),
+        credential_account_service: product_auth_dependencies.credential_account_service(),
+        credential_account_record_source: product_auth_dependencies
+            .credential_account_record_source(),
         product_auth_runtime_ports: product_auth_runtime_ports.clone(),
         google_oauth_configured,
     };
@@ -4117,7 +4117,7 @@ async fn build_backend_production(
             extension_installation_store,
             extension_lifecycle_service,
             active_extensions,
-            Some(Arc::clone(&product_auth_services) as Arc<dyn ExtensionCredentialCleanup>),
+            Some(Arc::clone(&product_auth_dependencies) as Arc<dyn ExtensionCredentialCleanup>),
         )
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
@@ -4126,7 +4126,7 @@ async fn build_backend_production(
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
-        &product_auth_services,
+        &product_auth_dependencies,
         &extension_management,
         channel_egress_scope.clone(),
     )
@@ -4142,6 +4142,44 @@ async fn build_backend_production(
     ));
     extension_management.attach_admin_configuration(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
+    // Mint the FINAL product-auth services with the lifecycle-activation
+    // continuation composed over the base dispatcher: extension-card OAuth
+    // completions re-enter the canonical lifecycle command (readiness
+    // reconciliation) before the provider-blocked-run fan-out, instead of
+    // being durably fenced un-activated.
+    let lifecycle_continuation_facade: Arc<dyn ironclaw_product_workflow::LifecycleProductFacade> =
+        Arc::new(
+            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+                &skill_management,
+            ))
+            .with_extension_management(Arc::clone(&extension_management))
+            .with_admin_configuration_resolver(Arc::clone(&admin_configuration_resolver))
+            .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
+            .with_runtime_credential_accounts(
+                product_auth_dependencies.runtime_credential_account_selection_service(),
+            ),
+        );
+    let product_auth_services = Arc::new(product_auth_core.with_continuation_dispatcher(
+        ironclaw_product_workflow::lifecycle_auth_continuation_dispatcher(
+            lifecycle_continuation_facade,
+            base_auth_continuation,
+        ),
+    ));
+    // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
+    // candidate source is present only when this path built a durable instance
+    // (no caller-supplied product_auth_ports); recipes are present only when
+    // the auth engine was composed; the leader lock and refresh port are
+    // always available here. The refresh port holds the WRAPPED services so a
+    // refresh-driven flow reconcile runs the same lifecycle continuation.
+    let credential_refresh_worker = match (credential_refresh_candidate_source, keepalive_recipes) {
+        (Some(candidate_source), Some(recipes)) => CredentialRefreshWorkerReady::Ready {
+            candidate_source,
+            recipes,
+            leader_lock,
+            refresh_port: Arc::clone(&product_auth_services),
+        },
+        _ => CredentialRefreshWorkerReady::Absent,
+    };
     let fold_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let channel_identity_store = Arc::new(
         crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(

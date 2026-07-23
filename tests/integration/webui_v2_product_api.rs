@@ -848,7 +848,10 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
                 .find(|extension| extension["package_ref"]["id"] == "catalog-present")
         })
         .unwrap_or_else(|| panic!("catalog-present extension must still restore: {body}"));
-    assert_eq!(present_extension["install_scope"], "shared");
+    // #6520 membership: every install is caller-private — the operator's own
+    // restored install projects as private (operator role never creates a
+    // tenant-wide membership).
+    assert_eq!(present_extension["install_scope"], "private");
 
     drop(store);
     drop(rebuilt_webui);

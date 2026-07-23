@@ -264,6 +264,11 @@ impl LifecycleIsolationFixture {
         operator_id: UserId,
     ) -> Self {
         let input = local_dev_build_input(operator_id.as_str(), storage_root.clone())
+            // Root-test packages compile composition with `test-support`, where
+            // `local_dev_build_input`'s cfg(test)-only first-party injection is
+            // off — supply the bundled surface like the binary does (the
+            // `extension.slack` admin group and the fixture installs need it).
+            .with_bundled_first_party_for_test()
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
             .with_network_http_egress_for_test(Arc::new(

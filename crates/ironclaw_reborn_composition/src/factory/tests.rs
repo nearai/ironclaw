@@ -2976,3 +2976,173 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
     .expect("wrong digest gmail identity should evaluate");
     assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
 }
+
+/// Regression (#6520 merge reconciliation): the production factory composes
+/// `lifecycle_auth_continuation_dispatcher` over the base product-auth
+/// dispatcher, so a completed extension-card OAuth (a `LifecycleActivation`
+/// continuation) re-enters the canonical lifecycle install/readiness command
+/// instead of being durably fenced un-activated. Pre-fix the base dispatcher
+/// answered `Ok` ("deferred to follow-up handler"), the fence stamped, and the
+/// extension could never activate.
+#[tokio::test]
+async fn completed_lifecycle_activation_continuation_installs_the_extension() {
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthProductScope, AuthProviderId,
+        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
+        OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
+        OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
+        ProviderScope,
+    };
+    use ironclaw_host_api::SecretHandle;
+
+    fn fake_digest(value: &str) -> String {
+        format!(
+            "{:064x}",
+            value.bytes().fold(0_u64, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+            })
+        )
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owner = "lifecycle-continuation-owner";
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let product_auth = Arc::clone(&services.product_auth);
+    let user = UserId::new(owner).expect("owner user id");
+    let scope = AuthProductScope::new(
+        ironclaw_host_api::ResourceScope::local_default(
+            user.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("owner scope"),
+        AuthSurface::Api,
+    );
+    let provider = AuthProviderId::new("github").expect("provider id");
+    // The auth-flow continuation carries the string-shaped auth package ref;
+    // the lifecycle wrapper converts it to the workflow ref internally.
+    let package_ref =
+        ironclaw_auth::LifecyclePackageRef::new("github").expect("github package ref");
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let state_hash = OpaqueStateHash::new(fake_digest("lifecycle-state")).unwrap();
+    let pkce_hash = PkceVerifierHash::new(fake_digest("lifecycle-pkce")).unwrap();
+
+    let flow = product_auth
+        .flow_manager()
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: package_ref.clone(),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash.clone()),
+            pkce_verifier_hash: Some(pkce_hash.clone()),
+            expires_at,
+        })
+        .await
+        .expect("create lifecycle-activation flow");
+    product_auth
+        .flow_manager()
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash.clone(),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash.clone(),
+            },
+        )
+        .await
+        .expect("claim callback");
+    product_auth
+        .flow_manager()
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider.clone(),
+                        account_label: CredentialAccountLabel::new("GitHub Account").unwrap(),
+                        authorization_code_hash: AuthorizationCodeHash::new(fake_digest(
+                            "lifecycle-code",
+                        ))
+                        .unwrap(),
+                        pkce_verifier_hash: pkce_hash,
+                        access_secret: SecretHandle::new("lifecycle-github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("repo.readonly").unwrap()],
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("complete callback");
+
+    // Reconciling the completed-but-unfenced flow drives the composed
+    // dispatcher: the lifecycle wrapper re-enters the canonical install
+    // command, the just-minted github credential account satisfies the
+    // credential gate, and install auto-advances the extension to Active
+    // before the fan-out settles the flow. Pre-fix the base dispatcher
+    // answered `Ok` without installing anything.
+    let status = product_auth
+        .reconcile_oauth_flow(&scope, flow.id)
+        .await
+        .expect("lifecycle continuation reconciles");
+    assert_eq!(status, ironclaw_auth::AuthFlowStatus::Completed);
+
+    let installation = runtime_surfaces
+        .extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("list installations")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "github")
+        .expect("lifecycle continuation must install the github extension");
+    assert!(
+        installation.owner().visible_to(&user),
+        "the continuation's caller must hold the installation membership"
+    );
+    // Install drove readiness all the way to runtime publication: the github
+    // tool surface is model-visible without any separate Activate action.
+    let capabilities = runtime_surfaces
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capabilities");
+    assert!(
+        capabilities
+            .iter()
+            .any(|capability| capability.provider.as_str() == "github"),
+        "github capabilities must be published after the continuation"
+    );
+
+    // A fanned-out continuation stamps the durable fence exactly once.
+    let record = product_auth
+        .flow_manager()
+        .get_flow(&scope, flow.id)
+        .await
+        .expect("get flow")
+        .expect("flow record exists");
+    assert!(
+        record.continuation_emitted_at.is_some(),
+        "a fanned-out continuation must stamp the durable fence"
+    );
+}

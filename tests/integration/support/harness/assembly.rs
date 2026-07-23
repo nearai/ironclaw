@@ -236,6 +236,13 @@ impl HostRuntime for TriggerActiveRunLookupHostRuntime {
         self.inner.auth_resume_capability(request).await
     }
 
+    async fn decline_auth_capability(
+        &self,
+        request: ironclaw_host_runtime::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.inner.decline_auth_capability(request).await
+    }
+
     async fn resume_spawn_capability(
         &self,
         request: RuntimeApprovalResume,

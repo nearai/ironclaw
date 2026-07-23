@@ -181,11 +181,14 @@ where
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<(String, String)>, ExtensionAdminConfigurationResolverError> {
-        let fields = self.by_extension.get(extension_id).ok_or_else(|| {
-            ExtensionAdminConfigurationResolverError::UnknownExtension {
-                extension_id: extension_id.as_str().to_string(),
-            }
-        })?;
+        // An extension with no manifest-declared `[admin_configuration]` (or
+        // one imported after the boot-time index was built) has no
+        // administrator values to supply — that is a normal lifecycle state,
+        // not an error: activation and boot restore publish it with an empty
+        // config. Credential-handle lookups (`extension_field`) stay strict.
+        let Some(fields) = self.by_extension.get(extension_id) else {
+            return Ok(Vec::new());
+        };
         let mut values = Vec::new();
         for (handle, indexed) in fields {
             let Some(location) = indexed_location(Some(indexed), handle)? else {
@@ -494,15 +497,16 @@ mod tests {
             vec![("oauth_client_id".to_string(), "client-id".to_string())],
             "effective runtime config includes configured non-secrets only"
         );
+        // #6520 lifecycle: an extension outside the admin-configuration index
+        // (nothing declared, or imported post-boot) resolves to an EMPTY
+        // effective config — install/restore publish it rather than failing.
         let unknown_extension = ExtensionId::new("unknown-extension").unwrap();
         assert_eq!(
             resolver
                 .effective_non_secret_config(&unknown_extension)
                 .await
-                .unwrap_err(),
-            ExtensionAdminConfigurationResolverError::UnknownExtension {
-                extension_id: "unknown-extension".to_string(),
-            }
+                .expect("undeclared extension resolves to empty config"),
+            Vec::<(String, String)>::new()
         );
     }
 

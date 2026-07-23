@@ -1485,11 +1485,23 @@ impl RebornLocalExtensionManagementPort {
                 LifecyclePackageKind::Extension,
                 installation.extension_id().as_str(),
             )?;
-            if !self
+            // Startup re-activation skips invalid rows instead of blocking
+            // boot (§6.5): an installation whose package left the catalog
+            // (orphan row) resolves as not-installed here — warn and move on.
+            match self
                 .package_requires_hosted_mcp_discovery(&package_ref)
-                .await?
+                .await
             {
-                continue;
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        extension_id = installation.extension_id().as_str(),
+                        %error,
+                        "skipping hosted MCP restart reconciliation for an unresolvable installation row"
+                    );
+                    continue;
+                }
             }
             let Some(members) = installation.owner().members() else {
                 tracing::warn!(
