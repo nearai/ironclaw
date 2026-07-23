@@ -186,7 +186,8 @@ async fn deferred_startup_router_serves_health_then_delegates_when_ready() {
         .await
         .expect("startup health response must be JSON");
     assert_eq!(health_json["status"], "healthy");
-    assert_eq!(health_json["channel"], "ironclaw");
+    assert_eq!(health_json["channel"], "reborn");
+    assert_eq!(health_json["product"], "ironclaw");
 
     let before_ready = test_client()
         .get(format!("http://{bound}/ping"))

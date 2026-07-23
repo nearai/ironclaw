@@ -32,7 +32,8 @@ fn build_doctor_dto(context: &IronClawCliContext) -> DoctorDto {
     let report = IronClawDoctorReport::from_config(context.boot_config().clone());
 
     checks.push(DoctorCheck {
-        name: "ironclaw_home".to_string(),
+        // Stable machine-readable ID used by `doctor --json` consumers.
+        name: "reborn_home".to_string(),
         category: CheckCategory::Core,
         outcome: if report.home_path().is_dir() {
             CheckOutcome::Pass
@@ -181,7 +182,7 @@ impl Renderable for DoctorDto {
             writeln!(
                 w,
                 "  {icon} {:<28} {}",
-                terminal_safe_text(&check.name),
+                terminal_safe_text(doctor_check_display_name(&check.name)),
                 terminal_safe_text(&check.detail)
             )?;
         }
@@ -192,6 +193,13 @@ impl Renderable for DoctorDto {
             self.summary.pass, self.summary.fail, self.summary.skip,
         )?;
         Ok(())
+    }
+}
+
+fn doctor_check_display_name(name: &str) -> &str {
+    match name {
+        "reborn_home" => "ironclaw_home",
+        other => other,
     }
 }
 

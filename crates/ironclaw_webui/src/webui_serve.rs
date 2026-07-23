@@ -739,12 +739,15 @@ pub fn webui_v2_app_with_lifecycle(
 struct IronClawHealthResponse {
     status: &'static str,
     channel: &'static str,
+    product: &'static str,
 }
 
 async fn ironclaw_health_handler() -> Json<IronClawHealthResponse> {
     Json(IronClawHealthResponse {
         status: "healthy",
-        channel: "ironclaw",
+        // Public compatibility token consumed by existing platform probes.
+        channel: "reborn",
+        product: "ironclaw",
     })
 }
 

@@ -244,7 +244,9 @@ A healthy run shows a `kind: "assistant"`, `status: "finalized"` message in
 `messages[]` with the model's reply (the first read right after sending may
 still show only the user message — repeat the timeline request until it
 finalizes). `GET /api/health` returns
-`{"status":"healthy","channel":"reborn"}` and `/` serves the UI. Legacy
+`{"status":"healthy","channel":"reborn","product":"ironclaw"}` and `/` serves
+the UI. The `channel` value remains stable for existing platform probes while
+`product` carries the canonical product identity. Legacy
 `/v2` browser links temporarily redirect to their root equivalents. CORS is
 fail-closed with no allowed origins, so drive it
 from a browser on the same host against `127.0.0.1`.
@@ -575,13 +577,15 @@ cargo run -q -p ironclaw --bin ironclaw -- skills list --verbose
 Expected fields include:
 
 - `configured: <count>`
-- `source: reborn-local-dev`
+- legacy-compatible `source: reborn-local-dev`
+- canonical `product: ironclaw` in JSON output
 - per-skill `name`, `source`, and `description` in text output
 - per-skill `name`, `version`, `description`, `source`, `keywords`, `tags`,
   and `requires_skills` in JSON output
 
-`--verbose` adds the resolved `profile`, `ironclaw_home`, `local_dev_root`, and
-`owner_id`; text output also includes per-skill `version`, `keywords`, `tags`,
+`--verbose` adds the resolved `profile`, compatibility `reborn_home`, canonical
+`ironclaw_home`, `local_dev_root`, and `owner_id`; the two home fields contain
+the same path. Text output also includes per-skill `version`, `keywords`, `tags`,
 and `requires_skills` when present. `skills list` currently supports
 `local-dev`, `local-dev-yolo`, `hosted-single-tenant`, and
 `hosted-single-tenant-volume` profiles and rejects `production` /
