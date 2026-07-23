@@ -34,6 +34,12 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 sha3 = "0.10"
 sha2 = "0.10"
+# NEAR redirect (PR8): the unsigned tx and gate-bound `state` ride the redirect
+# URL as URL-safe base64. Already vendored in the workspace lockfile; no heavy
+# near-primitives / near-crypto SDK is pulled — ed25519 verification reuses the
+# vendored ed25519-dalek above and the full borsh Transaction roundtrip is a
+# deferred follow-up (matching PR6).
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
