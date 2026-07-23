@@ -73,12 +73,7 @@ pub async fn build_openai_compat_route_mount(
     _default_agent_id: AgentId,
     _default_project_id: Option<ProjectId>,
 ) -> Result<ProtectedRouteMount, RebornBuildError> {
-    let local_runtime = runtime.services().local_runtime.as_ref().ok_or_else(|| {
-        RebornBuildError::InvalidConfig {
-            reason: "OpenAI-compatible routes require local runtime services".to_string(),
-        }
-    })?;
-    let ref_filesystem: Arc<dyn RootFilesystem> = local_runtime.extension_filesystem.clone();
+    let ref_filesystem: Arc<dyn RootFilesystem> = runtime.extension_filesystem.clone();
     let ref_store: Arc<dyn OpenAiCompatRefStore> =
         Arc::new(FilesystemOpenAiCompatRefStore::with_root(
             ref_filesystem,
@@ -94,7 +89,7 @@ pub async fn build_openai_compat_route_mount(
     // host: the host records parked calls + completes them from submitted
     // outputs; the Responses surface registers specs, submits outputs, and reads
     // parked calls back here.
-    let external_tool_catalog = local_runtime.external_tool_catalog.clone();
+    let external_tool_catalog = runtime.external_tool_catalog.clone();
     let responses_projection_reader = Arc::new(
         OpenAiResponsesThreadProjectionReader::new(
             runtime.webui_thread_service(),

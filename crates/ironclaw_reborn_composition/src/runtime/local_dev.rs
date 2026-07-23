@@ -41,18 +41,18 @@ use ironclaw_turns::{
 };
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
+use crate::factory::RebornRuntimeStores;
 use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
-    RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
     runtime::ComposedSelectableSkillContextSource,
 };
 
-pub(super) mod extension_surface;
+pub(crate) mod extension_surface;
 mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
@@ -96,7 +96,7 @@ pub(super) struct CapabilityPortWiring {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn capability_wiring(
-    services: &RebornServices,
+    services: &RebornRuntimeStores,
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -106,36 +106,34 @@ pub(super) fn capability_wiring(
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<CapabilityPortWiring> {
-    let runtime = services.host_runtime.clone()?;
-    let local_runtime = services.local_runtime.as_ref()?;
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
-    let system_extensions_lifecycle_mounts =
-        local_runtime.system_extensions_lifecycle_mounts.clone();
-    let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
-    let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
+    let runtime = services.host_runtime.clone();
+    let workspace_mounts = services.workspace_mounts.clone();
+    let memory_mounts = services.memory_mounts.clone();
+    let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
+    let approval_requests: Arc<dyn ApprovalRequestStore> = services.approval_requests.clone();
+    let capability_leases: Arc<dyn CapabilityLeaseStore> = services.capability_leases.clone();
     let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-        local_runtime.tool_permission_overrides.clone();
+        services.tool_permission_overrides.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        local_runtime.auto_approve_settings.clone();
+        services.auto_approve_settings.clone();
     let approval_settings: Arc<dyn ApprovalSettingsProvider> =
         Arc::new(StoreApprovalSettingsProvider::new(
             tool_permission_overrides,
             auto_approve_settings,
-            local_runtime.persistent_approval_policies.clone(),
+            services.persistent_approval_policies.clone(),
         ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
-        local_runtime.runtime_policy.as_ref(),
+        services.runtime_policy.as_ref(),
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
     let extension_surface_source =
-        ExtensionCapabilitySurfaceSource::new(local_runtime.extension_management.clone());
+        ExtensionCapabilitySurfaceSource::new(Some(services.extension_management.clone()));
     // First-class project creation reuses the same access-controlled
     // `ProjectService` facade the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real
     // entity that appears in the Projects list.
-    let project_service: Arc<dyn ProjectService> = Arc::clone(&local_runtime.project_service);
+    let project_service: Arc<dyn ProjectService> = Arc::clone(&services.project_service);
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(
         StagedCapabilityIo::new_with_durable_previews(
@@ -147,11 +145,11 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    // Shared per-runtime catalog (owned by local_runtime services) so the
+    // Shared per-runtime catalog (owned by the composed runtime) so the
     // OpenAI-compatible Responses surface and this loop host see the same
     // run-scoped external-tool state.
     let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
-        Arc::clone(&local_runtime.external_tool_catalog);
+        services.external_tool_catalog.clone();
     // Wire the durable gate-record and host-private replay-payload stores over
     // the composition-owned scoped filesystem (same backend + per-user mount view
     // as every other durable store; `extension_filesystem` is the shared composite
@@ -160,7 +158,7 @@ pub(super) fn capability_wiring(
     // and a gate/auth resume had no host-side replay payload to reconstitute
     // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
     let capability_store_filesystem =
-        crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem));
+        crate::wrap_scoped(Arc::clone(&services.extension_filesystem));
     let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
         Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
             Arc::clone(&capability_store_filesystem),
@@ -571,6 +569,28 @@ pub(super) fn staged_capability_io_for_test(
         thread_service,
         fallback_user_id,
     ));
+    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
+    let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
+    (input_resolver, result_writer)
+}
+
+#[cfg(feature = "test-support")]
+pub(super) fn staged_capability_io_with_observer_for_test(
+    thread_service: Arc<dyn SessionThreadService>,
+    fallback_user_id: UserId,
+    observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+) -> (
+    Arc<dyn LoopCapabilityInputResolver>,
+    Arc<dyn LoopCapabilityResultWriter>,
+) {
+    let io = Arc::new(
+        StagedCapabilityIo::new_with_durable_previews(
+            Arc::new(CapabilityDisplayPreviewStore::default()),
+            thread_service,
+            fallback_user_id,
+        )
+        .with_observer(observer),
+    );
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
     (input_resolver, result_writer)

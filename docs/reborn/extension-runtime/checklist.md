@@ -874,7 +874,7 @@ Rules — kept short on purpose:
   concrete route (architecture gate). — The lane deletion removed the last
   concrete construction and route mount from composition (`serve_slack`
   and `with_slack_channel_routes` are gone; the CLI supplies channel
-  adapters through `RebornBuildInput::with_channel_extension_bindings`).
+  adapters through `RebornHostBindings::with_channel_extension_bindings`).
   Gates green: `reborn_generic_code_names_no_concrete_extension` +
   `concrete_extension_crates_link_only_from_the_binary_and_tests`
   (`crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`,
@@ -883,7 +883,7 @@ Rules — kept short on purpose:
   crates (`cargo metadata` gate). — `CONCRETE_DEPENDENCY_EXCEPTIONS` is
   empty; composition keeps `ironclaw_slack_extension` as a dev-dependency
   only (the sanctioned test linkage); the CLI supplies the Slack channel
-  adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
+  adapter + extras through `RebornHostBindings::with_channel_extension_bindings`.
 - [ ] DEL-8 The concrete-name scanner allowlist is empty. — In progress: the
   shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) is **86**
   `(path, term)` entries (102 at the start of the finalize-takeover session;
@@ -1141,7 +1141,7 @@ Rules — kept short on purpose:
   `acme_fixture_lifecycle_dispatches_from_the_active_snapshot` drives
   install → activate → snapshot dispatch → remove through model tool calls,
   with the fixture's native factory assembled through the production
-  `RebornBuildInput` seam. P4 landed the inbound leg —
+  `RebornHostBindings` seam. P4 landed the inbound leg —
   `signed_acme_post_flows_through_the_production_mount_into_a_turn`.
   P5 landed the outbound machinery generically (the acme adapter's real
   `deliver` runs under TEST-1 conformance; the coordinated outbound

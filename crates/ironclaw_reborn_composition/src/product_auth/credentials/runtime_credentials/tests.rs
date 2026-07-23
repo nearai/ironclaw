@@ -16,13 +16,39 @@ use super::*;
 
 mod duplicate_selection;
 
+/// Local mirror of the GSuite Google-account visibility policy, which DEL-7
+/// moved out of composition into the assembling binary. These selector tests
+/// still need to exercise the family-aware Google-account visibility rule, so
+/// this test double reproduces it over the same `ironclaw_first_party_extensions`
+/// helper the binary's policy uses.
+struct TestGsuiteVisibilityPolicy;
+
+impl RuntimeCredentialAccountVisibilityPolicy for TestGsuiteVisibilityPolicy {
+    fn account_visible_to_requester(
+        &self,
+        account: &ironclaw_auth::CredentialAccount,
+        lookup: &ironclaw_auth::CredentialAccountSelectionRequest,
+    ) -> bool {
+        let requester = lookup.requester_extension.as_ref();
+        if lookup.provider.as_str() != ironclaw_first_party_extensions::GOOGLE_PROVIDER_ID {
+            return account.is_authorized_for_requester(requester);
+        }
+        let Some(requester) = requester else {
+            return account.is_authorized_for_requester(None);
+        };
+        ironclaw_first_party_extensions::gsuite_google_account_visible_to_requester(
+            account, requester,
+        )
+    }
+}
+
 fn resolver_with_accounts(
     accounts: Arc<InMemoryAuthProductServices>,
 ) -> ProductAuthRuntimeCredentialResolver {
     ProductAuthRuntimeCredentialResolver::new(Arc::new(
         ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
             accounts,
-            Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            Arc::new(TestGsuiteVisibilityPolicy),
         ),
     ))
 }
@@ -38,7 +64,7 @@ fn resolver_with_host_managed_nearai_scope(
     let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
         ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
             accounts,
-            Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            Arc::new(TestGsuiteVisibilityPolicy),
         ),
     );
     let fallback = HostManagedCredentialFallbackRule::new(
@@ -58,9 +84,7 @@ fn resolver_with_refresh(
         Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 accounts.clone(),
-                Arc::new(
-                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
-                ),
+                Arc::new(TestGsuiteVisibilityPolicy),
             ),
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
@@ -87,7 +111,7 @@ fn selector_for(
 ) -> ProductAuthRuntimeCredentialAccountSelector {
     ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
         accounts,
-        Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+        Arc::new(TestGsuiteVisibilityPolicy),
     )
 }
 
@@ -1600,9 +1624,7 @@ fn resolver_with_refresh_and_store(
         Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 accounts.clone(),
-                Arc::new(
-                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
-                ),
+                Arc::new(TestGsuiteVisibilityPolicy),
             ),
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(

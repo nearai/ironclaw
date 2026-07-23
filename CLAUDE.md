@@ -248,7 +248,7 @@ verification recipe, `[channel.config]`, egress allowlist, presentation) beside
 the extension's tools and auth recipes, and the extension's `ChannelAdapter`
 (`crates/ironclaw_product_adapters`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
-`RebornBuildInput::with_channel_extension_bindings`
+`RebornHostBindings::with_channel_extension_bindings`
 (`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the

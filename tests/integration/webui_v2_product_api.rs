@@ -38,10 +38,9 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornBuildInput, RebornChannelConnectStrategy, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornWebuiBundle, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, VendorId, build_reborn_runtime, build_webui_services,
-    local_dev_runtime_policy,
+    RebornChannelConnectStrategy, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornWebuiBundle, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+    build_reborn_runtime, build_webui_services, local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -297,14 +296,16 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-import-agent").expect("agent id");
     let user_id = UserId::new("webui-import-operator").expect("user id");
-    let input = RebornBuildInput::local_dev(user_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input =
+        ironclaw_reborn_composition::local_dev_build_input(user_id.as_str(), storage_root.clone())
+            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+            .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+            .with_bundled_first_party_for_test()
+            .with_network_http_egress_for_test(Arc::new(
+                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+            ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -405,14 +406,18 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     let tenant_id = TenantId::new("webui-legacy-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-legacy-agent").expect("agent id");
     let operator_id = UserId::new("webui-legacy-operator").expect("operator id");
-    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_reborn_composition::local_dev_build_input(
+        operator_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -526,14 +531,18 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     }
     drop(store);
 
-    let rebuilt_input = RebornBuildInput::local_dev("webui-legacy-operator", storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let rebuilt_input = ironclaw_reborn_composition::local_dev_build_input(
+        "webui-legacy-operator",
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let rebuilt_runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(rebuilt_input)
+        RebornRuntimeInput::from_build_input(rebuilt_input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -646,14 +655,18 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     let tenant_id = TenantId::new("webui-orphan-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-orphan-agent").expect("agent id");
     let operator_id = UserId::new("webui-orphan-operator").expect("operator id");
-    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_reborn_composition::local_dev_build_input(
+        operator_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -773,14 +786,18 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .expect("write orphan installation row");
     drop(store);
 
-    let rebuilt_input = RebornBuildInput::local_dev("webui-orphan-operator", storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let rebuilt_input = ironclaw_reborn_composition::local_dev_build_input(
+        "webui-orphan-operator",
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let rebuilt_runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(rebuilt_input)
+        RebornRuntimeInput::from_build_input(rebuilt_input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -866,14 +883,18 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-eviction-agent").expect("agent id");
     let operator_id = UserId::new("webui-eviction-operator").expect("operator id");
-    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_reborn_composition::local_dev_build_input(
+        operator_id.as_str(),
+        storage_root.clone(),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -1088,14 +1109,18 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     let tenant_id = TenantId::new("webui-admin-config-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-admin-config-agent").expect("agent id");
     let user_id = UserId::new("webui-admin-config-operator").expect("user id");
-    let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_reborn_composition::local_dev_build_input(
+        user_id.as_str(),
+        root.path().join("local-dev"),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -1162,14 +1187,18 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     let tenant_id = TenantId::new("webui-admin-save-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-admin-save-agent").expect("agent id");
     let user_id = UserId::new("webui-admin-save-operator").expect("user id");
-    let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
-        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-        .with_network_http_egress_for_test(Arc::new(
-            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-        ));
+    let input = ironclaw_reborn_composition::local_dev_build_input(
+        user_id.as_str(),
+        root.path().join("local-dev"),
+    )
+    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+    .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(Arc::new(
+        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+    ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -1526,15 +1555,19 @@ impl AdminConfigurationFixture {
         let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
         let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
         let user_id = UserId::new(format!("webui-admin-{name}-user")).expect("user id");
-        let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
-            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-            .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
-            .with_account_setup_descriptors(vec![telegram_pairing_descriptor()])
-            .with_network_http_egress_for_test(Arc::new(
-                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-            ));
+        let input = ironclaw_reborn_composition::local_dev_build_input(
+            user_id.as_str(),
+            root.path().join("local-dev"),
+        )
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_bundled_first_party_for_test()
+        .with_account_setup_descriptors(vec![telegram_pairing_descriptor()])
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(input)
+            RebornRuntimeInput::from_build_input(input)
                 .with_identity(RebornRuntimeIdentity {
                     tenant_id: tenant_id.as_str().to_string(),
                     agent_id: agent_id.as_str().to_string(),

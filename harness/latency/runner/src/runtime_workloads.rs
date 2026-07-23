@@ -112,7 +112,7 @@ async fn build_webui_runtime_context(
                     postgres_pool_size
                 )
             })?;
-            RebornBuildInput::hosted_single_tenant_postgres(
+            RebornHostBindings::hosted_single_tenant_postgres(
                 RebornCompositionProfile::HostedSingleTenant,
                 WEBUI_SESSION_RUNTIME_USER,
                 storage_root,

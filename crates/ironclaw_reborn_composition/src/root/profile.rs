@@ -44,14 +44,6 @@ impl RebornCompositionProfile {
         crate::deployment::DeploymentConfig::for_profile(self, false)
     }
 
-    pub fn requires_production_shape(self) -> bool {
-        self.deployment().substrate() == crate::deployment::RuntimeSubstrate::ProductionShaped
-    }
-
-    pub fn uses_local_runtime_substrate(self) -> bool {
-        self.deployment().substrate() == crate::deployment::RuntimeSubstrate::Local
-    }
-
     pub fn uses_local_dev_storage_input(self) -> bool {
         self.deployment().uses_local_dev_storage_input()
     }

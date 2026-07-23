@@ -140,18 +140,17 @@ mod tests {
     /// it here mirrors the operator having flipped it on before letting the
     /// agent run tools.
     async fn enable_global_auto_approve_for_run(
-        services: &crate::RebornServices,
+        services: &crate::factory::RebornRuntimeStores,
         run_context: &LoopRunContext,
         user_id: &UserId,
     ) {
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let mut scope = run_context.scope.to_resource_scope();
         scope.user_id = user_id.clone();
         ironclaw_approvals::AutoApproveSettingStore::set(
-            local_runtime.auto_approve_settings.as_ref(),
+            runtime_surfaces.auto_approve_settings_for_test().as_ref(),
             ironclaw_approvals::AutoApproveSettingInput {
                 updated_by: ironclaw_host_api::Principal::User(user_id.clone()),
                 scope,
@@ -508,8 +507,8 @@ mod tests {
     #[tokio::test]
     async fn extension_remove_tool_discloses_generic_unpair_disconnect_semantics() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev_with_profile(
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "extension-remove-generic-unpair-tool-copy",
                 dir.path().join("local-dev"),
@@ -632,8 +631,8 @@ mod tests {
             None,
         )
         .expect("valid test google oauth client config");
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev_with_profile(
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 owner,
                 dir.path().join("local-dev"),
@@ -676,18 +675,13 @@ mod tests {
     }
 
     async fn install_gsuite_extensions(
-        services: &crate::RebornServices,
+        services: &crate::factory::RebornRuntimeStores,
         extension_state: GsuiteExtensionState,
     ) {
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
+        let extension_management = runtime_surfaces.extension_management.clone();
         // #5459 P1: install AS the runtime's tenant operator so the extensions
         // are tenant-shared (what these surface tests always meant) — a
         // non-operator context would now produce a private install invisible
@@ -696,7 +690,7 @@ mod tests {
             .tenant_operator_user_id_for_test()
             .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
+            runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
         .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
@@ -1337,16 +1331,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_continues_exactly_where_first_look_preview_truncated() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-result-read-continuation",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-result-read-continuation",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let fallback_user_id =
             UserId::new("result-read-continuation-owner").expect("fallback user id");
@@ -1468,18 +1462,18 @@ mod tests {
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
-            policy: Arc::clone(&local_runtime.capability_policy),
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_facade: None,
@@ -1487,14 +1481,14 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
@@ -1682,16 +1676,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_chunk_does_not_persist_a_new_durable_record() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-result-read-no-amplification",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-result-read-no-amplification",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let fallback_user_id =
             UserId::new("result-read-no-amplification-owner").expect("fallback user id");
@@ -1780,18 +1774,18 @@ mod tests {
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
-            policy: Arc::clone(&local_runtime.capability_policy),
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_facade: None,
@@ -1799,14 +1793,14 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
@@ -2245,12 +2239,13 @@ mod tests {
     async fn local_dev_skill_activate_tool_loads_selected_skill_context() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-skill-activate-owner",
-            storage_root.clone(),
-        ))
-        .await
-        .expect("local-dev services build");
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-skill-activate-owner",
+                storage_root.clone(),
+            ))
+            .await
+            .expect("local-dev services build");
         let skill_path = storage_root.join(
             "tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
         );
@@ -2264,10 +2259,9 @@ mod tests {
             ),
         )
         .expect("skill file");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let mut run_context = run_context("skill-activate-tool").await;
         run_context = run_context
@@ -2278,7 +2272,7 @@ mod tests {
                 UserId::new("skill-activate-user").expect("user id"),
             ));
         let skill_context = local_dev_filesystem_skill_context_source(
-            local_runtime,
+            runtime_surfaces,
             &run_context.scope.tenant_id,
             false,
         )
@@ -2294,10 +2288,10 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -2310,16 +2304,16 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -2413,19 +2407,19 @@ mod tests {
     async fn capability_wiring_with_skill_activation_source_exposes_skill_activate_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-skill-activate-wiring-owner",
-            storage_root.clone(),
-        ))
-        .await
-        .expect("local-dev services build");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-skill-activate-wiring-owner",
+                storage_root.clone(),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let run_context = run_context("skill-activate-wiring").await;
         let skill_context = local_dev_filesystem_skill_context_source(
-            local_runtime,
+            runtime_surfaces,
             &run_context.scope.tenant_id,
             false,
         )
@@ -2467,17 +2461,15 @@ mod tests {
     async fn local_dev_external_tools_are_advertised_as_provider_tool_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-external-tool-owner",
-            storage_root,
-        ))
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input("local-dev-external-tool-owner", storage_root),
+        )
         .await
         .expect("local-dev services build");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let run_context = run_context("external-tool-provider-name").await;
         let catalog = Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new());
         catalog
@@ -2509,10 +2501,10 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -2525,16 +2517,16 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: catalog,
@@ -2577,16 +2569,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-project-create-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-project-create-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
@@ -2594,18 +2586,18 @@ mod tests {
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
-            policy: Arc::clone(&local_runtime.capability_policy),
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
             outbound_preferences_facade: None,
@@ -2613,14 +2605,14 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -2705,7 +2697,7 @@ mod tests {
         // The capability writes a real control-plane entity, not a workspace
         // file: the owner can now see the project through the same
         // access-controlled `ProjectService` facade the WebUI lists from.
-        let listed = local_runtime
+        let listed = runtime_surfaces
             .project_service
             .list_projects(
                 ironclaw_product_workflow::ProjectCaller {
@@ -2728,16 +2720,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_tool_returns_only_requested_thread_scoped_chunk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-result-read-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-result-read-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let fallback_user_id = UserId::new("result-read-owner").expect("user id");
         let run_context = run_context("result-read").await;
@@ -2798,18 +2790,18 @@ mod tests {
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
-            policy: Arc::clone(&local_runtime.capability_policy),
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_facade: None,
@@ -2817,14 +2809,14 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
@@ -3118,16 +3110,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_rejects_malformed_arguments_matrix() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-result-read-validation-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-result-read-validation-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let fallback_user_id = UserId::new("result-read-validation-owner").expect("user id");
         let run_context = run_context("result-read-validation").await;
@@ -3137,18 +3129,18 @@ mod tests {
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
-            policy: Arc::clone(&local_runtime.capability_policy),
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
             outbound_preferences_facade: None,
@@ -3156,14 +3148,14 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -3466,16 +3458,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_denies_cross_thread_reference_access() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-result-read-cross-thread-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-result-read-cross-thread-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let fallback_user_id = UserId::new("result-read-cross-thread-owner").expect("user id");
 
@@ -3569,18 +3561,18 @@ mod tests {
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
-            policy: Arc::clone(&local_runtime.capability_policy),
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
             outbound_preferences_facade: None,
@@ -3588,14 +3580,14 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
@@ -3641,16 +3633,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_outbound_delivery_targets_list_and_target_set_use_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-outbound-delivery-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-outbound-delivery-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let slack_target_id =
             RebornOutboundDeliveryTargetId::new("slack:test-dm").expect("target id");
@@ -3690,23 +3682,27 @@ mod tests {
             ]));
         let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
             Arc::new(RebornOutboundPreferencesFacade::new(
-                Arc::clone(&local_runtime.outbound_preferences),
+                Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
-        let policy = Arc::clone(&local_runtime.capability_policy);
+        let policy = Arc::clone(runtime_surfaces.capability_policy_for_test());
         let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            local_runtime.tool_permission_overrides.clone();
+            runtime_surfaces
+                .tool_permission_overrides_for_test()
+                .clone();
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-            local_runtime.auto_approve_settings.clone();
+            runtime_surfaces.auto_approve_settings_for_test().clone();
         let approval_settings = Arc::new(
             crate::local_dev_authorization::StoreApprovalSettingsProvider::new(
                 tool_permission_overrides,
                 auto_approve_settings,
-                local_runtime.persistent_approval_policies.clone(),
+                runtime_surfaces
+                    .persistent_approval_policies_for_test()
+                    .clone(),
             ),
         );
         // A durable gate-record store shared with the assertion below: the
@@ -3716,16 +3712,16 @@ mod tests {
         // findable.
         let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
             Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             ));
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -3736,14 +3732,14 @@ mod tests {
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
             approval_settings,
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::clone(&gate_record_store),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -3902,7 +3898,7 @@ mod tests {
             let mut disable_scope = run_context.scope.to_resource_scope();
             disable_scope.user_id = owner_user_id.clone();
             ironclaw_approvals::AutoApproveSettingStore::set(
-                local_runtime.auto_approve_settings.as_ref(),
+                runtime_surfaces.auto_approve_settings_for_test().as_ref(),
                 ironclaw_approvals::AutoApproveSettingInput {
                     updated_by: ironclaw_host_api::Principal::User(owner_user_id.clone()),
                     scope: disable_scope,
@@ -3970,7 +3966,7 @@ mod tests {
         missing_approval_scope.user_id = owner_user_id.clone();
         missing_approval_scope.invocation_id = missing_invocation_id;
         let missing_correlation_id = ironclaw_run_state::ApprovalRequestStore::get(
-            local_runtime.approval_requests.as_ref(),
+            runtime_surfaces.approval_requests_for_test().as_ref(),
             &missing_approval_scope,
             missing_approval_request_id,
         )
@@ -3985,21 +3981,21 @@ mod tests {
             correlation_id: missing_correlation_id,
             input_ref: missing_set_candidate.input_ref.clone(),
         };
-        let missing_approval = local_runtime
-            .capability_policy
+        let missing_approval = runtime_surfaces
+            .capability_policy_for_test()
             .lease_approval_for(
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                &local_runtime.workspace_mounts,
-                &local_runtime.skill_mounts,
-                &local_runtime.memory_mounts,
-                &local_runtime.system_extensions_lifecycle_mounts,
+                runtime_surfaces.workspace_mounts_for_test(),
+                runtime_surfaces.skill_mounts_for_test(),
+                runtime_surfaces.memory_mounts_for_test(),
+                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             )
             .expect("missing-target outbound delivery approval lease terms");
         ApprovalResolver::new(
-            local_runtime.approval_requests.as_ref(),
-            local_runtime.capability_leases.as_ref(),
+            runtime_surfaces.approval_requests_for_test().as_ref(),
+            runtime_surfaces.capability_leases_for_test().as_ref(),
         )
         .approve_dispatch(
             &missing_approval_scope,
@@ -4008,8 +4004,8 @@ mod tests {
         )
         .await
         .expect("missing-target approval issues dispatch lease");
-        let missing_lease_id = local_runtime
-            .capability_leases
+        let missing_lease_id = runtime_surfaces
+            .capability_leases_for_test()
             .leases_for_scope(&missing_approval_scope)
             .await
             .into_iter()
@@ -4050,15 +4046,15 @@ mod tests {
             }
         }
         assert!(
-            local_runtime
-                .outbound_preferences
+            runtime_surfaces
+                .outbound_preferences_for_test()
                 .load_communication_preference(owner_preference_key.clone())
                 .await
                 .expect("owner preference read after approved missing-target set")
                 .is_none()
         );
-        let missing_leases = local_runtime
-            .capability_leases
+        let missing_leases = runtime_surfaces
+            .capability_leases_for_test()
             .leases_for_scope(&missing_approval_scope)
             .await;
         let missing_lease = missing_leases
@@ -4119,7 +4115,7 @@ mod tests {
             correlation_scope.user_id = owner_user_id.clone();
             correlation_scope.invocation_id = set_invocation_id;
             let correlation_id = ironclaw_run_state::ApprovalRequestStore::get(
-                local_runtime.approval_requests.as_ref(),
+                runtime_surfaces.approval_requests_for_test().as_ref(),
                 &correlation_scope,
                 approval_request_id,
             )
@@ -4172,16 +4168,16 @@ mod tests {
             );
         }
         assert!(
-            local_runtime
-                .outbound_preferences
+            runtime_surfaces
+                .outbound_preferences_for_test()
                 .load_communication_preference(owner_preference_key.clone())
                 .await
                 .expect("owner preference read before approval")
                 .is_none()
         );
         assert!(
-            local_runtime
-                .outbound_preferences
+            runtime_surfaces
+                .outbound_preferences_for_test()
                 .load_communication_preference(actor_preference_key.clone())
                 .await
                 .expect("actor preference read before approval")
@@ -4193,22 +4189,22 @@ mod tests {
         let mut approval_scope = run_context.scope.to_resource_scope();
         approval_scope.user_id = owner_user_id.clone();
         approval_scope.invocation_id = invocation_id;
-        let approval = local_runtime
-            .capability_policy
+        let approval = runtime_surfaces
+            .capability_policy_for_test()
             .lease_approval_for(
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                &local_runtime.workspace_mounts,
-                &local_runtime.skill_mounts,
-                &local_runtime.memory_mounts,
-                &local_runtime.system_extensions_lifecycle_mounts,
+                runtime_surfaces.workspace_mounts_for_test(),
+                runtime_surfaces.skill_mounts_for_test(),
+                runtime_surfaces.memory_mounts_for_test(),
+                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             )
             .expect("outbound delivery approval lease terms");
         let persistent_terms = approval.clone();
         ApprovalResolver::new(
-            local_runtime.approval_requests.as_ref(),
-            local_runtime.capability_leases.as_ref(),
+            runtime_surfaces.approval_requests_for_test().as_ref(),
+            runtime_surfaces.capability_leases_for_test().as_ref(),
         )
         .approve_dispatch(
             &approval_scope,
@@ -4242,8 +4238,8 @@ mod tests {
             set_output["final_reply_target"]["target_id"],
             slack_target_id.as_str()
         );
-        let owner_preference = local_runtime
-            .outbound_preferences
+        let owner_preference = runtime_surfaces
+            .outbound_preferences_for_test()
             .load_communication_preference(owner_preference_key)
             .await
             .expect("owner preference read after approval")
@@ -4257,15 +4253,15 @@ mod tests {
             Some(slack_reply_target.as_str())
         );
         assert!(
-            local_runtime
-                .outbound_preferences
+            runtime_surfaces
+                .outbound_preferences_for_test()
                 .load_communication_preference(actor_preference_key)
                 .await
                 .expect("actor preference read after approval")
                 .is_none()
         );
-        let leases = local_runtime
-            .capability_leases
+        let leases = runtime_surfaces
+            .capability_leases_for_test()
             .leases_for_scope(&approval_scope)
             .await;
         assert!(leases.iter().any(|lease| {
@@ -4278,8 +4274,8 @@ mod tests {
         persistent_scope.project_id = None;
         persistent_scope.mission_id = None;
         persistent_scope.thread_id = None;
-        local_runtime
-            .persistent_approval_policies
+        runtime_surfaces
+            .persistent_approval_policies_for_test()
             .allow(PersistentApprovalPolicyInput {
                 scope: persistent_scope,
                 action: PersistentApprovalAction::Dispatch,
@@ -4315,8 +4311,8 @@ mod tests {
             Resolution::Done(_) => {}
             other => panic!("persistent always-allow set should complete, got {other:?}"),
         }
-        local_runtime
-            .tool_permission_overrides
+        runtime_surfaces
+            .tool_permission_overrides_for_test()
             .set(ToolPermissionOverrideInput {
                 scope: {
                     let mut scope = run_context.scope.to_resource_scope();
@@ -4367,8 +4363,8 @@ mod tests {
     #[tokio::test]
     async fn local_dev_yolo_outbound_delivery_target_set_bypasses_approval_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
                 "local-yolo-outbound-delivery-owner",
                 dir.path().join("local-dev"),
             )
@@ -4376,9 +4372,8 @@ mod tests {
         )
         .await
         .expect("local-dev-yolo services build");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let slack_target_id =
             RebornOutboundDeliveryTargetId::new("slack:yolo-dm").expect("target id");
@@ -4417,7 +4412,7 @@ mod tests {
             ]));
         let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
             Arc::new(RebornOutboundPreferencesFacade::new(
-                Arc::clone(&local_runtime.outbound_preferences),
+                Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
         let owner_user_id = UserId::new("local-yolo-outbound-owner").expect("user id");
@@ -4441,7 +4436,7 @@ mod tests {
             &services,
             thread_service,
             fallback_user_id,
-            Arc::clone(&local_runtime.capability_policy),
+            Arc::clone(runtime_surfaces.capability_policy_for_test()),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
@@ -4495,8 +4490,8 @@ mod tests {
             other => panic!("missing target should fail non-terminally, got {other:?}"),
         }
         assert!(
-            local_runtime
-                .outbound_preferences
+            runtime_surfaces
+                .outbound_preferences_for_test()
                 .load_communication_preference(owner_preference_key.clone())
                 .await
                 .expect("owner preference read after missing-target set")
@@ -4531,8 +4526,8 @@ mod tests {
                 .all(|caller| caller == &expected_provider_caller),
             "outbound target provider should be scoped to owner caller: {observed_provider_callers:?}"
         );
-        let owner_preference = local_runtime
-            .outbound_preferences
+        let owner_preference = runtime_surfaces
+            .outbound_preferences_for_test()
             .load_communication_preference(owner_preference_key)
             .await
             .expect("owner preference read after direct set")
@@ -4546,8 +4541,8 @@ mod tests {
             Some(slack_reply_target.as_str())
         );
         assert!(
-            local_runtime
-                .outbound_preferences
+            runtime_surfaces
+                .outbound_preferences_for_test()
                 .load_communication_preference(actor_preference_key)
                 .await
                 .expect("actor preference read after direct set")
@@ -4558,16 +4553,16 @@ mod tests {
     #[tokio::test]
     async fn local_dev_outbound_delivery_capabilities_hidden_without_provider_facade() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-no-outbound-provider-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-no-outbound-provider-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
+        let runtime = services.host_runtime.clone();
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
@@ -4579,10 +4574,10 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
-            workspace_mounts: local_runtime.workspace_mounts.clone(),
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -4595,16 +4590,16 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -4668,8 +4663,8 @@ mod tests {
             .to_string_lossy()
             .into_owned();
 
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev_with_profile(
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-yolo-host-owner",
                 storage_root,
@@ -4682,12 +4677,11 @@ mod tests {
         )
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
-        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime = services.host_runtime.clone(); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -4699,9 +4693,9 @@ mod tests {
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -4714,16 +4708,16 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -4925,8 +4919,8 @@ mod tests {
     async fn local_dev_capability_port_skill_install_writes_user_skill_root() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev_with_profile(
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-skill-port-owner",
                 storage_root.clone(),
@@ -4935,12 +4929,11 @@ mod tests {
         )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
-        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime = services.host_runtime.clone(); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -4952,9 +4945,9 @@ mod tests {
             fallback_user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -4967,16 +4960,16 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -5051,18 +5044,17 @@ mod tests {
             .expect("canonical workspace root")
             .to_string_lossy()
             .into_owned();
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev("local-dev-no-host-owner", storage_root)
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input("local-dev-no-host-owner", storage_root)
                 .with_local_dev_workspace_root(workspace_root.clone()),
         )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
-        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime = services.host_runtime.clone(); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -5074,9 +5066,9 @@ mod tests {
             fallback_user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            memory_mounts: local_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: local_runtime
-                .system_extensions_lifecycle_mounts
+            memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            system_extensions_lifecycle_mounts: runtime_surfaces
+                .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
             extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
@@ -5089,16 +5081,16 @@ mod tests {
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
             ),
-            project_service: Arc::clone(&local_runtime.project_service),
+            project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
-            approval_requests: local_runtime.approval_requests.clone(),
-            capability_leases: local_runtime.capability_leases.clone(),
+            approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
+            capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
             gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+                crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                    Arc::clone(&local_runtime.extension_filesystem),
+                    Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
                 )),
             ),
             external_tool_catalog: std::sync::Arc::new(
@@ -5208,26 +5200,20 @@ mod tests {
         let storage_root = dir.path().join("local-dev");
         let owner_id = "local-dev-github-surface-owner";
         {
-            let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-                owner_id,
-                storage_root.clone(),
-            ))
+            let services = crate::factory::build_runtime_substrate(
+                crate::deployment::local_dev_build_input(owner_id, storage_root.clone()),
+            )
             .await
             .expect("local-dev services build");
-            let local_runtime = services
-                .local_runtime
-                .as_ref()
+            let runtime_surfaces = services
+                .local_runtime_for_test()
                 .expect("local runtime substrate");
-            let extension_management = local_runtime
-                .extension_management
-                .as_ref()
-                .expect("extension management")
-                .clone();
+            let extension_management = runtime_surfaces.extension_management.clone();
             let operator = extension_management
                 .tenant_operator_user_id_for_test()
                 .clone();
             let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-                local_runtime.skill_management.clone(),
+                runtime_surfaces.skill_management.clone(),
             )
             .with_extension_management(extension_management)
             .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
@@ -5251,10 +5237,9 @@ mod tests {
                 .expect("activate github extension");
         }
 
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            owner_id,
-            storage_root,
-        ))
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input(owner_id, storage_root),
+        )
         .await
         .expect("local-dev services rebuild");
         let run_context = run_context("github-surface").await;
@@ -5280,12 +5265,13 @@ mod tests {
     async fn local_dev_capability_port_refreshes_extensions_after_activation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-live-github-surface-owner",
-            storage_root,
-        ))
-        .await
-        .expect("local-dev services build");
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-live-github-surface-owner",
+                storage_root,
+            ))
+            .await
+            .expect("local-dev services build");
         let run_context = run_context("github-live-surface").await;
         let wiring = capability_wiring(
             &services,
@@ -5321,20 +5307,15 @@ mod tests {
             "github capability should stay hidden before activation"
         );
 
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
+        let extension_management = runtime_surfaces.extension_management.clone();
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
+            runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
         .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
@@ -5398,12 +5379,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_search_makes_every_bundled_result_model_visible() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-extension-search-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
+        let services =
+            crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
+                "local-dev-extension-search-owner",
+                dir.path().join("local-dev"),
+            ))
+            .await
+            .expect("local-dev services build");
         let run_context = run_context("extension-search-loop-port").await;
         enable_global_auto_approve_for_run(
             &services,
@@ -5490,8 +5472,8 @@ mod tests {
     async fn register_does_not_rebuild_surface_mid_response() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(
-            crate::RebornBuildInput::local_dev_with_profile(
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-mid-response-owner",
                 storage_root,
@@ -5536,20 +5518,15 @@ mod tests {
             .await
             .expect("first register");
 
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
+        let runtime_surfaces = services
+            .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
+        let extension_management = runtime_surfaces.extension_management.clone();
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
+            runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
         .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));

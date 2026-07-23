@@ -363,8 +363,8 @@ impl ExtensionInstallationStore for OwnerReadFailingStore {
 #[tokio::test]
 async fn build_webui_services_wires_lifecycle_owner_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let input = crate::RebornRuntimeInput::from_services(
-        crate::RebornBuildInput::local_dev("runtime-owner", dir.path().join("local-dev"))
+    let input = crate::RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-owner", dir.path().join("local-dev"))
             .with_runtime_policy(
                 crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
             ),
@@ -398,8 +398,8 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
 #[tokio::test]
 async fn product_surface_extension_lifecycle_remove_succeeds_after_activation() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let input = crate::RebornRuntimeInput::from_services(
-        crate::RebornBuildInput::local_dev(
+    let input = crate::RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "product-surface-extension-owner",
             dir.path().join("local-dev"),
         )

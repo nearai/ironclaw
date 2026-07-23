@@ -23,7 +23,8 @@ from provider_capability_inventory import (
     EMULATE_SUPPORTED_TOOLS,
     capability_id_to_wire_name,
 )
-from provider_operation_cases import PROVIDER_OPERATION_CASES, ProviderOperationCase
+from provider_operation_cases import PROVIDER_OPERATION_CASES
+from provider_operation_types import ProviderOperationCase
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,

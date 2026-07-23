@@ -39,7 +39,7 @@ pip install -e .
 playwright install chromium
 ```
 
-Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `92bd9c2157a74613c47549eb5cfcccc7c0740adf`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
+Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `7f0175ad65a884ad86b3897c527cc40336e1391b`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
 
 ## Running Tests
 
@@ -208,15 +208,16 @@ gates, and read provider state back from Emulate. This is the contract tier to
 use when the behavior being protected is extension install/auth, model-to-tool
 routing, tool execution, and provider mutation together.
 
-The pinned `serrrfirat/emulate` fork adds the Google Docs and Sheets operations
-and Slack `search.messages` used by the harvested trace catalog. Google Slides
-remains outside the provider fixture because no harvested trace uses it. Manual
-QA rows that mention Telegram, Twitter/X, or HN/web search are likewise
-model-replay-only unless paired with a separate fake/provider fixture.
-GitHub `/contents` file create/update/delete and workflow dispatch also remain
-outside direct Emulate 0.7.0 coverage: the emulator exposes Git data APIs but no
-`/contents` routes, and it exposes Actions routes but does not let fixture seeds
-define workflows to dispatch.
+The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive, and
+Sheets operations and Slack `search.messages` used by the provider contract
+catalog. Google Slides remains outside the provider fixture because Emulate has
+no Slides routes. Manual QA rows that mention Telegram, Twitter/X, or HN/web
+search are likewise model-replay-only unless paired with a separate
+fake/provider fixture. GitHub `/contents` file create/update/delete, GraphQL
+review threads, and workflow dispatch remain outside direct Emulate coverage:
+the emulator exposes Git data APIs but no `/contents` or GraphQL routes, and it
+exposes Actions routes but does not let fixture seeds define workflows to
+dispatch.
 
 ### Environment passed to ironclaw in tests
 
