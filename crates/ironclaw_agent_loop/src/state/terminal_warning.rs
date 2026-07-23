@@ -204,6 +204,24 @@ mod tests {
     }
 
     #[test]
+    fn delivered_warning_stays_active_across_checkpoint_round_trip() {
+        let mut state = TerminalWarningState::default();
+        assert!(state.schedule(TerminalWarningObservation::no_progress(None, None)));
+        state.mark_delivered();
+
+        let encoded = serde_json::to_vec(&state).expect("warning state serializes");
+        let restored: TerminalWarningState =
+            serde_json::from_slice(&encoded).expect("warning state deserializes");
+
+        assert!(restored.pending().is_none());
+        assert_eq!(
+            restored.active(),
+            Some(TerminalWarningKind::NoProgressDetected)
+        );
+        assert!(restored.attempted(TerminalWarningKind::NoProgressDetected));
+    }
+
+    #[test]
     fn observation_rejects_unknown_schema_version() {
         let mut observation = TerminalWarningObservation::iteration_limit(8);
         observation.schema_version += 1;
