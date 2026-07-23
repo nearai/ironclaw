@@ -4575,7 +4575,7 @@ async fn build_backend_production(
                 // before the blocked-run fan-out. A bare turn-resume
                 // dispatcher here leaves a freshly paired channel extension
                 // stuck at setup_needed until an unrelated reconcile runs
-                // (#6520 live-repro: telegram remove → install → pair).
+                // (#6520 live-repro: channel remove → install → pair).
                 let continuation = Arc::clone(&lifecycle_wrapped_continuation);
                 let agent_id = match channel_egress_scope.agent_id.clone() {
                     Some(agent_id) => agent_id,

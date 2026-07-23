@@ -818,3 +818,81 @@ fn scoped_skill_mounts(
 fn skill_content(name: &str, description: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\nUse this skill.\n")
 }
+
+/// Live-repro regression (demo-stack defect): removing an installed CHANNEL
+/// extension through the real product-capability dispatch must actually tear
+/// the durable membership down — not resolve success while the installation
+/// row survives. The sibling test above asserts only the resolution verdict;
+/// this one demands the durable evidence (`tool-evidence.md`: installation
+/// mutations read back the durable lifecycle state).
+#[tokio::test]
+async fn product_surface_channel_extension_remove_deletes_the_durable_membership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = crate::RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "channel-remove-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy resolves")),
+    )
+    .with_identity(crate::RebornRuntimeIdentity {
+        tenant_id: "tenant-alpha".to_string(),
+        agent_id: "agent-alpha".to_string(),
+        source_binding_id: "webui-test-source".to_string(),
+        reply_target_binding_id: "webui-test-reply".to_string(),
+    });
+    let runtime = crate::build_reborn_runtime(input)
+        .await
+        .expect("runtime builds");
+    let bundle = build_webui_services(&runtime, None).expect("webui services build");
+    let caller = caller("channel-remove-owner");
+
+    let install = invoke_lifecycle_product_capability(
+        &bundle,
+        caller.clone(),
+        EXTENSION_INSTALL_CAPABILITY,
+        serde_json::json!({"extension_id": "telegram"}),
+    )
+    .await
+    .expect("install resolves");
+    // A channel extension's install parks on its pairing/auth requirement
+    // AFTER persisting the caller membership — the same Blocked(Auth)
+    // outcome the webui install handler accepts as "setup needed".
+    match install {
+        Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
+        Resolution::Blocked(Blocked::Auth(_)) => {}
+        other => panic!("telegram install failed: {other:?}"),
+    }
+    let installed = runtime
+        .extension_management
+        .installation_store_handle()
+        .get_installation(&ExtensionInstallationId::new("telegram").expect("installation id"))
+        .await
+        .expect("installation store read");
+    assert!(
+        installed.is_some(),
+        "telegram install must persist a durable installation row"
+    );
+
+    let remove = invoke_lifecycle_product_capability(
+        &bundle,
+        caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        serde_json::json!({"extension_id": "telegram"}),
+    )
+    .await
+    .expect("remove resolves");
+    assert_success(remove, "telegram remove");
+    let survivor = runtime
+        .extension_management
+        .installation_store_handle()
+        .get_installation(&ExtensionInstallationId::new("telegram").expect("installation id"))
+        .await
+        .expect("installation store read");
+    assert!(
+        survivor.is_none(),
+        "telegram remove reported success but the durable installation row survived: {survivor:?}"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
