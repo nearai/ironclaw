@@ -76,10 +76,6 @@ impl UserContainerCandidate {
             created_at,
         })
     }
-
-    pub(crate) fn age(&self, now: DateTime<Utc>) -> Duration {
-        (now - self.created_at).to_std().unwrap_or(Duration::ZERO)
-    }
 }
 
 /// Push-based in-memory map of per-user last-activity timestamps, keyed on

@@ -24,20 +24,23 @@ use crate::{
 mod broker;
 mod connect;
 mod container_identity;
+mod egress_proxy;
 mod exec_transport;
 mod mounts;
 mod network_allowlist;
 mod reaper;
 mod registry;
 mod scope_key;
-pub mod shell_limits;
+pub(crate) mod shell_limits;
 mod user_key;
 
 use mounts::RebornSandboxMountSources;
+use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use egress_proxy::{BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError};
 pub use network_allowlist::{
     DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, sandbox_allowed_domains,
     sandbox_extra_allowed_domains, sandbox_network_policy,
@@ -46,10 +49,6 @@ pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
 use registry::BackgroundJobRegistry;
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
-pub use shell_limits::{
-    SHELL_OUTPUT_LIMIT_DEFAULT_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES, SHELL_TIMEOUT_DEFAULT_SECS,
-    SHELL_TIMEOUT_MAX_SECS, clamp_shell_output_limit_bytes, clamp_shell_timeout_secs,
-};
 pub use user_key::RebornSandboxUserKey;
 
 /// Docker label prefix for container metadata attached by
@@ -204,16 +203,37 @@ impl RebornSandboxConfig {
         self
     }
 
+    /// Docker `--network` value for the sandbox container.
+    ///
+    /// - `disable_network: false` (`with_network_enabled`, unused in
+    ///   production today): `None` (Docker default bridge) — a deliberate
+    ///   fully-open mode, unrelated to the brokered-egress cases below.
+    /// - `disable_network: true` with no broker, or a Unix-socket broker
+    ///   (`requires_docker_network() == false`): `Some("none")` — no network
+    ///   interfaces at all.
+    /// - `disable_network: true` with an HTTP-proxy broker
+    ///   (`requires_docker_network() == true`): joins the pinned internal
+    ///   network (`broker::SANDBOX_EGRESS_NETWORK_NAME`) instead of the
+    ///   default bridge. **E1**: the default bridge NATs to the internet, so
+    ///   a container there could dial out directly and ignore the proxy env
+    ///   — "proxy-allowlist egress" would be advisory, not enforced. The
+    ///   internal network has no route off-host except back to its own
+    ///   gateway, where the proxy is reached (see
+    ///   `broker::SANDBOX_EGRESS_NETWORK_GATEWAY` and
+    ///   `exec_transport::ensure_egress_network`, which creates the network
+    ///   idempotently before a container joins it).
     fn container_network_mode(&self) -> Option<String> {
-        if self.disable_network
-            && !self
-                .network_broker
-                .as_ref()
-                .is_some_and(RebornSandboxNetworkBroker::requires_docker_network)
-        {
-            Some("none".to_string())
+        if !self.disable_network {
+            return None;
+        }
+        let requires_docker_network = self
+            .network_broker
+            .as_ref()
+            .is_some_and(RebornSandboxNetworkBroker::requires_docker_network);
+        if requires_docker_network {
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
         } else {
-            None
+            Some("none".to_string())
         }
     }
 
@@ -245,6 +265,10 @@ pub struct RebornScopedSandboxCommandTransport {
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
     background_jobs: Arc<BackgroundJobRegistry>,
+    /// Gates the egress network's idempotent-but-not-free create attempt
+    /// (see `exec_transport::ensure_egress_network_once`) to once per
+    /// process instead of once per command dispatch.
+    network_ready: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -273,6 +297,7 @@ impl RebornScopedSandboxCommandTransport {
             config,
             activity: Arc::new(SandboxActivityRegistry::new()),
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
+            network_ready: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -411,7 +436,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         // ceiling here rather than rejected when it overshoots.
         let requested_secs = request
             .timeout_secs
-            .unwrap_or_else(|| self.config.default_timeout.as_secs());
+            .unwrap_or(self.config.default_timeout.as_secs());
         let timeout = clamp_shell_timeout_secs(Some(requested_secs));
         // Clamp to `[SHELL_OUTPUT_LIMIT_MIN_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES]`,
         // falling back to the configured default when the model omits
@@ -430,6 +455,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             &request.scope.tenant_id,
             &request.scope.user_id,
             &workspace,
+            &self.network_ready,
         )
         .await?;
 
@@ -682,13 +708,19 @@ mod tests {
     }
 
     #[test]
-    fn network_broker_exposes_proxy_env_without_none_network_mode() {
+    fn network_broker_proxy_url_joins_internal_egress_network_not_default_bridge() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
         let env = config.command_env(HashMap::new()).unwrap();
 
-        assert_eq!(config.container_network_mode(), None);
+        // E1: an HTTP-proxy broker must NOT leave the container on Docker's
+        // default bridge (which NATs to the internet) — it joins the
+        // pinned internal network instead.
+        assert_eq!(
+            config.container_network_mode(),
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
+        );
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
         assert!(
             env.contains(&"IRONCLAW_REBORN_HTTP_PROXY=http://broker.internal:8181".to_string())
@@ -700,13 +732,22 @@ mod tests {
     }
 
     #[test]
-    fn network_broker_port_uses_docker_host_gateway_proxy_url() {
+    fn network_broker_port_uses_pinned_internal_network_gateway_proxy_url() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
         let env = config.command_env(HashMap::new()).unwrap();
-        let proxy_url = format!("http://{}:8181", broker::docker_host_gateway());
+        let proxy_url = format!("http://{}:8181", broker::SANDBOX_EGRESS_NETWORK_GATEWAY);
 
+        // E1: the default-port broker's proxy URL must point at the pinned
+        // internal network's gateway (reachable once the container joins
+        // `SANDBOX_EGRESS_NETWORK_NAME`), not the Docker default-bridge
+        // host-gateway address — that was the E1 hole (default bridge NATs
+        // to the internet).
         assert!(env.contains(&format!("IRONCLAW_REBORN_HTTP_PROXY={proxy_url}")));
         assert!(env.contains(&format!("http_proxy={proxy_url}")));
+        assert_eq!(
+            config.container_network_mode(),
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
+        );
     }
 
     #[test]
@@ -848,7 +889,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_container_launch_config_applies_http_proxy_broker_env_and_drops_none_network() {
+    async fn user_container_launch_config_applies_http_proxy_broker_env_and_joins_internal_egress_network()
+     {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -866,7 +908,14 @@ mod tests {
         let binds = host_config.binds.unwrap();
         let env = launch.env.unwrap();
 
-        assert_eq!(host_config.network_mode, None);
+        // E1: the applied Docker HostConfig must attach to the pinned
+        // internal egress network, never silently fall back to the default
+        // bridge (which would NAT to the internet and defeat the proxy
+        // allowlist).
+        assert_eq!(
+            host_config.network_mode,
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
+        );
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
         assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
         assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
@@ -897,7 +946,16 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejects_any_scoped_mount_grant_before_container_touch() {
         let temp = tempfile::tempdir().unwrap();
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        // `run_command` must reject a scoped `MountView` grant as a pure
+        // precondition, before any Docker client use — so this test must
+        // not require a live daemon either. `connect_with_local_defaults`
+        // stats the Unix socket at construction and fails immediately
+        // without one; the HTTP-transport client performs no I/O until a
+        // request is sent (see `ensure_egress_network_is_a_no_op_for_none_
+        // network_configs` in `exec_transport.rs` for the same pattern).
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
+                .expect("HTTP-transport client construction performs no I/O");
         let transport = RebornScopedSandboxCommandTransport::new(
             docker,
             RebornSandboxConfig::new(temp.path().join("workspaces")),

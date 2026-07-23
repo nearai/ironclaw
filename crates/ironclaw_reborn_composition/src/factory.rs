@@ -1770,6 +1770,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         runtime_policy,
         runtime_process_binding,
         sandbox_activity,
+        sandbox_egress_proxy,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -2024,6 +2025,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     })
     .await?;
 
+    // The identical local `RebornServices.secret_store` exposes to every
+    // other caller — never a second independently constructed store.
+    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let local_dev_secret_bundle = build_secret_store(
+        &root,
+        Arc::clone(&local_dev_product_auth_filesystem),
+        secret_master_key,
+    )
+    .await?;
+    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
+
     // D3-2: bound this tenant's concurrent SpawnProcess reservations for the
     // sandboxed profile only — every other profile leaves the tenant account
     // unlimited. Turns the D3-1 `ReserveResources` obligation from a no-op
@@ -2045,6 +2057,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 .clone()
                 .unwrap_or_else(|| Arc::new(ironclaw_host_runtime::SandboxActivityRegistry::new())),
             owner_user_id: sandbox_owner_user_id_for_ceiling,
+            // Phase C: the proxy `tenant_sandbox_process_binding` already
+            // spawned (and pointed the sandbox container's default proxy
+            // at), threaded here via `RebornBuildInput::sandbox_egress_proxy`
+            // so `build` takes ownership of the SAME instance rather than
+            // spawning a second one. `None` for non-sandboxed profiles.
+            egress_proxy: sandbox_egress_proxy,
         },
     )
     .await?;
@@ -2052,14 +2070,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
-    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
-    let local_dev_secret_bundle = build_secret_store(
-        &root,
-        Arc::clone(&local_dev_product_auth_filesystem),
-        secret_master_key,
-    )
-    .await?;
-    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
     // Admin per-user secret provisioner over the shared root + the SAME crypto
     // as the runtime's own secret store.
     let admin_secret_provisioner: Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> =
@@ -4764,6 +4774,7 @@ async fn build_production_shaped(
         account_setup_descriptors: _,
         runtime_process_binding,
         sandbox_activity: _,
+        sandbox_egress_proxy: _,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,

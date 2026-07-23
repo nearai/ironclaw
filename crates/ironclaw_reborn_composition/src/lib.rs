@@ -51,6 +51,7 @@ mod runtime_input;
 mod runtime_profile_approval_policy;
 mod sandbox_boot;
 mod sandbox_composition;
+mod sandbox_egress_proxy_task;
 mod sandbox_quota;
 mod sandbox_reaper_task;
 mod support;

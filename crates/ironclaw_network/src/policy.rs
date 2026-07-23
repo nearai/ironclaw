@@ -174,7 +174,27 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     }
 }
 
+/// Canonical private/loopback/reserved-range check for an already-resolved
+/// IP. Unwraps IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to their v4 form
+/// before classifying. Crate-private: other crates gating egress on a
+/// resolved dial address (e.g. the sandboxed shell's egress proxy in
+/// `ironclaw_host_runtime`) go through [`network_denies_resolved_ip`]
+/// instead of maintaining a second, independently-drifting copy of the same
+/// range logic.
 pub(crate) fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
+    is_private_or_loopback_ip_impl(ip)
+}
+
+/// Public entry point for other Reborn runtime crates (e.g. the sandboxed
+/// shell's egress proxy in `ironclaw_host_runtime`) gating a resolved dial
+/// address against this crate's private/loopback/reserved-IP policy — the
+/// name callers outside this crate are meant to use, so this crate stays the
+/// one place the range logic itself is defined.
+pub fn network_denies_resolved_ip(ip: IpAddr) -> bool {
+    is_private_or_loopback_ip_impl(ip)
+}
+
+fn is_private_or_loopback_ip_impl(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             ip.is_private()
@@ -188,7 +208,7 @@ pub(crate) fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
         }
         IpAddr::V6(ip) => {
             if let Some(mapped) = ip.to_ipv4_mapped() {
-                return is_private_or_loopback_ip(IpAddr::V4(mapped));
+                return is_private_or_loopback_ip_impl(IpAddr::V4(mapped));
             }
             ip.is_loopback()
                 || ip.is_unspecified()

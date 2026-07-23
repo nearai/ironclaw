@@ -23,9 +23,9 @@ use ironclaw_host_api::{
     RuntimeKind, TrustClass, UserId, runtime_policy::ApprovalPolicy,
 };
 use ironclaw_host_runtime::{
-    CommandExecutionOutput, CommandExecutionRequest, RebornSandboxScopeKey,
-    RuntimeCapabilityRequest, RuntimeProcessError, SHELL_CAPABILITY_ID, SandboxCommandTransport,
-    TenantSandboxProcessPort, sandbox_network_policy,
+    CommandExecutionOutput, CommandExecutionRequest, RebornSandboxScopeKey, RuntimeProcessError,
+    SHELL_CAPABILITY_ID, SandboxCommandTransport, TenantSandboxProcessPort,
+    sandbox_network_policy,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntimeProcessBinding, build_reborn_services,
@@ -190,7 +190,7 @@ async fn hosted_single_tenant_volume_sandboxed_forwards_distinct_scope_per_user(
 
     for user in ["user-a", "user-b"] {
         let outcome = runtime
-            .invoke_capability(RuntimeCapabilityRequest::new(
+            .invoke_capability((
                 shell_execution_context(user),
                 CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
                 ResourceEstimate::default(),

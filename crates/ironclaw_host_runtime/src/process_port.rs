@@ -391,9 +391,9 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
     #[cfg(unix)]
     use crate::process_output::SavedCommandOutputSanitization;
+    use crate::sandbox_process::shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES;
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -671,9 +671,14 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_sandbox_process_port_truncates_transport_output() {
+        // With `output_limit_bytes: None` below, `run_command` clamps to
+        // `SHELL_OUTPUT_LIMIT_DEFAULT_BYTES` (64KiB) — not
+        // `process_output::COMMAND_MAX_OUTPUT_SIZE` (16KiB), which only
+        // bounds the model-facing preview built elsewhere. Exceed the limit
+        // actually enforced at this seam so truncation is exercised.
         let transport = std::sync::Arc::new(RecordingSandboxTransport {
             requests: Mutex::new(Vec::new()),
-            output: "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1),
+            output: "x".repeat(SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize + 1),
         });
         let port = TenantSandboxProcessPort::new(transport);
 

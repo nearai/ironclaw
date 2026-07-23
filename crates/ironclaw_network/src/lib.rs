@@ -18,7 +18,7 @@ mod url_target;
 
 pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgress};
 pub use error::NetworkHttpError;
-pub use policy::{StaticNetworkPolicyEnforcer, target_matches_pattern};
+pub use policy::{StaticNetworkPolicyEnforcer, network_denies_resolved_ip, target_matches_pattern};
 pub use resolver::NetworkResolver;
 pub use test_rewrite::{
     HostRewriteMap, HostRewriteMapError, RewriteNetworkTransport, TEST_HTTP_REWRITE_MAP_ENV,

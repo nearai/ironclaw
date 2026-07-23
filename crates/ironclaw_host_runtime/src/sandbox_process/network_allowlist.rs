@@ -11,13 +11,15 @@
 //!
 //! This module owns the *domain list* — the set of hosts the sandboxed
 //! profile's `builtin.shell` grant should carry in its
-//! [`NetworkPolicy`](ironclaw_host_api::NetworkPolicy) `allowed_targets`, and
-//! that a host-side allowlist proxy would enforce for real. It does not
-//! itself enforce anything — enforcement is the transport/proxy wiring
-//! (`RebornSandboxConfig::with_network_broker_proxy_url`, wired at
-//! `crates/ironclaw_reborn_composition/src/sandbox_boot.rs`) plus, still
-//! outstanding (see the `TODO(follow-up, not built here)` there), the
-//! actual proxy server.
+//! [`NetworkPolicy`](ironclaw_host_api::NetworkPolicy) `allowed_targets`. It
+//! does not itself enforce anything; it is the policy input consumed by two
+//! things that do: the CONNECT/forward proxy
+//! (`ironclaw_host_runtime::sandbox_process::egress_proxy`), spawned and
+//! bound via `crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs`
+//! and `sandbox_boot.rs`'s `with_sandbox_network_broker`, and the topological
+//! guardrail that the container's Docker network is pinned `internal: true`
+//! with no default route off the host, so the proxy is the container's only
+//! path to the outside world.
 use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
 
 /// Environment variable operators can set to add domains to the sandboxed

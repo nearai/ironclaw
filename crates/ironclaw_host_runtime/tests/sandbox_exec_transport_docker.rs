@@ -59,6 +59,12 @@ fn request(scope: ResourceScope, command: &str) -> CommandExecutionRequest {
     }
 }
 
+fn background_request(scope: ResourceScope, command: &str) -> CommandExecutionRequest {
+    let mut request = request(scope, command);
+    request.background = true;
+    request
+}
+
 /// Finds the single container labeled for `{tenant, user}`, the same way the
 /// production `ensure_container` lookup does (see `exec_transport.rs`).
 async fn find_labeled_container(docker: &Docker, tenant: &str, user: &str) -> Option<String> {
@@ -372,6 +378,81 @@ async fn fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home() {
 
     if let Some(container_id) =
         find_labeled_container(&docker, "fat-image-tenant", "fat-image-user").await
+    {
+        best_effort_remove(&docker, &container_id).await;
+    }
+}
+
+/// End-to-end round trip for `background: true` against a real container:
+/// starts a detached command, then proves the pid-agreement invariant that
+/// only the script-shape unit test (`background_launch_script_puts_the_
+/// dollar_dollar_log_redirect_inside_the_inner_shell` in `exec_transport.rs`)
+/// otherwise pins — that the log file the launched job actually writes to
+/// lives at the exact `log_path` reported back to the caller. If the `$$`
+/// used to build the log filename ever disagreed with the `$!` pid reported
+/// to Rust again, this test would fail by finding no file (or the wrong
+/// content) at the reported path, where the unit test alone cannot catch it
+/// (it only asserts the script string's shape, never runs it).
+#[tokio::test]
+async fn background_command_writes_its_output_to_the_reported_log_path() {
+    let image =
+        skip_unless_docker_ready!("background_command_writes_its_output_to_the_reported_log_path");
+
+    let docker = Docker::connect_with_local_defaults().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let user_scope = scope("background-tenant", "background-user");
+    let workspace = RebornSandboxUserKey::from_scope(&user_scope).workspace_path(temp.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    let port = sandbox_transport::connect_for_test(&workspace, &image)
+        .await
+        .expect("sandbox transport connects");
+
+    let marker = "background-e2e-marker-9f3c1a";
+    let launch = port
+        .run_command(background_request(
+            user_scope.clone(),
+            &format!("echo {marker}"),
+        ))
+        .await
+        .expect("background launch succeeds");
+    assert!(
+        launch.output.starts_with("Started in background: pid "),
+        "expected the background-launch acknowledgement, got: {launch:?}"
+    );
+    let log_path = launch
+        .output
+        .split_once(", log ")
+        .map(|(_, log_path)| log_path.trim().to_string())
+        .expect("background launch output names a log path");
+    assert!(
+        log_path.starts_with("/workspace/.ironclaw/bg-") && log_path.ends_with(".log"),
+        "unexpected log path shape: {log_path}"
+    );
+
+    // The background job races the `cat` below; poll briefly rather than
+    // assuming it has already flushed its output by the time we check.
+    let mut log_contents = String::new();
+    for _ in 0..20 {
+        let read = port
+            .run_command(request(
+                user_scope.clone(),
+                &format!("cat {log_path} 2>&1 || echo NOT_YET"),
+            ))
+            .await
+            .expect("log read command succeeds");
+        if read.output.contains(marker) {
+            log_contents = read.output;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        log_contents.contains(marker),
+        "expected the background job's output at its reported log_path {log_path}, got: {log_contents:?}"
+    );
+
+    if let Some(container_id) =
+        find_labeled_container(&docker, "background-tenant", "background-user").await
     {
         best_effort_remove(&docker, &container_id).await;
     }

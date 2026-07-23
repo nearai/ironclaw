@@ -389,6 +389,10 @@ name = "reborn_integration_safety"
 path = "tests/integration/safety.rs"
 
 [[test]]
+name = "reborn_integration_sandbox_egress_proxy"
+path = "tests/integration/reborn_sandbox_egress_proxy.rs"
+
+[[test]]
 name = "reborn_integration_secret_injection"
 path = "tests/integration/secret_injection.rs"
 

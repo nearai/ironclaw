@@ -26,11 +26,13 @@ use crate::input::RebornRuntimeProcessBinding;
 /// sandboxed shell container's `http_proxy`/`https_proxy` env should point
 /// at. Takes priority over [`SANDBOX_HTTP_PROXY_PORT_ENV`] when both are set.
 ///
-/// Soft-enforcement model (mirrors legacy IronClaw's sandbox): the container
-/// keeps normal bridge networking and is steered through this proxy, which
-/// is expected to enforce the egress allowlist
-/// (`ironclaw_host_runtime::sandbox_allowed_domains`) — see the follow-up
-/// note below.
+/// Hard (topological) enforcement model: the sandboxed container is placed
+/// on a pinned, Docker `internal: true` network with no default route off
+/// the host (`ironclaw_host_runtime::sandbox_process::exec_transport`'s
+/// `SANDBOX_EGRESS_NETWORK_NAME`), so this proxy is the container's only
+/// path to the outside world — not a steering convention layered on normal
+/// bridge networking. It enforces the egress allowlist
+/// (`ironclaw_host_runtime::sandbox_process::egress_proxy`).
 const SANDBOX_HTTP_PROXY_URL_ENV: &str = "IRONCLAW_SANDBOX_HTTP_PROXY";
 
 /// Port of an allowlist proxy reachable via the Docker host-gateway address
@@ -51,24 +53,34 @@ const SANDBOX_HTTP_PROXY_PORT_ENV: &str = "IRONCLAW_SANDBOX_HTTP_PROXY_PORT";
 /// [`SANDBOX_HTTP_PROXY_PORT_ENV`] names a reachable proxy, the container
 /// gets normal (bridge) networking plus `http_proxy`/`https_proxy` env
 /// pointing at it, so pip/npm/git/curl workflows can reach the allowlisted
-/// registries (`ironclaw_host_runtime::sandbox_allowed_domains`). Without
-/// either env var the sandbox falls back to the prior `--network none`
-/// posture — no egress at all, but still a safe default rather than a
-/// build failure — until a proxy address is configured.
-///
-/// TODO(follow-up, not built here): this only points the container at a
-/// proxy address; it does not stand one up. The actual host-side allowlist
-/// **proxy server** — a forward proxy that enforces
-/// `ironclaw_host_runtime::sandbox_allowed_domains` and is reachable from
-/// the sandbox container at the configured address — still needs to be
-/// built and deployed. Until it lands, setting either env var here routes
-/// the container's traffic at *something*, but that something must already
-/// exist and enforce the allowlist, or the container effectively gets open
-/// egress.
+/// registries. Without either env var, `default_broker_port` is used when
+/// present; when it is also `None`, this function spawns a fresh
+/// [`ironclaw_host_runtime::EgressAllowlistProxy`] itself (fail-closed: a
+/// bind failure here fails this call, never a silent `--network none`
+/// downgrade masquerading as "configured") and uses its freshly bound port,
+/// so unconfigured deployments still get a live, allowlist-enforcing
+/// default rather than the prior `--network none` posture. A caller that
+/// already spawned (and separately owns the lifecycle of) a proxy — e.g.
+/// composition's boot path, which threads the resulting handle onward via
+/// [`TenantSandboxBinding::egress_proxy`] for `SandboxRuntimeBindings` to
+/// shut down — passes that proxy's port as `default_broker_port` instead of
+/// asking this function to spawn a second, orphaned one.
 pub async fn tenant_sandbox_process_binding(
     sandbox_workspaces_root: PathBuf,
+    default_broker_port: Option<u16>,
 ) -> Result<TenantSandboxBinding, RebornBuildError> {
-    let config = with_sandbox_network_broker(RebornSandboxConfig::new(sandbox_workspaces_root))?;
+    let (default_broker_port, egress_proxy) = match default_broker_port {
+        Some(port) => (Some(port), None),
+        None => {
+            let handle = crate::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy().await?;
+            let port = handle.local_addr.port();
+            (Some(port), Some(handle))
+        }
+    };
+    let config = with_sandbox_network_broker(
+        RebornSandboxConfig::new(sandbox_workspaces_root),
+        default_broker_port,
+    )?;
     let activity = Arc::new(SandboxActivityRegistry::new());
     let transport = RebornScopedSandboxCommandTransport::connect(config)
         .await
@@ -82,6 +94,7 @@ pub async fn tenant_sandbox_process_binding(
     Ok(TenantSandboxBinding {
         binding: RebornRuntimeProcessBinding::tenant_sandbox(process_port),
         activity,
+        egress_proxy,
     })
 }
 
@@ -94,22 +107,31 @@ pub async fn tenant_sandbox_process_binding(
 pub struct TenantSandboxBinding {
     pub binding: RebornRuntimeProcessBinding,
     pub activity: Arc<SandboxActivityRegistry>,
+    /// `Some` when this call spawned its own egress-allowlist proxy (the
+    /// production case: no `default_broker_port` was supplied). The caller
+    /// threads this onward (`RebornBuildInput::with_sandbox_egress_proxy_handle`)
+    /// so `SandboxRuntimeBindings::build` takes ownership of the SAME
+    /// instance rather than spawning a second one — one bound proxy per
+    /// sandboxed-profile boot, one owner for its shutdown.
+    pub egress_proxy: Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
 }
 
 /// Applies the configured proxy broker (if any) to `config`. Missing or
-/// invalid configuration is handled gracefully: an absent env var leaves the
-/// sandbox at its safe `--network none` default rather than failing the
-/// build; an invalid `SANDBOX_HTTP_PROXY_URL_ENV` value fails closed with a
-/// descriptive error rather than silently falling back to no proxy (which
-/// would look configured but silently grant no egress instead of the
-/// intended allowlisted egress).
+/// invalid configuration is handled gracefully: an absent env var falls
+/// back to `default_port` (see [`tenant_sandbox_process_binding`]) rather
+/// than failing the build; an invalid `SANDBOX_HTTP_PROXY_URL_ENV` value
+/// fails closed with a descriptive error rather than silently falling back
+/// to no proxy (which would look configured but silently grant no egress
+/// instead of the intended allowlisted egress).
 fn with_sandbox_network_broker(
     config: RebornSandboxConfig,
+    default_port: Option<u16>,
 ) -> Result<RebornSandboxConfig, RebornBuildError> {
     with_sandbox_network_broker_from_values(
         config,
         std::env::var(SANDBOX_HTTP_PROXY_URL_ENV).ok(),
         std::env::var(SANDBOX_HTTP_PROXY_PORT_ENV).ok(),
+        default_port,
     )
 }
 
@@ -117,10 +139,15 @@ fn with_sandbox_network_broker(
 /// drive every branch without mutating process-global env — this crate is
 /// `#![forbid(unsafe_code)]`, which bans `std::env::set_var`. Mirrors the
 /// `hosted_volume_secret_master_key_from_raw` pattern in `deployment.rs`.
+///
+/// Precedence: `proxy_url` env wins over `proxy_port` env, which wins over
+/// `default_port` — an operator-pointed external proxy is never overridden
+/// by the composition-supplied default.
 fn with_sandbox_network_broker_from_values(
     config: RebornSandboxConfig,
     proxy_url: Option<String>,
     proxy_port: Option<String>,
+    default_port: Option<u16>,
 ) -> Result<RebornSandboxConfig, RebornBuildError> {
     if let Some(proxy_url) = proxy_url {
         return config
@@ -141,6 +168,9 @@ fn with_sandbox_network_broker_from_values(
                 })?;
         return Ok(config.with_network_broker_port(port));
     }
+    if let Some(port) = default_port {
+        return Ok(config.with_network_broker_port(port));
+    }
     Ok(config)
 }
 
@@ -158,6 +188,7 @@ mod tests {
             RebornSandboxConfig::new("/tmp/reborn-sandbox"),
             None,
             None,
+            None,
         )
         .expect("no proxy env configured is not an error");
 
@@ -172,6 +203,7 @@ mod tests {
             RebornSandboxConfig::new("/tmp/reborn-sandbox"),
             Some("http://proxy.internal:3128".to_string()),
             None,
+            None,
         )
         .expect("valid proxy URL wires successfully");
 
@@ -183,6 +215,7 @@ mod tests {
         let result = with_sandbox_network_broker_from_values(
             RebornSandboxConfig::new("/tmp/reborn-sandbox"),
             Some("not a url".to_string()),
+            None,
             None,
         );
 
@@ -198,9 +231,51 @@ mod tests {
             RebornSandboxConfig::new("/tmp/reborn-sandbox"),
             None,
             Some("8181".to_string()),
+            None,
         )
         .expect("valid proxy port wires successfully");
 
         assert!(!format!("{config:?}").contains("network_broker: None"));
+    }
+
+    #[test]
+    fn default_port_env_absent_falls_back_to_supplied_default_port() {
+        let config = with_sandbox_network_broker_from_values(
+            RebornSandboxConfig::new("/tmp/reborn-sandbox"),
+            None,
+            None,
+            Some(8181),
+        )
+        .expect("a supplied default port wires successfully with no env set");
+
+        assert!(!format!("{config:?}").contains("network_broker: None"));
+    }
+
+    #[test]
+    fn explicit_proxy_url_env_still_wins_over_default_port() {
+        let with_default_only = with_sandbox_network_broker_from_values(
+            RebornSandboxConfig::new("/tmp/reborn-sandbox"),
+            None,
+            None,
+            Some(8181),
+        )
+        .expect("default port wires successfully");
+
+        let with_env_and_default = with_sandbox_network_broker_from_values(
+            RebornSandboxConfig::new("/tmp/reborn-sandbox"),
+            Some("http://proxy.internal:3128".to_string()),
+            None,
+            Some(8181),
+        )
+        .expect("env proxy URL wires successfully even with a default port supplied");
+
+        // The env-sourced broker (a proxy URL) must differ from the
+        // default-port-only broker (a host-gateway port) — proves env
+        // precedence took effect rather than the default silently winning.
+        assert_ne!(
+            format!("{with_default_only:?}"),
+            format!("{with_env_and_default:?}"),
+            "explicit proxy URL env must produce a different broker than the default port alone"
+        );
     }
 }

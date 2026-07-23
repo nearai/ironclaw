@@ -31,6 +31,39 @@ const CONTAINER_HTTP_BROKER_SOCKET: &str = "/tmp/ironclaw-http-broker.sock";
 const CONTAINER_SECRET_BROKER_SOCKET: &str = "/tmp/ironclaw-secret-broker.sock";
 const CONTAINER_BROKER_URL: &str = "http://ironclaw-broker";
 
+/// Name of the pinned, `internal: true` Docker network the has-egress
+/// sandbox container joins instead of Docker's default bridge (E1,
+/// `docs/plans/2026-07-21-persistent-sandbox-container-plan.md` Task 2
+/// amendment). Docker's default bridge NATs to the internet, so a container
+/// on it can dial out directly and ignore `http_proxy`/`https_proxy` env —
+/// that made "proxy-allowlist egress" advisory, not enforced. An `internal:
+/// true` network has no default route off-host, so the proxy becomes the
+/// only path out. `exec_transport::ensure_egress_network` creates this
+/// network idempotently before a container joins it.
+///
+/// This topology's DinD runtime behavior (does an `internal: true` network's
+/// containers really retain reachability to that network's own bridge
+/// gateway while losing the internet route?) is NOT validated on this dev
+/// machine — no local Docker daemon. Task 3's Docker-real integration test
+/// (`tests/integration/reborn_sandbox_egress_proxy.rs`, the E1 bypass
+/// assertion) is the CI arbiter for this mechanism.
+pub(super) const SANDBOX_EGRESS_NETWORK_NAME: &str = "ironclaw-sandbox-egress";
+
+/// Pinned subnet for [`SANDBOX_EGRESS_NETWORK_NAME`]. Pinning it (rather
+/// than letting Docker choose one) makes [`SANDBOX_EGRESS_NETWORK_GATEWAY`]
+/// a known constant instead of something that requires a `docker network
+/// inspect` round-trip to discover. If this range collides with a DinD
+/// host's own address space, that is a config constant to revisit, not a
+/// reason to build subnet auto-selection now.
+pub(super) const SANDBOX_EGRESS_NETWORK_SUBNET: &str = "10.200.0.0/24";
+
+/// Gateway address of [`SANDBOX_EGRESS_NETWORK_NAME`] — where the sandbox
+/// egress proxy (bound `0.0.0.0:0` host-side, see composition's
+/// `sandbox_egress_proxy_task.rs`) is reached from inside a container on
+/// this network. An `internal: true` network still bridges to the host at
+/// its own gateway IP; it just has no NAT/default route beyond the host.
+pub(super) const SANDBOX_EGRESS_NETWORK_GATEWAY: &str = "10.200.0.1";
+
 /// Broker affordance exposed to tenant sandbox commands.
 ///
 /// The Unix-socket variant preserves Docker `--network none`; the HTTP-proxy
@@ -57,7 +90,11 @@ impl RebornSandboxNetworkBroker {
     }
 
     pub fn from_port(port: u16) -> Self {
-        let proxy_url = format!("http://{}:{port}", docker_host_gateway());
+        // Points at the pinned internal-network gateway (E1), NOT Docker's
+        // default-bridge host-gateway address — the container joins
+        // `SANDBOX_EGRESS_NETWORK_NAME` (see `container_network_mode`
+        // below), which has no route to the internet, only to this gateway.
+        let proxy_url = format!("http://{SANDBOX_EGRESS_NETWORK_GATEWAY}:{port}");
         debug_assert!(validate_broker_url("network broker proxy URL", &proxy_url).is_ok());
 
         Self {
@@ -334,12 +371,4 @@ fn docker_file_bind(
     validate_host_socket_path(label, host_path)?;
     reject_nul("container broker path", container_path)?;
     Ok(format!("{}:{container_path}:rw", host_path.display()))
-}
-
-pub(super) fn docker_host_gateway() -> &'static str {
-    if cfg!(target_os = "linux") {
-        "172.17.0.1"
-    } else {
-        "host.docker.internal"
-    }
 }
