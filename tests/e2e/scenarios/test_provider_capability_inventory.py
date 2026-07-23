@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import tomllib
 
+import pytest
+
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     EMULATE_SUPPORTED_TOOLS,
@@ -82,12 +84,11 @@ def _cargo_test_targets() -> dict[str, str]:
 def _assert_integration_evidence_is_executable(
     evidence: dict, targets: dict[str, str]
 ) -> None:
-    required = {"capability", "kind", "target", "source", "test"}
+    required = {"capability", "target", "source", "test"}
     assert set(evidence) == required, (
         f"integration evidence fields must be exactly {sorted(required)}: "
         f"{evidence}"
     )
-    assert evidence["kind"] == "reborn_integration", evidence
 
     assert evidence["target"] in targets, (
         f"unknown Cargo test target {evidence['target']!r}: {evidence}"
@@ -99,17 +100,65 @@ def _assert_integration_evidence_is_executable(
 
     source = ROOT / evidence["source"]
     assert source.is_file(), f"integration evidence source is missing: {source}"
-    test_pattern = re.compile(
-        rf"#\s*\[\s*(?:tokio::)?test(?:\s*\([^]]*\))?\s*\]\s*"
-        rf"(?:pub\s+)?(?:async\s+)?fn\s+{re.escape(evidence['test'])}\s*\("
-    )
-    assert test_pattern.search(source.read_text()), (
-        f"integration test {evidence['test']!r} is missing from "
-        f"{evidence['source']}"
+    _assert_executable_test_declaration(
+        source.read_text(), evidence["test"], evidence["source"]
     )
 
 
-def test_tested_capabilities_have_full_path_evidence():
+def _assert_executable_test_declaration(
+    source: str, test_name: str, source_label: str
+) -> None:
+    declaration = re.compile(
+        rf"(?P<attributes>(?:^[ \t]*#\s*\[[^\n]+\][ \t]*\n)+)"
+        rf"^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+{re.escape(test_name)}\s*\(",
+        re.MULTILINE,
+    ).search(source)
+    assert declaration, (
+        f"integration test {test_name!r} is missing from {source_label}"
+    )
+
+    attributes = set(
+        re.findall(
+            r"#\s*\[\s*([A-Za-z_][A-Za-z0-9_:]*)",
+            declaration.group("attributes"),
+        )
+    )
+    assert attributes & {"test", "tokio::test"}, (
+        f"integration test {test_name!r} lacks a test attribute in "
+        f"{source_label}"
+    )
+    disabling_attributes = sorted(attributes & {"cfg", "cfg_attr", "ignore"})
+    assert not disabling_attributes, (
+        f"integration test {test_name!r} is disabled by test-level attributes "
+        f"{disabling_attributes} in {source_label}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("disabling_attribute", "expected_attribute"),
+    [
+        ("#[ignore]", "ignore"),
+        ('#[cfg(feature = "disabled-evidence")]', "cfg"),
+    ],
+)
+def test_executable_evidence_rejects_disabled_tests(
+    disabling_attribute: str, expected_attribute: str
+):
+    source = (
+        f"{disabling_attribute}\n"
+        "#[tokio::test]\n"
+        "async fn disabled_evidence() {}\n"
+    )
+    with pytest.raises(
+        AssertionError,
+        match=rf"disabled by test-level attributes .*{expected_attribute}",
+    ):
+        _assert_executable_test_declaration(
+            source, "disabled_evidence", "synthetic.rs"
+        )
+
+
+def test_tested_capabilities_have_executable_evidence_at_the_correct_seam():
     """A tested label must point to executable evidence at the correct seam."""
     evidence = _recorded_tool_evidence()
     operation_case_tools = {
@@ -125,7 +174,10 @@ def test_tested_capabilities_have_full_path_evidence():
         if integration_capabilities.count(capability) > 1
     )
     assert not duplicates, f"duplicate integration evidence: {duplicates}"
-    assert INTEGRATION_EVIDENCE_CAPABILITY_IDS <= TESTED_CAPABILITY_IDS
+    assert INTEGRATION_EVIDENCE_CAPABILITY_IDS <= TESTED_CAPABILITY_IDS, (
+        "integration evidence for untested capabilities: "
+        f"{sorted(INTEGRATION_EVIDENCE_CAPABILITY_IDS - TESTED_CAPABILITY_IDS)}"
+    )
     cargo_targets = _cargo_test_targets()
     for integration_evidence in INTEGRATION_EVIDENCE:
         _assert_integration_evidence_is_executable(
@@ -136,6 +188,6 @@ def test_tested_capabilities_have_full_path_evidence():
         EMULATE_SUPPORTED_TOOLS - evidence.keys() - operation_case_tools
     )
     assert not missing_tested, (
-        f"tested capabilities lack full-path evidence: {missing_tested}"
+        f"Emulate-backed capabilities lack executable evidence: {missing_tested}"
     )
     assert operation_case_tools <= EMULATE_SUPPORTED_TOOLS

@@ -1,7 +1,8 @@
 schema_version = 1
 
 # A capability is "tested" only when a harvested journey or typed operation
-# case executes the real extension boundary and observes Emulate.
+# case observes Emulate, or an integration_evidence entry names its executable
+# test at the real local-WASM or hosted-MCP seam.
 [classifications]
 tested = [
   "github.add_issue_assignees",
@@ -134,28 +135,24 @@ unsupported = []
 
 [[integration_evidence]]
 capability = "github.handle_webhook"
-kind = "reborn_integration"
 target = "reborn_integration_tool_call"
 source = "tests/integration/tool_call.rs"
 test = "github_webhook_normalization_dispatches_through_bundled_wasm"
 
 [[integration_evidence]]
 capability = "nearai.web_search"
-kind = "reborn_integration"
 target = "reborn_integration_mcp"
 source = "tests/integration/mcp.rs"
 test = "nearai_web_search_dispatches_through_bundled_hosted_mcp"
 
 [[integration_evidence]]
 capability = "web-access.get_content"
-kind = "reborn_integration"
 target = "reborn_integration_web_access"
 source = "tests/integration/web_access.rs"
 test = "get_content_dispatches_through_scripted_exa_mcp"
 
 [[integration_evidence]]
 capability = "web-access.search"
-kind = "reborn_integration"
 target = "reborn_integration_web_access"
 source = "tests/integration/web_access.rs"
 test = "web_search_dispatches_through_scripted_exa_mcp"

@@ -29,6 +29,34 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "chat:write",
 ];
 
+fn github_webhook_normalization_call() -> RebornScriptedReply {
+    RebornScriptedReply::tool_call(
+        "github.handle_webhook",
+        json!({
+            "webhook": {
+                "headers": {
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-capability-evidence"
+                },
+                "body_json": {
+                    "action": "opened",
+                    "repository": {
+                        "full_name": "nearai/ironclaw",
+                        "owner": {"login": "nearai"}
+                    },
+                    "pull_request": {
+                        "number": 6573,
+                        "state": "open",
+                        "base": {"ref": "main"},
+                        "head": {"ref": "codex/provider-evidence"}
+                    },
+                    "sender": {"login": "serrrfirat"}
+                }
+            }
+        }),
+    )
+}
+
 #[tokio::test]
 async fn runs_numeric_time_input_through_builtin_tools_group() {
     let g = RebornIntegrationGroup::builtin_tools()
@@ -117,31 +145,7 @@ async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
     let h = RebornIntegrationHarness::test_default()
         .with_github_issue_tools()
         .script([
-            RebornScriptedReply::tool_call(
-                "github.handle_webhook",
-                json!({
-                    "webhook": {
-                        "headers": {
-                            "X-GitHub-Event": "pull_request",
-                            "X-GitHub-Delivery": "delivery-capability-evidence"
-                        },
-                        "body_json": {
-                            "action": "opened",
-                            "repository": {
-                                "full_name": "nearai/ironclaw",
-                                "owner": {"login": "nearai"}
-                            },
-                            "pull_request": {
-                                "number": 6573,
-                                "state": "open",
-                                "base": {"ref": "main"},
-                                "head": {"ref": "codex/provider-evidence"}
-                            },
-                            "sender": {"login": "serrrfirat"}
-                        }
-                    }
-                }),
-            ),
+            github_webhook_normalization_call(),
             RebornScriptedReply::text("webhook normalized"),
         ])
         .build()

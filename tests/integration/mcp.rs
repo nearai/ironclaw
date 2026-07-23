@@ -59,57 +59,19 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
     let group = RebornIntegrationGroup::extension_lifecycle()
         .await
         .expect("extension-lifecycle group builds");
-    let installer = group
-        .thread("nearai-hosted-mcp-install")
+    let h = group
+        .thread("nearai-hosted-mcp-lifecycle")
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
                 serde_json::json!({"extension_id": "nearai"}),
             ),
             RebornScriptedReply::text("NEAR AI search is installed."),
-        ])
-        .build()
-        .await
-        .expect("installer thread builds");
-
-    installer
-        .seed_capability_credential_account("nearai", "NEAR AI integration account", &[])
-        .await
-        .expect("NEAR AI account is seeded under the dispatching user");
-    installer
-        .submit_turn("install NEAR AI search")
-        .await
-        .expect("install turn completes");
-    installer
-        .assert_tool_result_contains(r#""installed":true"#)
-        .await
-        .expect("NEAR AI package installed");
-
-    let activator = group
-        .thread("nearai-hosted-mcp-activate")
-        .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_activate",
                 serde_json::json!({"extension_id": "nearai"}),
             ),
             RebornScriptedReply::text("NEAR AI search is ready."),
-        ])
-        .build()
-        .await
-        .expect("activator thread builds");
-
-    activator
-        .submit_turn("activate NEAR AI search")
-        .await
-        .expect("activation turn completes");
-    activator
-        .assert_tool_result_contains(r#""activated":true"#)
-        .await
-        .expect("NEAR AI package activated");
-
-    let search = group
-        .thread("nearai-hosted-mcp-search")
-        .script([
             RebornScriptedReply::tool_call(
                 "nearai.web_search",
                 serde_json::json!({"query": "IronClaw capability evidence"}),
@@ -118,26 +80,37 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
         ])
         .build()
         .await
-        .expect("search thread builds");
+        .expect("NEAR AI lifecycle thread builds");
 
-    search
-        .submit_turn("search for IronClaw capability evidence")
+    h.seed_capability_credential_account("nearai", "NEAR AI integration account", &[])
+        .await
+        .expect("NEAR AI account is seeded under the dispatching user");
+    h.submit_turn("install NEAR AI search")
+        .await
+        .expect("install turn completes");
+    h.assert_tool_result_contains(r#""installed":true"#)
+        .await
+        .expect("NEAR AI package installed");
+    h.submit_turn("activate NEAR AI search")
+        .await
+        .expect("activation turn completes");
+    h.assert_tool_result_contains(r#""activated":true"#)
+        .await
+        .expect("NEAR AI package activated");
+    h.submit_turn("search for IronClaw capability evidence")
         .await
         .expect("search turn completes");
-    search
-        .assert_model_tools_contains("nearai__web_search")
+    h.assert_model_tools_contains("nearai__web_search")
         .await
         .expect("activated NEAR AI capability is disclosed to the model");
-    search
-        .assert_tool_invoked("nearai.web_search")
+    h.assert_tool_invoked("nearai.web_search")
         .await
         .expect("canonical NEAR AI capability dispatched");
-    search
-        .assert_tool_result_contains("REBORN_NEARAI_WEB_SEARCH_RESULT")
+    h.assert_tool_result_contains("REBORN_NEARAI_WEB_SEARCH_RESULT")
         .await
         .expect("hosted MCP response reached the model-facing result");
 
-    let requests = search.captured_network_requests_for_test();
+    let requests = h.captured_network_requests_for_test();
     let tools_call = requests
         .iter()
         .find(|request| {

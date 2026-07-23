@@ -369,14 +369,13 @@ fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<St
                 .collect(),
         ),
         // extension_lifecycle_tools_profile() (harness/profiles/extension.rs)
-        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS (4 ids) plus
-        // BUNDLED_EXTENSION_CAPABILITY_IDS. The 4 lifecycle ids are filtered
-        // out BY NAME (order-independent): their real production values are
-        // visibility-blocked (see `production_capability_surface()`'s doc) —
-        // checking them against a surface that (correctly) no longer contains
-        // them would fail for a reason unrelated to real drift. The remaining
-        // ~130 bundled-extension ids ARE checked, against the manifest-derived
-        // (not hand-transcribed) surface.
+        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS plus the real GitHub
+        // package ids and the other manifest-derived bundled extension ids.
+        // The lifecycle ids are filtered out BY NAME (order-independent):
+        // their real production values are visibility-blocked (see
+        // `production_capability_surface()`'s doc), so checking them against a
+        // surface that correctly omits them would report unrelated drift.
+        // Every remaining manifest-derived capability id is checked.
         ("extension", {
             let capability_ids =
                 profiles::extension::extension_lifecycle_tools_profile()?.capability_ids;
