@@ -1877,6 +1877,7 @@ impl RebornIntegrationHarness {
         let response = self
             .coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope,
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,

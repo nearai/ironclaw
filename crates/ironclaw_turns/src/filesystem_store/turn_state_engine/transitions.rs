@@ -338,6 +338,7 @@ impl Inner {
             self.apply_status_transition(transition, &record);
             record.resume_disposition = request.resume_disposition.clone();
             record.gate_ref = None;
+            record.expected_tx_hash = None;
             record.credential_requirements = Vec::new();
             record.source_binding_ref = request.source_binding_ref.clone();
             record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
@@ -348,6 +349,76 @@ impl Inner {
                 run_id: record.run_id,
                 status: record.status.get(),
                 event_cursor: record.event_cursor,
+                // Fresh transition: callers may drive a one-shot side effect
+                // (the attested signer continuation) off this success.
+                replayed: false,
+            };
+            self.push_event(&record, TurnEventKind::Resumed, None, None);
+            Ok(response)
+        })();
+        self.records.insert(record.run_id, record);
+        result
+    }
+
+    /// Apply an attested-resume verdict for a run parked on `BlockedAttested`.
+    ///
+    /// The row store reads the run's status + persisted binding and calls the
+    /// crypto-free `AttestedResumePort` with NO durable lock held; it then calls
+    /// this with the verdict. Re-derives and re-validates the binding from the
+    /// engine's own record (so a concurrent transition between the port call and
+    /// this commit cannot let a stale verdict drive a one-shot resume): status
+    /// still `BlockedAttested`, gate matches the request, binding present. On
+    /// `Ok` the run transitions to `AttestedResolved`; a rejection leaves it
+    /// blocked and surfaces a sanitized reason.
+    pub(crate) fn commit_attested_resume_once(
+        &mut self,
+        request: &ResumeTurnRequest,
+        verdict: Result<(), crate::AttestedResumeRejection>,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        let mut record = self.take_record(request.run_id)?;
+        let result = (|| {
+            if record.scope != request.scope {
+                return Err(TurnError::ScopeNotFound);
+            }
+            if record.status.get() != TurnStatus::BlockedAttested {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status.get(),
+                    to: TurnStatus::AttestedResolved,
+                });
+            }
+            if record.actor != request.actor {
+                return Err(TurnError::Unauthorized);
+            }
+            if record.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
+                return Err(TurnError::InvalidRequest {
+                    reason: "gate resolution reference mismatch".to_string(),
+                });
+            }
+            if record.expected_tx_hash.is_none() {
+                return Err(TurnError::InvalidRequest {
+                    reason: "attested gate has no persisted transaction binding".to_string(),
+                });
+            }
+            if let Err(rejection) = verdict {
+                return Err(TurnError::InvalidRequest {
+                    reason: format!("attested resume rejected: {}", rejection.category()),
+                });
+            }
+            let now = Utc::now();
+            let transition = record.status.set(TurnStatus::AttestedResolved);
+            self.apply_status_transition(transition, &record);
+            record.resume_disposition = request.resume_disposition.clone();
+            record.gate_ref = None;
+            record.expected_tx_hash = None;
+            record.source_binding_ref = request.source_binding_ref.clone();
+            record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
+            record.event_cursor = self.next_cursor();
+            self.update_active_lock(&record, now);
+            let response = ResumeTurnResponse {
+                run_id: record.run_id,
+                status: record.status.get(),
+                event_cursor: record.event_cursor,
+                replayed: false,
             };
             self.push_event(&record, TurnEventKind::Resumed, None, None);
             Ok(response)
@@ -814,6 +885,7 @@ impl Inner {
         self.apply_status_transition(transition, &record);
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
+        record.expected_tx_hash = reason.expected_tx_hash().cloned();
         record.blocked_activity_id = blocked_activity_id;
         record.credential_requirements = reason.credential_requirements().to_vec();
         clear_runner_lease(&mut record);
@@ -1318,6 +1390,7 @@ impl TurnRunTransitionPort for TurnStateEngine {
                 inner.apply_status_transition(transition, &record);
                 record.checkpoint_id = Some(request.checkpoint_id);
                 record.gate_ref = Some(request.reason.gate_ref().clone());
+                record.expected_tx_hash = request.reason.expected_tx_hash().cloned();
                 record.blocked_activity_id = None;
                 record.credential_requirements = request.reason.credential_requirements().to_vec();
                 clear_runner_lease(&mut record);

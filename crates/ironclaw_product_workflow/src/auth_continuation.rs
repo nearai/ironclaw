@@ -152,6 +152,7 @@ impl ProductAuthTurnGateResumeDispatcher {
 
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope,
                 actor,
                 run_id,
@@ -459,6 +460,7 @@ mod tests {
             let run_id = request.run_id;
             self.resumes.lock().expect("resume lock").push(request);
             Ok(ResumeTurnResponse {
+                replayed: false,
                 run_id,
                 status: TurnStatus::Running,
                 event_cursor: EventCursor::default(),

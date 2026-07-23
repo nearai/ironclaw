@@ -210,6 +210,7 @@ struct RunRecord {
     reply_target_binding_ref: ReplyTargetBindingRef,
     checkpoint_id: Option<TurnCheckpointId>,
     gate_ref: Option<crate::GateRef>,
+    expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     blocked_activity_id: Option<crate::CapabilityActivityId>,
     credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     failure: Option<SanitizedFailure>,
@@ -402,6 +403,47 @@ impl TurnStateEngine {
             Ok(inner) => inner.turns.get(&turn_id).cloned(),
             Err(poisoned) => poisoned.into_inner().turns.get(&turn_id).cloned(),
         }
+    }
+
+    /// Commit an attested-resume verdict (the crypto-free verifier has already
+    /// run, with no lock held, in the row-store layer). Mirrors `resume_turn`'s
+    /// idempotency handling: a replayed key returns the cached success flagged
+    /// `replayed`, so a caller driving the one-shot signer continuation cannot
+    /// fire it twice.
+    pub(crate) fn commit_attested_resume_once(
+        &self,
+        request: &ResumeTurnRequest,
+        verdict: Result<(), crate::AttestedResumeRejection>,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let idempotency_key = RunIdempotencyKey {
+            scope: request.scope.clone(),
+            run_id: request.run_id,
+            key: request.idempotency_key.clone(),
+        };
+        if let Some(cached) = inner.resume_idempotency.get(&idempotency_key) {
+            let mut cached = cached.clone();
+            if let Ok(response) = cached.as_mut() {
+                response.replayed = true;
+            }
+            return cached;
+        }
+        let result = inner.commit_attested_resume_once(request, verdict);
+        // Only cache a verdict that is FINAL. A transient verifier outage
+        // (`AttestedResumeRejection::Unavailable`) reached no judgement about
+        // the claim, so caching it under this idempotency key would wedge the
+        // caller permanently on a fault that has since cleared — they could
+        // never retry the same resume. Final verdicts (binding mismatch,
+        // invalid claim, rejected evidence) are cached as before, which is what
+        // keeps a rejected resume from being replayed for a fresh answer.
+        let cacheable = match verdict {
+            Err(rejection) => rejection.is_final(),
+            Ok(()) => true,
+        };
+        if cacheable {
+            inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+        }
+        result
     }
 
     pub(crate) fn run_record(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
@@ -1012,9 +1054,17 @@ impl TurnStateStore for TurnStateEngine {
                 run_id: request.run_id,
                 key: request.idempotency_key.clone(),
             };
-            if let Some(replayed) = inner.resume_idempotency.get(&idempotency_key) {
+            if let Some(cached) = inner.resume_idempotency.get(&idempotency_key) {
                 // Idempotent replay — no state change, so no durable write.
-                replayed.clone()
+                // Flag the returned success so a caller that drives a one-shot
+                // side effect off a resume (the attested signer continuation)
+                // can tell this apart from the original transition and not fire
+                // twice. The stored record keeps the canonical fresh value.
+                let mut cached = cached.clone();
+                if let Ok(response) = cached.as_mut() {
+                    response.replayed = true;
+                }
+                cached
             } else {
                 let result = inner.resume_turn_once(&request);
                 inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());

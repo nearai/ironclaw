@@ -868,6 +868,7 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
 
     reopened_blocked
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: request.scope.clone(),
             actor: turn_actor(),
             run_id,
@@ -3640,5 +3641,409 @@ async fn filesystem_turn_state_events_backfill_skips_tombstones_and_reprojects_l
         marker.get("backfilled").and_then(|value| value.as_bool()),
         Some(true),
         "backfill must record completion even when the events collection is tombstone-heavy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Attested-signing gate: BlockedAttested resume through the injected port.
+// Driven end-to-end through the production `FilesystemTurnStateRowStore` caller
+// (submit -> claim -> block(Attested) -> resume) rather than a store helper, so
+// the row-store orchestration (verify-outside-durable-lock + commit) is what is
+// exercised. See .claude/rules/testing.md "Test Through the Caller".
+// ---------------------------------------------------------------------------
+
+use ironclaw_turns::{
+    ApprovedTxHashRef, AttestationClaimRef, AttestedResumePort, AttestedResumeRejection,
+    AttestedResumeRequest,
+};
+
+/// Recording double: captures every `(gate, attestation, expected_hash)` it is
+/// asked to verify so tests can assert the port was (or was NOT) called, and
+/// returns a scripted verdict.
+struct RecordingAttestedPort {
+    verdict: Result<(), AttestedResumeRejection>,
+    calls: StdMutex<Vec<(String, String, String)>>,
+}
+
+impl RecordingAttestedPort {
+    fn accepting() -> Arc<Self> {
+        Arc::new(Self {
+            verdict: Ok(()),
+            calls: StdMutex::new(Vec::new()),
+        })
+    }
+    fn rejecting(rejection: AttestedResumeRejection) -> Arc<Self> {
+        Arc::new(Self {
+            verdict: Err(rejection),
+            calls: StdMutex::new(Vec::new()),
+        })
+    }
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+
+impl AttestedResumePort for RecordingAttestedPort {
+    fn verify_attested_resume(
+        &self,
+        request: AttestedResumeRequest<'_>,
+    ) -> Result<(), AttestedResumeRejection> {
+        self.calls.lock().unwrap().push((
+            request.gate_ref.as_str().to_string(),
+            request.attestation.as_str().to_string(),
+            request.expected_tx_hash.as_str().to_string(),
+        ));
+        self.verdict
+    }
+}
+
+/// Submit -> claim -> block on an attested gate carrying `expected_tx_hash`.
+/// Returns `(run_id, gate_ref)`.
+async fn block_on_attested_gate<F: RootFilesystem>(
+    store: &FilesystemTurnStateRowStore<F>,
+    scope: TurnScope,
+    idem: &str,
+    gate: &str,
+    expected_tx_hash: &str,
+) -> (TurnRunId, GateRef) {
+    let resolver = InMemoryRunProfileResolver::default();
+    let request = submit_request_for(scope, idem);
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new(gate).unwrap();
+    let blocked = store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new("checkpoint:attested").unwrap(),
+            reason: BlockedReason::Attested {
+                gate_ref: gate_ref.clone(),
+                expected_tx_hash: Some(ApprovedTxHashRef::new(expected_tx_hash).unwrap()),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, TurnStatus::BlockedAttested);
+    (run_id, gate_ref)
+}
+
+fn attested_resume_request(
+    scope: TurnScope,
+    run_id: TurnRunId,
+    gate_ref: GateRef,
+    idem: &str,
+    attestation: Option<&str>,
+) -> ResumeTurnRequest {
+    ResumeTurnRequest {
+        attestation: attestation.map(|a| AttestationClaimRef::new(a).unwrap()),
+        scope,
+        actor: turn_actor(),
+        run_id,
+        gate_resolution_ref: gate_ref,
+        source_binding_ref: SourceBindingRef::new("source-attested").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-attested").unwrap(),
+        idempotency_key: IdempotencyKey::new(idem).unwrap(),
+        precondition: ResumeTurnPrecondition::BlockedAttestedGate,
+        resume_disposition: None,
+    }
+}
+
+#[tokio::test]
+async fn attested_resume_with_valid_port_transitions_to_attested_resolved() {
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::accepting();
+    let store =
+        FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone());
+    let scope = turn_scope("thread-attested-ok");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-ok", "gate-att-ok", "hash-A").await;
+
+    let resumed = store
+        .resume_turn(attested_resume_request(
+            scope,
+            run_id,
+            gate_ref,
+            "idem-resume-ok",
+            Some("attestation-A"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.status, TurnStatus::AttestedResolved);
+    assert!(!resumed.replayed, "fresh attested resolution is not a replay");
+    assert_eq!(port.call_count(), 1, "port verified exactly once");
+    let (gate, att, hash) = port.calls.lock().unwrap()[0].clone();
+    assert_eq!((gate.as_str(), att.as_str(), hash.as_str()), ("gate-att-ok", "attestation-A", "hash-A"));
+}
+
+#[tokio::test]
+async fn attested_resume_without_configured_port_fails_closed() {
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let store = FilesystemTurnStateRowStore::new(scoped); // no port injected
+    let scope = turn_scope("thread-attested-noport");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-np", "gate-np", "hash-B").await;
+
+    let err = store
+        .resume_turn(attested_resume_request(
+            scope.clone(),
+            run_id,
+            gate_ref,
+            "idem-resume-np",
+            Some("attestation-B"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TurnError::Unavailable { .. }), "got {err:?}");
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedAttested, "run stays blocked");
+}
+
+#[tokio::test]
+async fn attested_resume_with_rejecting_port_stays_blocked() {
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::rejecting(AttestedResumeRejection::BindingMismatch);
+    let store =
+        FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone());
+    let scope = turn_scope("thread-attested-reject");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-rej", "gate-rej", "hash-C").await;
+
+    let err = store
+        .resume_turn(attested_resume_request(
+            scope.clone(),
+            run_id,
+            gate_ref,
+            "idem-resume-rej",
+            Some("attestation-C"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TurnError::InvalidRequest { .. }), "got {err:?}");
+    assert_eq!(port.call_count(), 1, "port was consulted");
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedAttested, "rejection leaves run blocked");
+}
+
+#[tokio::test]
+async fn attested_resume_without_claim_does_not_call_port() {
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::accepting();
+    let store =
+        FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone());
+    let scope = turn_scope("thread-attested-noclaim");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-nc", "gate-nc", "hash-D").await;
+
+    // Attestation claim omitted: must fail closed BEFORE the crypto port runs.
+    let err = store
+        .resume_turn(attested_resume_request(
+            scope,
+            run_id,
+            gate_ref,
+            "idem-resume-nc",
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TurnError::InvalidRequest { .. }), "got {err:?}");
+    assert_eq!(port.call_count(), 0, "port must not run without an attestation claim");
+}
+
+#[tokio::test]
+async fn attested_resume_same_key_retry_is_marked_replayed() {
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::accepting();
+    let store =
+        FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone());
+    let scope = turn_scope("thread-attested-replay");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-rp", "gate-rp", "hash-E").await;
+
+    let req = attested_resume_request(scope, run_id, gate_ref, "idem-resume-rp", Some("attestation-E"));
+    let first = store.resume_turn(req.clone()).await.unwrap();
+    let second = store.resume_turn(req).await.unwrap();
+    assert!(!first.replayed, "first is a fresh transition");
+    assert!(second.replayed, "same-key retry is marked replayed");
+    assert_eq!(second.status, TurnStatus::AttestedResolved);
+    // The one-shot continuation must not be able to fire twice: only the fresh
+    // resume drove the port to a resolution.
+    assert_eq!(port.call_count(), 1, "idempotent replay does not re-run the port");
+}
+
+#[tokio::test]
+async fn attested_resume_wrong_gate_stays_blocked() {
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::accepting();
+    let store =
+        FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone());
+    let scope = turn_scope("thread-attested-wrong-gate");
+    let (run_id, _real_gate) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-wg", "gate-real", "hash-F").await;
+
+    let err = store
+        .resume_turn(attested_resume_request(
+            scope.clone(),
+            run_id,
+            GateRef::new("gate-wrong").unwrap(),
+            "idem-resume-wg",
+            Some("attestation-F"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TurnError::InvalidRequest { .. }), "got {err:?}");
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedAttested);
+}
+
+#[tokio::test]
+async fn attested_resume_from_wrong_scope_does_not_call_port() {
+    // Regression pin (#3966 review): the peek that decides whether to invoke the
+    // external verifier must scope-check FIRST. Otherwise a caller from another
+    // scope can learn a run exists and is parked on an attested gate, and can
+    // drive the crypto port, even though the commit would ultimately refuse.
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::accepting();
+    let store = FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone());
+    let scope = turn_scope("thread-attested-scope");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-scope", "gate-scope", "hash-S").await;
+
+    let mut wrong = attested_resume_request(
+        turn_scope("thread-attested-other"),
+        run_id,
+        gate_ref,
+        "idem-resume-scope",
+        Some("attestation-S"),
+    );
+    wrong.scope = turn_scope("thread-attested-other");
+    let err = store.resume_turn(wrong).await.unwrap_err();
+
+    assert!(matches!(err, TurnError::ScopeNotFound), "got {err:?}");
+    assert_eq!(port.call_count(), 0, "wrong-scope caller must never reach the verifier");
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedAttested, "run stays parked");
+}
+
+#[tokio::test]
+async fn transient_verifier_failure_is_not_cached_and_can_be_retried() {
+    // Regression pin (#3966 review): a rejection that reached NO verdict
+    // (`Unavailable`) must not be cached under the idempotency key, or a
+    // transient outage wedges the caller on that key forever. A later retry
+    // with the SAME key must be re-verified, not replayed from cache.
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = Arc::new(FlakyAttestedPort::default());
+    let store = FilesystemTurnStateRowStore::new(scoped)
+        .with_attested_resume_port(port.clone() as Arc<dyn AttestedResumePort>);
+    let scope = turn_scope("thread-attested-flaky");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&store, scope.clone(), "idem-att-flaky", "gate-flaky", "hash-T").await;
+
+    let req = attested_resume_request(
+        scope.clone(), run_id, gate_ref, "idem-resume-flaky", Some("attestation-T"),
+    );
+    // First attempt: the verifier is down.
+    let err = store.resume_turn(req.clone()).await.unwrap_err();
+    assert!(matches!(err, TurnError::InvalidRequest { .. }), "got {err:?}");
+
+    // Outage clears; the SAME idempotency key must be re-verified and succeed.
+    port.recover();
+    let resumed = store.resume_turn(req).await.expect("retry after outage must be re-verified");
+    assert_eq!(resumed.status, TurnStatus::AttestedResolved);
+    assert!(!resumed.replayed, "must be a fresh verdict, not a cached replay");
+    assert_eq!(port.call_count(), 2, "verifier consulted again after the transient failure");
+}
+
+/// Port double that fails with a transient `Unavailable` until `recover()`.
+#[derive(Default)]
+struct FlakyAttestedPort {
+    down: StdMutex<bool>,
+    calls: StdMutex<usize>,
+}
+
+impl FlakyAttestedPort {
+    fn recover(&self) {
+        *self.down.lock().unwrap() = false;
+    }
+    fn call_count(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+impl AttestedResumePort for FlakyAttestedPort {
+    fn verify_attested_resume(
+        &self,
+        _request: AttestedResumeRequest<'_>,
+    ) -> Result<(), AttestedResumeRejection> {
+        *self.calls.lock().unwrap() += 1;
+        let mut down = self.down.lock().unwrap();
+        if *down || *self.calls.lock().unwrap() == 1 {
+            *down = true;
+            return Err(AttestedResumeRejection::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn concurrent_same_key_attested_resume_verifies_once() {
+    // Regression pin (#3966 review): the attested path runs the verifier with no
+    // lock held, so two callers racing on the same idempotency key could both
+    // reach the port. Only one could ever win the commit, but the duplicate
+    // verification work and duplicate audit entry were real. The in-flight
+    // reservation collapses the race: the loser short-circuits instead.
+    let scoped = scoped_turns_fs(Arc::new(engine_filesystem()));
+    let port = RecordingAttestedPort::accepting();
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(scoped).with_attested_resume_port(port.clone()),
+    );
+    let scope = turn_scope("thread-attested-race");
+    let (run_id, gate_ref) =
+        block_on_attested_gate(&*store, scope.clone(), "idem-att-race", "gate-race", "hash-R").await;
+
+    let req = attested_resume_request(
+        scope, run_id, gate_ref, "idem-resume-race", Some("attestation-R"),
+    );
+    let (a, b) = tokio::join!(
+        { let s = Arc::clone(&store); let r = req.clone(); async move { s.resume_turn(r).await } },
+        { let s = Arc::clone(&store); let r = req.clone(); async move { s.resume_turn(r).await } },
+    );
+
+    // Exactly one resolution, and the verifier was consulted at most once per
+    // distinct verification window — never twice for one gate.
+    let resolved = [&a, &b].iter().filter(|r| r.as_ref().is_ok_and(|x| x.status == TurnStatus::AttestedResolved)).count();
+    assert!(resolved >= 1, "one caller must resolve the gate: {a:?} / {b:?}");
+    assert!(
+        port.call_count() <= 1,
+        "verifier must not be driven twice for one gate, got {}",
+        port.call_count()
     );
 }

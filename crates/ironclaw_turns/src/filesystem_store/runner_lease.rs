@@ -609,6 +609,7 @@ mod tests {
         TurnRunRecord {
             run_id,
             turn_id: TurnId::new(),
+            expected_tx_hash: None,
             scope: TurnScope::new(
                 TenantId::new("tenant-runner-lease-test").unwrap(),
                 Some(AgentId::new("agent-runner-lease-test").unwrap()),

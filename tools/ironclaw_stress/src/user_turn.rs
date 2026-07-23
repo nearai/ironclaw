@@ -1615,6 +1615,7 @@ where
         time_stage(
             &mut stages.resume_turn,
             turn_store.resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope: context.turn_scope.clone(),
                 actor: TurnActor::new(context.user_id.clone()),
                 run_id,

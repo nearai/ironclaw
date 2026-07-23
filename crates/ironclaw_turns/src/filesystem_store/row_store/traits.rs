@@ -115,11 +115,74 @@ where
         let max_idempotency_records = self.limits.max_idempotency_records;
         let scope = request.scope.clone();
         let run_id = request.run_id;
+
+        // Attested gate: the verification port may run heavy crypto or I/O, so
+        // it MUST NOT run under the durable apply lock. Peek the persisted
+        // status + binding, run the crypto-free verifier with no lock held, then
+        // commit the verdict through the normal targeted-delta apply. Standard
+        // gates skip this entirely and take the path below unchanged.
+        // Held for the whole verify→commit span (not just the port call), so a
+        // concurrent caller on the same key cannot slip in between the two.
+        let mut _in_flight_guard = None;
+        let attested_verdict = match self.read_engine().await?.run_record(run_id) {
+            // Scope-check BEFORE anything observable happens. Without this a
+            // caller from another scope could learn a run exists and is parked
+            // on an attested gate, and could drive the external verifier, even
+            // though the commit below would ultimately refuse them. Mirrors the
+            // `ScopeNotFound` the commit path returns so the two agree.
+            Some(record) if record.scope != request.scope => {
+                return Err(TurnError::ScopeNotFound);
+            }
+            Some(record) if record.status == TurnStatus::BlockedAttested => {
+                // Reserve this idempotency key for the duration of the unlocked
+                // verification. A concurrent caller on the SAME key short-circuits
+                // instead of driving the verifier a second time. The guard
+                // releases on drop, so no early return or panic can strand it.
+                let Some(in_flight) = super::AttestedInFlightGuard::try_acquire(
+                    &self.attested_in_flight,
+                    format!("{:?}|{}|{:?}", request.scope, run_id, request.idempotency_key),
+                ) else {
+                    return Err(TurnError::Unavailable {
+                        reason: "attested resume already in flight for this idempotency key"
+                            .to_string(),
+                    });
+                };
+                _in_flight_guard = Some(in_flight);
+                let Some(expected_tx_hash) = record.expected_tx_hash.clone() else {
+                    return Err(TurnError::InvalidRequest {
+                        reason: "attested gate has no persisted transaction binding".to_string(),
+                    });
+                };
+                let Some(attestation) = request.attestation.clone() else {
+                    return Err(TurnError::InvalidRequest {
+                        reason: "attested resume requires an attestation claim".to_string(),
+                    });
+                };
+                let Some(port) = self.attested_resume_port.clone() else {
+                    return Err(TurnError::Unavailable {
+                        reason: "attested resume port not configured".to_string(),
+                    });
+                };
+                Some(port.verify_attested_resume(crate::AttestedResumeRequest {
+                    gate_ref: &request.gate_resolution_ref,
+                    attestation: &attestation,
+                    expected_tx_hash: &expected_tx_hash,
+                }))
+            }
+            _ => None,
+        };
+
         self.apply_with_targeted_delta(
             RunnerLeaseOverlay::None,
             |store| {
                 let request = request.clone();
-                async move { store.resume_turn(request).await }
+                let verdict = attested_verdict;
+                async move {
+                    match verdict {
+                        Some(verdict) => store.commit_attested_resume_once(&request, verdict),
+                        None => store.resume_turn(request).await,
+                    }
+                }
             },
             move |snapshot, latest_event_cursor, store, response| {
                 if snapshot.idempotency_records.len() >= max_idempotency_records {

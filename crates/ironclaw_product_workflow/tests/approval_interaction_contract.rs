@@ -554,6 +554,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             return Err(error);
         }
         let response = ResumeTurnResponse {
+            replayed: false,
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(11),
@@ -1921,6 +1922,7 @@ async fn already_denied_replay_resumes_idempotently_when_disposition_marker_pres
     coordinator.set_status(TurnStatus::Queued);
     // Pre-seed the idempotency cache with the response the first Deny produced.
     let cached_response = ResumeTurnResponse {
+        replayed: false,
         run_id,
         status: TurnStatus::Queued,
         event_cursor: EventCursor(11),
