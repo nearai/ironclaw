@@ -1176,7 +1176,7 @@ impl ProductCapabilityInvoker for RecordingExtensionInstallInvoker {
         self.calls
             .lock()
             .expect("lock")
-            .push((caller, capability, input, activity_id.clone()));
+            .push((caller, capability, input, activity_id));
         Ok(operator_config_success_resolution(activity_id))
     }
 }
@@ -6087,14 +6087,10 @@ async fn install_extension_operation_invokes_and_reads_back_exact_caller_members
     let package_ref = lifecycle_package_ref("github");
     let activity_id = ActivityId::new();
 
-    let response = install_extension_on_surface(
-        &services,
-        caller(),
-        package_ref.clone(),
-        activity_id.clone(),
-    )
-    .await
-    .expect("installed membership is authoritative");
+    let response =
+        install_extension_on_surface(&services, caller(), package_ref.clone(), activity_id)
+            .await
+            .expect("installed membership is authoritative");
 
     assert!(response.success);
     assert_eq!(response.message, "Extension installed.");

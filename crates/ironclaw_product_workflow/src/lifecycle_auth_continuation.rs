@@ -40,16 +40,15 @@ impl ProductAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
         &self,
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
-        if let AuthContinuationRef::LifecycleActivation { package_ref } = &event.continuation {
-            if reconcile_lifecycle_activation(&self.facade, &event, package_ref.as_str()).await?
+        if let AuthContinuationRef::LifecycleActivation { package_ref } = &event.continuation
+            && reconcile_lifecycle_activation(&self.facade, &event, package_ref.as_str()).await?
                 == LifecycleAuthContinuationOutcome::SetupIncomplete
-            {
-                // This OAuth requirement completed successfully, but another
-                // manifest-declared setup blocker remains. Settle this flow
-                // without resuming provider-blocked runs; the final setup
-                // requirement will reconcile readiness and delegate fan-out.
-                return Ok(());
-            }
+        {
+            // This OAuth requirement completed successfully, but another
+            // manifest-declared setup blocker remains. Settle this flow
+            // without resuming provider-blocked runs; the final setup
+            // requirement will reconcile readiness and delegate fan-out.
+            return Ok(());
         }
         self.inner.dispatch_auth_continuation(event).await
     }

@@ -242,6 +242,7 @@ impl ProductAuthContinuationDispatcher for BlockingContinuation {
 
 #[derive(Default)]
 struct FaultInjectedActorPairings {
+    #[allow(clippy::type_complexity)]
     owners: Mutex<BTreeMap<(String, String), (UserId, Option<ExternalActorBindingEpoch>)>>,
     unpair_calls: Mutex<Vec<(String, String)>>,
     fail_next_unpair: AtomicBool,
