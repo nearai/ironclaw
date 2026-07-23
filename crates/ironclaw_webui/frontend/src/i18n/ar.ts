@@ -1045,13 +1045,6 @@ registerPack("ar", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "الاقتران",
-  "pairing.instructions": "أدخل الرمز من القناة لإنهاء الاقتران.",
-  "pairing.placeholder": "أدخل رمز الاقتران…",
-  "pairing.approve": "موافقة",
-  "pairing.success": "اكتمل الاقتران.",
-  "pairing.error": "فشل الاقتران.",
-  "pairing.none": "لا توجد طلبات اقتران معلّقة.",
   "pairing.connect": "اتصال",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("ar", {
   "markdown.showMore": "إظهار المزيد",
   "markdown.showLess": "إظهار أقل",
   "pairing.connectTitle": "ربط {name}",
-  "pairing.openAndPaste": "افتح {name}، واحصل على رمز الربط، ثم الصقه هنا.",
+  "pairing.connectInstructions": "اتبع خطوات الاتصال الخاصة بـ {name} للمتابعة.",
   "pairing.connectFromExtensions": "اربط {name} من صفحة الإضافات للمتابعة.",
-  "pairing.checkCodeAndRetry": "فشل الربط. تحقق من الرمز وحاول مرة أخرى.",
-  "pairing.resumeFailed": "تم ربط {name}، لكن تعذر متابعة هذه المحادثة. أعد تحميل الصفحة للمتابعة.",
+  "pairing.connectFailedRetry": "فشل الاتصال. حاول مرة أخرى.",
   "extensions.authUrlHttpsRequired": "يجب أن يستخدم عنوان URL للمصادقة HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "مكوّن؛ اتركه فارغًا للإبقاء عليه",

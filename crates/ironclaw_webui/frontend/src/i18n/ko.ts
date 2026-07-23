@@ -1045,13 +1045,6 @@ registerPack("ko", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "페어링",
-  "pairing.instructions": "해당 채널의 코드를 입력하면 페어링이 완료됩니다.",
-  "pairing.placeholder": "페어링 코드를 입력…",
-  "pairing.approve": "승인",
-  "pairing.success": "페어링이 완료되었습니다.",
-  "pairing.error": "페어링에 실패했습니다.",
-  "pairing.none": "대기 중인 페어링 요청이 없습니다.",
   "pairing.connect": "연결",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("ko", {
   "markdown.showMore": "더 보기",
   "markdown.showLess": "덜 보기",
   "pairing.connectTitle": "{name} 연결",
-  "pairing.openAndPaste": "{name}을 열고 페어링 코드를 받은 뒤 여기에 붙여넣으세요.",
+  "pairing.connectInstructions": "계속하려면 {name} 연결 단계를 따르세요.",
   "pairing.connectFromExtensions": "계속하려면 확장 페이지에서 {name}을 연결하세요.",
-  "pairing.checkCodeAndRetry": "페어링에 실패했습니다. 코드를 확인하고 다시 시도하세요.",
-  "pairing.resumeFailed": "{name}이 연결되었지만 이 채팅을 계속할 수 없습니다. 계속하려면 페이지를 새로고침하세요.",
+  "pairing.connectFailedRetry": "연결에 실패했습니다. 다시 시도하세요.",
   "extensions.authUrlHttpsRequired": "인증 URL은 HTTPS를 사용해야 합니다.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "구성됨; 유지하려면 비워두세요",

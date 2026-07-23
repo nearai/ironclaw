@@ -1045,13 +1045,6 @@ registerPack("pt-BR", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "Pareamento",
-  "pairing.instructions": "Insira o código do canal para finalizar o emparelhamento.",
-  "pairing.placeholder": "Digite o código de pareamento…",
-  "pairing.approve": "Aprovar",
-  "pairing.success": "Emparelhamento concluído.",
-  "pairing.error": "O emparelhamento falhou.",
-  "pairing.none": "Não há solicitações de pareamento pendentes.",
   "pairing.connect": "Conectar",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("pt-BR", {
   "markdown.showMore": "Mostrar mais",
   "markdown.showLess": "Mostrar menos",
   "pairing.connectTitle": "Conectar {name}",
-  "pairing.openAndPaste": "Abra {name}, obtenha o código de pareamento e cole aqui.",
+  "pairing.connectInstructions": "Siga as etapas de conexão de {name} para continuar.",
   "pairing.connectFromExtensions": "Conecte {name} pela página Extensões para continuar.",
-  "pairing.checkCodeAndRetry": "Pareamento falhou. Confira o código e tente novamente.",
-  "pairing.resumeFailed": "{name} foi conectado, mas este chat não pôde continuar. Recarregue a página para seguir.",
+  "pairing.connectFailedRetry": "A conexão falhou. Tente novamente.",
   "extensions.authUrlHttpsRequired": "A URL de autenticação deve usar HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Configurado; deixe em branco para manter",

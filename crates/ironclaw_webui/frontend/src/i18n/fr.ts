@@ -1045,13 +1045,6 @@ registerPack("fr", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "Appairage",
-  "pairing.instructions": "Entrez le code du canal pour terminer l'appairage.",
-  "pairing.placeholder": "Saisissez le code d’appairage…",
-  "pairing.approve": "Valider",
-  "pairing.success": "Appairage terminé.",
-  "pairing.error": "Le couplage a échoué.",
-  "pairing.none": "Aucune demande d’appairage en attente.",
   "pairing.connect": "Connectez-vous",
 
   // Admin — tabs
@@ -1418,10 +1411,9 @@ registerPack("fr", {
   "markdown.showMore": "Afficher plus",
   "markdown.showLess": "Afficher moins",
   "pairing.connectTitle": "Connecter {name}",
-  "pairing.openAndPaste": "Ouvrez {name}, récupérez le code d'association, puis collez-le ici.",
+  "pairing.connectInstructions": "Suivez les étapes de connexion pour {name} afin de continuer.",
   "pairing.connectFromExtensions": "Connectez {name} depuis la page Extensions pour continuer.",
-  "pairing.checkCodeAndRetry": "L'association a échoué. Vérifiez le code et réessayez.",
-  "pairing.resumeFailed": "{name} est connecté, mais cette conversation n'a pas pu continuer. Rechargez la page pour poursuivre.",
+  "pairing.connectFailedRetry": "La connexion a échoué. Réessayez.",
   "extensions.authUrlHttpsRequired": "L'URL d'authentification doit utiliser HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Configuré ; laissez vide pour conserver",

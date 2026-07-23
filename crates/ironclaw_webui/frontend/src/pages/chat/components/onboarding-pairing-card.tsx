@@ -124,9 +124,9 @@ function pairingCardCopy(onboarding, t) {
     instructions:
       onboarding?.instructions ||
       onboarding?.message ||
-      t("pairing.openAndPaste", { name: displayName }),
+      t("pairing.connectInstructions", { name: displayName }),
     submitLabel: onboarding?.submitLabel || t("pairing.connect"),
     submittingLabel: onboarding?.submittingLabel || t("connection.connecting"),
-    errorMessage: onboarding?.errorMessage || t("pairing.checkCodeAndRetry"),
+    errorMessage: onboarding?.errorMessage || t("pairing.connectFailedRetry"),
   };
 }

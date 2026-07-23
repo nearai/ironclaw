@@ -1146,13 +1146,6 @@ registerPack("en", {
   "inference.none": "—",
 
   // Extensions — pairing
-  "pairing.title": "Pairing",
-  "pairing.instructions": "Enter the code from the channel to finish pairing.",
-  "pairing.placeholder": "Enter pairing code…",
-  "pairing.approve": "Approve",
-  "pairing.success": "Pairing complete.",
-  "pairing.error": "Pairing failed.",
-  "pairing.none": "No pending pairing requests.",
   "pairing.connect": "Connect",
 
   // Admin — tabs
@@ -1468,10 +1461,9 @@ registerPack("en", {
   "markdown.showMore": "Show more",
   "markdown.showLess": "Show less",
   "pairing.connectTitle": "Connect {name}",
-  "pairing.openAndPaste": "Open {name}, get the pairing code, and paste it here.",
+  "pairing.connectInstructions": "Follow the connection steps for {name} to continue.",
   "pairing.connectFromExtensions": "Connect {name} from the Extensions page to continue.",
-  "pairing.checkCodeAndRetry": "Pairing failed. Check the code and try again.",
-  "pairing.resumeFailed": "{name} connected, but this chat couldn't continue. Reload the page to keep going.",
+  "pairing.connectFailedRetry": "Connection failed. Try again.",
   "extensions.authUrlHttpsRequired": "Authentication URL must use HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Configured; leave blank to keep",
@@ -1497,7 +1489,6 @@ registerPack("en", {
   "pairing.web.instructions": "Scan the QR code or open the link, then send the code to the {name} bot to pair this account.",
   "pairing.web.instructionsNoLink": "Send the code below to the {name} bot to pair this account.",
   "pairing.web.copyCode": "Copy code",
-  "pairing.web.copyUsername": "Copy bot username",
   "pairing.web.openIn": "Open in {name}",
   "pairing.web.qrAlt": "{name} pairing QR",
   "pairing.web.expiresIn": "Expires in {time}",
