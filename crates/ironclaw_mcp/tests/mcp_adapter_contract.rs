@@ -914,6 +914,46 @@ async fn concrete_mcp_http_client_classifies_invalid_catalog_as_non_retryable_sh
     ));
 }
 
+/// Regression for the first-install brick: a real MCP server can advertise a
+/// mostly-valid catalog with one shape-nonconforming tool (here an uppercase
+/// name). The offending tool is skipped and the remaining valid tools still
+/// publish through the real client/egress path, so the integration activates
+/// instead of failing whole-catalog with no prior generation to fall back to.
+#[tokio::test]
+async fn concrete_mcp_http_client_skips_shape_invalid_tool_and_publishes_bounded_remainder() {
+    let egress = RecordingRuntimeEgress::mixed_shape_invalid_catalog();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 16_384,
+            },
+            64,
+        )
+        .await
+        .expect("a bounded catalog must survive one shape-nonconforming tool");
+
+    let names = output
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["document.search", "document.update"]);
+    assert_eq!(egress.requests().len(), 3);
+}
+
 /// Coverage gap noted in review of the SSE contract tests: the loopback MCP
 /// path predeclares its tool schemas, so `discover_tools` (host-mediated HTTP
 /// path) is only ever exercised over JSON-framed `tools/list` responses
@@ -1434,6 +1474,7 @@ enum RecordedResponseMode {
     JsonMissingProtocolVersion,
     DeepOpenApiSchema,
     InvalidToolCatalog,
+    MixedShapeInvalidCatalog,
     LongToolDescription,
     Sse,
 }
@@ -1493,6 +1534,14 @@ impl RecordingRuntimeEgress {
     fn invalid_tool_catalog() -> Self {
         Self {
             mode: RecordedResponseMode::InvalidToolCatalog,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn mixed_shape_invalid_catalog() -> Self {
+        Self {
+            mode: RecordedResponseMode::MixedShapeInvalidCatalog,
             protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1565,6 +1614,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     | RecordedResponseMode::JsonMissingProtocolVersion
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
+                    | RecordedResponseMode::MixedShapeInvalidCatalog
                     | RecordedResponseMode::LongToolDescription => Ok(runtime_json_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
@@ -1610,9 +1660,34 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                         json!({
                             "tools": [{
                                 "name": "UnsafeUppercaseName",
-                                "description": "must be rejected atomically",
+                                "description": "the only tool is shape-invalid, so nothing publishes",
                                 "inputSchema": {"type": "object"}
                             }]
+                        }),
+                        vec![],
+                    ));
+                }
+                if self.mode == RecordedResponseMode::MixedShapeInvalidCatalog {
+                    return Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "tools": [
+                                {
+                                    "name": "document.search",
+                                    "description": "Search hosted documents",
+                                    "inputSchema": {"type": "object"}
+                                },
+                                {
+                                    "name": "UppercaseName",
+                                    "description": "shape-invalid name is skipped, not fatal",
+                                    "inputSchema": {"type": "object"}
+                                },
+                                {
+                                    "name": "document.update",
+                                    "description": "Update a hosted document",
+                                    "inputSchema": {"type": "object"}
+                                }
+                            ]
                         }),
                         vec![],
                     ));
@@ -1658,6 +1733,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     | RecordedResponseMode::JsonMissingProtocolVersion
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
+                    | RecordedResponseMode::MixedShapeInvalidCatalog
                     | RecordedResponseMode::LongToolDescription => {
                         Ok(runtime_json_response(id, result, vec![]))
                     }

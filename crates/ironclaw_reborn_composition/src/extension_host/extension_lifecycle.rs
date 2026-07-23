@@ -10,7 +10,8 @@ use ironclaw_auth::{
     SecretCleanupRequest,
 };
 use ironclaw_extension_host::activation_transaction::{
-    ExtensionActivationOperations, ExtensionActivationTransactionResult, run_extension_activation,
+    ExtensionActivationOperations, ExtensionActivationTransactionResult, HostedMcpDiscoveryOutcome,
+    run_extension_activation,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
@@ -2613,10 +2614,21 @@ impl ExtensionActivationOperations for ComposedExtensionActivationOperations<'_>
         max_tools: u32,
         scope: ResourceScope,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    ) -> Result<ExtensionPackage, Self::Error> {
-        discover_hosted_mcp_package(package, max_tools, scope, runtime_http_egress)
-            .await
-            .map_err(hosted_mcp_discovery_error)
+    ) -> Result<HostedMcpDiscoveryOutcome, Self::Error> {
+        match discover_hosted_mcp_package(package, max_tools, scope, runtime_http_egress).await {
+            Ok(discovered) => Ok(HostedMcpDiscoveryOutcome::Discovered(Box::new(discovered))),
+            Err(HostedMcpDiscoveryError::ReAuthRequired) => {
+                // The provider rejected the staged credentials during
+                // discovery. Route the caller back through the same credential
+                // setup / OAuth path a pre-discovery missing credential uses,
+                // re-deriving the extension's declared requirements from the
+                // package. Nothing is discarded from the credential store.
+                Ok(HostedMcpDiscoveryOutcome::CredentialsRejected(
+                    package_runtime_credential_auth_requirements(package),
+                ))
+            }
+            Err(other) => Err(hosted_mcp_discovery_error(other)),
+        }
     }
 
     fn package_is_published(&self, extension_id: &ExtensionId, package: &ExtensionPackage) -> bool {
@@ -3147,6 +3159,14 @@ fn hosted_mcp_discovery_error(error: HostedMcpDiscoveryError) -> ProductWorkflow
         },
         HostedMcpDiscoveryError::Permanent(reason) => ProductWorkflowError::InvalidBindingRequest {
             reason: format!("hosted MCP discovery failed: {reason}"),
+        },
+        // A provider credential rejection is routed to the credentials-missing
+        // outcome by `discover_hosted_mcp_package` before it reaches this error
+        // mapper, so this arm is defensive: if the invariant is ever violated,
+        // fail closed (non-retryable) rather than folding back into a
+        // retry-forever transient that re-hits the same rejection.
+        HostedMcpDiscoveryError::ReAuthRequired => ProductWorkflowError::InvalidBindingRequest {
+            reason: "hosted MCP discovery requires re-authentication".to_string(),
         },
     }
 }
@@ -5391,6 +5411,57 @@ supports_threads = true
                 .get_capability(&CapabilityId::new("notion.live-search").unwrap())
                 .is_none(),
             "discovered tools must not publish after post-discovery credential failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_activation_routes_provider_auth_rejection_to_reauth() {
+        // Credentials are present pre-discovery, but the provider rejects them
+        // mid-`tools/list` (401). This must route the caller back through OAuth
+        // (a credentials-incomplete response with credential blockers), NOT
+        // fold into a retry-forever transient that leaves the extension stuck
+        // re-hitting the same 401. Nothing may publish.
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install Notion MCP");
+        let response = port
+            .activate_with_credential_gate(
+                package_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: hosted_mcp_scope("hosted-mcp-provider-auth-rejection"),
+                    runtime_http_egress: Arc::new(AuthRejectedDiscoveryHostedMcpEgress),
+                },
+                crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate,
+                &lifecycle_owner(),
+            )
+            .await
+            .expect("a provider 401 during discovery must route to re-auth, not a transient retry");
+
+        assert!(
+            !response.blockers.is_empty()
+                && response
+                    .blockers
+                    .iter()
+                    .all(|blocker| matches!(blocker, LifecycleReadinessBlocker::Credential { .. })),
+            "the user must be routed back to connect credentials (re-auth), got {:?}",
+            response.blockers
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_none(),
+            "no catalog may publish after a provider credential rejection"
         );
     }
 
@@ -9195,6 +9266,60 @@ output_schema_ref = "schemas/search.output.json"
         }
     }
 
+    /// Discovery whose staged credentials are rejected mid-`tools/list`: the
+    /// `initialize`/`notifications/initialized` handshake succeeds, then
+    /// `tools/list` answers HTTP 401 (token expired/revoked after the
+    /// pre-discovery credential check). Exercises the `AuthRequired` re-auth
+    /// routing.
+    struct AuthRejectedDiscoveryHostedMcpEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for AuthRejectedDiscoveryHostedMcpEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            let request_bytes = request.body.len() as u64;
+            let body = parse_test_json_rpc_body(&request)?;
+            let method = body
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| RuntimeHttpEgressError::Request {
+                    reason: "missing_json_rpc_method".to_string(),
+                    request_bytes,
+                    response_bytes: 0,
+                })?;
+            match method {
+                "initialize" => test_runtime_json_response(
+                    body["id"].as_u64(),
+                    serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "notion-test", "version": "1.0.0"}
+                    }),
+                    vec![("Mcp-Session-Id".to_string(), "session-1".to_string())],
+                ),
+                "notifications/initialized" => {
+                    test_runtime_json_response(None, serde_json::json!({}), Vec::new())
+                }
+                "tools/list" => Ok(RuntimeHttpEgressResponse {
+                    status: 401,
+                    headers: vec![("content-type".to_string(), "application/json".to_string())],
+                    body: br#"{"error":"invalid_token"}"#.to_vec(),
+                    saved_body: None,
+                    request_bytes,
+                    response_bytes: 25,
+                    redaction_applied: false,
+                }),
+                _ => Err(RuntimeHttpEgressError::Request {
+                    reason: "unexpected_method".to_string(),
+                    request_bytes,
+                    response_bytes: 0,
+                }),
+            }
+        }
+    }
+
     struct MalformedToolsHostedMcpEgress;
 
     #[async_trait]
@@ -9501,12 +9626,22 @@ output_schema_ref = "schemas/search.output.json"
             &self,
             _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let base = chrono::DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
                 .expect("valid fixed credential epoch")
                 .with_timezone(&chrono::Utc);
-            let epoch = base
-                + chrono::Duration::seconds(self.calls.fetch_add(1, Ordering::SeqCst) as i64);
-            Ok(configured_runtime_credential_account(epoch))
+            // The discovery authority fence deliberately tolerates a benign
+            // timestamp bump, so an epoch change must rotate a real authority
+            // input — here the access-secret handle — to still discard a
+            // catalog discovered under the superseded credential.
+            let mut account = configured_runtime_credential_account(
+                base + chrono::Duration::seconds(call as i64),
+            );
+            account.access_secret = Some(
+                ironclaw_host_api::SecretHandle::new(format!("test-secret-epoch-{call}"))
+                    .expect("valid secret handle"),
+            );
+            Ok(account)
         }
     }
 
