@@ -10,6 +10,8 @@ tokens:
       - https://www.googleapis.com/auth/drive.file
       - https://www.googleapis.com/auth/documents
       - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/presentations
+      - https://www.googleapis.com/auth/presentations.readonly
   mock-refreshed-access-token:
     login: e2e.google@example.com
     scopes:
@@ -21,6 +23,8 @@ tokens:
       - https://www.googleapis.com/auth/drive.file
       - https://www.googleapis.com/auth/documents
       - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/presentations
+      - https://www.googleapis.com/auth/presentations.readonly
   emulate-google-secondary-token:
     login: secondary.google@example.com
     scopes:
@@ -32,6 +36,8 @@ tokens:
       - https://www.googleapis.com/auth/drive.file
       - https://www.googleapis.com/auth/documents
       - https://www.googleapis.com/auth/spreadsheets
+      - https://www.googleapis.com/auth/presentations
+      - https://www.googleapis.com/auth/presentations.readonly
 
 google:
   users:
@@ -185,3 +191,23 @@ google:
           title: Sheet1
           values:
             - [Summary, Reporter, Slack Timestamp, Status, QA Marker]
+  presentations:
+    - id: slides_reborn_launch
+      user_email: e2e.google@example.com
+      title: Reborn Launch Review
+      slides:
+        - id: slide_main
+          layout: TITLE_AND_BODY
+          elements:
+            - id: shape_body
+              type: shape
+              shape_type: TEXT_BOX
+              text: Launch Review PLACEHOLDER DELETE
+            - id: shape_delete
+              type: shape
+              shape_type: TEXT_BOX
+              text: Delete me
+            - id: shape_replace
+              type: shape
+              shape_type: TEXT_BOX
+              text: IMAGE_PLACEHOLDER

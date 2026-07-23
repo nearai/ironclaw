@@ -139,7 +139,7 @@ impl std::fmt::Debug for HookProjectionRegistry {
 /// to discovery resolves `/system/extensions/<id>` to that tenant's storage and
 /// no other's.** In local-dev (single-tenant, the only profile
 /// `build_reborn_runtime` wires) the runtime's FS is constructed once per
-/// identity in `build_reborn_services`, so it is per-identity by construction;
+/// identity in `build_runtime_substrate`, so it is per-identity by construction;
 /// production wiring (a follow-up, since `build_reborn_runtime` only supports
 /// local-dev) must supply a tenant-scoped backend here.
 ///
@@ -203,7 +203,7 @@ pub(super) fn enforce_root_containment(
 /// is *computed* from the identity ([`tenant_extension_root`]) inside the
 /// builder — never supplied by the caller — which is the tenant-isolation
 /// contract (Step 2). The filesystem is the same tenant-scoped
-/// [`RootFilesystem`] already built in `build_reborn_services`.
+/// [`RootFilesystem`] already built in `build_runtime_substrate`.
 pub struct ThirdPartyDiscoveryInput<'a, F: ironclaw_filesystem::RootFilesystem> {
     pub filesystem: &'a F,
     pub tenant_id: &'a ironclaw_host_api::TenantId,

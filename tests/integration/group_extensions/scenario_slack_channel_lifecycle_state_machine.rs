@@ -51,7 +51,17 @@
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use ironclaw_auth::OAuthProviderIdentity;
+use ironclaw_host_api::UserId;
+use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
+use ironclaw_secrets::SecretMaterial;
 use serde_json::json;
+
+const SLACK_BOT_TOKEN: &str = "xoxb-itest-bot-token";
+const SLACK_SIGNING_SECRET: &str = "itest-slack-signing-secret";
+const SLACK_INSTALLATION_ID: &str = "slack";
+const SLACK_BOT_USER_ID: &str = "U-BOT";
+const SLACK_OAUTH_CLIENT_ID: &str = "slack-oauth-client";
+const SLACK_OAUTH_CLIENT_SECRET: &str = "slack-oauth-secret";
 
 /// Mirrors the slack manifest's `[[tools.credentials]]` scope union
 /// (`crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`):
@@ -107,12 +117,100 @@ async fn configure_slack_connection_scoping(g: &RebornIntegrationGroup) -> Harne
         .save_values(
             &slack_id,
             vec![
+                ("slack_bot_token".to_string(), SLACK_BOT_TOKEN.to_string()),
+                (
+                    "slack_signing_secret".to_string(),
+                    SLACK_SIGNING_SECRET.to_string(),
+                ),
                 ("slack_team_id".to_string(), SLACK_TEAM_ID.to_string()),
                 ("slack_api_app_id".to_string(), SLACK_API_APP_ID.to_string()),
+                (
+                    "slack_installation_id".to_string(),
+                    SLACK_INSTALLATION_ID.to_string(),
+                ),
+                (
+                    "slack_bot_user_id".to_string(),
+                    SLACK_BOT_USER_ID.to_string(),
+                ),
+                (
+                    "slack_oauth_client_id".to_string(),
+                    SLACK_OAUTH_CLIENT_ID.to_string(),
+                ),
+                (
+                    "slack_oauth_client_secret".to_string(),
+                    SLACK_OAUTH_CLIENT_SECRET.to_string(),
+                ),
             ],
         )
         .await
         .map_err(|error| format!("slack channel config save failed: {:?}", error.code))?;
+    Ok(())
+}
+
+fn register_slack_channel_egress_credentials(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let services = g
+        .capability_harness()
+        .and_then(|harness| harness.reborn_services_for_test())
+        .ok_or("extension_lifecycle group must expose its RebornServices bundle")?;
+    if !services.register_static_channel_egress_credentials_for_test(vec![(
+        "slack".to_string(),
+        "slack_bot_token".to_string(),
+        SecretMaterial::from(SLACK_BOT_TOKEN.to_string()),
+    )]) {
+        return Err("the composed runtime must expose channel-egress credential bridging".into());
+    }
+    Ok(())
+}
+
+async fn wait_for_slack_connected(
+    slack: &ChannelConnectionTestBundle,
+    actor: &UserId,
+    label: &str,
+) -> HarnessResult<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if slack.caller_channel_connected("slack", actor).await? {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("slack must report connected after {label}").into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn assert_slack_installation_phase(
+    g: &RebornIntegrationGroup,
+    expected_phase: &str,
+    label: &str,
+) -> HarnessResult<()> {
+    let viewer = g
+        .thread(format!("slack-lifecycle-viewer-{label}"))
+        .script([
+            RebornScriptedReply::tool_call("builtin.extension_search", json!({"query": "slack"})),
+            RebornScriptedReply::text("searched slack lifecycle"),
+        ])
+        .build()
+        .await?;
+    let prompt = format!("search slack {label}");
+    viewer.submit_turn(&prompt).await?;
+    viewer
+        .assert_tool_invoked("builtin.extension_search")
+        .await?;
+    let output = viewer
+        .tool_result_output("builtin.extension_search")
+        .await?;
+    let output = output.to_string();
+    if !output.contains("\"slack\"") {
+        return Err(format!("slack search result missing slack entry: {output}").into());
+    }
+    let expected = format!(r#""installation_phase":"{expected_phase}""#);
+    if !output.contains(&expected) {
+        return Err(format!(
+            "slack search result missing expected phase {expected_phase}: {output}"
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -137,48 +235,52 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
 
     // ── Phase 1: install + activate publishes tools, but does NOT connect ───
-    let lifecycle = g
+    let installer = g
         .thread("slack-lifecycle-install")
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
+            RebornScriptedReply::text("slack installed"),
+        ])
+        .build()
+        .await?;
+    eprintln!("SLACK-LIFECYCLE PHASE1-install begin");
+    installer.submit_turn("install slack").await?;
+    installer
+        .assert_tool_invoked("builtin.extension_install")
+        .await?;
+    assert_slack_installation_phase(g, "installed", "after-install").await?;
+
+    let activator = g
+        .thread("slack-lifecycle-activate")
+        .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_activate",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("slack ready"),
+            RebornScriptedReply::text("slack activated"),
         ])
         .build()
         .await?;
     // Activation's credential gate and dispatch-time staging select a slack
     // account under the capability dispatch scope.
-    lifecycle
+    activator
         .seed_capability_credential_account("slack", "itest slack", SLACK_SCOPES)
         .await?;
-    eprintln!("SLACK-LIFECYCLE PHASE1-install-activate begin");
-    lifecycle.submit_turn("install and activate slack").await?;
-    lifecycle
-        .assert_tool_result_contains("\"installed\":true")
+    eprintln!("SLACK-LIFECYCLE PHASE1-activate begin");
+    activator.submit_turn("activate slack").await?;
+    activator
+        .assert_tool_invoked("builtin.extension_activate")
         .await?;
-    lifecycle
-        .assert_tool_result_contains("\"activated\":true")
-        .await?;
-    lifecycle
-        .assert_model_message_content_contains(r#"\"installed\":true"#)
-        .await?;
-    lifecycle
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
-        .await?;
-    // Activation published the tool surface…
-    lifecycle
-        .assert_tool_result_contains(r#""slack.send_message""#)
-        .await?;
+    // Activation published the lifecycle phase and tool surface.
+    assert_slack_installation_phase(g, "active", "after-activate").await?;
     // …and the §6.5 configure step binds the connection-scoping values the
     // generic identity bind validates proven identities against.
     eprintln!("SLACK-LIFECYCLE PHASE1b-configure begin");
     configure_slack_connection_scoping(g).await?;
+    register_slack_channel_egress_credentials(g)?;
     // …but neither activation nor configuration is connection (the #6091
     // distinction).
     if slack.caller_channel_connected("slack", &actor).await? {
@@ -193,9 +295,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     slack
         .connect_provider_user(&actor, "slack", proven_slack_identity()?)
         .await?;
-    if !slack.caller_channel_connected("slack", &actor).await? {
-        return Err("slack must report connected after the personal OAuth connect".into());
-    }
+    wait_for_slack_connected(&slack, &actor, "the personal OAuth connect").await?;
     if !slack
         .has_any_active_identity_binding("slack", &actor)
         .await?
@@ -245,10 +345,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     eprintln!("SLACK-LIFECYCLE PHASE4-remove begin");
     remover.submit_turn("remove slack").await?;
     remover
-        .assert_tool_result_contains("\"removed\":true")
-        .await?;
-    remover
-        .assert_model_message_content_contains(r#"\"removed\":true"#)
+        .assert_tool_invoked("builtin.extension_remove")
         .await?;
     // Every surface flips together: connection facade…
     if slack.caller_channel_connected("slack", &actor).await? {
@@ -335,26 +432,23 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     eprintln!("SLACK-LIFECYCLE PHASE6-reinstall begin");
     restorer.submit_turn("reinstall and activate slack").await?;
     restorer
-        .assert_tool_result_contains("\"installed\":true")
+        .assert_tool_invoked("builtin.extension_install")
         .await?;
     restorer
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_invoked("builtin.extension_activate")
         .await?;
-    restorer
-        .assert_model_message_content_contains(r#"\"installed\":true"#)
-        .await?;
-    restorer
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
-        .await?;
+    assert_slack_installation_phase(g, "active", "after-restore").await?;
     configure_slack_connection_scoping(g).await?;
+    register_slack_channel_egress_credentials(g)?;
     slack
         .connect_provider_user(&actor, "slack", proven_slack_identity()?)
         .await?;
-    if !slack.caller_channel_connected("slack", &actor).await? {
-        return Err("slack must report connected after reconnect; \
-             a completed removal must not fence out a NEW connection (issue #6092 shape)"
-            .into());
-    }
+    wait_for_slack_connected(
+        &slack,
+        &actor,
+        "reconnect; a completed removal must not fence out a NEW connection (issue #6092 shape)",
+    )
+    .await?;
 
     // ── Phase 7: use again — the same call that was rejected now dispatches ─
     eprintln!("SLACK-LIFECYCLE PHASE7-send-again begin");

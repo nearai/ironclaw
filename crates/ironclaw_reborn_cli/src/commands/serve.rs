@@ -11,7 +11,7 @@ use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornHostBindings, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornWebuiBundle, TriggerFireAccessPolicy, build_reborn_runtime,
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
@@ -469,17 +469,14 @@ impl ServeCommand {
             // Only SSO-enabled WebUI needs the canonical Reborn identity
             // resolver: an env-bearer-only deployment resolves its single
             // configured user without any identity store, so skip opening (and
-            // its legacy migration) when SSO is disabled. `None` also covers
-            // the case where the runtime carries no local-runtime substrate;
-            // the auth surface fails closed when SSO is configured but no
-            // resolver is available.
+            // its legacy migration) when SSO is disabled.
             let identity_resolver = if sso_startup.is_some() {
-                match runtime.open_reborn_identity_resolver(&tenant_id).await {
-                    Some(result) => Some(
-                        result.context("failed to initialize the IronClaw identity resolver")?,
-                    ),
-                    None => None,
-                }
+                Some(
+                    runtime
+                        .open_reborn_identity_resolver(&tenant_id)
+                        .await
+                        .context("failed to initialize the IronClaw identity resolver")?,
+                )
             } else {
                 None
             };
@@ -569,7 +566,7 @@ impl ServeCommand {
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
             // for every active extension; the route table follows the active
             // snapshot.
-            if let Some(ingress_parts) = runtime.services().extension_ingress_parts() {
+            if let Some(ingress_parts) = runtime.extension_ingress_parts() {
                 let ingress_mount =
                     ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
                         .context("failed to compose the extension ingress route mount")?;
@@ -742,9 +739,9 @@ fn reject_non_loopback_privileged_local_runtime(
 }
 
 fn with_notion_dcr_oauth_backend(
-    services: RebornBuildInput,
+    services: RebornHostBindings,
     callback_origin: &str,
-) -> anyhow::Result<RebornBuildInput> {
+) -> anyhow::Result<RebornHostBindings> {
     services
         .with_dcr_oauth_callback(callback_origin)
         .map_err(|error| anyhow!("OAuth callback origin rejected: {error}"))
@@ -1581,29 +1578,37 @@ slack_user_id = "U123"
     async fn webui_serve_wires_notion_dcr_into_runtime_services() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            ironclaw_reborn_composition::local_dev_build_input(
+                "notion-dcr-owner",
+                dir.path().join("local-dev"),
+            ),
             "http://127.0.0.1:3000",
         )
         .expect("notion dcr wiring");
-        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
-            .await
-            .expect("reborn services build");
+        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
+            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        )
+        .await
+        .expect("reborn runtime builds");
 
         assert!(
-            services
-                .product_auth
-                .as_ref()
-                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+            runtime
+                .product_auth_for_test()
+                .as_auth_challenge_provider()
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
     async fn webui_serve_wires_notion_dcr_with_canonical_host_origin() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            ironclaw_reborn_composition::local_dev_build_input(
+                "notion-dcr-owner",
+                dir.path().join("local-dev"),
+            ),
             webui_oauth_callback_origin(
                 SocketAddr::from(([0, 0, 0, 0], 3000)),
                 None,
@@ -1613,18 +1618,20 @@ slack_user_id = "U123"
             .expect("canonical callback origin"),
         )
         .expect("notion dcr wiring");
-        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
-            .await
-            .expect("reborn services build");
+        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
+            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        )
+        .await
+        .expect("reborn runtime builds");
 
         assert!(
-            services
-                .product_auth
-                .as_ref()
-                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+            runtime
+                .product_auth_for_test()
+                .as_auth_challenge_provider()
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
@@ -1648,22 +1655,27 @@ slack_user_id = "U123"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let services_input = with_notion_dcr_oauth_backend(
-            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            ironclaw_reborn_composition::local_dev_build_input(
+                "notion-dcr-owner",
+                dir.path().join("local-dev"),
+            ),
             &callback_origin,
         )
         .expect("notion dcr wiring");
-        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
-            .await
-            .expect("reborn services build");
+        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
+            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        )
+        .await
+        .expect("reborn runtime builds");
 
         assert!(
-            services
-                .product_auth
-                .as_ref()
-                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+            runtime
+                .product_auth_for_test()
+                .as_auth_challenge_provider()
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[test]

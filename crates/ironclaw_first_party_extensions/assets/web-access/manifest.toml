@@ -18,6 +18,12 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/web-access/search.input.v1.json"
 prompt_doc_ref = "prompts/web-access/search.md"
+# Zero-config Exa MCP endpoint; no credential is injected. Egress is capped to
+# bound DoS exposure on the keyless path.
+network_targets = [
+  { scheme = "https", host_pattern = "mcp.exa.ai" },
+]
+max_egress_bytes = 2097152
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -28,3 +34,9 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/web-access/get_content.input.v1.json"
 prompt_doc_ref = "prompts/web-access/get_content.md"
+# Zero-config Exa MCP endpoint; no credential is injected. Egress is capped to
+# bound DoS exposure on the keyless path.
+network_targets = [
+  { scheme = "https", host_pattern = "mcp.exa.ai" },
+]
+max_egress_bytes = 2097152
