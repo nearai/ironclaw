@@ -1124,7 +1124,23 @@ async fn drive_immediate_cross_channel_result(
         "the route must preserve the host-resolved binding behind the opaque registry id"
     );
 
-    let destination_requests = egress.requests();
+    // #6520 delivery is event-driven; under instrumented (coverage) builds the
+    // send can land after the router reports idle. Poll the wire with the same
+    // bounded deadline the file's other async seams use before asserting.
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let destination_requests = loop {
+        let requests = egress.requests();
+        if requests.iter().any(|request| {
+            String::from_utf8_lossy(request.body.as_deref().unwrap_or_default()).contains(&reply)
+        }) {
+            break requests;
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "bot wire did not carry {reply:?}: {requests:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_bot_wire(destination, &destination_requests, &reply);
     assert_eq!(
         destination_requests

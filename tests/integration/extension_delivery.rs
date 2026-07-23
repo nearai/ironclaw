@@ -1173,19 +1173,25 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 
     // Wire seam: the coordinated FinalReply reached chat.postMessage with the
     // bridged bot token injected host-side (the adapter never saw it).
-    let requests = inbound.captured_network_requests_for_test();
-    let post_message = requests
-        .iter()
-        .find(|request| {
+    // #6520 delivery is event-driven, so poll the wire with the file's
+    // bounded deadline instead of a single post-idle snapshot.
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let (requests, post_message_position) = loop {
+        let requests = inbound.captured_network_requests_for_test();
+        if let Some(position) = requests.iter().position(|request| {
             request.url.ends_with("/api/chat.postMessage")
                 && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "chat.postMessage with the reply must land on the wire; got {:?}",
-                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
-            )
-        });
+        }) {
+            break (requests, position);
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "chat.postMessage with the reply must land on the wire; got {:?}",
+            requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let post_message = &requests[post_message_position];
     let posted_body = String::from_utf8_lossy(&post_message.body);
     assert!(
         posted_body.contains("\"channel\":\"D777\""),
@@ -1562,20 +1568,35 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     event_router.wait_until_run_idle(run_id).await;
 
     // Wire seam: the coordinated reply reached sendMessage on the Bot API
-    // with the token substituted host-side.
-    let requests = inbound.captured_network_requests_for_test();
-    let send_message = requests
-        .iter()
-        .find(|request| {
-            request.url.ends_with("/sendMessage")
-                && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "sendMessage with the reply must land on the wire; got {:?}",
-                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
-            )
-        });
+    // with the token substituted host-side. #6520 delivery is event-driven,
+    // so poll the wire with the file's bounded deadline instead of a single
+    // post-idle snapshot (the send and its cleanup can land moments after
+    // the router reports idle).
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let (requests, send_message_position) = loop {
+        let requests = inbound.captured_network_requests_for_test();
+        let matched = requests
+            .iter()
+            .position(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
+            })
+            .filter(|_| {
+                requests
+                    .iter()
+                    .any(|request| request.url.ends_with("/deleteMessage"))
+            });
+        if let Some(position) = matched {
+            break (requests, position);
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "sendMessage with the reply must land on the wire; got {:?}",
+            requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let send_message = &requests[send_message_position];
     assert_eq!(
         send_message.url,
         format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage")
@@ -1931,19 +1952,25 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         .await;
     assert_eq!(status, StatusCode::OK);
     ingress.drain().await;
-    let requests = inbound.captured_network_requests_for_test();
-    requests
-        .iter()
-        .find(|request| {
+    // #6520 final-reply delivery is event-driven (RunDeliveryEventRouter), so
+    // the send can land after ingress drain returns; poll the wire with the
+    // same bounded deadline the file's other async seams use.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = inbound.captured_network_requests_for_test();
+        if requests.iter().any(|request| {
             request.url.ends_with("/sendMessage")
                 && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "sendMessage with the paired reply must land on the wire; got {:?}",
-                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
-            )
-        });
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "sendMessage with the paired reply must land on the wire; got {:?}",
+            requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_delivered_attempt(services, &vendor_scope).await;
 
     // 5. Exercise the real protected HTTP unpair handler. It must revoke both

@@ -80,7 +80,15 @@ where
         .trigger_source_turn_state
         .write()
         .map_err(|error| format!("trigger source turn-state lock unavailable: {error}"))?;
-    *source = turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>;
+    *source = Arc::clone(&turn_state) as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>;
+    drop(source);
+    // Repoint the sibling TurnStateStore-typed slot too so the trigger
+    // delivery-target service resolves runs from the same harness store.
+    let mut store_slot = services
+        .trigger_source_turn_state_store
+        .write()
+        .map_err(|error| format!("trigger source turn-state store lock unavailable: {error}"))?;
+    *store_slot = turn_state as Arc<dyn ironclaw_turns::TurnStateStore>;
     Ok(())
 }
 

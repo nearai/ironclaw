@@ -464,6 +464,14 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
         outbound_delivery_targets: Arc::clone(runtime.outbound_delivery_targets_for_test()),
         scoped_filesystem: failing_trigger_conversation_filesystem(),
         conversations: tokio::sync::OnceCell::new(),
+        delivery_target_service: Arc::new(ironclaw_product::TriggerFinalReplyTargetService::new(
+            Arc::new(LateBoundTriggerSourceTurnStateStore {
+                source_turn_state: Arc::clone(&services.trigger_source_turn_state_store),
+            }),
+            Arc::clone(&services.outbound_state),
+            Arc::clone(&services.current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
+        )),
     };
     let record = trigger_record_for_pairing_test();
 
