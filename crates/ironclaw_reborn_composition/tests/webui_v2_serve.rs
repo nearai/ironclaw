@@ -2166,7 +2166,13 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
                 .uri("/api/webchat/v2/extensions/telegram/setup")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({"action": "begin"}).to_string()))
+                .body(Body::from(
+                    json!({
+                        "action": "begin",
+                        "client_action_id": "action-setup-extension-begin"
+                    })
+                    .to_string(),
+                ))
                 .expect("request"),
         )
         .await
