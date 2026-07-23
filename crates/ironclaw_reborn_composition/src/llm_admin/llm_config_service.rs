@@ -683,12 +683,51 @@ impl LlmConfigService for RebornLlmConfigService {
                 ok: true,
                 message: format!("connection ok — {} models available", models.len()),
             }),
-            // The endpoint answered but advertised no models. Connectivity is
-            // confirmed, but don't overstate it as a verified model list.
-            Ok(_) => Ok(LlmProbeResult {
-                ok: true,
-                message: format!("connected to {endpoint}, but it reported no models"),
-            }),
+            // When `list_models()` returns an empty model list (because model
+            // discovery is unsupported or default returned Ok([]) without I/O),
+            // connectivity is not yet verified. Run a fallback completion probe.
+            Ok(_) => {
+                let model = request
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty());
+
+                let Some(model) = model else {
+                    return Ok(LlmProbeResult {
+                        ok: false,
+                        message: format!(
+                            "could not verify {endpoint}: model is required when model discovery is unavailable"
+                        ),
+                    });
+                };
+
+                let probe_req =
+                    ironclaw_llm::CompletionRequest::new(vec![ironclaw_llm::ChatMessage::user(
+                        "ping",
+                    )])
+                    .with_model(model)
+                    .with_max_tokens(1);
+
+                match provider.complete(probe_req).await {
+                    Ok(_) => Ok(LlmProbeResult {
+                        ok: true,
+                        message: format!("connection ok — verified {endpoint}"),
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            provider_id = %request.provider_id,
+                            adapter = %request.adapter,
+                            error = %error,
+                            "test_connection fallback completion probe failed"
+                        );
+                        Ok(LlmProbeResult {
+                            ok: false,
+                            message: format!("probe failed for {endpoint}: {error}"),
+                        })
+                    }
+                }
+            }
             // A failed `list_models` is the connectivity signal: the discovery
             // request never reached a live endpoint. Name the address so the
             // operator can see which host was unreachable.
@@ -2104,6 +2143,41 @@ mod tests {
         assert!(
             !result.ok,
             "an unreachable endpoint must not report success, got {result:?}"
+        );
+        assert!(
+            result.message.contains("127.0.0.1:1"),
+            "failure message must name the unreachable endpoint, got: {}",
+            result.message
+        );
+    }
+
+    /// Regression for #6099: Probing an unreachable endpoint for a provider
+    /// whose list_models() returns empty without I/O (e.g. OpenAI/Anthropic/custom)
+    /// must fail closed and name the unreachable endpoint, rather than returning
+    /// a false positive success.
+    #[tokio::test]
+    async fn test_connection_reports_unreachable_openai_endpoint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let request = LlmProbeRequest {
+            provider_id: "openai".to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            model: Some("gpt-4o".to_string()),
+            api_key: Some(secrecy::SecretString::from("sk-invalid-key")),
+        };
+
+        let result = service
+            .test_connection(caller(), request)
+            .await
+            .expect("probe completes");
+
+        assert!(
+            !result.ok,
+            "an unreachable OpenAI endpoint must not report success, got {result:?}"
         );
         assert!(
             result.message.contains("127.0.0.1:1"),
