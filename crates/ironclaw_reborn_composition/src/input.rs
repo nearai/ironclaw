@@ -407,7 +407,17 @@ impl RebornHostBindings {
         root: PathBuf,
     ) -> Self {
         debug_assert!(deployment.uses_local_dev_storage_input());
-        Self::new(
+        // Resolve the deployment's runtime policy from its policy request up
+        // front, so a local-dev input is buildable without the caller
+        // separately calling `.with_runtime_policy(...)`. This is what the
+        // `local_runtime_build_input*` bridge did explicitly; folding it in here
+        // removes the bare, unresolved-policy local-dev constructor that left
+        // `runtime_policy` unset (and the build failing `MissingRuntimePolicy`).
+        // Resolution is infallible for the non-yolo local-dev shapes; a yolo
+        // shape without an acknowledged disclosure resolves to no policy, which
+        // the caller can still override via `with_runtime_policy`.
+        let resolved_policy = deployment.resolve().ok().flatten();
+        let bindings = Self::new(
             deployment,
             owner_id,
             RebornStorageInput::LocalDev {
@@ -415,7 +425,11 @@ impl RebornHostBindings {
                 workspace_root: None,
                 host_home_root: None,
             },
-        )
+        );
+        match resolved_policy {
+            Some(policy) => bindings.with_runtime_policy(policy),
+            None => bindings,
+        }
     }
 
     pub fn hosted_single_tenant_postgres(
