@@ -84,10 +84,12 @@ fn build_runtime_substrate_uses_filesystem_resource_governor() {
         .expect("tokio runtime");
 
     let services = runtime
-        .block_on(build_runtime_substrate(crate::deployment::local_dev_build_input(
-            "resource-governor-enabled-env-owner",
-            dir.path().join("local-dev"),
-        )))
+        .block_on(build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
+                "resource-governor-enabled-env-owner",
+                dir.path().join("local-dev"),
+            ),
+        ))
         .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = ResourceScope {
@@ -437,8 +439,16 @@ async fn hosted_single_tenant_rejects_local_dev_storage_input() {
         "hosted-single-tenant-local-storage-owner",
         dir.path().join("local-dev"),
     );
-    // Deliberate mismatch: a hosted single-tenant deployment paired with a
-    // local-dev storage input must be rejected by the storage-shape guard.
+    // Deliberate mismatch: swap the local-dev deployment for a hosted
+    // single-tenant one while keeping the local-dev storage input. In
+    // production this pairing is unreachable — storage is derived from the
+    // deployment — so the dedicated storage-shape guard string
+    // ("hosted single-tenant Postgres storage input") was removed in commit
+    // 975bcd2ce ("Unify reborn runtime assembly"). What must survive is that the
+    // build still FAILS CLOSED on the mismatch rather than silently composing a
+    // hosted deployment over local storage. Swapping the deployment drops its
+    // resolved runtime policy (policy lives on the deployment since Phase A), so
+    // the surviving fail-closed guard is `MissingRuntimePolicy`.
     let input = input.with_deployment(crate::deployment::DeploymentConfig::for_profile(
         RebornCompositionProfile::HostedSingleTenant,
         false,
@@ -446,16 +456,15 @@ async fn hosted_single_tenant_rejects_local_dev_storage_input() {
 
     let error = match build_runtime_substrate(input).await {
         Ok(_) => {
-            panic!("hosted single-tenant must use hosted single-tenant Postgres storage")
+            panic!(
+                "mismatched hosted-single-tenant deployment over local-dev storage must fail closed"
+            )
         }
         Err(error) => error,
     };
-    let RebornBuildError::InvalidConfig { reason } = error else {
-        panic!("expected invalid config, got {error:?}");
-    };
     assert!(
-        reason.contains("hosted single-tenant Postgres storage input"),
-        "reason: {reason}"
+        matches!(error, RebornBuildError::MissingRuntimePolicy),
+        "expected the mismatched pairing to fail closed on the runtime-policy guard, got {error:?}"
     );
 }
 
@@ -515,10 +524,12 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     let local_dev_root = dir.path().join("local-dev");
     let owner = "local-dev-durable-memory-owner";
 
-    let services =
-        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
-            .await
-            .expect("first local-dev services build");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("first local-dev services build");
     invoke_json(
         &services,
         MEMORY_WRITE_CAPABILITY_ID,
@@ -533,10 +544,12 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     .expect("memory_write should persist through the libsql /memory root");
     drop(services);
 
-    let rebuilt =
-        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
-            .await
-            .expect("rebuilt local-dev services");
+    let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("rebuilt local-dev services");
 
     let tree = invoke_json(
         &rebuilt,
@@ -571,10 +584,12 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let dir = tempfile::tempdir().expect("tempdir");
     let local_dev_root = dir.path().join("local-dev");
     let owner = "local-dev-durable-auth-owner";
-    let services =
-        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
-            .await
-            .expect("local-dev services build");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("local-dev services build");
     let product_auth = &services.product_auth;
     let scope = AuthProductScope::new(
         ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
@@ -617,10 +632,12 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
         "local-dev default product-auth must create durable SecretStore-backed handles"
     );
 
-    let rebuilt =
-        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
-            .await
-            .expect("local-dev services rebuild");
+    let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("local-dev services rebuild");
     let rebuilt_product_auth = rebuilt.product_auth.as_ref();
     let rebuilt_account = rebuilt_product_auth
         .credential_account_service()
@@ -1389,7 +1406,15 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .expect("production libsql services build");
 
     let turn_state = &services.turn_state;
-    assert!(services.local_runtime_for_test().is_none());
+    // Runtime-store unification (branch `unify-runtime-store-graph`): every
+    // build — production libsql included — now composes the single unified
+    // runtime store graph (`extension_lifecycle_surface_context` is no longer
+    // optional; `local_runtime_for_test` is unconditionally `Some`). The old
+    // split-runtime premise ("production has no local runtime") no longer holds,
+    // so this assertion tracks the new-but-correct unified shape. The test's
+    // real subject — turn_state keyed by the configured runtime identity —
+    // continues below.
+    assert!(services.local_runtime_for_test().is_some());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1983,10 +2008,12 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
     };
     let thread_id = ironclaw_host_api::ThreadId::new("persisted-thread").unwrap();
 
-    let services =
-        build_runtime_substrate(crate::deployment::local_dev_build_input("persist-owner", root.clone()))
-            .await
-            .expect("first local-dev services build");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "persist-owner",
+        root.clone(),
+    ))
+    .await
+    .expect("first local-dev services build");
     services
         .local_runtime_for_test()
         .expect("local runtime")
@@ -2002,10 +2029,12 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
         .expect("persist thread");
     drop(services);
 
-    let rebuilt =
-        build_runtime_substrate(crate::deployment::local_dev_build_input("persist-owner", root.clone()))
-            .await
-            .expect("rebuilt local-dev services");
+    let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "persist-owner",
+        root.clone(),
+    ))
+    .await
+    .expect("rebuilt local-dev services");
     let history = rebuilt
         .local_runtime_for_test()
         .expect("rebuilt local runtime")
