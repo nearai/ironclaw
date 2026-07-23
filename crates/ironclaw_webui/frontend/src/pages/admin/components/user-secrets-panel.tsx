@@ -3,6 +3,7 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Panel } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
+import { Icon } from "../../../design-system/icons";
 import { Input } from "../../../design-system/input";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
 import { useAdminUserSecrets } from "../hooks/useAdminUsers";
@@ -31,6 +32,11 @@ export function UserSecretsPanelView({
   const [pendingDelete, setPendingDelete] = React.useState(null);
   const normalizedHandle = handle.trim();
   const isMutating = isSaving || isDeleting;
+  const queryErrorCode = query.error?.payload?.kind || query.error?.payload?.error;
+  const isForbidden =
+    query.error?.status === 403 ||
+    queryErrorCode === "forbidden" ||
+    queryErrorCode === "participant_denied";
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -97,6 +103,21 @@ export function UserSecretsPanelView({
           <div className="v2-skeleton h-9 rounded" />
           <div className="v2-skeleton h-9 rounded" />
         </div>
+      ) : isForbidden ? (
+        <div
+          className="rounded-lg border border-iron-700 bg-iron-800/40 px-4 py-4"
+          data-testid="admin-user-secrets-access-boundary"
+        >
+          <div className="flex items-center gap-2">
+            <Icon name="lock" className="h-4 w-4 text-iron-300" />
+            <p className="text-sm font-medium text-iron-100">
+              {t("admin.user.secrets.adminRequired")}
+            </p>
+          </div>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
+            {t("admin.user.secrets.adminRequiredDesc")}
+          </p>
+        </div>
       ) : query.error ? (
         <p className="text-sm text-red-200" role="alert">
           {t("admin.user.secrets.loadFailed", { message: query.error.message })}
@@ -146,63 +167,65 @@ export function UserSecretsPanelView({
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label htmlFor="admin-secret-handle" className="mb-1 block text-xs text-iron-300">
-              {t("admin.user.secrets.handle")}
-            </label>
-            <Input
-              id="admin-secret-handle"
-              data-testid="admin-secret-handle"
-              size="sm"
-              value={handle}
-              onChange={(event) => {
-                setHandle(event.currentTarget.value);
-                setSuccess("");
-                resetPut?.();
-              }}
-              autoComplete="off"
-              spellCheck={false}
-              required
-            />
+      {!query.isLoading && !query.error && (
+        <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="admin-secret-handle" className="mb-1 block text-xs text-iron-300">
+                {t("admin.user.secrets.handle")}
+              </label>
+              <Input
+                id="admin-secret-handle"
+                data-testid="admin-secret-handle"
+                size="sm"
+                value={handle}
+                onChange={(event) => {
+                  setHandle(event.currentTarget.value);
+                  setSuccess("");
+                  resetPut?.();
+                }}
+                autoComplete="off"
+                spellCheck={false}
+                required
+              />
+            </div>
+            <div>
+              <label htmlFor="admin-secret-value" className="mb-1 block text-xs text-iron-300">
+                {t("admin.user.secrets.value")}
+              </label>
+              <Input
+                id="admin-secret-value"
+                data-testid="admin-secret-value"
+                size="sm"
+                type="password"
+                value={value}
+                onChange={(event) => {
+                  setValue(event.currentTarget.value);
+                  setSuccess("");
+                  resetPut?.();
+                }}
+                autoComplete="new-password"
+                spellCheck={false}
+                required
+              />
+            </div>
           </div>
-          <div>
-            <label htmlFor="admin-secret-value" className="mb-1 block text-xs text-iron-300">
-              {t("admin.user.secrets.value")}
-            </label>
-            <Input
-              id="admin-secret-value"
-              data-testid="admin-secret-value"
-              size="sm"
-              type="password"
-              value={value}
-              onChange={(event) => {
-                setValue(event.currentTarget.value);
-                setSuccess("");
-                resetPut?.();
-              }}
-              autoComplete="new-password"
-              spellCheck={false}
-              required
-            />
-          </div>
-        </div>
-        <p className="text-xs text-iron-300">
-          {t("admin.user.secrets.writeOnlyHint")}
-        </p>
-        <Button
-          type="submit"
-          size="sm"
-          loading={isSaving}
-          disabled={isMutating || !normalizedHandle || value.length === 0}
-          data-testid="admin-secret-save"
-        >
-          {isSaving
-            ? t("admin.user.secrets.saving")
-            : t("admin.user.secrets.save")}
-        </Button>
-      </form>
+          <p className="text-xs text-iron-300">
+            {t("admin.user.secrets.writeOnlyHint")}
+          </p>
+          <Button
+            type="submit"
+            size="sm"
+            loading={isSaving}
+            disabled={isMutating || !normalizedHandle || value.length === 0}
+            data-testid="admin-secret-save"
+          >
+            {isSaving
+              ? t("admin.user.secrets.saving")
+              : t("admin.user.secrets.save")}
+          </Button>
+        </form>
+      )}
 
       {success && (
         <p

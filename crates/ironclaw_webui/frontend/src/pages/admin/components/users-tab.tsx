@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { SelectMenu } from "../../../design-system/select-menu";
@@ -61,7 +61,7 @@ export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 
   if (loginToken) {
     return (
-      <Panel className="p-5 sm:p-6" data-testid="admin-user-login-token">
+      <Panel className="w-full p-5 sm:p-6" data-testid="admin-user-login-token">
         <h3 className="font-semibold text-iron-100">{t("admin.users.loginTokenReady")}</h3>
         <p className="mt-1 text-sm text-iron-300">{t("admin.users.loginTokenOnce")}</p>
         <code className="mt-3 block break-all rounded-md border border-iron-700 bg-iron-900 p-3 text-xs text-signal">
@@ -76,7 +76,7 @@ export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 
   if (!isOpen) {
     return (
-      <Button variant="secondary" onClick={() => setIsOpen(true)}>
+      <Button size="sm" onClick={() => setIsOpen(true)}>
         <Icon name="plus" className="mr-2 h-4 w-4" />
         {t("admin.users.newUser")}
       </Button>
@@ -84,7 +84,7 @@ export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   }
 
   return (
-    <Panel className="p-5 sm:p-6">
+    <Panel className="w-full p-5 sm:p-6">
       <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.users.createUser")}</h3>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
@@ -165,13 +165,19 @@ export function CreateManagedAgentForm({ onCreate, isCreating, error, resetError
       // Keep the form open; the mutation exposes its sanitized error below.
     }
   };
-  const createLabel = `${t("admin.users.createUser")} · ${t("settings.agent")}`;
   if (!isOpen) {
-    return <Button variant="secondary" onClick={() => setIsOpen(true)}>{createLabel}</Button>;
+    return (
+      <Button size="sm" variant="secondary" onClick={() => setIsOpen(true)}>
+        <Icon name="spark" className="mr-2 h-4 w-4" />
+        {t("admin.users.newManagedAgent")}
+      </Button>
+    );
   }
   return (
-    <Panel className="p-5 sm:p-6">
-      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{createLabel}</h3>
+    <Panel className="w-full p-5 sm:p-6">
+      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+        {t("admin.users.createManagedAgent")}
+      </h3>
       <form onSubmit={handleSubmit} className="space-y-4">
         <input
           type="text"
@@ -183,7 +189,9 @@ export function CreateManagedAgentForm({ onCreate, isCreating, error, resetError
         />
         {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
         <div className="flex gap-2">
-          <Button type="submit" disabled={isCreating}>{isCreating ? t("common.loading") : createLabel}</Button>
+          <Button type="submit" disabled={isCreating}>
+            {isCreating ? t("common.loading") : t("admin.users.createManagedAgent")}
+          </Button>
           <Button variant="ghost" type="button" onClick={() => setIsOpen(false)}>{t("common.cancel")}</Button>
         </div>
       </form>
@@ -244,6 +252,9 @@ export function UserRow({
           </button>
           <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
           <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
+          {user.content_access_policy === "tenant_admin_managed" && (
+            <StatusPill tone="muted" label={t("admin.users.managedAgent")} />
+          )}
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
           {user.email && (<span className="font-mono text-xs text-iron-300">{user.email}</span>)}
@@ -388,78 +399,87 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
 
   return (
     <div className="space-y-5">
-      <CreateUserForm
-        onCreate={createUser}
-        isCreating={isCreating}
-        error={createError}
-        resetError={resetCreate}
-      />
-      <CreateManagedAgentForm
-        onCreate={createManagedAgent}
-        isCreating={isCreatingManagedAgent}
-        error={createManagedAgentError}
-        resetError={resetCreateManagedAgent}
-      />
+      <div className="flex flex-wrap gap-2" data-testid="admin-user-create-actions">
+        <CreateUserForm
+          onCreate={createUser}
+          isCreating={isCreating}
+          error={createError}
+          resetError={resetCreate}
+        />
+        <CreateManagedAgentForm
+          onCreate={createManagedAgent}
+          isCreating={isCreatingManagedAgent}
+          error={createManagedAgentError}
+          resetError={resetCreateManagedAgent}
+        />
+      </div>
 
-      <Panel className="p-5 sm:p-6">
-        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
-            {t("admin.users.title", { count: filtered.length, total: users.length })}
-          </h3>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              placeholder={t("admin.users.searchPlaceholder")}
-              value={search}
-              onChange={(e) => setSearch(e.currentTarget.value)}
-              className="h-8 w-48 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-xs text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
-            />
-            <div className="flex gap-1">
-              {FILTERS.map(
-                (f) => (
-                  <button
-                    key={f.value}
-                    onClick={() => setFilter(f.value)}
-                    className={[
-                      "rounded-md px-2.5 py-1.5 text-[11px] font-medium",
-                      filter === f.value
-                        ? "border border-signal/35 bg-signal/10 text-iron-100"
-                        : "border border-transparent text-iron-300 hover:text-iron-100",
-                    ].join(" ")}
-                  >
-                    {f.label}
-                  </button>
-                )
-              )}
+      {users.length === 0 ? (
+        <EmptyPanel
+          title={t("admin.dashboard.noUsers")}
+          description={t("admin.users.emptyDescription")}
+        />
+      ) : (
+        <Panel className="p-5 sm:p-6">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+              {t("admin.users.title", { count: filtered.length, total: users.length })}
+            </h3>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder={t("admin.users.searchPlaceholder")}
+                value={search}
+                onChange={(e) => setSearch(e.currentTarget.value)}
+                className="h-8 w-48 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-xs text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+              />
+              <div className="flex gap-1">
+                {FILTERS.map(
+                  (f) => (
+                    <button
+                      key={f.value}
+                      onClick={() => setFilter(f.value)}
+                      className={[
+                        "rounded-md px-2.5 py-1.5 text-[11px] font-medium",
+                        filter === f.value
+                          ? "border border-signal/35 bg-signal/10 text-iron-100"
+                          : "border border-transparent text-iron-300 hover:text-iron-100",
+                      ].join(" ")}
+                    >
+                      {f.label}
+                    </button>
+                  )
+                )}
+              </div>
             </div>
           </div>
-        </div>
 
-        {actionError && (
-          <p className="mb-4 text-sm text-red-200" role="alert" data-testid="admin-user-action-error">
-            {adminUserActionErrorMessage(actionError, t)}
-          </p>
-        )}
+          {actionError && (
+            <p className="mb-4 text-sm text-red-200" role="alert" data-testid="admin-user-action-error">
+              {adminUserActionErrorMessage(actionError, t)}
+            </p>
+          )}
 
-        {filtered.length === 0
-          ? (<p className="py-4 text-sm text-iron-300">{t("admin.users.noMatch")}</p>)
-          : filtered.map(
-              (user) => (
-                <UserRow
-                  key={user.id}
-                  user={user}
-                  onSelect={onSelectUser}
-                  onSuspend={handleSuspend}
-                  onActivate={handleActivate}
-                  onChangeRole={handleChangeRole}
-                  isActionPending={isActionPending}
-                  isSuspending={isSuspending && suspendingUserId === user.id}
-                  isActivating={isActivating && activatingUserId === user.id}
-                  isUpdating={isUpdating && updatingUserId === user.id}
-                />
-              )
-            )}
-      </Panel>
+          {filtered.length === 0
+            ? (<p className="py-4 text-sm text-iron-300">{t("admin.users.noMatch")}</p>)
+            : filtered.map(
+                (user) => (
+                  <UserRow
+                    key={user.id}
+                    user={user}
+                    onSelect={onSelectUser}
+                    onSuspend={handleSuspend}
+                    onActivate={handleActivate}
+                    onChangeRole={handleChangeRole}
+                    isActionPending={isActionPending}
+                    isSuspending={isSuspending && suspendingUserId === user.id}
+                    isActivating={isActivating && activatingUserId === user.id}
+                    isUpdating={isUpdating && updatingUserId === user.id}
+                  />
+                )
+              )}
+        </Panel>
+      )}
 
       {confirm && (
         <ConfirmModal

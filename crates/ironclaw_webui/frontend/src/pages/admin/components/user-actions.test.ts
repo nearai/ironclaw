@@ -251,6 +251,20 @@ test("managed-agent form opens, submits the dedicated payload, and closes", asyn
   assert.equal(findByType(rendered, "form"), null);
 });
 
+test("empty users view presents creation choices without irrelevant search filters", () => {
+  const harness = createReactHarness();
+  const { AdminUsersTabView: View } = loadUsersView(harness);
+  const rendered = harness.render(View, {
+    onSelectUser: () => {},
+    adminState: baseAdminState({ users: [] }),
+  });
+
+  assert.ok(findByTestId(rendered, "admin-user-create-actions"));
+  assert.ok(collectScalars(rendered).includes("admin.dashboard.noUsers"));
+  assert.ok(collectScalars(rendered).includes("admin.users.emptyDescription"));
+  assert.equal(findByType(rendered, "input"), null);
+});
+
 function loadDetailModule(harness) {
   return runVmModuleForTest(
     "./user-detail.tsx",
@@ -440,6 +454,26 @@ test("user detail surfaces status and role failures", () => {
   })));
   assert.ok(findByTestId(roleFailure, "admin-user-detail-role-error"));
   assert.ok(collectScalars(roleFailure).includes("admin.users.actionFailed:cannot demote last admin"));
+});
+
+test("managed-agent detail explains its fixed member role instead of rendering role controls", () => {
+  const harness = createReactHarness();
+  const View = loadDetailView(harness);
+  const managedAgent = {
+    ...baseAdminState().users[0],
+    role: "member",
+    content_access_policy: "tenant_admin_managed",
+  };
+  const rendered = harness.render(View, {
+    onBack: () => {},
+    userQuery: { isLoading: false, error: null, data: managedAgent },
+    usageQuery: { data: { usage: [] } },
+    adminState: baseAdminState(),
+  });
+
+  assert.ok(findByTestId(rendered, "admin-user-managed-role-policy"));
+  assert.ok(collectScalars(rendered).includes("admin.user.managedRoleLocked"));
+  assert.equal(findByTestId(rendered, "admin-user-detail-save-role"), null);
 });
 
 test("delete failure keeps the dialog open and does not navigate away", async () => {
