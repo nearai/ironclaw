@@ -28,10 +28,10 @@ use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{OutboundDeliveryTargetProvider, OutboundError, RunFinalReplyDestination};
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     CurrentDeliveryTarget, CurrentDeliveryTargetResolver, PreferenceTargetCodec,
     ProductWorkflowError,
 };

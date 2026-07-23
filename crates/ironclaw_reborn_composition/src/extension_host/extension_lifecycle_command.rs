@@ -1,4 +1,4 @@
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecyclePublicState, LifecycleSearchExtensionSummary,
@@ -167,7 +167,7 @@ mod tests {
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
     use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
-    use ironclaw_product_workflow::LifecycleExtensionSummary;
+    use ironclaw_product::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
     use super::*;
@@ -281,8 +281,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                         description: "line\rrewrite".to_string(),
                         source: LifecycleExtensionSource::HostBundled,
-                        runtime_kind:
-                            ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                        runtime_kind: ironclaw_product::LifecycleExtensionRuntimeKind::WasmTool,
                         surface_kinds: Vec::new(),
                         channel_directions: None,
                         channel_connection: None,

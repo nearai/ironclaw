@@ -217,8 +217,8 @@ def is_test_only_path(path: str) -> bool:
     ``src/**/test_support.rs`` is the repo-wide convention for a
     ``#[cfg(feature = "test-support")] pub mod test_support;`` module
     (used by ``ironclaw_agent_loop``, ``ironclaw_host_runtime``,
-    ``ironclaw_product_adapters``, ``ironclaw_product_workflow``,
-    ``ironclaw_reborn_composition``). The ``test-support`` feature is enabled
+    ``ironclaw_product``, ``ironclaw_reborn_composition``). The
+    ``test-support`` feature is enabled
     only via ``[dev-dependencies]``, so these modules ship zero bytes in
     production binaries — the same "never compiled in production" rationale that
     exempts ``tests.rs``. Their fixtures legitimately ``.unwrap()`` constant

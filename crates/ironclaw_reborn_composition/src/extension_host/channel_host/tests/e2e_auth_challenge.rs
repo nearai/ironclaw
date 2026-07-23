@@ -3,10 +3,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{AgentId, ProjectId, UserId};
-use ironclaw_product_adapters::AuthPromptChallengeKind;
+use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-use ironclaw_product_workflow::{AuthChallengeProvider, AuthChallengeView};
+use ironclaw_product::{AuthChallengeProvider, AuthChallengeView};
 
 use super::{AGENT, AUTH_GATE, PROJECT, TENANT, USER};
 

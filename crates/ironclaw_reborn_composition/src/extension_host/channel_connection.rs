@@ -25,11 +25,13 @@ use ironclaw_auth::{
     SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_extensions::ExtensionInstallationStore;
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ResourceScope, TenantId,
+};
+use ironclaw_product::{
     ChannelAuthAccountState, ChannelConnectionFacade, ChannelDisconnectActions,
     ChannelPairingRegistry, ChannelPairingService, ChannelWorkflowStateService,
-    RebornServicesError, WebUiAuthenticatedCaller, disconnect_channel_in_order,
+    disconnect_channel_in_order,
 };
 
 use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
@@ -50,7 +52,7 @@ pub(crate) trait ChannelCredentialCleanup: Send + Sync {
     async fn cleanup_credentials_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError>;
+    ) -> Result<SecretCleanupReport, ProductSurfaceError>;
 }
 
 #[async_trait]
@@ -58,11 +60,11 @@ impl ChannelCredentialCleanup for crate::RebornProductAuthServices {
     async fn cleanup_credentials_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError> {
+    ) -> Result<SecretCleanupReport, ProductSurfaceError> {
         crate::RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
             .await
             .map_err(|error| {
-                RebornServicesError::internal_from(format!(
+                ProductSurfaceError::internal_from(format!(
                     "channel credential cleanup failed: {:?}",
                     error.code
                 ))
@@ -84,20 +86,20 @@ pub(crate) trait ChannelAccountStatusReader: Send + Sync {
     /// when the caller holds no account for that vendor.
     async fn account_status_for_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider: &str,
-    ) -> Result<Option<CredentialAccountStatus>, RebornServicesError>;
+    ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError>;
 }
 
 #[async_trait]
 impl ChannelAccountStatusReader for crate::RebornProductAuthServices {
     async fn account_status_for_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider: &str,
-    ) -> Result<Option<CredentialAccountStatus>, RebornServicesError> {
+    ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError> {
         let provider_id = AuthProviderId::new(provider)
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         let scope = AuthProductScope::credential_owner(
             &ResourceScope {
                 tenant_id: caller.tenant_id.clone(),
@@ -115,7 +117,7 @@ impl ChannelAccountStatusReader for crate::RebornProductAuthServices {
             .accounts_for_owner(&scope)
             .await
             .map_err(|error| {
-                RebornServicesError::internal_from(format!(
+                ProductSurfaceError::internal_from(format!(
                     "channel account status lookup failed: {error:?}"
                 ))
             })?;
@@ -205,7 +207,7 @@ impl GenericChannelConnectionFacade {
     }
 
     /// The lane entries plus generically-discovered channel extensions.
-    async fn connection_entries(&self) -> Result<Vec<ChannelConnectionEntry>, RebornServicesError> {
+    async fn connection_entries(&self) -> Result<Vec<ChannelConnectionEntry>, ProductSurfaceError> {
         let mut entries = self.entries.clone();
         let Some(installation_store) = &self.installation_store else {
             return Ok(entries);
@@ -216,7 +218,7 @@ impl GenericChannelConnectionFacade {
             .collect();
         let discovered = discover_channel_extensions(installation_store, &overridden)
             .await
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
         for extension in discovered {
             let Ok(extension_id) = ExtensionId::new(&extension.extension_id) else {
                 continue;
@@ -237,20 +239,20 @@ impl GenericChannelConnectionFacade {
     async fn entry_scope(
         &self,
         entry: &ChannelConnectionEntry,
-    ) -> Result<Option<ChannelConnectionScope>, RebornServicesError> {
+    ) -> Result<Option<ChannelConnectionScope>, ProductSurfaceError> {
         entry
             .scope_source
             .resolve_connection_scope()
             .await
-            .map_err(RebornServicesError::internal_from)
+            .map_err(ProductSurfaceError::internal_from)
     }
 
     async fn caller_connected(
         &self,
         entry: &ChannelConnectionEntry,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         scope: &ChannelConnectionScope,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, ProductSurfaceError> {
         let prefix = scope.provider_user_id_prefix();
         for provider in &entry.providers {
             let connected = self
@@ -261,7 +263,7 @@ impl GenericChannelConnectionFacade {
                     Some(prefix.as_str()),
                 )
                 .await
-                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
             if connected {
                 return Ok(true);
             }
@@ -272,8 +274,8 @@ impl GenericChannelConnectionFacade {
     async fn revoke_personal_credentials(
         &self,
         entry: &ChannelConnectionEntry,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<(), RebornServicesError> {
+        caller: &ProductSurfaceCaller,
+    ) -> Result<(), ProductSurfaceError> {
         let Some(cleanup) = &self.credential_cleanup else {
             return Ok(());
         };
@@ -292,9 +294,9 @@ impl GenericChannelConnectionFacade {
     async fn delete_identity_bindings(
         &self,
         entry: &ChannelConnectionEntry,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider_user_id_prefix: Option<&str>,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         for provider in &entry.providers {
             self.identity_delete_store
                 .delete_user_identity_bindings_for_user(
@@ -303,7 +305,7 @@ impl GenericChannelConnectionFacade {
                     provider_user_id_prefix,
                 )
                 .await
-                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         }
         Ok(())
     }
@@ -314,20 +316,20 @@ impl GenericChannelConnectionFacade {
 struct ChannelDisconnectOperations<'a> {
     facade: &'a GenericChannelConnectionFacade,
     entry: &'a ChannelConnectionEntry,
-    caller: &'a WebUiAuthenticatedCaller,
+    caller: &'a ProductSurfaceCaller,
     scope: Option<&'a ChannelConnectionScope>,
 }
 
 #[async_trait]
 impl ChannelDisconnectActions for ChannelDisconnectOperations<'_> {
-    type Error = RebornServicesError;
+    type Error = ProductSurfaceError;
 
     async fn disconnect_pairing(&self) -> Result<(), Self::Error> {
         let Some(pairing) = self.facade.pairing_service_for(&self.entry.extension_id) else {
             return Ok(());
         };
         pairing.unpair(&self.caller.user_id).await.map_err(|error| {
-            RebornServicesError::internal_from(format!(
+            ProductSurfaceError::internal_from(format!(
                 "channel pairing disconnect failed: {error}"
             ))
         })
@@ -344,14 +346,14 @@ impl ChannelDisconnectActions for ChannelDisconnectOperations<'_> {
             store
                 .delete(&self.entry.extension_id, &self.caller.user_id)
                 .await
-                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         }
         Ok(())
     }
 
     async fn cleanup_conversation_bindings(&self) -> Result<(), Self::Error> {
         let extension_id = ExtensionId::new(&self.entry.extension_id)
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         self.facade
             .workflow_state
             .cleanup_conversation_bindings(
@@ -360,7 +362,7 @@ impl ChannelDisconnectActions for ChannelDisconnectOperations<'_> {
                 self.scope.map(|scope| &scope.installation_id),
             )
             .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))
     }
 
     async fn delete_identity_bindings(&self) -> Result<(), Self::Error> {
@@ -377,8 +379,8 @@ impl ChannelDisconnectActions for ChannelDisconnectOperations<'_> {
 impl ChannelConnectionFacade for GenericChannelConnectionFacade {
     async fn caller_channel_connections(
         &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<HashMap<String, bool>, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<HashMap<String, bool>, ProductSurfaceError> {
         let entries = self.connection_entries().await?;
         let mut connections = HashMap::with_capacity(entries.len());
         for entry in &entries {
@@ -389,7 +391,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
                     .status_for(&caller.user_id)
                     .await
                     .map_err(|error| {
-                        RebornServicesError::internal_from(format!(
+                        ProductSurfaceError::internal_from(format!(
                             "channel pairing status unavailable: {error}"
                         ))
                     })?
@@ -407,8 +409,8 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
 
     async fn caller_channel_account_states(
         &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<HashMap<String, ChannelAuthAccountState>, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<HashMap<String, ChannelAuthAccountState>, ProductSurfaceError> {
         let Some(reader) = &self.account_status_reader else {
             return Ok(HashMap::new());
         };
@@ -443,9 +445,9 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
 
     async fn disconnect_channel_for_caller(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         channel: &str,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         if caller.tenant_id != self.tenant_id {
             return Ok(());
         }
@@ -469,10 +471,10 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
 // vendor account. Shared by the scoped and no-scope disconnect arms so the
 // revoke request cannot drift between them.
 fn personal_credential_cleanup_request(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     extension_id: &str,
     provider: &str,
-) -> Result<SecretCleanupRequest, RebornServicesError> {
+) -> Result<SecretCleanupRequest, ProductSurfaceError> {
     Ok(SecretCleanupRequest {
         scope: AuthProductScope::new(
             ResourceScope {
@@ -487,10 +489,10 @@ fn personal_credential_cleanup_request(
             AuthSurface::Callback,
         ),
         extension_id: ExtensionId::new(extension_id)
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?,
         provider: Some(
             AuthProviderId::new(provider)
-                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?,
         ),
         lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,

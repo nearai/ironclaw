@@ -121,7 +121,7 @@ effect_path = { type = "product_workflow" }
 Cargo features (mirror slack lines exactly):
 ```toml
 # composition Cargo.toml [features]
-telegram-v2-host-beta = ["webui-v2-beta", "dep:ironclaw_telegram_v2_adapter", "dep:ironclaw_wasm_product_adapters", "ironclaw_product_workflow/storage"]
+telegram-v2-host-beta = ["webui-v2-beta", "dep:ironclaw_telegram_v2_adapter", "dep:ironclaw_wasm_product_adapters", "ironclaw_product/storage"]
 # + [dependencies] ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", optional = true }
 # cli Cargo.toml [features]
 telegram-v2-host-beta = ["webui-v2-beta", "ironclaw_reborn_composition/telegram-v2-host-beta"]
@@ -286,7 +286,7 @@ self.continuation.dispatch_auth_continuation(event).await // fan-out resumes Blo
 > design and must not be copied into current code or fixtures.
 
 **Files:**
-- Modify: `crates/ironclaw_host_api/src/capability.rs` (~L128-144 `RuntimeCredentialAccountSetup`), `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs` (`activation_credential_requirements` L526-543; connect-strategy fn ~L3143; `channel_connection_requirement` construction ~L2190-2216), `crates/ironclaw_product_workflow/src/lifecycle.rs` (`LifecycleExtensionCredentialSetup` — add `Pairing`), `crates/ironclaw_product_workflow/src/reborn_services/types.rs` (`RebornExtensionCredentialSetup` — add `Pairing` arm), `crates/ironclaw_reborn_composition/src/extension_host/extension_credential_requirements.rs` (projection arms)
+- Modify: `crates/ironclaw_host_api/src/capability.rs` (~L128-144 `RuntimeCredentialAccountSetup`), `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs` (`activation_credential_requirements` L526-543; connect-strategy fn ~L3143; `channel_connection_requirement` construction ~L2190-2216), `crates/ironclaw_product/src/lifecycle.rs` (`LifecycleExtensionCredentialSetup` — add `Pairing`), `crates/ironclaw_product/src/reborn_services/types.rs` (`RebornExtensionCredentialSetup` — add `Pairing` arm), `crates/ironclaw_reborn_composition/src/extension_host/extension_credential_requirements.rs` (projection arms)
 - Create: `crates/ironclaw_reborn_composition/src/telegram/telegram_channel_connection.rs` (slot + facade)
 - Test: `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (DTO), composition tests
 

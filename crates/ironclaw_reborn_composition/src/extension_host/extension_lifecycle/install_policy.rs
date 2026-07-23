@@ -14,7 +14,7 @@
 
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::UserId;
-use ironclaw_product_workflow::{LifecycleInstallScope, ProductWorkflowError};
+use ironclaw_product::{LifecycleInstallScope, ProductWorkflowError};
 
 /// Every install is caller-owned. Tenant-scoped extension configuration is a
 /// separate manifest-declared deployment concern and never installs a tool on

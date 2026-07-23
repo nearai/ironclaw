@@ -66,7 +66,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn product storage crate" \
-  "crates/ironclaw_product_workflow_storage/src/lib.rs" \
+  "crates/ironclaw_product_storage/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

@@ -20,8 +20,12 @@ LIVE_ONLY_CAPABILITY_IDS = frozenset(CLASSIFICATIONS["live_only"])
 UNSUPPORTED_CAPABILITY_IDS = frozenset(CLASSIFICATIONS["unsupported"])
 WAIVED_CAPABILITY_IDS = frozenset(
     capability
-    for waiver in INVENTORY["waivers"]
+    for waiver in INVENTORY.get("waivers", [])
     for capability in waiver["capabilities"]
+)
+INTEGRATION_EVIDENCE = tuple(INVENTORY.get("integration_evidence", []))
+INTEGRATION_EVIDENCE_CAPABILITY_IDS = frozenset(
+    evidence["capability"] for evidence in INTEGRATION_EVIDENCE
 )
 ALL_CLASSIFIED_CAPABILITY_IDS = (
     TESTED_CAPABILITY_IDS
@@ -55,6 +59,7 @@ def capability_id_to_wire_name(capability_id: str) -> str:
 EMULATE_SUPPORTED_TOOLS = frozenset(
     capability_id_to_wire_name(capability_id)
     for capability_id in TESTED_CAPABILITY_IDS
+    - INTEGRATION_EVIDENCE_CAPABILITY_IDS
 )
 LIVE_ONLY_TOOLS = frozenset(
     capability_id_to_wire_name(capability_id)

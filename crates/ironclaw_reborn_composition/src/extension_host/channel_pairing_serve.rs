@@ -22,15 +22,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{NetworkMethod, ProductSurfaceCaller};
+use ironclaw_product::{
     ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
-    ChannelPairingStatus, WebUiAuthenticatedCaller,
+    ChannelPairingStatus,
 };
 use serde::Serialize;
 
@@ -226,7 +226,7 @@ fn unknown_extension() -> Response {
 async fn mint(
     State(state): State<PairingRouteState>,
     Path(extension_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Response {
     let Some(service) = service_for(&state, &extension_id) else {
         return unknown_extension();
@@ -240,7 +240,7 @@ async fn mint(
 async fn status(
     State(state): State<PairingRouteState>,
     Path(extension_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Response {
     let Some(service) = service_for(&state, &extension_id) else {
         return unknown_extension();
@@ -254,7 +254,7 @@ async fn status(
 async fn unpair(
     State(state): State<PairingRouteState>,
     Path(extension_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Response {
     let Some(service) = service_for(&state, &extension_id) else {
         return unknown_extension();

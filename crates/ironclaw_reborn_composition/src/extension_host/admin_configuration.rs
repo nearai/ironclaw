@@ -7,12 +7,14 @@ use async_trait::async_trait;
 use ironclaw_extension_host::{AdminConfigurationGroupState, AdminConfigurationService};
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{InvocationId, ResourceScope};
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceScope,
+};
+use ironclaw_product::{
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
-    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornViewDescriptor, RebornViewPage,
-    RebornViewProvider, WebUiAuthenticatedCaller,
+    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse, RebornViewDescriptor,
+    RebornViewPage, RebornViewProvider,
 };
 use ironclaw_secrets::SecretStore;
 
@@ -61,11 +63,11 @@ impl RebornViewProvider for AdminConfigurationViewProvider {
 
     async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         params: serde_json::Value,
         cursor: Option<String>,
-    ) -> Result<RebornViewPage, RebornServicesError> {
-        if !caller.operator_webui_config {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
+        if !caller.operator_config {
             return Err(forbidden());
         }
         if params != serde_json::json!({}) || cursor.is_some() {
@@ -73,8 +75,8 @@ impl RebornViewProvider for AdminConfigurationViewProvider {
         }
         let Some(parts) = &self.parts else {
             return Err(service_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
+                ProductSurfaceErrorCode::Unavailable,
+                ProductSurfaceErrorKind::ServiceUnavailable,
                 503,
             ));
         };
@@ -88,7 +90,7 @@ impl RebornViewProvider for AdminConfigurationViewProvider {
             .installation_store
             .list_installations()
             .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?
             .into_iter()
             .map(|installation| installation.extension_id().as_str().to_string())
             .collect::<BTreeSet<_>>();
@@ -97,7 +99,7 @@ impl RebornViewProvider for AdminConfigurationViewProvider {
             .map(|state| render_group(state, &parts.uses, &installed))
             .collect();
         let payload = serde_json::to_value(RebornAdminConfigurationListResponse { groups })
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
         Ok(RebornViewPage {
             payload,
             next_cursor: None,
@@ -141,7 +143,7 @@ fn render_group(
     }
 }
 
-pub(crate) fn caller_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+pub(crate) fn caller_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
     ResourceScope {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
@@ -155,15 +157,15 @@ pub(crate) fn caller_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
 
 fn map_admin_configuration_error(
     error: ironclaw_extension_host::AdminConfigurationServiceError,
-) -> RebornServicesError {
+) -> ProductSurfaceError {
     use ironclaw_extension_host::AdminConfigurationServiceError;
     let source = error.to_string();
     match error {
-        AdminConfigurationServiceError::UnknownGroup => RebornServicesError::not_found(),
+        AdminConfigurationServiceError::UnknownGroup => ProductSurfaceError::not_found(),
         AdminConfigurationServiceError::RevisionConflict { .. }
         | AdminConfigurationServiceError::IdempotencyConflict => service_error(
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorKind::Conflict,
+            ProductSurfaceErrorCode::Conflict,
+            ProductSurfaceErrorKind::Conflict,
             409,
         ),
         AdminConfigurationServiceError::UnknownField
@@ -173,15 +175,15 @@ fn map_admin_configuration_error(
         AdminConfigurationServiceError::InvalidDescriptor
         | AdminConfigurationServiceError::DescriptorConflict => {
             tracing::error!(error = %source, "admin-configuration descriptor projection failed");
-            RebornServicesError::internal_from("admin configuration descriptor is invalid")
+            ProductSurfaceError::internal_from("admin configuration descriptor is invalid")
         }
         AdminConfigurationServiceError::RuntimeReconciliationFailed
         | AdminConfigurationServiceError::RuntimeRollbackFailed
         | AdminConfigurationServiceError::Unavailable => {
             tracing::warn!(error = %source, "admin-configuration query service unavailable");
-            RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Unavailable,
+                kind: ProductSurfaceErrorKind::ServiceUnavailable,
                 status_code: 503,
                 retryable: true,
                 field: None,
@@ -191,28 +193,28 @@ fn map_admin_configuration_error(
     }
 }
 
-fn invalid_request() -> RebornServicesError {
+fn invalid_request() -> ProductSurfaceError {
     service_error(
-        RebornServicesErrorCode::InvalidRequest,
-        RebornServicesErrorKind::Validation,
+        ProductSurfaceErrorCode::InvalidRequest,
+        ProductSurfaceErrorKind::Validation,
         400,
     )
 }
 
-fn forbidden() -> RebornServicesError {
+fn forbidden() -> ProductSurfaceError {
     service_error(
-        RebornServicesErrorCode::Forbidden,
-        RebornServicesErrorKind::ParticipantDenied,
+        ProductSurfaceErrorCode::Forbidden,
+        ProductSurfaceErrorKind::ParticipantDenied,
         403,
     )
 }
 
 fn service_error(
-    code: RebornServicesErrorCode,
-    kind: RebornServicesErrorKind,
+    code: ProductSurfaceErrorCode,
+    kind: ProductSurfaceErrorKind,
     status_code: u16,
-) -> RebornServicesError {
-    RebornServicesError {
+) -> ProductSurfaceError {
+    ProductSurfaceError {
         code,
         kind,
         status_code,

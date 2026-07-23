@@ -201,7 +201,7 @@ have no manifest in this tree. Nothing to verify.
   (real production code path over the FS backend).
 - [x] **A2a · Projection honors `expires_at`.** BUILT + TESTED (folded — verbatim structure match).
   `AuthGateRecord::to_view(now)` returns not-live for a non-terminal flow past `expires_at`
-  (`crates/ironclaw_product_workflow/src/auth_interaction/types.rs`), and
+  (`crates/ironclaw_product/src/auth_interaction/types.rs`), and
   `DefaultAuthInteractionService::list_pending` passes `chrono::Utc::now()`. RFC 6819 §5.1.5.3.
   **Proven:** `auth_interaction_contract::list_pending_auth_omits_flow_past_its_expiry`.
 - [ ] **A2b · Background flow-expiry sweep** — DEFERRED FOLLOW-UP (bounded; not shipped here). A2a

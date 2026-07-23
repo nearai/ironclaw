@@ -10,7 +10,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use crate::extension_host::{
     extension_lifecycle::ActiveExtensionCapability, lifecycle::RebornLocalLifecycleFacade,
 };
-use ironclaw_product_workflow::{LifecycleProductContext, ProductWorkflowError};
+use ironclaw_product::{LifecycleProductContext, ProductWorkflowError};
 
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct ExtensionCapabilitySurfaceSource {

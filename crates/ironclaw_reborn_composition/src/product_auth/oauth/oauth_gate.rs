@@ -11,13 +11,13 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, SecretHandle,
 };
-use ironclaw_product_adapters::AuthPromptChallengeKind;
+use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 use ironclaw_turns::{TurnRunId, TurnScope};
 use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 
-use ironclaw_product_workflow::AuthChallengeView;
+use ironclaw_product::AuthChallengeView;
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 

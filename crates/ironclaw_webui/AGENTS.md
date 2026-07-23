@@ -22,7 +22,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, folded from the former
    `ironclaw_webui_v2` crate): axum handlers dispatching to
-   `ironclaw_product_workflow::ProductSurface`, the `webui_v2_router` builder,
+   `ironclaw_host_api::ProductSurface`, the `webui_v2_router` builder,
    the `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE + WebSocket streaming with a shared `SseCapacity` budget, and the
    Vite SPA under `frontend/` (built by `build.rs`, served from
@@ -44,8 +44,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 - **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
-  `ironclaw_product_workflow` / `ironclaw_reborn_composition`.
-- **A direct `ironclaw_product_adapters` dependency**, or any lower substrate /
+  `ironclaw_product` / `ironclaw_reborn_composition`.
+- **A direct `ironclaw_product` dependency**, or any lower substrate /
   runtime / DB crate. Reach that surface through composition's public facade
   (e.g. `mark_bearer_token_verified_for_tenant` is re-exported from composition,
   not imported from adapters). The architecture boundary test forbids the direct
@@ -60,8 +60,9 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 `ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
 mount builders + `WebuiAuthenticator` trait + mount vocabulary),
-`ironclaw_product_workflow` (`ProductSurface` + wire DTOs), `ironclaw_host_api`
-(identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+`ironclaw_product` (wire DTOs and product command/view descriptors),
+`ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, and identity
+newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test
@@ -71,7 +72,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
 
 - **Adding a route** requires a handler **and** a matching entry in
   `webui_v2_routes()` — the descriptor contract test fails otherwise. Handlers
-  receive `WebUiAuthenticatedCaller` via `axum::Extension`; a missing extension
+  receive `ProductSurfaceCaller` via `axum::Extension`; a missing extension
   surfaces `500` (locked by a regression test — do not hand-roll a fallback).
 - **All HTTP errors travel through `WebUiV2HttpError`**, never hand-built
   `StatusCode` returns — that keeps the redacted-error vocabulary intact.

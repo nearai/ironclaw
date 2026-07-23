@@ -1,5 +1,5 @@
 //! Composition implementations of the generic run-delivery ports
-//! (`ironclaw_product_workflow::run_delivery`): approval-gate context from
+//! (`ironclaw_product::run_delivery`): approval-gate context from
 //! the projection layer, blocked-auth prompt views from the product-auth
 //! engine, and the auth-flow cancel bridge. All delivery *semantics* live in
 //! the generic components; these adapters only surface composition-owned
@@ -10,15 +10,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId};
 use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
-use ironclaw_product_adapters::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalPromptContextSource, AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptSource,
     ChannelPairingRegistry, PairingAuthChallengeView,
 };
+use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{GateRef, TurnScope};
 
-use ironclaw_product_workflow::auth_prompt_view_for_blocked_auth;
+use ironclaw_product::auth_prompt_view_for_blocked_auth;
 
 /// One recipe-driven challenge materializer for every product surface.
 /// Product-auth owns OAuth/manual challenges; the canonical channel-pairing
@@ -78,7 +78,7 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
                 return Ok(None);
             };
             return Ok(Some(AuthChallengeView {
-                kind: ironclaw_product_adapters::AuthPromptChallengeKind::Pairing,
+                kind: ironclaw_product::AuthPromptChallengeKind::Pairing,
                 provider: AuthProviderId::new(requirement.provider.as_str().to_string())
                     .map_err(|_| AuthProductError::MalformedConfig)?,
                 account_label: None,
@@ -153,7 +153,7 @@ impl ProductAuthBlockedAuthPromptSource {
 impl BlockedAuthPromptSource for ProductAuthBlockedAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
         &self,
-        request: ironclaw_product_workflow::BlockedAuthPromptRequest<'_>,
+        request: ironclaw_product::BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError> {
         auth_prompt_view_for_blocked_auth(request, self.auth_challenges.as_deref()).await
     }

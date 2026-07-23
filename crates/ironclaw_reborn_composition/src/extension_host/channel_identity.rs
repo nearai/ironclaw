@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
-use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_product::AdapterInstallationId;
 
 use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::product_auth::api::auth::{

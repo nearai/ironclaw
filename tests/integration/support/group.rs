@@ -64,8 +64,8 @@ use ironclaw_loop_host::{
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
-use ironclaw_product_workflow::{
+use ironclaw_product::ProductTriggerReason;
+use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ResolvedBinding, RunDeliveryEventRouter,
 };
@@ -486,7 +486,7 @@ impl RebornIntegrationGroup {
         let services = harness
             .reborn_services_for_test()
             .ok_or("source delivery target requires composed Reborn services")?;
-        let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target_id)?;
+        let target_id = ironclaw_product::RebornOutboundDeliveryTargetId::new(target_id)?;
         ironclaw_reborn_composition::test_support::register_static_source_delivery_target_for_test(
             services,
             provider_key,

@@ -245,7 +245,7 @@ jobs:
             esac
 
             case "${package}" in
-              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)
+              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)
                 sccache_dist_enabled=false
                 ;;
             esac

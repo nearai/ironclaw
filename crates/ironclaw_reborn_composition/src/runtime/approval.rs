@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
     LifecycleProductContext, LifecycleProductSurfaceContext, ProductWorkflowError,
 };
@@ -249,7 +249,7 @@ mod tests {
         ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
         TenantId, ThreadId, UserId,
     };
-    use ironclaw_product_workflow::approval_gate_ref;
+    use ironclaw_product::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;

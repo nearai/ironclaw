@@ -6,10 +6,10 @@ use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthProductError, CredentialAccountLabel,
     CredentialAccountSelectionRequest,
 };
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind};
+use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind,
+    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
 };
 
 use crate::{
@@ -35,7 +35,7 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
     async fn credential_status(
         &self,
         request: ExtensionCredentialStatusRequest,
-    ) -> Result<Option<ironclaw_auth::CredentialAccountProjection>, RebornServicesError> {
+    ) -> Result<Option<ironclaw_auth::CredentialAccountProjection>, ProductSurfaceError> {
         let selector = self
             .product_auth
             .runtime_credential_account_selection_service();
@@ -66,7 +66,7 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
     async fn submit_manual_token(
         &self,
         request: ExtensionCredentialSubmitRequest,
-    ) -> Result<ironclaw_auth::CredentialAccountId, RebornServicesError> {
+    ) -> Result<ironclaw_auth::CredentialAccountId, ProductSurfaceError> {
         let label =
             CredentialAccountLabel::new(request.label).map_err(|_| invalid_auth_setup_request())?;
         let expires_at =
@@ -99,28 +99,28 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
     }
 }
 
-fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
+fn map_auth_error(error: crate::RebornAuthProductError) -> ProductSurfaceError {
     match error.code {
         AuthErrorCode::InvalidRequest | AuthErrorCode::MalformedCallback => {
             invalid_auth_setup_request()
         }
         AuthErrorCode::CrossScopeDenied => services_error(
-            RebornServicesErrorCode::Forbidden,
-            RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorKind::ParticipantDenied,
             403,
             false,
         ),
         AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => services_error(
-            RebornServicesErrorCode::Unavailable,
-            RebornServicesErrorKind::ServiceUnavailable,
+            ProductSurfaceErrorCode::Unavailable,
+            ProductSurfaceErrorKind::ServiceUnavailable,
             503,
             error.retryable,
         ),
         AuthErrorCode::AccountSelectionRequired
         | AuthErrorCode::ProviderIdentityAlreadyConnected
         | AuthErrorCode::LifecycleActivationFailed => services_error(
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorKind::BlockedAuthentication,
+            ProductSurfaceErrorCode::Conflict,
+            ProductSurfaceErrorKind::BlockedAuthentication,
             409,
             false,
         ),
@@ -131,8 +131,8 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
         | AuthErrorCode::RefreshFailed
         | AuthErrorCode::Canceled
         | AuthErrorCode::FlowAlreadyTerminal => services_error(
-            RebornServicesErrorCode::Internal,
-            RebornServicesErrorKind::BlockedAuthentication,
+            ProductSurfaceErrorCode::Internal,
+            ProductSurfaceErrorKind::BlockedAuthentication,
             500,
             error.retryable,
         ),
@@ -155,22 +155,22 @@ fn runtime_credential_setup(
     }
 }
 
-fn invalid_auth_setup_request() -> RebornServicesError {
+fn invalid_auth_setup_request() -> ProductSurfaceError {
     services_error(
-        RebornServicesErrorCode::InvalidRequest,
-        RebornServicesErrorKind::Validation,
+        ProductSurfaceErrorCode::InvalidRequest,
+        ProductSurfaceErrorKind::Validation,
         400,
         false,
     )
 }
 
 fn services_error(
-    code: RebornServicesErrorCode,
-    kind: RebornServicesErrorKind,
+    code: ProductSurfaceErrorCode,
+    kind: ProductSurfaceErrorKind,
     status_code: u16,
     retryable: bool,
-) -> RebornServicesError {
-    RebornServicesError {
+) -> ProductSurfaceError {
+    ProductSurfaceError {
         code,
         kind,
         status_code,
@@ -194,7 +194,7 @@ mod tests {
     use ironclaw_host_api::{
         ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
     };
-    use ironclaw_product_workflow::{
+    use ironclaw_product::{
         ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
         LifecycleExtensionCredentialSetup,
     };

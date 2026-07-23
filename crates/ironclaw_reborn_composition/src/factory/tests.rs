@@ -28,7 +28,7 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState};
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState};
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;

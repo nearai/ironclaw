@@ -6,7 +6,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 

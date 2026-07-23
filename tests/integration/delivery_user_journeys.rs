@@ -38,6 +38,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
+use ironclaw_host_api::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_loop_host::{
@@ -51,28 +54,27 @@ use ironclaw_outbound::{
     TriggerFireSlot, TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore, WriteCommunicationPreferenceRequest,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, AuthPromptChallengeKind, AuthPromptView, AuthRequirement,
     ChannelAdapter, ExternalConversationRef, InboundOutcome, ParsedProductInbound,
     ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
     VerifiedInbound,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelDeliveryResolver,
     ConversationBindingService, CurrentDeliveryTarget, CurrentDeliveryTargetResolver,
     DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
     OUTBOUND_DELIVERY_TARGETS_VIEW, OutboundPreferencesProductFacade, ProductConversationRouteKind,
-    ProductSurface, ProductWorkflowError, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornServices, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSubmitTurnResponse, RebornViewQuery, ResolveBindingRequest,
-    ResolveStoredProductReplyTargetRequest, ResolvedBinding, ResolvedChannelDelivery,
-    ResolvedStoredProductReplyTarget, RunDeliveryEventHandler, RunDeliveryEventRouter,
-    RunDeliveryServices, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiSendMessageRequest,
+    ProductCreateThreadRequest, ProductSubmitTurnRequest, ProductWorkflowError,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornServices,
+    RebornSetOutboundPreferencesRequest, RebornSubmitTurnResponse, RebornViewQuery,
+    ResolveBindingRequest, ResolveStoredProductReplyTargetRequest, ResolvedBinding,
+    ResolvedChannelDelivery, ResolvedStoredProductReplyTarget, RunDeliveryEventHandler,
+    RunDeliveryEventRouter, RunDeliveryServices, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest,
 };
 use ironclaw_turns::{
     GateResumeDisposition, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -250,11 +252,11 @@ impl MatrixOutboundFacade {
 
     async fn seal_external_run_target(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         run_id: ironclaw_turns::TurnRunId,
         scope: ironclaw_turns::TurnScope,
         target_id: RebornOutboundDeliveryTargetId,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         if scope.tenant_id != caller.tenant_id
             || scope.agent_id != caller.agent_id
             || scope.project_id != caller.project_id
@@ -263,15 +265,15 @@ impl MatrixOutboundFacade {
                 .is_some_and(|owner| owner != &caller.user_id)
         {
             return Err(matrix_service_error(
-                RebornServicesErrorCode::Forbidden,
-                RebornServicesErrorKind::ParticipantDenied,
+                ProductSurfaceErrorCode::Forbidden,
+                ProductSurfaceErrorKind::ParticipantDenied,
                 403,
             ));
         }
         if target_id != self.target.target.target_id {
             return Err(matrix_service_error(
-                RebornServicesErrorCode::NotFound,
-                RebornServicesErrorKind::NotFound,
+                ProductSurfaceErrorCode::NotFound,
+                ProductSurfaceErrorKind::NotFound,
                 404,
             ));
         }
@@ -287,8 +289,8 @@ impl MatrixOutboundFacade {
             .await
             .map_err(|_| {
                 matrix_service_error(
-                    RebornServicesErrorCode::Unavailable,
-                    RebornServicesErrorKind::ServiceUnavailable,
+                    ProductSurfaceErrorCode::Unavailable,
+                    ProductSurfaceErrorKind::ServiceUnavailable,
                     503,
                 )
             })
@@ -299,27 +301,27 @@ impl MatrixOutboundFacade {
 impl OutboundPreferencesProductFacade for MatrixOutboundFacade {
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         Ok(RebornOutboundPreferencesResponse::default())
     }
 
     async fn set_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         Err(matrix_service_error(
-            RebornServicesErrorCode::Unavailable,
-            RebornServicesErrorKind::ServiceUnavailable,
+            ProductSurfaceErrorCode::Unavailable,
+            ProductSurfaceErrorKind::ServiceUnavailable,
             503,
         ))
     }
 
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Ok(RebornOutboundDeliveryTargetListResponse {
             targets: vec![self.target.clone()],
             next_cursor: None,
@@ -328,11 +330,11 @@ impl OutboundPreferencesProductFacade for MatrixOutboundFacade {
 }
 
 fn matrix_service_error(
-    code: RebornServicesErrorCode,
-    kind: RebornServicesErrorKind,
+    code: ProductSurfaceErrorCode,
+    kind: ProductSurfaceErrorKind,
     status_code: u16,
-) -> RebornServicesError {
-    RebornServicesError {
+) -> ProductSurfaceError {
+    ProductSurfaceError {
         code,
         kind,
         status_code,
@@ -1477,7 +1479,7 @@ async fn web_app_source_can_seal_the_current_run_to_web_app_without_external_egr
         .expect("delivery matrix group uses the host runtime")
         .reborn_services_for_test()
         .expect("delivery matrix group exposes composed services");
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         harness.binding.tenant_id.clone(),
         harness.binding.actor_user_id.clone(),
         harness.binding.agent_id.clone(),
@@ -1619,7 +1621,7 @@ async fn web_app_source_immediate_result_fans_out_to_selected_external_bot_wire(
         destination_binding.clone(),
         Arc::clone(&outbound_store),
     );
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         harness.binding.tenant_id.clone(),
         harness.binding.actor_user_id.clone(),
         harness.binding.agent_id.clone(),
@@ -1638,7 +1640,7 @@ async fn web_app_source_immediate_result_fans_out_to_selected_external_bot_wire(
     let created = webui
         .create_thread(
             caller.clone(),
-            WebUiCreateThreadRequest {
+            ProductCreateThreadRequest {
                 client_action_id: Some("delivery-web-app-source-create".to_string()),
                 requested_thread_id: Some("delivery-web-app-source-external".to_string()),
                 project_id: None,
@@ -1681,11 +1683,11 @@ async fn web_app_source_immediate_result_fans_out_to_selected_external_bot_wire(
     let submitted = webui
         .submit_turn(
             caller.clone(),
-            WebUiSendMessageRequest {
+            ProductSubmitTurnRequest {
                 client_action_id: Some("delivery-web-app-source-external-action".to_string()),
                 thread_id: Some(created.thread.thread_id.as_str().to_string()),
                 content: Some("Send this one result to my selected external destination.".into()),
-                ..WebUiSendMessageRequest::default()
+                ..ProductSubmitTurnRequest::default()
             },
         )
         .await
@@ -2086,7 +2088,7 @@ async fn registered_scheduled_target(
         .expect("trigger group uses the host runtime")
         .reborn_services_for_test()
         .expect("trigger group exposes composed services");
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         harness.binding.tenant_id.clone(),
         harness.binding.actor_user_id.clone(),
         harness.binding.agent_id.clone(),

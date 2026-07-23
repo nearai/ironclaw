@@ -11,8 +11,9 @@ use ironclaw_host_api::{
 use std::sync::Arc;
 
 use super::super::super::extension_surface::{
-    BUNDLED_EXTENSION_CAPABILITY_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
+    EXTENSION_LIFECYCLE_CAPABILITY_IDS, bundled_extension_manifest_capability_ids,
 };
+use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
@@ -38,7 +39,8 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     user_id: &str,
 ) -> HarnessResult<ToolsProfile> {
     let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
-    capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+    capability_ids.extend(github::capability_ids()?);
+    capability_ids.extend(bundled_extension_manifest_capability_ids()?);
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
     // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
     // bundled extension capability post-activation, which crosses HTTP. The
@@ -78,6 +80,7 @@ fn hosted_mcp_discovery_fixture_response(
 ) -> Option<(u16, Vec<u8>)> {
     let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
     let method = body.get("method")?.as_str()?;
+    let is_nearai = request.url.contains(".near.ai/");
     let result = match method {
         "initialize" => serde_json::json!({
             "protocolVersion": "2025-06-18",
@@ -87,7 +90,7 @@ fn hosted_mcp_discovery_fixture_response(
         "notifications/initialized" => serde_json::json!({}),
         "tools/list" => serde_json::json!({
             "tools": [{
-                "name": "live-search",
+                "name": if is_nearai { "web_search" } else { "live-search" },
                 "description": "Hermetic hosted MCP search tool",
                 "inputSchema": {
                     "type": "object",
@@ -95,6 +98,12 @@ fn hosted_mcp_discovery_fixture_response(
                     "required": ["query"]
                 },
                 "annotations": {"readOnlyHint": true}
+            }]
+        }),
+        "tools/call" if is_nearai => serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": "REBORN_NEARAI_WEB_SEARCH_RESULT"
             }]
         }),
         _ => return None,
@@ -435,13 +444,12 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
 pub(crate) struct AcmeFixtureChannelAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
+impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
-        request: ironclaw_product_adapters::VerifiedInbound<'_>,
-    ) -> Result<ironclaw_product_adapters::InboundOutcome, ironclaw_product_adapters::ChannelError>
-    {
-        use ironclaw_product_adapters::{
+        request: ironclaw_product::VerifiedInbound<'_>,
+    ) -> Result<ironclaw_product::InboundOutcome, ironclaw_product::ChannelError> {
+        use ironclaw_product::{
             ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
             ImmediateResponse, InboundOutcome, NormalizedInboundMessage, ProductTriggerReason,
         };
@@ -496,11 +504,10 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
     /// fixture.
     async fn deliver(
         &self,
-        envelope: ironclaw_product_adapters::OutboundEnvelope,
+        envelope: ironclaw_product::OutboundEnvelope,
         egress: &dyn ironclaw_host_api::RestrictedEgress,
-    ) -> Result<ironclaw_product_adapters::DeliveryReport, ironclaw_product_adapters::ChannelError>
-    {
-        use ironclaw_product_adapters::{ChannelError, OutboundPart, PartDeliveryOutcome};
+    ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
+        use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -551,7 +558,7 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
                 break;
             }
         }
-        Ok(ironclaw_product_adapters::DeliveryReport { parts })
+        Ok(ironclaw_product::DeliveryReport { parts })
     }
 }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
-use ironclaw_product_workflow::ProductSurface;
+use ironclaw_host_api::{BoundProductSurface, ProductSurface, ProductSurfaceCaller};
 use serde::Serialize;
 
 use crate::webui_v2::descriptors::{
@@ -128,6 +128,10 @@ impl WebUiV2State {
 
     pub fn services(&self) -> &Arc<dyn ProductSurface> {
         &self.services
+    }
+
+    pub fn bind_services(&self, caller: ProductSurfaceCaller) -> BoundProductSurface {
+        BoundProductSurface::new(Arc::clone(&self.services), caller)
     }
 
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {

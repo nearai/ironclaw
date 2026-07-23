@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     AgentId, HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
     ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
     IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductWorkflowError,
     ResolveBindingRequest, ResolveStoredProductReplyTargetRequest, ResolvedBinding,
@@ -441,9 +441,9 @@ struct StoredHarnessReplyTarget {
     tenant_id: TenantId,
     actor_user_id: UserId,
     thread_id: ThreadId,
-    adapter_id: ironclaw_product_adapters::ProductAdapterId,
-    installation_id: ironclaw_product_adapters::AdapterInstallationId,
-    external_conversation_ref: ironclaw_product_adapters::ExternalConversationRef,
+    adapter_id: ironclaw_product::ProductAdapterId,
+    installation_id: ironclaw_product::AdapterInstallationId,
+    external_conversation_ref: ironclaw_product::ExternalConversationRef,
     route_kind: ProductConversationRouteKind,
 }
 

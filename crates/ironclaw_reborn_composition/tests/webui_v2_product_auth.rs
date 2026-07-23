@@ -24,14 +24,14 @@ use ironclaw_auth::{
     SecretSubmitResult,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
+    SecretHandle, TenantId, UserId,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LifecyclePublicState, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionSetupSecret, RebornServicesError, RebornSetupExtensionResponse, RebornViewPage,
-    RebornViewQuery, WebUiAuthenticatedCaller, rejecting_reborn_services_error,
+    LifecyclePublicState, RebornExtensionCredentialSetup, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
+    rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -338,8 +338,7 @@ impl UnusedServices {
                     runtime: "wasm".to_string(),
                     description: "test installed extension".to_string(),
                     tools: Vec::new(),
-                    installation_state:
-                        ironclaw_product_workflow::LifecyclePublicState::SetupNeeded,
+                    installation_state: ironclaw_product::LifecyclePublicState::SetupNeeded,
                     activation_error: None,
                     version: None,
                     onboarding: None,
@@ -354,46 +353,56 @@ impl UnusedServices {
 }
 
 #[async_trait]
-impl ProductSurface for UnusedServices {
+impl ironclaw_host_api::ProductSurface for UnusedServices {
+    async fn invoke(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
+    }
+
     async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
-        match query.view_id.as_str() {
-            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornExtensionListResponse {
-                    extensions: self.installed_extensions.clone(),
-                })
-                .expect("extension list payload"),
+        _caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        match request.view_id.as_str() {
+            id if id == EXTENSIONS_VIEW.id => Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                items: vec![
+                    serde_json::to_value(RebornExtensionListResponse {
+                        extensions: self.installed_extensions.clone(),
+                    })
+                    .expect("extension list payload"),
+                ],
                 next_cursor: None,
             }),
             id if id == EXTENSION_SETUP_VIEW.id => {
-                let package_id = query
-                    .params
+                let package_id = request
+                    .input
                     .get("package_id")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or_else(rejecting_reborn_services_error)?;
+                    .ok_or_else(rejecting_product_surface_error)?;
                 let setup = self
                     .extension_setups
                     .get(package_id)
                     .cloned()
-                    .ok_or_else(rejecting_reborn_services_error)?;
-                Ok(RebornViewPage {
-                    payload: serde_json::to_value(setup).expect("extension setup payload"),
+                    .ok_or_else(rejecting_product_surface_error)?;
+                Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                    items: vec![serde_json::to_value(setup).expect("extension setup payload")],
                     next_cursor: None,
                 })
             }
-            _ => Err(rejecting_reborn_services_error()),
+            _ => Err(rejecting_product_surface_error()),
         }
     }
 
-    async fn execute_command(
+    async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 }
 
@@ -435,7 +444,7 @@ fn build_app_with_product_auth_service_config_and_extensions(
     installed_package_ids: &[&str],
 ) -> axum::Router {
     let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices::with_installed_extensions(
+        product_surface: Arc::new(UnusedServices::with_installed_extensions(
             installed_package_ids,
         )),
         product_auth: Some(product_auth),

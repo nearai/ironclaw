@@ -2,7 +2,7 @@
 //!
 //! The pairing state machine, durable completion outbox, manifest-declared
 //! inbound command interpretation, and retry policy live in
-//! `ironclaw_product_workflow`. This module only adapts composition-owned
+//! `ironclaw_product`. This module only adapts composition-owned
 //! installation, administrator-configuration, identity, and direct-target
 //! stores into those product ports.
 
@@ -24,9 +24,9 @@ use ironclaw_filesystem::RootFilesystem;
 #[cfg(test)]
 use ironclaw_host_api::TenantId;
 use ironclaw_host_api::{ExtensionId, UserId};
-use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_product::AdapterInstallationId;
 
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelPairingDirectTargetStore, ChannelPairingIdentityBindOutcome,
     ChannelPairingIdentityStore, ChannelPairingInstallationSource, ChannelPairingTemplateValues,
 };

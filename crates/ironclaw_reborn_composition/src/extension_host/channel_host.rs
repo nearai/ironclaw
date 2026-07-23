@@ -27,6 +27,7 @@ use ironclaw_extension_host::ingress::{
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
+use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
     AgentId, ExtensionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
@@ -34,11 +35,11 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ChannelPairingConsumeOutcome, ChannelPairingRegistry, ChannelWorkflowState,
@@ -46,8 +47,8 @@ use ironclaw_product_workflow::{
     DefaultProductSurface, DeliveryCoordinator, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurface, ProductWorkflowError, ResolvedProductActorUser, RunDeliveryObserver,
-    RunDeliveryServices, StaticProductInstallationResolver, TriggeredRunDeliveryChannel,
+    ProductWorkflowError, ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices,
+    StaticProductInstallationResolver, TriggeredRunDeliveryChannel,
 };
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
@@ -123,12 +124,11 @@ pub(crate) struct ChannelHostDeliveryDeps {
     pub(crate) outbound_store: Arc<dyn OutboundStateStore>,
     pub(crate) route_store: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    pub(crate) current_delivery_targets:
-        Arc<dyn ironclaw_product_workflow::CurrentDeliveryTargetResolver>,
+    pub(crate) current_delivery_targets: Arc<dyn ironclaw_product::CurrentDeliveryTargetResolver>,
     pub(crate) approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
-    pub(crate) event_router: Arc<ironclaw_product_workflow::RunDeliveryEventRouter>,
+    pub(crate) event_router: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 /// Everything the assembly composes per-extension graphs from.
@@ -572,10 +572,8 @@ impl GenericChannelHostAssembly {
             .channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(source.extension_id()))
-            .map(|service| {
-                service as Arc<dyn ironclaw_product_workflow::ChannelPairingInterceptor>
-            });
-        let surface = Arc::new(workflow) as Arc<dyn ProductSurface>;
+            .map(|service| service as Arc<dyn ironclaw_product::ChannelPairingInterceptor>);
+        let surface = Arc::new(workflow) as Arc<dyn ChannelInboundProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,
@@ -727,10 +725,8 @@ impl GenericChannelHostAssembly {
         let conversations: Arc<dyn ironclaw_conversations::ConversationBindingService> =
             Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationBindingService>;
-        let binding = ironclaw_product_workflow::ProductConversationBindingService::new(
-            conversations,
-            resolver,
-        );
+        let binding =
+            ironclaw_product::ProductConversationBindingService::new(conversations, resolver);
         Ok((
             Arc::new(binding) as Arc<dyn ConversationBindingService>,
             workflow_state,
@@ -783,7 +779,7 @@ impl GenericChannelHostAssembly {
             services.clone(),
             connection_notices.clone(),
         ));
-        let mut event_handler = ironclaw_product_workflow::RunDeliveryEventHandler::new(
+        let mut event_handler = ironclaw_product::RunDeliveryEventHandler::new(
             services,
             source.extension_id(),
             source.installation_id(),
@@ -872,8 +868,8 @@ struct TriggeredNoopConversationBindingService;
 impl ConversationBindingService for TriggeredNoopConversationBindingService {
     async fn resolve_binding(
         &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        _request: ironclaw_product::ResolveBindingRequest,
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -881,8 +877,8 @@ impl ConversationBindingService for TriggeredNoopConversationBindingService {
 
     async fn lookup_binding(
         &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        _request: ironclaw_product::ResolveBindingRequest,
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -954,8 +950,8 @@ pub(super) struct RunDeliveryPostAdmissionObserver {
     connection_notices: ChannelConnectionNoticePolicy,
     // Strong ownership keeps the router's weak registration live for exactly
     // as long as this reconciled channel graph remains installed.
-    event_handler: Arc<ironclaw_product_workflow::RunDeliveryEventHandler>,
-    event_router: Arc<ironclaw_product_workflow::RunDeliveryEventRouter>,
+    event_handler: Arc<ironclaw_product::RunDeliveryEventHandler>,
+    event_router: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 #[async_trait]
@@ -980,7 +976,7 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
+        error: ironclaw_product::ProductAdapterError,
     ) {
         self.observer.observe_error(envelope, error).await;
     }

@@ -22,8 +22,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # `#[cfg(test)] mod tests {}` blocks. `ironclaw_wasm_product_adapters`
 # moved to dev-deps because it is only referenced from the integration
 # contract test crate, not from the adapter library itself.
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
-ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -37,6 +36,6 @@ thiserror = "2"
 # `http`, `ironclaw_host_api`, and `ironclaw_wasm_product_adapters` has
 # been removed pending the post-#3352 fixture port — re-add those when
 # the contract suite returns.
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }

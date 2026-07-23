@@ -15,7 +15,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
     ProductWorkflowError,
 };
@@ -435,7 +435,7 @@ mod tests {
     use super::*;
     use crate::OAuthClientConfig;
     use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
-    use ironclaw_product_workflow::{
+    use ironclaw_product::{
         ChannelConnectionRequirement, LifecyclePublicState, RebornChannelConnectStrategy,
     };
 
