@@ -402,14 +402,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, VecDeque};
     use std::sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
+    use ironclaw_auth::{
+        AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+        CredentialAccountStatus, CredentialOwnership, ProviderScope,
+    };
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionManifest, ExtensionManifestRecord, ExtensionManifestRef,
         ExtensionPackage, HostApiContractRegistry, InstallationOwner, ManifestSource,
@@ -417,7 +421,7 @@ mod tests {
     use ironclaw_host_api::{
         HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
         InvocationId, NetworkPolicy, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, VirtualPath,
+        RuntimeHttpEgressResponse, SecretHandle, VirtualPath,
     };
     use tokio::sync::Notify;
 
@@ -513,6 +517,137 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn hosted_discovery_fence_tolerates_benign_timestamp_bump() {
+        // A benign write (e.g. a last-used bump) can touch the credential row
+        // between the pre-discovery capture and the post-discovery recheck,
+        // changing only `updated_at`. That must not trip the authority fence
+        // and force a spurious `discovery_recheck` retry — the discovered
+        // catalog is still authorized, so activation must commit.
+        let base = fence_credential_account(
+            CredentialAccountId::new(),
+            CredentialAccountStatus::Configured,
+            "hosted-access-1",
+            &["read"],
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("timestamp"),
+        );
+        let mut bumped = base.clone();
+        bumped.updated_at = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 5, 0)
+            .single()
+            .expect("timestamp");
+
+        let operations =
+            ActivationOperationsFixture::success().with_credential_readiness_sequence(vec![
+                ExtensionActivationCredentialReadiness::Ready(vec![base]),
+                ExtensionActivationCredentialReadiness::Ready(vec![bumped]),
+            ]);
+
+        let result = run_extension_activation(
+            &Mutex::new(()),
+            &operations,
+            &fixture_extension_id(),
+            &fixture_installation_id(),
+            &fixture_user_id(),
+            fixture_discovery_mode(),
+        )
+        .await
+        .expect("a benign timestamp bump must not fail the discovery authority fence");
+
+        assert!(
+            matches!(result, ExtensionActivationTransactionResult::Activated(_)),
+            "the discovered catalog is still authorized and must activate"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_discovery_fence_rejects_real_authority_change() {
+        // The fence stays fail-closed: a scope, secret, or status change to the
+        // authorizing credential between capture and recheck must still reject
+        // the discovered generation with a `discovery_recheck` error.
+        let base_id = CredentialAccountId::new();
+        let captured = || {
+            fence_credential_account(
+                base_id,
+                CredentialAccountStatus::Configured,
+                "hosted-access-1",
+                &["read"],
+                Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("timestamp"),
+            )
+        };
+
+        let mut scope_changed = captured();
+        scope_changed.scopes = vec![
+            ProviderScope::new("read").expect("scope"),
+            ProviderScope::new("write").expect("scope"),
+        ];
+        let mut secret_changed = captured();
+        secret_changed.access_secret = Some(SecretHandle::new("hosted-access-2").expect("secret"));
+        let mut status_changed = captured();
+        status_changed.status = CredentialAccountStatus::Revoked;
+
+        for rechecked in [scope_changed, secret_changed, status_changed] {
+            let operations = ActivationOperationsFixture::success()
+                .with_credential_readiness_sequence(vec![
+                    ExtensionActivationCredentialReadiness::Ready(vec![captured()]),
+                    ExtensionActivationCredentialReadiness::Ready(vec![rechecked]),
+                ]);
+
+            match run_extension_activation(
+                &Mutex::new(()),
+                &operations,
+                &fixture_extension_id(),
+                &fixture_installation_id(),
+                &fixture_user_id(),
+                fixture_discovery_mode(),
+            )
+            .await
+            {
+                Err(error) => assert_eq!(error, "discovery authority changed"),
+                Ok(_) => panic!("a real credential authority change must fail the fence"),
+            }
+        }
+    }
+
+    fn fence_credential_account(
+        id: CredentialAccountId,
+        status: CredentialAccountStatus,
+        access_secret: &str,
+        scopes: &[&str],
+        updated_at: chrono::DateTime<Utc>,
+    ) -> CredentialAccount {
+        CredentialAccount {
+            id,
+            scope: AuthProductScope::new(
+                ResourceScope::local_default(fixture_user_id(), InvocationId::new())
+                    .expect("resource scope"),
+                AuthSurface::Web,
+            ),
+            provider: AuthProviderId::new("hosted-provider").expect("provider id"),
+            label: CredentialAccountLabel::new("primary").expect("label"),
+            status,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new(access_secret).expect("secret handle")),
+            refresh_secret: None,
+            scopes: scopes
+                .iter()
+                .map(|scope| ProviderScope::new(*scope).expect("provider scope"))
+                .collect(),
+            provider_identity: None,
+            created_at: Utc
+                .with_ymd_and_hms(2025, 12, 1, 0, 0, 0)
+                .single()
+                .expect("timestamp"),
+            updated_at,
+        }
+    }
+
     struct DropProbeGuard {
         drops: Arc<AtomicUsize>,
     }
@@ -536,6 +671,13 @@ mod tests {
         discovery: DiscoveryScript,
         guard_drops: Arc<AtomicUsize>,
         staged_policies: Arc<StdMutex<Vec<NetworkPolicy>>>,
+        // Per-call credential readiness. Each `credential_readiness` call pops
+        // the next scripted result; an empty queue defaults to the always-ready
+        // empty account set the non-fence tests rely on. This lets a fence test
+        // return distinct account snapshots on the pre-discovery capture and the
+        // post-discovery recheck.
+        credential_readiness_sequence:
+            Arc<StdMutex<VecDeque<ExtensionActivationCredentialReadiness>>>,
     }
 
     impl ActivationOperationsFixture {
@@ -560,7 +702,22 @@ mod tests {
                 discovery,
                 guard_drops: Arc::new(AtomicUsize::new(0)),
                 staged_policies: Arc::new(StdMutex::new(Vec::new())),
+                credential_readiness_sequence: Arc::new(StdMutex::new(VecDeque::new())),
             }
+        }
+
+        /// Script the credential readiness returned by successive
+        /// `credential_readiness` calls (pre-discovery capture, then
+        /// post-discovery recheck).
+        fn with_credential_readiness_sequence(
+            self,
+            sequence: Vec<ExtensionActivationCredentialReadiness>,
+        ) -> Self {
+            *self
+                .credential_readiness_sequence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = sequence.into();
+            self
         }
     }
 
@@ -611,7 +768,12 @@ mod tests {
             &self,
             _package: &ExtensionPackage,
         ) -> Result<ExtensionActivationCredentialReadiness, Self::Error> {
-            Ok(ExtensionActivationCredentialReadiness::Ready(Vec::new()))
+            Ok(self
+                .credential_readiness_sequence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| ExtensionActivationCredentialReadiness::Ready(Vec::new())))
         }
 
         async fn stage_hosted_mcp_discovery_authority(
