@@ -4,11 +4,7 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
-use crate::{
-    family::LoopFamily,
-    state::{BoundedRing, LoopExecutionState, TerminalWarningObservation},
-    strategies::TurnEndKind,
-};
+use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKind};
 
 use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
@@ -332,27 +328,18 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state: stop_state,
+                            state: mut stop_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let mut stop_state = stop_state;
-                            if schedule_no_progress_warning(&mut stop_state, &kind) {
-                                debug!(
-                                    iteration = stop_state.iteration,
-                                    "agent loop scheduling final no-progress recovery iteration"
-                                );
-                                state = stop_state;
-                                pending_input_ack = ack;
-                            } else if completion_nudge_should_fire(host, &stop_state, &kind) {
+                            if completion_nudge_should_fire(host, &stop_state, &kind) {
                                 // Instead of terminating, re-enter the loop for one
                                 // more iteration with the full tool surface and a
                                 // completion-nudge directive, so the model can finish
                                 // the task (e.g. write a required output file) before
                                 // answering. Mirrors the drained-follow-up continue
                                 // (defer the ack returned by stop.decide to the next
-                                // iteration) rather than the terminal, tool-free
-                                // final-answer nudge.
+                                // iteration) rather than terminating.
                                 stop_state.completion_nudges_used += 1;
                                 stop_state.completion_nudge_pending = true;
                                 stop_state.last_reply_trailed_off = false;
@@ -468,35 +455,30 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state: mut stopped_state,
+                            state: stopped_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            if schedule_no_progress_warning(&mut stopped_state, &kind) {
-                                state = stopped_state;
-                                pending_input_ack = ack;
-                            } else {
-                                let exit_iteration = stopped_state.iteration;
-                                let exit = latency::stage!(
-                                    "exit_resume",
-                                    host.run_context(),
-                                    exit_iteration,
-                                    self.exit.process(
-                                        ctx,
-                                        ExitInput {
-                                            state: stopped_state,
-                                            kind,
-                                        },
-                                    ),
-                                )?;
-                                latency::stage!(
-                                    "ack_pending_input_before_exit_resume",
-                                    host.run_context(),
-                                    exit_iteration,
-                                    ack.ack(host),
-                                )?;
-                                return Ok(exit);
-                            }
+                            let exit_iteration = stopped_state.iteration;
+                            let exit = latency::stage!(
+                                "exit_resume",
+                                host.run_context(),
+                                exit_iteration,
+                                self.exit.process(
+                                    ctx,
+                                    ExitInput {
+                                        state: stopped_state,
+                                        kind,
+                                    },
+                                ),
+                            )?;
+                            latency::stage!(
+                                "ack_pending_input_before_exit_resume",
+                                host.run_context(),
+                                exit_iteration,
+                                ack.ack(host),
+                            )?;
+                            return Ok(exit);
                         }
                         StopStep::Continue {
                             state: next,
@@ -568,35 +550,30 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state: mut stopped_state,
+                            state: stopped_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            if schedule_no_progress_warning(&mut stopped_state, &kind) {
-                                next_state = stopped_state;
-                                pending_input_ack = ack;
-                            } else {
-                                let exit_iteration = stopped_state.iteration;
-                                let exit = latency::stage!(
-                                    "exit_skip_model",
-                                    host.run_context(),
-                                    exit_iteration,
-                                    self.exit.process(
-                                        ctx,
-                                        ExitInput {
-                                            state: stopped_state,
-                                            kind,
-                                        },
-                                    ),
-                                )?;
-                                latency::stage!(
-                                    "ack_pending_input_before_exit_skip_model",
-                                    host.run_context(),
-                                    exit_iteration,
-                                    ack.ack(host),
-                                )?;
-                                return Ok(exit);
-                            }
+                            let exit_iteration = stopped_state.iteration;
+                            let exit = latency::stage!(
+                                "exit_skip_model",
+                                host.run_context(),
+                                exit_iteration,
+                                self.exit.process(
+                                    ctx,
+                                    ExitInput {
+                                        state: stopped_state,
+                                        kind,
+                                    },
+                                ),
+                            )?;
+                            latency::stage!(
+                                "ack_pending_input_before_exit_skip_model",
+                                host.run_context(),
+                                exit_iteration,
+                                ack.ack(host),
+                            )?;
+                            return Ok(exit);
                         }
                         StopStep::Continue {
                             state: next,
@@ -655,41 +632,8 @@ fn completion_nudge_should_fire(
         return false;
     }
     match kind {
-        StopKind::NoProgressDetected => !state
-            .terminal_warning_state
-            .attempted(crate::state::TerminalWarningKind::NoProgressDetected),
+        StopKind::NoProgressDetected => false,
         StopKind::GracefulStop => state.last_reply_trailed_off,
         StopKind::Aborted(_) => false,
     }
-}
-
-/// Convert the first no-progress terminal into one normal loop iteration with
-/// typed model-visible recovery context. Reset only the stale evidence windows
-/// that produced the terminal so a genuinely changed action can make progress;
-/// the one-shot attempted bit remains durable and prevents another warning.
-fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind) -> bool {
-    if !matches!(kind, StopKind::NoProgressDetected) {
-        return false;
-    }
-    let repeated_call_count = state
-        .recent_call_signatures
-        .most_common_count_in(8)
-        .min(u32::MAX as usize) as u32;
-    let repeated_call_count = (repeated_call_count > 1).then_some(repeated_call_count);
-    let last_failure = state.recent_failure_kinds.iter().next_back().copied();
-    if !state
-        .terminal_warning_state
-        .schedule(TerminalWarningObservation::no_progress(
-            repeated_call_count,
-            last_failure,
-        ))
-    {
-        return false;
-    }
-
-    state.recent_call_signatures = BoundedRing::new();
-    state.recent_output_token_counts = BoundedRing::new();
-    state.stop_state.trailing_no_progress_results = 0;
-    state.stop_state.repeated_call_warning = None;
-    true
 }

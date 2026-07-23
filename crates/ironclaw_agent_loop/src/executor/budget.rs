@@ -36,7 +36,10 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
         let mut pending_input_ack = input.pending_input_ack;
         let mut state = input.state;
         let iteration_limit = ctx.planner.budget().iteration_limit(&state);
-        if state.iteration < iteration_limit || state.terminal_warning_state.pending().is_some() {
+        if state.iteration < iteration_limit
+            || state.terminal_warning_state.pending().is_some()
+            || state.terminal_warning_state.active().is_some()
+        {
             return Ok(BudgetStep::Continue {
                 state: Box::new(state),
                 pending_input_ack,

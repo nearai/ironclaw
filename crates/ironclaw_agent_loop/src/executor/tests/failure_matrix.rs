@@ -153,10 +153,9 @@ const ROWS: &[MatrixRow] = &[
             kind: LoopFailureKind::NoProgressDetected,
             safe_summary: None,
         },
-        // §5a.2 closed: the StopKind::NoProgressDetected failed branch now
-        // attaches a failure explanation (same path as other explainable
-        // kinds) after the final-answer nudge declines — the nudge itself is
-        // untouched (a successful nudge still completes with no explanation).
+        // §5a.2 closed: the StopKind::NoProgressDetected failed branch attaches
+        // a failure explanation through the same path as other explainable
+        // kinds.
         expects_explanation: true,
     },
     MatrixRow {

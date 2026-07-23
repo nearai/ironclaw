@@ -306,8 +306,8 @@ impl GroupSharedStorage {
 // ---------------------------------------------------------------------------
 
 /// Shared capability backend for a group. Groups always use `HostRuntime`
-/// (sharing the approval/memory/credential stores across threads). `Recording`
-/// is the single-shot echo path for text-only turns.
+/// (sharing the approval/memory/credential stores across threads). The
+/// recording variants are single-shot echo paths for text-only turns.
 pub(crate) enum GroupCapability {
     /// Echo recorder — records invocations, executes nothing. Default for a
     /// text-only single-shot harness; no stores to share.
@@ -323,9 +323,9 @@ pub(crate) enum GroupCapability {
 impl GroupCapability {
     /// Return a fresh `HarnessCapabilityMode` for one thread.
     ///
-    /// `Recording` creates a fresh echo port each call (ports are consumed by
-    /// `into_parts`). `HostRuntime` clones the `Arc` — N threads share the
-    /// same underlying harness and all its stores.
+    /// Recording variants create a fresh echo port each call (ports are
+    /// consumed by `into_parts`). `HostRuntime` clones the `Arc` — N threads
+    /// share the same underlying harness and all its stores.
     pub(crate) fn mode(&self) -> HarnessCapabilityMode {
         match self {
             Self::Recording => {
@@ -340,9 +340,9 @@ impl GroupCapability {
 
     /// The durable gate-record store this backend's capability port persists
     /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
-    /// re-read an auth block's `credential_requirements` from. `None` only for
-    /// the `Recording` (echo) backend; the host-runtime backend always resolves
-    /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
+    /// re-read an auth block's `credential_requirements` from. Recording
+    /// backends return `None`; the host-runtime backend always resolves a store
+    /// (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
     pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),

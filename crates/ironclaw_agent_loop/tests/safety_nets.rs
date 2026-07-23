@@ -4,10 +4,11 @@ use chrono::{TimeZone, Utc};
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
-    state::{CheckpointKind, LoopExecutionState, TerminalWarningObservation},
+    state::{CheckpointKind, LoopExecutionState},
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
-        ScriptedCapabilityOutcome, ScriptedModelResponse, capability_id, surface_version,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, capability_id,
+        state_after_no_progress_warning_attempt, surface_version,
     },
 };
 use ironclaw_turns::{
@@ -15,7 +16,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostErrorKind, CapabilityInputRef, ContentDigest, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopRequest,
-        LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
+        LoopRequestBatch, LoopRunInfoPort,
     },
 };
 
@@ -682,17 +683,6 @@ fn assert_no_progress_typed_failure(
         "a no-progress failure may only finalize its failure-explanation message, got {:?}",
         host.finalized_assistant_messages()
     );
-}
-
-fn state_after_no_progress_warning_attempt(context: &LoopRunContext) -> LoopExecutionState {
-    let mut state = LoopExecutionState::initial_for_run(context);
-    assert!(
-        state
-            .terminal_warning_state
-            .schedule(TerminalWarningObservation::no_progress(None, None))
-    );
-    state.terminal_warning_state.clear_pending();
-    state
 }
 
 fn call_with_input(input_ref: &str) -> ScriptedCapabilityCall {

@@ -207,17 +207,23 @@ Model-error retry accounting and pending prompt controls are also checkpointed
 loop state. A `BeforeModel` retry-transition checkpoint records the consumed
 attempt budget, any pending typed observation, and any invalid-output repair
 directive. Prompt construction does not clear those controls; the executor
-clears them only after issuing the model request. A worker restart can therefore
-replay a pending control at least once, but cannot silently lose it or grant a
-fresh recovery budget. Unsupported observation schema versions fail prompt
-construction before a model call.
+clears them only after the model boundary returns a non-gate result. A
+pre-dispatch budget gate therefore leaves them pending for the approved retry.
+A worker restart can replay a pending control at least once, but cannot silently
+lose it or grant a fresh recovery budget. Unsupported observation schema
+versions fail prompt construction before a model call.
 
 Pre-termination warning accounting follows the same checkpoint discipline. The
 attempted terminal class and pending typed warning are written to the
 `BeforeModel` checkpoint, remain pending through prompt construction, and clear
-only after the model request is issued. Restarts can therefore replay a pending
-warning but cannot reset its one-shot budget. Legacy checkpoints deserialize an
-empty warning state, and unsupported warning schema versions fail before the
+only after the model returns a response. At that point an active warning marker
+survives capability gates and resume checkpoints until the warning turn's
+capability results are evaluated. If a no-progress warning response again
+produces only `NoChange` results, the loop fails immediately instead of
+rebuilding the ordinary detection window; a `MadeProgress` result continues
+normally. Restarts can therefore replay a pending warning but cannot reset its
+one-shot budget or grant extra no-progress turns. Legacy checkpoints deserialize
+an empty warning state, and unsupported warning schema versions fail before the
 model boundary.
 
 This keeps projections, debugging, and compaction grounded in typed state rather than inferences from transcript prose alone.

@@ -1219,6 +1219,29 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
     }
 
+    /// Assert the named capability was invoked exactly `expected` times through
+    /// the real capability path. Uses the same per-thread delta as
+    /// [`Self::assert_tool_invoked`].
+    pub async fn assert_tool_invocation_count(
+        &self,
+        capability_id: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        let actual = delta
+            .iter()
+            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
+            .count();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected capability {capability_id:?} to be invoked {expected} time(s), saw {actual}"
+        )
+        .into())
+    }
+
     /// Assert the named capability was NOT invoked through the real
     /// capability path (proves a visibility/gating filter held). Same
     /// delta-scoping as `assert_tool_invoked` (R2), but the diagnostic

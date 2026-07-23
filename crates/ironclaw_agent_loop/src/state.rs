@@ -22,7 +22,8 @@ pub use slots::{
     RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
     ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
-pub use terminal_warning::{TerminalWarningKind, TerminalWarningObservation, TerminalWarningState};
+pub use terminal_warning::TerminalWarningState;
+pub(crate) use terminal_warning::{TerminalWarningKind, TerminalWarningObservation};
 
 use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_turns::{
@@ -82,20 +83,12 @@ pub struct LoopExecutionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_model_usage: Option<ironclaw_turns::run_profile::LoopModelUsage>,
 
-    /// Count of final-answer nudges issued this run (driver-specific nudge,
-    /// gated by `SteeringPolicy.allow_driver_specific_nudges`). Capped so the
-    /// loop can't issue unbounded extra model calls. `#[serde(default)]` keeps
-    /// older checkpoints decodable.
-    #[serde(default)]
-    pub final_answer_nudges_used: u32,
-
     /// Count of tools-capable completion nudges issued this run (driver-specific
-    /// nudge, gated by `SteeringPolicy.allow_driver_specific_nudges`). Unlike the
-    /// tool-free `final_answer_nudges_used` rescue, this one re-enters the loop
-    /// with the full tool surface so the model can finish the task (e.g. write a
-    /// required output file) before answering. Capped so the loop can't issue
-    /// unbounded extra iterations. `#[serde(default)]` keeps older checkpoints
-    /// decodable.
+    /// nudge, gated by `SteeringPolicy.allow_driver_specific_nudges`). It
+    /// re-enters the loop with the full tool surface so the model can finish the
+    /// task (e.g. write a required output file) before answering. Capped so the
+    /// loop can't issue unbounded extra iterations. `#[serde(default)]` keeps
+    /// older checkpoints decodable.
     #[serde(default)]
     pub completion_nudges_used: u32,
 
@@ -334,7 +327,6 @@ impl LoopExecutionState {
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
             cumulative_model_usage: None,
-            final_answer_nudges_used: 0,
             completion_nudges_used: 0,
             completion_nudge_pending: false,
             pending_model_error_observation: None,
@@ -1140,36 +1132,6 @@ mod tests {
         assert!(
             restored.pending_auth_resume.is_none(),
             "decoded state must have no pending_auth_resume when field was absent from payload"
-        );
-    }
-
-    #[test]
-    fn checkpoint_payload_without_final_answer_nudges_slot_decodes_to_zero() {
-        // A checkpoint produced before `final_answer_nudges_used` was added would
-        // lack the field entirely. The `#[serde(default)]` contract must decode it
-        // to 0 rather than failing, so a resumed run still has its one-shot budget.
-        let context = test_run_context();
-        let state = LoopExecutionState::initial_for_run(&context);
-        assert_eq!(
-            state.final_answer_nudges_used, 0,
-            "initial state must start with zero nudges used"
-        );
-
-        let payload = encode_payload(&state);
-        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
-        value
-            .as_object_mut()
-            .expect("state serializes as object")
-            .remove("final_answer_nudges_used");
-        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
-        let from_legacy = LoopExecutionState::from_checkpoint_payload(
-            &stripped_payload,
-            CheckpointKind::BeforeBlock,
-        )
-        .expect("decode legacy checkpoint payload without final_answer_nudges_used");
-        assert_eq!(
-            from_legacy.final_answer_nudges_used, 0,
-            "legacy checkpoint missing final_answer_nudges_used must decode to 0"
         );
     }
 

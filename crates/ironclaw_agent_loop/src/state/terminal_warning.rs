@@ -10,14 +10,14 @@ const TERMINAL_WARNING_SCHEMA_VERSION: u32 = 1;
 /// Only bounded typed facts are stored. Raw model/provider content and backend
 /// diagnostics are deliberately excluded from checkpoint state and prompt text.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TerminalWarningObservation {
+pub(crate) struct TerminalWarningObservation {
     #[serde(default = "current_schema_version")]
     pub(crate) schema_version: u32,
     detail: TerminalWarningDetail,
 }
 
 impl TerminalWarningObservation {
-    pub fn no_progress(
+    pub(crate) fn no_progress(
         repeated_call_count: Option<u32>,
         last_failure: Option<LoopFailureKind>,
     ) -> Self {
@@ -30,14 +30,14 @@ impl TerminalWarningObservation {
         }
     }
 
-    pub fn iteration_limit(limit: u32) -> Self {
+    pub(crate) fn iteration_limit(limit: u32) -> Self {
         Self {
             schema_version: TERMINAL_WARNING_SCHEMA_VERSION,
             detail: TerminalWarningDetail::IterationLimit { limit },
         }
     }
 
-    pub fn kind(&self) -> TerminalWarningKind {
+    pub(crate) fn kind(&self) -> TerminalWarningKind {
         match self.detail {
             TerminalWarningDetail::NoProgressDetected { .. } => {
                 TerminalWarningKind::NoProgressDetected
@@ -46,7 +46,7 @@ impl TerminalWarningObservation {
         }
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.schema_version != TERMINAL_WARNING_SCHEMA_VERSION {
             return Err(format!(
                 "terminal warning schema version {} is unsupported",
@@ -56,7 +56,7 @@ impl TerminalWarningObservation {
         Ok(())
     }
 
-    pub fn model_instruction(&self) -> String {
+    pub(crate) fn model_instruction(&self) -> String {
         match self.detail {
             TerminalWarningDetail::NoProgressDetected {
                 repeated_call_count,
@@ -102,7 +102,7 @@ enum TerminalWarningDetail {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum TerminalWarningKind {
+pub(crate) enum TerminalWarningKind {
     NoProgressDetected,
     IterationLimit,
 }
@@ -114,13 +114,18 @@ pub struct TerminalWarningState {
     attempted: BTreeSet<TerminalWarningKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending: Option<TerminalWarningObservation>,
+    /// Warning whose model response is being processed. This survives a
+    /// capability gate/resume so the first completed warning turn can be
+    /// evaluated without reopening an unbounded no-progress window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active: Option<TerminalWarningKind>,
 }
 
 impl TerminalWarningState {
     /// Schedule a warning exactly once per terminal class.
-    pub fn schedule(&mut self, observation: TerminalWarningObservation) -> bool {
+    pub(crate) fn schedule(&mut self, observation: TerminalWarningObservation) -> bool {
         let kind = observation.kind();
-        if self.attempted.contains(&kind) {
+        if self.pending.is_some() || self.attempted.contains(&kind) {
             return false;
         }
         self.attempted.insert(kind);
@@ -128,16 +133,34 @@ impl TerminalWarningState {
         true
     }
 
-    pub fn attempted(&self, kind: TerminalWarningKind) -> bool {
+    #[cfg(test)]
+    pub(crate) fn attempted(&self, kind: TerminalWarningKind) -> bool {
         self.attempted.contains(&kind)
     }
 
-    pub fn pending(&self) -> Option<&TerminalWarningObservation> {
+    pub(crate) fn pending(&self) -> Option<&TerminalWarningObservation> {
         self.pending.as_ref()
     }
 
-    pub fn clear_pending(&mut self) {
+    pub(crate) fn clear_pending(&mut self) {
         self.pending = None;
+    }
+
+    /// Mark the pending warning as delivered only after a model response was
+    /// returned. Gate-shaped errors occur before provider dispatch and must
+    /// leave the warning pending for the approved retry.
+    pub(crate) fn mark_delivered(&mut self) {
+        if let Some(observation) = self.pending.take() {
+            self.active = Some(observation.kind());
+        }
+    }
+
+    pub(crate) fn active(&self) -> Option<TerminalWarningKind> {
+        self.active
+    }
+
+    pub(crate) fn clear_active(&mut self) {
+        self.active = None;
     }
 }
 
@@ -165,6 +188,19 @@ mod tests {
         state.clear_pending();
         assert!(!state.schedule(TerminalWarningObservation::iteration_limit(8)));
         assert!(state.schedule(TerminalWarningObservation::no_progress(None, None)));
+    }
+
+    #[test]
+    fn warning_state_never_replaces_an_unconsumed_warning() {
+        let mut state = TerminalWarningState::default();
+
+        assert!(state.schedule(TerminalWarningObservation::no_progress(None, None)));
+        assert!(!state.schedule(TerminalWarningObservation::iteration_limit(8)));
+        assert_eq!(
+            state.pending().map(TerminalWarningObservation::kind),
+            Some(TerminalWarningKind::NoProgressDetected)
+        );
+        assert!(!state.attempted(TerminalWarningKind::IterationLimit));
     }
 
     #[test]
