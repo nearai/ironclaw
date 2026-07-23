@@ -382,22 +382,6 @@ impl RebornHostBindings {
         )
     }
 
-    pub fn local_dev(owner_id: impl Into<String>, root: PathBuf) -> Self {
-        Self::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root)
-    }
-
-    pub(crate) fn local_dev_with_profile(
-        profile: RebornCompositionProfile,
-        owner_id: impl Into<String>,
-        root: PathBuf,
-    ) -> Self {
-        Self::local_dev_from_deployment(
-            DeploymentConfig::for_profile(profile, false),
-            owner_id,
-            root,
-        )
-    }
-
     /// Build a local-dev-storage-shaped input from an already-resolved
     /// deployment. The `debug_assert` is on the storage-shape **axis**, not on
     /// a list of profile names (§4.4).

@@ -514,7 +514,7 @@ mod tests {
     async fn extension_remove_tool_discloses_generic_unpair_disconnect_semantics() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev_with_profile(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "extension-remove-generic-unpair-tool-copy",
                 dir.path().join("local-dev"),
@@ -638,7 +638,7 @@ mod tests {
         )
         .expect("valid test google oauth client config");
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev_with_profile(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 owner,
                 dir.path().join("local-dev"),
@@ -1337,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_continues_exactly_where_first_look_preview_truncated() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-result-read-continuation",
             dir.path().join("local-dev"),
         ))
@@ -1681,7 +1681,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_chunk_does_not_persist_a_new_durable_record() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-result-read-no-amplification",
             dir.path().join("local-dev"),
         ))
@@ -2243,7 +2243,7 @@ mod tests {
     async fn local_dev_skill_activate_tool_loads_selected_skill_context() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-skill-activate-owner",
             storage_root.clone(),
         ))
@@ -2410,7 +2410,7 @@ mod tests {
     async fn capability_wiring_with_skill_activation_source_exposes_skill_activate_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-skill-activate-wiring-owner",
             storage_root.clone(),
         ))
@@ -2463,7 +2463,7 @@ mod tests {
     async fn local_dev_external_tools_are_advertised_as_provider_tool_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-external-tool-owner",
             storage_root,
         ))
@@ -2572,7 +2572,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-project-create-owner",
             dir.path().join("local-dev"),
         ))
@@ -2722,7 +2722,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_tool_returns_only_requested_thread_scoped_chunk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-result-read-owner",
             dir.path().join("local-dev"),
         ))
@@ -3111,7 +3111,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_rejects_malformed_arguments_matrix() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-result-read-validation-owner",
             dir.path().join("local-dev"),
         ))
@@ -3458,7 +3458,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_denies_cross_thread_reference_access() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-result-read-cross-thread-owner",
             dir.path().join("local-dev"),
         ))
@@ -3632,7 +3632,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_outbound_delivery_targets_list_and_target_set_use_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-outbound-delivery-owner",
             dir.path().join("local-dev"),
         ))
@@ -4360,7 +4360,7 @@ mod tests {
     async fn local_dev_yolo_outbound_delivery_target_set_bypasses_approval_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev(
+            crate::deployment::local_dev_build_input(
                 "local-yolo-outbound-delivery-owner",
                 dir.path().join("local-dev"),
             )
@@ -4547,7 +4547,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_outbound_delivery_capabilities_hidden_without_provider_facade() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-no-outbound-provider-owner",
             dir.path().join("local-dev"),
         ))
@@ -4657,7 +4657,7 @@ mod tests {
             .into_owned();
 
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev_with_profile(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-yolo-host-owner",
                 storage_root,
@@ -4913,7 +4913,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev_with_profile(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-skill-port-owner",
                 storage_root.clone(),
@@ -5038,7 +5038,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev("local-dev-no-host-owner", storage_root)
+            crate::deployment::local_dev_build_input("local-dev-no-host-owner", storage_root)
                 .with_local_dev_workspace_root(workspace_root.clone()),
         )
         .await
@@ -5194,7 +5194,7 @@ mod tests {
         let owner_id = "local-dev-github-surface-owner";
         {
             let services = crate::factory::build_runtime_substrate(
-                crate::RebornHostBindings::local_dev(owner_id, storage_root.clone()),
+                crate::deployment::local_dev_build_input(owner_id, storage_root.clone()),
             )
             .await
             .expect("local-dev services build");
@@ -5230,7 +5230,7 @@ mod tests {
                 .expect("activate github extension");
         }
 
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             owner_id,
             storage_root,
         ))
@@ -5259,7 +5259,7 @@ mod tests {
     async fn local_dev_capability_port_refreshes_extensions_after_activation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-live-github-surface-owner",
             storage_root,
         ))
@@ -5372,7 +5372,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_search_makes_every_bundled_result_model_visible() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::factory::build_runtime_substrate(crate::RebornHostBindings::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
             "local-dev-extension-search-owner",
             dir.path().join("local-dev"),
         ))
@@ -5465,7 +5465,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let services = crate::factory::build_runtime_substrate(
-            crate::RebornHostBindings::local_dev_with_profile(
+            crate::deployment::local_dev_build_input_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-mid-response-owner",
                 storage_root,

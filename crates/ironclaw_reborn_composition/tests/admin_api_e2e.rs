@@ -138,7 +138,7 @@ struct AdminHarness {
 async fn build_admin_harness() -> AdminHarness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root: PathBuf = root.path().join("local-dev");
-    let build_input = RebornHostBindings::local_dev(OPERATOR_USER, storage_root)
+    let build_input = ironclaw_reborn_composition::local_dev_build_input(OPERATOR_USER, storage_root)
         .with_runtime_policy(local_dev_effective_policy());
     build_admin_harness_from(root, build_input).await
 }

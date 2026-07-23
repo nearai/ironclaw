@@ -640,12 +640,40 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    Ok(RebornHostBindings::local_dev_with_profile(
-        RebornCompositionProfile::HostedSingleTenantVolume,
+    Ok(RebornHostBindings::local_dev_from_deployment(
+        DeploymentConfig::for_profile(RebornCompositionProfile::HostedSingleTenantVolume, false),
         owner_id,
         root,
     )
     .with_runtime_policy(policy))
+}
+
+/// Test-support constructor for a local-dev-shaped build input.
+///
+/// Replaces the removed `RebornHostBindings::local_dev` associated
+/// constructor: a local-dev deployment is *data* (`DeploymentConfig::local_dev`)
+/// plus generic bindings, not a bindings-typed constructor. Behaviour is
+/// identical to the former method — it builds the local-dev deployment and
+/// resolves its runtime policy through `local_dev_from_deployment`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn local_dev_build_input(owner_id: impl Into<String>, root: PathBuf) -> RebornHostBindings {
+    RebornHostBindings::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root)
+}
+
+/// Test-support constructor for a local-dev-shaped build input on a specific
+/// profile (e.g. `LocalDevYolo`, `HostedSingleTenantVolume`). Replaces the
+/// removed `RebornHostBindings::local_dev_with_profile` associated constructor.
+#[cfg(any(test, feature = "test-support"))]
+pub fn local_dev_build_input_with_profile(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    root: PathBuf,
+) -> RebornHostBindings {
+    RebornHostBindings::local_dev_from_deployment(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        root,
+    )
 }
 
 /// Resolved policy for the standalone local development runtime profile.

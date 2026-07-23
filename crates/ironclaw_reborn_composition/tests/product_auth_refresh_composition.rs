@@ -31,13 +31,13 @@ use ironclaw_auth::{
     CredentialRefreshRequest,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{RebornHostBindings, RebornRuntimeInput, build_reborn_runtime};
+use ironclaw_reborn_composition::{RebornRuntimeInput, build_reborn_runtime};
 
 #[tokio::test]
 async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(
-        RebornHostBindings::local_dev("refresh-composition-owner", dir.path().to_path_buf()),
+        ironclaw_reborn_composition::local_dev_build_input("refresh-composition-owner", dir.path().to_path_buf()),
     ))
     .await
     .expect("local-dev runtime should build");

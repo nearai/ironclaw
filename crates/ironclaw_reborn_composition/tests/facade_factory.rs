@@ -608,7 +608,7 @@ async fn disabled_returns_empty_services() {
 async fn local_dev_builds_facades_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf()).with_runtime_policy(
             ironclaw_reborn_composition::local_dev_runtime_policy()
                 .expect("local-dev runtime policy resolves"),
         ),
@@ -686,7 +686,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
 async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf()).with_runtime_policy(
             ironclaw_reborn_composition::local_dev_runtime_policy()
                 .expect("local-dev runtime policy resolves"),
         ),
@@ -756,7 +756,7 @@ fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
 async fn local_dev_runtime_policy_exposes_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf())
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
             .with_runtime_policy(local_only_runtime_policy()),
     )
     .await
@@ -790,7 +790,7 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
 async fn local_dev_runtime_policy_hides_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf())
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
             .with_runtime_policy(network_denied_runtime_policy()),
     )
     .await
@@ -1323,7 +1323,7 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
 async fn local_dev_services_dispatch_trigger_management_through_composed_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        RebornHostBindings::local_dev("test-owner", dir.path().to_path_buf())
+        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
             .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await

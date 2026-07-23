@@ -50,7 +50,7 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
-    BudgetEventObserver, PollSettings, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    BudgetEventObserver, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     build_reborn_runtime,
 };
 use ironclaw_reborn_config::BudgetDefaults;
@@ -144,7 +144,7 @@ fn build_input(
     budget_defaults: BudgetDefaults,
 ) -> RebornRuntimeInput {
     RebornRuntimeInput::from_build_input(
-        RebornHostBindings::local_dev(format!("{tenant}-owner"), owner_root)
+        ironclaw_reborn_composition::local_dev_build_input(format!("{tenant}-owner"), owner_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {

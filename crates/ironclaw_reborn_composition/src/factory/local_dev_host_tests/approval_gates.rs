@@ -30,7 +30,7 @@ use crate::approval_test_support::disable_global_auto_approve;
 async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one_shot_lease() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-approval-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-approval-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -99,7 +99,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
         transport.clone(),
     ));
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("sandbox-port-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("sandbox-port-owner", dir.path().join("local-dev"))
             .with_runtime_policy(tenant_sandbox_process_policy())
             .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(
                 process_port,
@@ -161,7 +161,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev_with_profile(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-approval-owner",
             dir.path().join("local-dev"),
@@ -209,7 +209,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
 async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-auto-approve-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-auto-approve-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -262,7 +262,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
     // dispatch, with no approval gate. No disable call — the default must carry.
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-echo-default-on", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-echo-default-on", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -300,7 +300,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
 async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-echo-default-ask", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-echo-default-ask", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -340,7 +340,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
 async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-echo-ask-resume", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-echo-ask-resume", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -462,7 +462,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
 async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-echo-legacy-grant", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-echo-legacy-grant", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -523,7 +523,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
 async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev(
+        crate::deployment::local_dev_build_input(
             "local-dev-echo-settings-allow",
             dir.path().join("local-dev"),
         )
@@ -590,7 +590,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
 async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev(
+        crate::deployment::local_dev_build_input(
             "local-dev-settings-allow-owner",
             dir.path().join("local-dev"),
         )
@@ -659,7 +659,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev_with_profile(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-ask-owner",
             dir.path().join("local-dev"),
@@ -740,7 +740,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
 async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-deny-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-deny-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -968,7 +968,7 @@ fn local_dev_minimal_enterprise_policy() -> ironclaw_host_api::runtime_policy::E
 async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-minimal-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-minimal-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_minimal_policy()),
     )
     .await
@@ -1006,7 +1006,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
 async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("ent-minimal-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("ent-minimal-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_minimal_enterprise_policy()),
     )
     .await
@@ -1047,7 +1047,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
 async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev(
+        crate::deployment::local_dev_build_input(
             "local-dev-spawn-approval-owner",
             dir.path().join("local-dev"),
         )
@@ -1121,7 +1121,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
 async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_approval() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-echo-spawn-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-echo-spawn-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -1207,7 +1207,7 @@ fn echo_dispatch_allowed_effects() -> Vec<EffectKind> {
 async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-deny-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-deny-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
@@ -1239,7 +1239,7 @@ async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
 async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev("local-dev-regate-owner", dir.path().join("local-dev"))
+        crate::deployment::local_dev_build_input("local-dev-regate-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await

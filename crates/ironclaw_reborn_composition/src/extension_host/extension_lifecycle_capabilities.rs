@@ -436,7 +436,7 @@ mod tests {
 
     use super::*;
     use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
-    use crate::{OAuthClientConfig, RebornHostBindings};
+    use crate::OAuthClientConfig;
     use ironclaw_host_api::InstallationState;
     use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
@@ -444,7 +444,7 @@ mod tests {
     /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
     /// credential reuse) rather than the provider-instance readiness map —
     /// without this, every google-family activation on a plain
-    /// `RebornHostBindings::local_dev(..)` fixture now fails closed
+    /// `crate::deployment::local_dev_build_input(..)` fixture now fails closed
     /// with `ProviderInstanceNotConfigured` before it ever reaches the
     /// per-account gate these tests target. Mirrors
     /// `factory/auth_tests.rs::local_dev_google_oauth_backend_builds_with_host_provider_config`.
@@ -613,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-surface-owner",
             dir.path().join("local-dev"),
         ))
@@ -701,7 +701,7 @@ mod tests {
     async fn local_dev_extension_lifecycle_tools_manage_visible_extension_surface() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-owner",
             storage_root.clone(),
         ))
@@ -795,7 +795,7 @@ mod tests {
         // Removing an extension whose credential provider it exclusively owns must
         // revoke that credential so re-activation raises the auth gate again.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-remove-revoke-owner",
             dir.path().join("local-dev"),
         ))
@@ -859,7 +859,7 @@ mod tests {
         // credential intact so Calendar keeps working.
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_runtime_substrate(
-            RebornHostBindings::local_dev(
+            crate::deployment::local_dev_build_input(
                 "extension-tools-remove-shared-owner",
                 dir.path().join("local-dev"),
             )
@@ -933,7 +933,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_for_missing_extension_credentials() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-auth-gate-owner",
             dir.path().join("local-dev"),
         ))
@@ -998,7 +998,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_search_distinguishes_configured_from_active() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-active-search-owner",
             dir.path().join("local-dev"),
         ))
@@ -1154,7 +1154,7 @@ mod tests {
     async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_runtime_substrate(
-            RebornHostBindings::local_dev(
+            crate::deployment::local_dev_build_input(
                 "extension-tools-scope-gate-owner",
                 dir.path().join("local-dev"),
             )
@@ -1221,7 +1221,7 @@ mod tests {
     async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_runtime_substrate(
-            RebornHostBindings::local_dev(
+            crate::deployment::local_dev_build_input(
                 "extension-tools-gmail-scope-union-owner",
                 dir.path().join("local-dev"),
             )
@@ -1287,7 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_maps_corrupt_configured_account_to_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-corrupt-auth-owner",
             dir.path().join("local-dev"),
         ))
@@ -1353,7 +1353,7 @@ mod tests {
                 .with_tool_description("provider documentation ".repeat(320)),
         );
         let services = build_runtime_substrate(
-            RebornHostBindings::local_dev("extension-tools-hosted-mcp-owner", storage_root.clone())
+            crate::deployment::local_dev_build_input("extension-tools-hosted-mcp-owner", storage_root.clone())
                 .with_network_http_egress_for_test(discovery_script.clone()),
         )
         .await
@@ -1429,7 +1429,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_runtime_substrate(RebornHostBindings::local_dev(
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-tools-invalid-owner",
             dir.path().join("local-dev"),
         ))

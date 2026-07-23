@@ -36,7 +36,7 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornHostBindings,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
     RebornRuntime, RebornRuntimeInput, build_runtime, capability_allowlist,
 };
 use ironclaw_runner::{
@@ -261,7 +261,7 @@ impl ProductLiveAgentLoopHarness {
             .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
         let host_runtime_services = if let Some(root) = &host_runtime_root {
             let services = build_runtime(RebornRuntimeInput::from_build_input(
-                RebornHostBindings::local_dev(
+                ironclaw_reborn_composition::local_dev_build_input(
                     "planned-harness-host-runtime",
                     root.path().join("local-dev"),
                 ),

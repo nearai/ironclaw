@@ -84,7 +84,7 @@ fn build_runtime_substrate_uses_filesystem_resource_governor() {
         .expect("tokio runtime");
 
     let services = runtime
-        .block_on(build_runtime_substrate(RebornHostBindings::local_dev(
+        .block_on(build_runtime_substrate(crate::deployment::local_dev_build_input(
             "resource-governor-enabled-env-owner",
             dir.path().join("local-dev"),
         )))
@@ -382,7 +382,7 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
     let local_dev_root = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "pairing-owner",
         local_dev_root.path().join("local-dev"),
     ))
@@ -410,7 +410,7 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
 #[tokio::test]
 async fn local_dev_services_include_repl_runtime_substrate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-substrate-owner",
         dir.path().join("local-dev"),
     ))
@@ -433,7 +433,7 @@ async fn local_dev_services_include_repl_runtime_substrate() {
 #[tokio::test]
 async fn hosted_single_tenant_rejects_local_dev_storage_input() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let input = RebornHostBindings::local_dev(
+    let input = crate::deployment::local_dev_build_input(
         "hosted-single-tenant-local-storage-owner",
         dir.path().join("local-dev"),
     );
@@ -462,7 +462,7 @@ async fn hosted_single_tenant_rejects_local_dev_storage_input() {
 #[tokio::test]
 async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-memory-owner",
         dir.path().join("local-dev"),
     ))
@@ -516,7 +516,7 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     let owner = "local-dev-durable-memory-owner";
 
     let services =
-        build_runtime_substrate(RebornHostBindings::local_dev(owner, local_dev_root.clone()))
+        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
             .await
             .expect("first local-dev services build");
     invoke_json(
@@ -534,7 +534,7 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     drop(services);
 
     let rebuilt =
-        build_runtime_substrate(RebornHostBindings::local_dev(owner, local_dev_root.clone()))
+        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
             .await
             .expect("rebuilt local-dev services");
 
@@ -572,7 +572,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let local_dev_root = dir.path().join("local-dev");
     let owner = "local-dev-durable-auth-owner";
     let services =
-        build_runtime_substrate(RebornHostBindings::local_dev(owner, local_dev_root.clone()))
+        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
             .await
             .expect("local-dev services build");
     let product_auth = &services.product_auth;
@@ -618,7 +618,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     );
 
     let rebuilt =
-        build_runtime_substrate(RebornHostBindings::local_dev(owner, local_dev_root.clone()))
+        build_runtime_substrate(crate::deployment::local_dev_build_input(owner, local_dev_root.clone()))
             .await
             .expect("local-dev services rebuild");
     let rebuilt_product_auth = rebuilt.product_auth.as_ref();
@@ -985,7 +985,7 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
 #[tokio::test]
 async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-gsuite-owner",
         dir.path().join("local-dev"),
     ))
@@ -1107,7 +1107,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
 async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev_with_profile(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-notion-mcp-owner",
             dir.path().join("local-dev"),
@@ -1189,7 +1189,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
 async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
-        RebornHostBindings::local_dev_with_profile(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-web-access-owner",
             dir.path().join("local-dev"),
@@ -1253,7 +1253,7 @@ fn nearai_bootstrap_input_with_base(
     base_url: &str,
     api_key: &str,
 ) -> RebornHostBindings {
-    RebornHostBindings::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
+    crate::deployment::local_dev_build_input(owner, root).with_nearai_mcp_bootstrap_config(
         crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
             base_url,
             secrecy::SecretString::from(api_key.to_string()),
@@ -1939,7 +1939,7 @@ async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
     )
     .expect("config shape");
     let error = build_runtime_substrate(
-        RebornHostBindings::local_dev(
+        crate::deployment::local_dev_build_input(
             "local-dev-nearai-mcp-invalid-owner",
             dir.path().join("local-dev"),
         )
@@ -1984,7 +1984,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
     let thread_id = ironclaw_host_api::ThreadId::new("persisted-thread").unwrap();
 
     let services =
-        build_runtime_substrate(RebornHostBindings::local_dev("persist-owner", root.clone()))
+        build_runtime_substrate(crate::deployment::local_dev_build_input("persist-owner", root.clone()))
             .await
             .expect("first local-dev services build");
     services
@@ -2003,7 +2003,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
     drop(services);
 
     let rebuilt =
-        build_runtime_substrate(RebornHostBindings::local_dev("persist-owner", root.clone()))
+        build_runtime_substrate(crate::deployment::local_dev_build_input("persist-owner", root.clone()))
             .await
             .expect("rebuilt local-dev services");
     let history = rebuilt
@@ -2032,7 +2032,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
         .expect("marker directory");
     std::fs::write(&marker_path, "done").expect("marker file");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-marker-workspace-owner",
         storage_root,
     ))
@@ -2073,7 +2073,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
 async fn local_dev_skill_management_invokes_through_first_party_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-skill-tools-owner",
         storage_root.clone(),
     ))
@@ -2169,7 +2169,7 @@ async fn local_dev_skill_management_invokes_through_first_party_runtime() {
 async fn local_dev_workspace_mounts_do_not_authorize_skill_writes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-workspace-skill-boundary-owner",
         storage_root.clone(),
     ))
@@ -2685,7 +2685,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 #[tokio::test]
 async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(RebornHostBindings::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "outbound-store-alloc-owner",
         dir.path().join("local-dev"),
     ))
