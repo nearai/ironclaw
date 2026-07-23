@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 
 const DEFAULT_ENV_PREFIX: &str = "IRONCLAW_";
@@ -13,14 +14,15 @@ const LEGACY_ENV_PREFIX: &str = "IRONCLAW_REBORN_";
 /// after the legacy environment contract reaches end of life.
 pub(crate) fn install_legacy_env_aliases() {
     let environment = std::env::vars_os().collect::<Vec<_>>();
+    let present_names = environment
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
     let legacy_fallbacks = environment
         .iter()
         .filter_map(|(name, value)| {
             let default_name = default_name_for_legacy_alias(name)?;
-            (!environment
-                .iter()
-                .any(|(candidate, _)| candidate == &default_name))
-            .then(|| (default_name, value.clone()))
+            (!present_names.contains(&default_name)).then(|| (default_name, value.clone()))
         })
         .collect::<Vec<_>>();
     let preferred_aliases = environment

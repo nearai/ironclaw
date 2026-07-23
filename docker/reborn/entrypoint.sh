@@ -97,6 +97,19 @@ case "$default_config" in
     ;;
 esac
 
+if ! canonical_default_config="$(realpath -e -- "$default_config" 2>/dev/null)"; then
+  echo "IRONCLAW_DEFAULT_CONFIG must resolve to an existing file: $default_config" >&2
+  exit 1
+fi
+case "$canonical_default_config" in
+  /opt/ironclaw/*) ;;
+  *)
+    echo "IRONCLAW_DEFAULT_CONFIG must resolve under /opt/ironclaw: $default_config -> $canonical_default_config" >&2
+    exit 1
+    ;;
+esac
+default_config="$canonical_default_config"
+
 if [ ! -f "$config_path" ]; then
   mkdir -p "$IRONCLAW_HOME"
   tmp_config="${config_path}.tmp.$$"
