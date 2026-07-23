@@ -22,13 +22,13 @@ use ironclaw_host_api::{
     ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
     TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, ProductCapabilityInput, ProductOperationId, ProductOperationRequest,
-    ProductOperationResponse, ProductSurface, RebornCancelRunResponse, RebornCreateThreadResponse,
+    ProductOperationResponse, ProductSurface, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewPage,
     RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
@@ -570,14 +570,14 @@ mod openai_compat_mount_tests {
             &self,
             caller: WebUiAuthenticatedCaller,
             request: WebUiCreateThreadRequest,
-        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
             let thread_id = ThreadId::new(
                 request
                     .requested_thread_id
                     .or(request.client_action_id)
                     .unwrap_or_else(|| THREAD.to_string()),
             )
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
             Ok(RebornCreateThreadResponse {
                 thread: test_thread_record(caller, thread_id),
             })
@@ -587,17 +587,17 @@ mod openai_compat_mount_tests {
             &self,
             _caller: WebUiAuthenticatedCaller,
             request: WebUiSendMessageRequest,
-        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
             *self
                 .submit_count
                 .lock()
                 .expect("submit count lock should not be poisoned") += 1;
             let thread_id = ThreadId::new(request.thread_id.unwrap_or_else(|| THREAD.to_string()))
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             Ok(RebornSubmitTurnResponse::Submitted {
                 thread_id,
                 accepted_message_ref: AcceptedMessageRef::new("msg:openai-chat")
-                    .map_err(RebornServicesError::internal_from)?,
+                    .map_err(ProductSurfaceError::internal_from)?,
                 turn_id: "turn-openai-chat".to_string(),
                 run_id: TurnRunId::new(),
                 status: TurnStatus::Queued,
@@ -624,14 +624,14 @@ mod openai_compat_mount_tests {
             &self,
             caller: WebUiAuthenticatedCaller,
             request: WebUiCreateThreadRequest,
-        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
             let thread_id = ThreadId::new(
                 request
                     .requested_thread_id
                     .or(request.client_action_id)
                     .unwrap_or_else(|| THREAD.to_string()),
             )
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
             Ok(RebornCreateThreadResponse {
                 thread: test_thread_record(caller, thread_id),
             })
@@ -641,14 +641,14 @@ mod openai_compat_mount_tests {
             &self,
             caller: WebUiAuthenticatedCaller,
             request: WebUiSendMessageRequest,
-        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
             let thread_id = ThreadId::new(
                 request
                     .thread_id
                     .clone()
                     .ok_or_else(invalid_request_error)?,
             )
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
             let scope = caller.turn_scope(thread_id.clone());
             let run_id = self
                 .coordinator
@@ -659,7 +659,7 @@ mod openai_compat_mount_tests {
                 "msg:{}",
                 request.client_action_id.as_deref().unwrap_or("openai-chat")
             ))
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
             let response = self
                 .coordinator
                 .submit_turn(SubmitTurnRequest {
@@ -667,9 +667,9 @@ mod openai_compat_mount_tests {
                     actor: caller.actor(),
                     accepted_message_ref: accepted_message_ref.clone(),
                     source_binding_ref: SourceBindingRef::new("source:openai-chat")
-                        .map_err(RebornServicesError::internal_from)?,
+                        .map_err(ProductSurfaceError::internal_from)?,
                     reply_target_binding_ref: ReplyTargetBindingRef::new("reply:openai-chat")
-                        .map_err(RebornServicesError::internal_from)?,
+                        .map_err(ProductSurfaceError::internal_from)?,
                     requested_run_profile: None,
                     requested_model: request.model,
                     idempotency_key: IdempotencyKey::new(
@@ -677,7 +677,7 @@ mod openai_compat_mount_tests {
                             .client_action_id
                             .unwrap_or_else(|| "openai-chat".to_string()),
                     )
-                    .map_err(RebornServicesError::internal_from)?,
+                    .map_err(ProductSurfaceError::internal_from)?,
                     received_at: chrono::Utc::now(),
                     requested_run_id: Some(run_id),
                     parent_run_id: None,
@@ -743,10 +743,10 @@ mod openai_compat_mount_tests {
         }
     }
 
-    fn invalid_request_error() -> RebornServicesError {
-        RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+    fn invalid_request_error() -> ProductSurfaceError {
+        ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: None,
@@ -754,46 +754,46 @@ mod openai_compat_mount_tests {
         }
     }
 
-    fn map_turn_error(error: TurnError) -> RebornServicesError {
+    fn map_turn_error(error: TurnError) -> ProductSurfaceError {
         match error {
             TurnError::AdmissionRejected(_) | TurnError::CapacityExceeded { .. } => {
-                RebornServicesError {
-                    code: RebornServicesErrorCode::RateLimited,
-                    kind: RebornServicesErrorKind::Busy,
+                ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::RateLimited,
+                    kind: ProductSurfaceErrorKind::Busy,
                     status_code: 429,
                     retryable: true,
                     field: None,
                     validation_code: None,
                 }
             }
-            TurnError::ScopeNotFound => RebornServicesError {
-                code: RebornServicesErrorCode::NotFound,
-                kind: RebornServicesErrorKind::NotFound,
+            TurnError::ScopeNotFound => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::NotFound,
+                kind: ProductSurfaceErrorKind::NotFound,
                 status_code: 404,
                 retryable: false,
                 field: None,
                 validation_code: None,
             },
-            TurnError::Unauthorized => RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            TurnError::Unauthorized => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
                 validation_code: None,
             },
             TurnError::InvalidRequest { .. } => invalid_request_error(),
-            TurnError::Unavailable { .. } => RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
+            TurnError::Unavailable { .. } => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Unavailable,
+                kind: ProductSurfaceErrorKind::ServiceUnavailable,
                 status_code: 503,
                 retryable: true,
                 field: None,
                 validation_code: None,
             },
-            _ => RebornServicesError {
-                code: RebornServicesErrorCode::Internal,
-                kind: RebornServicesErrorKind::Internal,
+            _ => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Internal,
+                kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
                 retryable: false,
                 field: None,
@@ -916,7 +916,7 @@ impl StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         self.create_thread_calls.lock().expect("lock").push(caller);
         Ok(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
@@ -942,7 +942,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         Ok(RebornSubmitTurnResponse::Submitted {
             thread_id: ThreadId::new(request.thread_id.clone().unwrap_or_default())
                 .expect("thread id"),
@@ -960,7 +960,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         Ok(RebornCancelRunResponse {
             run_id: TurnRunId::new(),
             status: TurnStatus::Cancelled,
@@ -973,10 +973,10 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
+    ) -> Result<RebornRetryRunResponse, ProductSurfaceError> {
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -988,14 +988,14 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+    ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         self.resolve_gate_refs
             .lock()
             .expect("lock")
             .push(request.gate_ref.clone());
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -1012,10 +1012,10 @@ impl ProductSurface for StubServices {
         capability: CapabilityId,
         input: ProductCapabilityInput,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, ProductSurfaceError> {
         if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
             let _request: RebornDeleteThreadRequest = serde_json::from_value(input.into_json()?)
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             let _ = caller;
             return Ok(successful_resolution(activity_id));
         }
@@ -1023,9 +1023,9 @@ impl ProductSurface for StubServices {
             let _ = (caller, input);
             return Ok(successful_resolution(activity_id));
         }
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -1037,11 +1037,11 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
         match query.view_id.as_str() {
             id if id == THREADS_VIEW.id => {
                 let mut request: WebUiListThreadsRequest = serde_json::from_value(query.params)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 request.cursor = query.cursor.or(request.cursor);
                 let _ = request;
                 Ok(RebornViewPage {
@@ -1049,19 +1049,19 @@ impl ProductSurface for StubServices {
                         threads: Vec::new(),
                         next_cursor: None,
                     })
-                    .map_err(RebornServicesError::internal_from)?,
+                    .map_err(ProductSurfaceError::internal_from)?,
                     next_cursor: None,
                 })
             }
             id if id == TRACE_CREDITS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(trace_credits_response(&caller))
-                    .map_err(RebornServicesError::internal_from)?,
+                    .map_err(ProductSurfaceError::internal_from)?,
                 next_cursor: None,
             }),
             id if id == TIMELINE_VIEW.id => {
                 let thread_id = query.params["thread_id"]
                     .as_str()
-                    .ok_or_else(|| RebornServicesError::internal_from("missing thread_id"))?
+                    .ok_or_else(|| ProductSurfaceError::internal_from("missing thread_id"))?
                     .to_string();
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornTimelineResponse {
@@ -1085,26 +1085,26 @@ impl ProductSurface for StubServices {
                         summary_artifacts: Vec::new(),
                         next_cursor: None,
                     })
-                    .map_err(RebornServicesError::internal_from)?,
+                    .map_err(ProductSurfaceError::internal_from)?,
                     next_cursor: None,
                 })
             }
             id if id == EXTENSION_SETUP_VIEW.id => {
                 let package_id = query.params["package_id"]
                     .as_str()
-                    .ok_or_else(|| RebornServicesError::internal_from("missing package_id"))?;
+                    .ok_or_else(|| ProductSurfaceError::internal_from("missing package_id"))?;
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
-                        .map_err(RebornServicesError::internal_from)?;
+                        .map_err(ProductSurfaceError::internal_from)?;
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(extension_setup_response(package_ref))
-                        .map_err(RebornServicesError::internal_from)?,
+                        .map_err(ProductSurfaceError::internal_from)?,
                     next_cursor: None,
                 })
             }
-            _ => Err(RebornServicesError {
-                code: RebornServicesErrorCode::Internal,
-                kind: RebornServicesErrorKind::Internal,
+            _ => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Internal,
+                kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
                 retryable: false,
                 field: None,
@@ -1117,7 +1117,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.stream_events_calls.lock().expect("lock").push(caller);
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
@@ -1126,10 +1126,10 @@ impl ProductSurface for StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
+    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -1141,11 +1141,11 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
         let command_id = ProductOperationId::parse(request.operation_id.as_str()).ok_or(
-            RebornServicesError {
-                code: RebornServicesErrorCode::Internal,
-                kind: RebornServicesErrorKind::Internal,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Internal,
+                kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
                 retryable: false,
                 field: None,
@@ -1155,32 +1155,32 @@ impl ProductSurface for StubServices {
         match command_id {
             ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
             ProductOperationId::SubmitTurn => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.submit_turn(caller, request).await?)
             }
             ProductOperationId::CancelRun => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.cancel_run(caller, request).await?)
             }
             ProductOperationId::RetryRun => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.retry_run(caller, request).await?)
             }
             ProductOperationId::ResolveGate => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.resolve_gate(caller, request).await?)
             }
-            _ => Err(RebornServicesError {
-                code: RebornServicesErrorCode::Internal,
-                kind: RebornServicesErrorKind::Internal,
+            _ => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Internal,
+                kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
                 retryable: false,
                 field: None,

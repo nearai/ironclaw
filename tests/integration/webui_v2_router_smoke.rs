@@ -17,8 +17,8 @@
 //! `StubServices`; extraction of a shared in-crate `test_support` module was
 //! reviewed and deferred (production-crate touch outside this batch's
 //! budget). Methods the scenario never calls return the shared rejecting
-//! error (`rejecting_reborn_services_error`, the public fakes helper —
-//! `RebornServicesError::service_unavailable` is `pub(super)`) so an
+//! error (`rejecting_product_surface_error`, the public fakes helper —
+//! `ProductSurfaceError::service_unavailable` is `pub(super)`) so an
 //! unexpected dispatch fails loudly.
 //!
 //! Flat suite, no harness mounts: this models an HTTP wire contract, not an
@@ -31,10 +31,10 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
-    WebUiCreateThreadRequest, rejecting_reborn_services_error,
+    ProductSurfaceError, RebornCreateThreadResponse, WebUiAuthenticatedCaller,
+    WebUiCreateThreadRequest, rejecting_product_surface_error,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::webui_v2::{
@@ -56,7 +56,7 @@ impl MinimalWebuiServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         self.create_thread_calls.lock().expect("lock").push(request);
         Ok(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
@@ -85,16 +85,16 @@ impl ProductSurface for MinimalWebuiServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
         let command_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(rejecting_reborn_services_error)?;
+            .ok_or_else(rejecting_product_surface_error)?;
         match command_id {
             ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
-            _ => Err(rejecting_reborn_services_error()),
+            _ => Err(rejecting_product_surface_error()),
         }
     }
 }

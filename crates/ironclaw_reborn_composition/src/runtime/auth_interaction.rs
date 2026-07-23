@@ -5,7 +5,7 @@ use ironclaw_auth::{
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, TurnGateAuthFlowQuery,
     TurnRunRef, flow_matches_turn_gate_query,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     AuthGateRecord, AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
     AuthInteractionService, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, ProductWorkflowError, ResolveAuthInteractionRequest,

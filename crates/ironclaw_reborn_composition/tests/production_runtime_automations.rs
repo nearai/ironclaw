@@ -26,7 +26,7 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     AUTOMATIONS_VIEW, RebornListAutomationsResponse, RebornViewQuery, WebUiAuthenticatedCaller,
     WebUiListAutomationsRequest,
 };

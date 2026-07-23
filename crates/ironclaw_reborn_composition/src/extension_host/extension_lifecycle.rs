@@ -22,14 +22,14 @@ use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
     RuntimeHttpEgress, UserId, VendorId, VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
-use ironclaw_product_workflow::{
+use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
+use ironclaw_product::{
     ChannelConnectionFacade, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
-    RebornChannelConnectStrategy, RebornServicesError, WebUiAuthenticatedCaller,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductSurfaceError,
+    ProductWorkflowError, RebornChannelConnectStrategy, WebUiAuthenticatedCaller,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -50,7 +50,7 @@ pub(crate) trait ExtensionCredentialCleanup: Send + Sync {
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError>;
+    ) -> Result<SecretCleanupReport, ProductSurfaceError>;
 }
 
 #[async_trait]
@@ -58,11 +58,11 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError> {
+    ) -> Result<SecretCleanupReport, ProductSurfaceError> {
         RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
             .await
             .map_err(|error| {
-                RebornServicesError::internal_from(format!(
+                ProductSurfaceError::internal_from(format!(
                     "extension credential cleanup failed: {:?}",
                     error.code
                 ))
@@ -3358,7 +3358,7 @@ mod tests {
         TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
-    use ironclaw_product_workflow::{
+    use ironclaw_product::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleProductAction,
         LifecycleProductContext, LifecycleProductFacade, LifecycleProductSurfaceContext,
         LifecycleReadinessBlocker,
@@ -3937,7 +3937,7 @@ mod tests {
             &self,
             context: &ExtensionRemovalCleanupContext,
             binding: &ExtensionRemovalCleanupBinding,
-        ) -> Result<(), RebornServicesError> {
+        ) -> Result<(), ProductSurfaceError> {
             let probe = self.probe.lock().expect("cleanup probe lock").clone();
             let (package_files_present, manifest_present, installation_present) =
                 if let Some(probe) = probe {
@@ -3972,7 +3972,7 @@ mod tests {
                     installation_present,
                 });
             if let Some(detail) = self.failure_detail {
-                return Err(RebornServicesError::internal_from(detail));
+                return Err(ProductSurfaceError::internal_from(detail));
             }
             Ok(())
         }
@@ -4285,7 +4285,7 @@ supports_threads = true
         async fn caller_channel_connections(
             &self,
             _caller: WebUiAuthenticatedCaller,
-        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError> {
             Ok(std::collections::HashMap::new())
         }
 
@@ -4293,7 +4293,7 @@ supports_threads = true
             &self,
             caller: WebUiAuthenticatedCaller,
             channel: &str,
-        ) -> Result<(), RebornServicesError> {
+        ) -> Result<(), ProductSurfaceError> {
             self.disconnects
                 .lock()
                 .expect("disconnect lock")
@@ -4305,7 +4305,7 @@ supports_threads = true
                 })
                 .is_ok()
             {
-                return Err(RebornServicesError::internal_from("disconnect unavailable"));
+                return Err(ProductSurfaceError::internal_from("disconnect unavailable"));
             }
             Ok(())
         }
@@ -7661,7 +7661,7 @@ output_schema_ref = "schemas/search.output.json"
         async fn cleanup_for_lifecycle(
             &self,
             request: SecretCleanupRequest,
-        ) -> Result<SecretCleanupReport, RebornServicesError> {
+        ) -> Result<SecretCleanupReport, ProductSurfaceError> {
             self.requests.lock().expect("cleanup lock").push(request);
             Ok(SecretCleanupReport::default())
         }
@@ -7677,9 +7677,9 @@ output_schema_ref = "schemas/search.output.json"
         async fn cleanup_for_lifecycle(
             &self,
             _request: SecretCleanupRequest,
-        ) -> Result<SecretCleanupReport, RebornServicesError> {
+        ) -> Result<SecretCleanupReport, ProductSurfaceError> {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
-                0 => Err(RebornServicesError::internal_from(
+                0 => Err(ProductSurfaceError::internal_from(
                     "credential cleanup backend unavailable",
                 )),
                 1 => Ok(SecretCleanupReport {
@@ -9937,7 +9937,7 @@ output_schema_ref = "schemas/search.output.json"
         let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
         contracts
             .register(Arc::new(
-                ironclaw_product_adapter_registry::ProductAdapterHostApiContract::new()
+                ironclaw_product::adapter_registry::ProductAdapterHostApiContract::new()
                     .expect("product adapter host API contract"),
             ))
             .expect("register product adapter host API contract");

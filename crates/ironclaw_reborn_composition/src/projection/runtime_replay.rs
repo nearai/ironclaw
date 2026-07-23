@@ -6,7 +6,7 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::EventCursor;
 use ironclaw_host_api::InvocationId;
-use ironclaw_product_adapters::{ProductAdapterError, ProductOutboundPayload};
+use ironclaw_product::{ProductAdapterError, ProductOutboundPayload};
 
 use super::WEBUI_RUNTIME_ITEM_MAX_PAYLOADS;
 

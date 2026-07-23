@@ -364,7 +364,7 @@ rows are inventoried here, not implemented in the current PR.
   `config.tenant_id` (trusted host installation) plus the
   authenticator's verified `UserId`. The browser body cannot influence
   either field; matches the rule in
-  `crates/ironclaw_product_workflow/CLAUDE.md`.
+  `crates/ironclaw_product/CLAUDE.md`.
 
 ### What this composition deliberately does NOT do
 

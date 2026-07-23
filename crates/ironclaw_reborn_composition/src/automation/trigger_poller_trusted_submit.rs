@@ -7,7 +7,7 @@ use ironclaw_conversations::{
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
-use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
+use ironclaw_product::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
@@ -486,7 +486,7 @@ mod tests {
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_product_workflow::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
+    use ironclaw_product::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
         AcceptedInboundMessage as CanonicalAcceptedInboundMessage,

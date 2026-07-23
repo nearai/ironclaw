@@ -28,7 +28,7 @@ use ironclaw_extension_host::{
     LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_host_api::SecretHandle;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ChannelAdapter, ChannelError, DeliveryReport, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope,
     ProductTriggerReason, VerifiedInbound,

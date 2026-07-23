@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::ThreadId;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ExternalEventId, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
     ProductTriggerReason, ProjectionReadRequest, UserMessagePayload,
 };
-use ironclaw_product_workflow::{
-    ProductSurface, RebornCancelRunResponse, RebornCreateThreadResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+use ironclaw_product::{
+    ProductSurface, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornStreamEventsRequest,
     RebornStreamEventsResponse, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiSendMessageRequest,
 };
@@ -38,7 +38,7 @@ struct FakeProductSurfaceState {
     cancelled: Vec<WebUiCancelRunRequest>,
     read_inputs: Vec<ProjectionReadRequest>,
     stream_events: Vec<RebornStreamEventsRequest>,
-    fail_with: Option<RebornServicesError>,
+    fail_with: Option<ProductSurfaceError>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ impl FakeProductSurface {
         }
     }
 
-    pub(crate) fn with_error(error: RebornServicesError) -> Self {
+    pub(crate) fn with_error(error: ProductSurfaceError) -> Self {
         Self {
             state: Mutex::new(FakeProductSurfaceState {
                 fail_with: Some(error),
@@ -123,7 +123,7 @@ impl FakeProductSurface {
             .insert(event_id.as_str().to_string(), outcome);
     }
 
-    pub(crate) fn force_failure(&self, error: RebornServicesError) {
+    pub(crate) fn force_failure(&self, error: ProductSurfaceError) {
         self.state.lock().expect("surface state lock").fail_with = Some(error);
     }
 
@@ -131,7 +131,7 @@ impl FakeProductSurface {
 
     pub(crate) fn program_projection_resolution(
         &self,
-        _request: ironclaw_product_adapters::ProjectionSubscriptionRequest,
+        _request: ironclaw_product::ProjectionSubscriptionRequest,
     ) {
     }
 
@@ -200,7 +200,7 @@ impl ProductSurface for FakeProductSurface {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
             .lock()
@@ -224,7 +224,7 @@ impl ProductSurface for FakeProductSurface {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
             .lock()
@@ -271,7 +271,7 @@ impl ProductSurface for FakeProductSurface {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
             .lock()
@@ -304,7 +304,7 @@ impl ProductSurface for FakeProductSurface {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.state
             .lock()
             .expect("surface state lock")
@@ -326,7 +326,7 @@ fn reborn_submit_from_ack(
     thread_id: ThreadId,
     mut ack: ProductInboundAck,
     rejection_param: &'static str,
-) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
     loop {
         match ack {
             ProductInboundAck::Accepted {
@@ -403,10 +403,10 @@ fn thread_record(caller: &WebUiAuthenticatedCaller, thread_id: ThreadId) -> Sess
     }
 }
 
-pub(crate) fn service_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+pub(crate) fn service_unavailable() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -414,10 +414,10 @@ pub(crate) fn service_unavailable() -> RebornServicesError {
     }
 }
 
-pub(crate) fn rate_limited() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::RateLimited,
-        kind: RebornServicesErrorKind::Busy,
+pub(crate) fn rate_limited() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::RateLimited,
+        kind: ProductSurfaceErrorKind::Busy,
         status_code: 429,
         retryable: false,
         field: None,
@@ -425,10 +425,10 @@ pub(crate) fn rate_limited() -> RebornServicesError {
     }
 }
 
-pub(crate) fn internal_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
+pub(crate) fn internal_error() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Internal,
+        kind: ProductSurfaceErrorKind::Internal,
         status_code: 500,
         retryable: false,
         field: None,
@@ -436,10 +436,10 @@ pub(crate) fn internal_error() -> RebornServicesError {
     }
 }
 
-fn invalid_request() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::InvalidRequest,
-        kind: RebornServicesErrorKind::Validation,
+fn invalid_request() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
         status_code: 400,
         retryable: false,
         field: None,
@@ -458,20 +458,20 @@ fn rejection_param_for_content(content: Option<&str>) -> &'static str {
 fn service_error_from_rejection(
     rejection: &ProductRejection,
     param: &'static str,
-) -> RebornServicesError {
+) -> ProductSurfaceError {
     match rejection.kind {
-        ProductRejectionKind::BindingRequired => RebornServicesError {
-            code: RebornServicesErrorCode::NotFound,
-            kind: RebornServicesErrorKind::NotFound,
+        ProductRejectionKind::BindingRequired => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::NotFound,
+            kind: ProductSurfaceErrorKind::NotFound,
             status_code: 404,
             retryable: false,
             field: Some(param.to_string()),
             validation_code: None,
         },
         ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -479,18 +479,18 @@ fn service_error_from_rejection(
             }
         }
         ProductRejectionKind::UnknownInstallation => service_unavailable(),
-        ProductRejectionKind::InvalidRequest => RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        ProductRejectionKind::InvalidRequest => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: Some(param.to_string()),
             validation_code: None,
         },
         ProductRejectionKind::AmbiguousResolution | ProductRejectionKind::StaleGate => {
-            RebornServicesError {
-                code: RebornServicesErrorCode::Conflict,
-                kind: RebornServicesErrorKind::Conflict,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Conflict,
+                kind: ProductSurfaceErrorKind::Conflict,
                 status_code: 409,
                 retryable: false,
                 field: None,

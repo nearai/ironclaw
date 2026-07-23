@@ -50,7 +50,7 @@ use ratchet_support::{strip_comments_and_strings, workspace_root};
 
 /// Path (relative to the workspace root) of the crate that defines the facade
 /// trait — the §-referenced contract owner (`type-placement.md` rule 3).
-const FACADE_SOURCE: &str = "crates/ironclaw_product_workflow/src/reborn_services.rs";
+const FACADE_SOURCE: &str = "crates/ironclaw_product/src/reborn_services.rs";
 const FACADE_TRAIT: &str = "ProductSurface";
 const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
 const RETIRED_PROTO_FACADE_TRAIT: &str = "RebornServicesApi";

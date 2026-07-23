@@ -13,7 +13,7 @@ use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,

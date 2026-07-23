@@ -36,11 +36,11 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ThreadId;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
     ProjectionSubscriptionRequest, UserMessagePayload,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProductSurface, WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiSendMessageRequest,
 };
 
@@ -1458,7 +1458,7 @@ fn content_value_to_text(content: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_product::ProductInboundAck;
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::accepted_ack_from_ack;

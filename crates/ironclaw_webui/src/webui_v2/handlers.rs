@@ -10,7 +10,7 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_product_workflow::ProductSurface
+//! [`ProductSurface`]: ironclaw_product::ProductSurface
 
 // arch-exempt: large_file, ProductSurface facade-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
@@ -29,7 +29,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_OPERATION,
     ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_OPERATION,
     ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
@@ -55,8 +55,9 @@ use ironclaw_product_workflow::{
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor, ProductCapabilityInput,
-    ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RESOLVE_GATE_OPERATION, RETRY_RUN_OPERATION, RebornAccountLoginLinkResponse,
+    ProductOutboundEnvelope, ProductSurface, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceValidationCode, ProductWorkflowError, ProjectFsFile,
+    ProjectionCursor, RESOLVE_GATE_OPERATION, RETRY_RUN_OPERATION, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
@@ -84,8 +85,7 @@ use ironclaw_product_workflow::{
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
     RebornProjectResponse, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornSetOutboundPreferencesRequest,
     RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
@@ -98,10 +98,10 @@ use ironclaw_product_workflow::{
     THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_OPERATION,
     TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_OPERATION,
     UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -269,10 +269,10 @@ pub async fn delete_thread(
 /// to a sanitized `400 invalid_request` before the facade is touched.
 fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
     UserId::new(raw).map_err(|_| {
-        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+        WebUiV2HttpError::from(ProductSurfaceError::validation(
             "user_id",
-            WebUiInboundValidationCode::InvalidId,
-        )))
+            ProductSurfaceValidationCode::InvalidId,
+        ))
     })
 }
 
@@ -281,10 +281,10 @@ fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
 /// Keeps a bad handle a client fault (400), never an internal 500 downstream.
 fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
     SecretHandle::new(raw).map_err(|_| {
-        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+        WebUiV2HttpError::from(ProductSurfaceError::validation(
             "handle",
-            WebUiInboundValidationCode::InvalidId,
-        )))
+            ProductSurfaceValidationCode::InvalidId,
+        ))
     })
 }
 
@@ -293,7 +293,7 @@ async fn read_admin_user_secret(
     caller: WebUiAuthenticatedCaller,
     user_id: UserId,
     handle: String,
-) -> Result<ironclaw_product_workflow::AdminUserSecretMeta, WebUiV2HttpError> {
+) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
     let response = ADMIN_USER_SECRETS_VIEW
         .query_on(
             services.as_ref(),
@@ -306,7 +306,7 @@ async fn read_admin_user_secret(
         .secrets
         .into_iter()
         .find(|secret| secret.handle == handle)
-        .ok_or_else(|| RebornServicesError::internal_from("updated admin user secret missing"))
+        .ok_or_else(|| ProductSurfaceError::internal_from("updated admin user secret missing"))
         .map_err(WebUiV2HttpError::from)
 }
 
@@ -716,7 +716,7 @@ fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2
                 error = %error,
                 "failed to build project-file download response",
             );
-            WebUiV2HttpError::from(RebornServicesError::internal())
+            WebUiV2HttpError::from(ProductSurfaceError::internal())
         })
 }
 
@@ -820,11 +820,9 @@ pub async fn read_fs_file(
 fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
     match path {
         Some(path) if !path.trim().is_empty() => Ok(path),
-        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
-            "path",
-            WebUiInboundValidationCode::Blank,
-        ))
-        .into()),
+        _ => {
+            Err(ProductSurfaceError::validation("path", ProductSurfaceValidationCode::Blank).into())
+        }
     }
 }
 
@@ -844,11 +842,9 @@ fn project_fs_list_path(path: Option<String>) -> String {
 fn require_project_fs_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
     match path {
         Some(path) if !path.trim().is_empty() => Ok(path),
-        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
-            "path",
-            WebUiInboundValidationCode::Blank,
-        ))
-        .into()),
+        _ => {
+            Err(ProductSurfaceError::validation("path", ProductSurfaceValidationCode::Blank).into())
+        }
     }
 }
 
@@ -1078,7 +1074,7 @@ async fn read_project_member(
         .members
         .into_iter()
         .find(|member| member.user_id == user_id)
-        .ok_or_else(|| RebornServicesError::internal_from("updated project member missing"))
+        .ok_or_else(|| ProductSurfaceError::internal_from("updated project member missing"))
         .map_err(WebUiV2HttpError::from)
 }
 
@@ -1211,7 +1207,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_product_workflow::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_product::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1263,9 +1259,9 @@ pub async fn stream_events(
 /// concurrency cap. `retryable: true` because the slot will free as soon
 /// as one of the caller's existing streams closes.
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
-    WebUiV2HttpError::from(RebornServicesError {
-        code: RebornServicesErrorCode::RateLimited,
-        kind: RebornServicesErrorKind::Busy,
+    WebUiV2HttpError::from(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::RateLimited,
+        kind: ProductSurfaceErrorKind::Busy,
         status_code: 429,
         retryable: true,
         field: None,
@@ -1301,8 +1297,8 @@ fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
 /// cannot fail on a tagged enum + bool, so there is no fallback branch.
 #[derive(Debug, Clone, Serialize)]
 struct SseErrorPayload {
-    error: RebornServicesErrorCode,
-    kind: RebornServicesErrorKind,
+    error: ProductSurfaceErrorCode,
+    kind: ProductSurfaceErrorKind,
     retryable: bool,
 }
 
@@ -1331,7 +1327,7 @@ fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<
     }
 }
 
-fn sse_error_event(error: RebornServicesError) -> Event {
+fn sse_error_event(error: ProductSurfaceError) -> Event {
     let payload = SseErrorPayload {
         error: error.code,
         kind: error.kind,
@@ -1919,35 +1915,35 @@ fn capability_resolution_succeeded(
     resolution: Resolution,
     label: &'static str,
     operation_failed_is_invalid_request: bool,
-    forbidden: fn() -> RebornServicesError,
-    unavailable: fn(bool) -> RebornServicesError,
-) -> Result<(), RebornServicesError> {
+    forbidden: fn() -> ProductSurfaceError,
+    unavailable: fn(bool) -> ProductSurfaceError,
+) -> Result<(), ProductSurfaceError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            Some(FailureKind::InvalidInput) => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::InvalidRequest,
+                kind: ProductSurfaceErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: None,
-                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
             }),
             Some(FailureKind::OperationFailed) if operation_failed_is_invalid_request => {
-                Err(RebornServicesError {
-                    code: RebornServicesErrorCode::InvalidRequest,
-                    kind: RebornServicesErrorKind::Validation,
+                Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::InvalidRequest,
+                    kind: ProductSurfaceErrorKind::Validation,
                     status_code: 400,
                     retryable: false,
                     field: None,
-                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                    validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
                 })
             }
             Some(FailureKind::Authorization | FailureKind::PolicyDenied) => Err(forbidden()),
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
                 Err(unavailable(true))
             }
-            _ => Err(RebornServicesError::internal_from(format!(
+            _ => Err(ProductSurfaceError::internal_from(format!(
                 "{label} capability did not complete successfully"
             ))),
         },
@@ -1961,18 +1957,14 @@ fn parse_thread_id_for_response(
     value: String,
 ) -> Result<ThreadId, WebUiV2HttpError> {
     ThreadId::new(value).map_err(|_| {
-        RebornServicesError::from(WebUiInboundValidationError::new(
-            field,
-            WebUiInboundValidationCode::InvalidId,
-        ))
-        .into()
+        ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidId).into()
     })
 }
 
-fn outbound_preferences_forbidden() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+fn outbound_preferences_forbidden() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -1980,10 +1972,10 @@ fn outbound_preferences_forbidden() -> RebornServicesError {
     }
 }
 
-fn outbound_preferences_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn outbound_preferences_unavailable(retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2194,18 +2186,18 @@ pub async fn set_auto_activate_learned(
     }))
 }
 
-fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), ProductSurfaceError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
             Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
-                Err(RebornServicesError {
-                    code: RebornServicesErrorCode::InvalidRequest,
-                    kind: RebornServicesErrorKind::Validation,
+                Err(ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::InvalidRequest,
+                    kind: ProductSurfaceErrorKind::Validation,
                     status_code: 400,
                     retryable: false,
                     field: None,
-                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                    validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
                 })
             }
             Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
@@ -2214,7 +2206,7 @@ fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServices
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
                 Err(skill_mutation_unavailable(true))
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(ProductSurfaceError::internal_from(
                 "skill capability did not complete successfully",
             )),
         },
@@ -2223,10 +2215,10 @@ fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServices
     }
 }
 
-fn skill_mutation_forbidden() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+fn skill_mutation_forbidden() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2234,10 +2226,10 @@ fn skill_mutation_forbidden() -> RebornServicesError {
     }
 }
 
-fn skill_mutation_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn skill_mutation_unavailable(retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2349,21 +2341,21 @@ pub async fn remove_extension(
 
 fn extension_lifecycle_mutation_succeeded(
     resolution: Resolution,
-) -> Result<(), RebornServicesError> {
+) -> Result<(), ProductSurfaceError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            Some(FailureKind::InvalidInput) => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::InvalidRequest,
+                kind: ProductSurfaceErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: None,
-                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
             }),
-            Some(FailureKind::OperationFailed) => Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            Some(FailureKind::OperationFailed) => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::InvalidRequest,
+                kind: ProductSurfaceErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: None,
@@ -2375,7 +2367,7 @@ fn extension_lifecycle_mutation_succeeded(
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
                 Err(extension_lifecycle_unavailable(true))
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(ProductSurfaceError::internal_from(
                 "extension lifecycle capability did not complete successfully",
             )),
         },
@@ -2391,7 +2383,7 @@ async fn extension_activation_response(
     caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
     resolution: Resolution,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+) -> Result<RebornExtensionActionResponse, ProductSurfaceError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => {
             let activated = query_extension_active_state(services, caller, &package_ref).await?;
@@ -2426,7 +2418,7 @@ async fn query_extension_active_state(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
     package_ref: &LifecyclePackageRef,
-) -> Result<bool, RebornServicesError> {
+) -> Result<bool, ProductSurfaceError> {
     let page = services
         .query(
             caller,
@@ -2438,7 +2430,7 @@ async fn query_extension_active_state(
         )
         .await?;
     let response: RebornExtensionListResponse =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     response
         .extensions
         .iter()
@@ -2447,10 +2439,10 @@ async fn query_extension_active_state(
         .ok_or_else(|| extension_lifecycle_unavailable(true))
 }
 
-fn extension_lifecycle_forbidden() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+fn extension_lifecycle_forbidden() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2458,10 +2450,10 @@ fn extension_lifecycle_forbidden() -> RebornServicesError {
     }
 }
 
-fn extension_lifecycle_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn extension_lifecycle_unavailable(retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2507,7 +2499,7 @@ pub async fn get_extension_setup(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2531,10 +2523,10 @@ pub async fn setup_extension(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let mut input = serde_json::to_value(body).map_err(RebornServicesError::internal_from)?;
+    let mut input = serde_json::to_value(body).map_err(ProductSurfaceError::internal_from)?;
     let input_object = input
         .as_object_mut()
-        .ok_or_else(|| RebornServicesError::internal_from("setup request did not encode object"))?;
+        .ok_or_else(|| ProductSurfaceError::internal_from("setup request did not encode object"))?;
     input_object.insert(
         "extension_id".to_string(),
         serde_json::Value::String(package_ref.id.as_str().to_string()),
@@ -2559,7 +2551,7 @@ pub async fn setup_extension(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2569,9 +2561,9 @@ fn require_operator_webui_config(
     if capabilities.operator_webui_config {
         return Ok(());
     }
-    Err(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2662,7 +2654,7 @@ pub async fn replace_extension_admin_configuration(
                 .get("revision")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| {
-                    RebornServicesError::internal_from(
+                    ProductSurfaceError::internal_from(
                         "admin configuration view omitted a numeric revision",
                     )
                 })?;
@@ -2671,9 +2663,9 @@ pub async fn replace_extension_admin_configuration(
             }
             Err(admin_configuration_done_failure(outcome.verdict.error_kind()).into())
         }
-        Resolution::Denied(_) => Err(RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        Resolution::Denied(_) => Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Forbidden,
+            kind: ProductSurfaceErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -2690,11 +2682,11 @@ async fn invoke_product_capability<T>(
     caller: WebUiAuthenticatedCaller,
     capability: ProductCapabilityDescriptor,
     input: T,
-) -> Result<Resolution, RebornServicesError>
+) -> Result<Resolution, ProductSurfaceError>
 where
     T: Serialize,
 {
-    let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+    let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_capability_activity_id(&caller, capability, &input)?;
     invoke_product_capability_with_activity_id(services, caller, capability, input, activity_id)
         .await
@@ -2706,7 +2698,7 @@ async fn invoke_product_capability_with_activity_id<T>(
     capability: ProductCapabilityDescriptor,
     input: T,
     activity_id: ActivityId,
-) -> Result<Resolution, RebornServicesError>
+) -> Result<Resolution, ProductSurfaceError>
 where
     T: Serialize,
 {
@@ -2719,9 +2711,9 @@ fn product_capability_activity_id(
     caller: &WebUiAuthenticatedCaller,
     capability: ProductCapabilityDescriptor,
     input: &serde_json::Value,
-) -> Result<ActivityId, RebornServicesError> {
+) -> Result<ActivityId, ProductSurfaceError> {
     let capability_id = capability.capability_id()?;
-    let input_bytes = serde_json::to_vec(input).map_err(RebornServicesError::internal_from)?;
+    let input_bytes = serde_json::to_vec(input).map_err(ProductSurfaceError::internal_from)?;
     let mut seed = Vec::new();
     for segment in [
         "webui-product-capability",
@@ -2749,7 +2741,7 @@ fn product_capability_activity_id(
 fn llm_provider_upsert_activity_id(
     caller: &WebUiAuthenticatedCaller,
     request: &UpsertLlmProviderRequest,
-) -> Result<ActivityId, RebornServicesError> {
+) -> Result<ActivityId, ProductSurfaceError> {
     let capability_id = LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?;
     let mut seed = Vec::new();
     for segment in [
@@ -2793,7 +2785,7 @@ async fn query_product_view<T>(
     view: RebornViewDescriptor,
     params: serde_json::Value,
     cursor: Option<String>,
-) -> Result<T, RebornServicesError>
+) -> Result<T, ProductSurfaceError>
 where
     T: DeserializeOwned,
 {
@@ -2807,13 +2799,13 @@ where
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 async fn query_extension_admin_configuration(
     state: &WebUiV2State,
     caller: WebUiAuthenticatedCaller,
-) -> Result<serde_json::Value, RebornServicesError> {
+) -> Result<serde_json::Value, ProductSurfaceError> {
     let page = state
         .services()
         .query(
@@ -2830,7 +2822,7 @@ async fn query_extension_admin_configuration(
         .get("groups")
         .is_some_and(serde_json::Value::is_array)
     {
-        return Err(RebornServicesError::internal_from(
+        return Err(ProductSurfaceError::internal_from(
             "admin configuration view returned an invalid list payload",
         ));
     }
@@ -2840,7 +2832,7 @@ async fn query_extension_admin_configuration(
 fn select_extension_admin_configuration_group(
     payload: &serde_json::Value,
     group_id: &str,
-) -> Result<serde_json::Value, RebornServicesError> {
+) -> Result<serde_json::Value, ProductSurfaceError> {
     payload
         .get("groups")
         .and_then(serde_json::Value::as_array)
@@ -2850,29 +2842,29 @@ fn select_extension_admin_configuration_group(
             })
         })
         .cloned()
-        .ok_or_else(RebornServicesError::not_found)
+        .ok_or_else(ProductSurfaceError::not_found)
 }
 
 fn admin_configuration_activity_id(
     caller: &WebUiAuthenticatedCaller,
     group_id: &str,
     idempotency_key: &str,
-) -> Result<ActivityId, RebornServicesError> {
+) -> Result<ActivityId, ProductSurfaceError> {
     let validation_code = if idempotency_key.is_empty() {
-        Some(WebUiInboundValidationCode::Blank)
+        Some(ProductSurfaceValidationCode::Blank)
     } else if idempotency_key.len() > ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES {
-        Some(WebUiInboundValidationCode::TooLong)
+        Some(ProductSurfaceValidationCode::TooLong)
     } else if idempotency_key.trim() != idempotency_key {
-        Some(WebUiInboundValidationCode::InvalidId)
+        Some(ProductSurfaceValidationCode::InvalidId)
     } else if idempotency_key.chars().any(char::is_control) {
-        Some(WebUiInboundValidationCode::InvalidControlCharacter)
+        Some(ProductSurfaceValidationCode::InvalidControlCharacter)
     } else {
         None
     };
     if let Some(validation_code) = validation_code {
-        return Err(RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        return Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: Some("idempotency_key".to_string()),
@@ -2903,10 +2895,10 @@ fn admin_configuration_activity_id(
     )))
 }
 
-fn admin_configuration_conflict() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
-        kind: RebornServicesErrorKind::Conflict,
+fn admin_configuration_conflict() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
         status_code: 409,
         retryable: false,
         field: Some("expected_revision".to_string()),
@@ -2914,10 +2906,10 @@ fn admin_configuration_conflict() -> RebornServicesError {
     }
 }
 
-fn admin_configuration_unavailable(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn admin_configuration_unavailable(retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -2925,15 +2917,15 @@ fn admin_configuration_unavailable(retryable: bool) -> RebornServicesError {
     }
 }
 
-fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornServicesError {
+fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> ProductSurfaceError {
     match error_kind {
-        Some(FailureKind::InvalidInput) => RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        Some(FailureKind::InvalidInput) => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: None,
-            validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
         },
         Some(
             FailureKind::Backend
@@ -2944,9 +2936,9 @@ fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornS
         ) => admin_configuration_unavailable(true),
         Some(
             FailureKind::Authorization | FailureKind::PolicyDenied | FailureKind::GateDeclined,
-        ) => RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        ) => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Forbidden,
+            kind: ProductSurfaceErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -2964,18 +2956,18 @@ fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornS
             | FailureKind::Permanent
             | FailureKind::Unknown(_),
         )
-        | None => RebornServicesError::internal(),
+        | None => ProductSurfaceError::internal(),
     }
 }
 
-fn admin_configuration_blocked(blocked: Blocked) -> RebornServicesError {
+fn admin_configuration_blocked(blocked: Blocked) -> ProductSurfaceError {
     let kind = match blocked {
-        Blocked::Approval(_) => RebornServicesErrorKind::BlockedApproval,
-        Blocked::Auth(_) => RebornServicesErrorKind::BlockedAuthentication,
-        Blocked::Resource(_) => RebornServicesErrorKind::BlockedResource,
+        Blocked::Approval(_) => ProductSurfaceErrorKind::BlockedApproval,
+        Blocked::Auth(_) => ProductSurfaceErrorKind::BlockedAuthentication,
+        Blocked::Resource(_) => ProductSurfaceErrorKind::BlockedResource,
     };
-    RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
         kind,
         status_code: 409,
         retryable: true,
@@ -2998,7 +2990,7 @@ pub async fn get_operator_setup(
 async fn query_operator_setup_response(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
-) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+) -> Result<RebornOperatorSetupResponse, ProductSurfaceError> {
     let page = services
         .query(
             caller,
@@ -3009,7 +3001,7 @@ async fn query_operator_setup_response(
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 /// `POST /api/webchat/v2/operator/setup`
@@ -3056,7 +3048,7 @@ pub async fn list_settings_tools(
         )
         .await?;
     let mut response: RebornOperatorConfigListResponse =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     response.entries.retain(|entry| {
         entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
             || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
@@ -3137,10 +3129,10 @@ pub async fn set_settings_tool_permission(
 
 fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
     if capability_id.len() > SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES {
-        return Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        return Err(ProductSurfaceError::validation(
             "capability_id",
-            WebUiInboundValidationCode::TooLong,
-        ))
+            ProductSurfaceValidationCode::TooLong,
+        )
         .into());
     }
     Ok(())
@@ -3155,11 +3147,7 @@ fn validate_settings_tool_config_response(
         return Ok(());
     }
 
-    Err(RebornServicesError::from(WebUiInboundValidationError::new(
-        "key",
-        WebUiInboundValidationCode::InvalidValue,
-    ))
-    .into())
+    Err(ProductSurfaceError::validation("key", ProductSurfaceValidationCode::InvalidValue).into())
 }
 
 /// `GET /api/webchat/v2/operator/config`
@@ -3181,7 +3169,7 @@ pub async fn list_operator_config(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3195,17 +3183,17 @@ const OPERATOR_CONFIG_RESERVED_VALIDATE_KEY: &str = "validate";
 
 fn validate_operator_config_key(key: String) -> Result<String, WebUiV2HttpError> {
     let validation_code = if key.is_empty() {
-        Some(WebUiInboundValidationCode::Blank)
+        Some(ProductSurfaceValidationCode::Blank)
     } else if key.len() > OPERATOR_CONFIG_KEY_MAX_BYTES {
-        Some(WebUiInboundValidationCode::TooLong)
+        Some(ProductSurfaceValidationCode::TooLong)
     } else if key == OPERATOR_CONFIG_RESERVED_VALIDATE_KEY {
-        Some(WebUiInboundValidationCode::InvalidValue)
+        Some(ProductSurfaceValidationCode::InvalidValue)
     } else if key.bytes().all(|byte| {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
     }) {
         None
     } else {
-        Some(WebUiInboundValidationCode::InvalidValue)
+        Some(ProductSurfaceValidationCode::InvalidValue)
     };
 
     match validation_code {
@@ -3214,15 +3202,15 @@ fn validate_operator_config_key(key: String) -> Result<String, WebUiV2HttpError>
     }
 }
 
-fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpError {
-    RebornServicesError::from(WebUiInboundValidationError::new("key", code)).into()
+fn operator_config_key_error(code: ProductSurfaceValidationCode) -> WebUiV2HttpError {
+    ProductSurfaceError::validation("key", code).into()
 }
 
 async fn query_operator_config_key_response(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
     key: String,
-) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
     let page = services
         .query(
             caller,
@@ -3233,7 +3221,7 @@ async fn query_operator_config_key_response(
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 /// `GET /api/webchat/v2/operator/config/{key}`
@@ -3282,7 +3270,7 @@ pub async fn reject_reserved_operator_config_key(
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     Err(operator_config_key_error(
-        WebUiInboundValidationCode::InvalidValue,
+        ProductSurfaceValidationCode::InvalidValue,
     ))
 }
 
@@ -3300,13 +3288,13 @@ pub async fn validate_operator_config(
             caller,
             RebornViewQuery {
                 view_id: OPERATOR_CONFIG_VALIDATE_VIEW.id.to_string(),
-                params: serde_json::to_value(body).map_err(RebornServicesError::internal_from)?,
+                params: serde_json::to_value(body).map_err(ProductSurfaceError::internal_from)?,
                 cursor: None,
             },
         )
         .await?;
     let response: RebornOperatorConfigValidateResponse =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3329,7 +3317,7 @@ pub async fn get_operator_diagnostics(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3352,7 +3340,7 @@ pub async fn get_operator_status(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3368,7 +3356,7 @@ pub async fn query_operator_logs(
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let cursor = query.cursor.take();
-    let params = serde_json::to_value(query).map_err(RebornServicesError::internal_from)?;
+    let params = serde_json::to_value(query).map_err(ProductSurfaceError::internal_from)?;
     let page = state
         .services()
         .query(
@@ -3381,7 +3369,7 @@ pub async fn query_operator_logs(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3411,7 +3399,7 @@ pub async fn query_logs(
         follow: query.follow,
     };
     let cursor = request.cursor.take();
-    let params = serde_json::to_value(request).map_err(RebornServicesError::internal_from)?;
+    let params = serde_json::to_value(request).map_err(ProductSurfaceError::internal_from)?;
     let page = state
         .services()
         .query(
@@ -3424,7 +3412,7 @@ pub async fn query_logs(
         )
         .await?;
     let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -3462,7 +3450,7 @@ pub async fn get_llm_config(
 async fn query_llm_config_snapshot(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
-) -> Result<LlmConfigSnapshot, RebornServicesError> {
+) -> Result<LlmConfigSnapshot, ProductSurfaceError> {
     let page = services
         .query(
             caller,
@@ -3473,7 +3461,7 @@ async fn query_llm_config_snapshot(
             },
         )
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
 }
 
 /// `POST /api/webchat/v2/llm/providers`
@@ -3606,10 +3594,7 @@ pub async fn start_nearai_login(
     {
         body.as_object_mut()
             .ok_or_else(|| {
-                RebornServicesError::from(WebUiInboundValidationError::new(
-                    "body",
-                    WebUiInboundValidationCode::InvalidValue,
-                ))
+                ProductSurfaceError::validation("body", ProductSurfaceValidationCode::InvalidValue)
             })?
             .insert(
                 "origin".to_string(),
@@ -3695,14 +3680,11 @@ pub struct SetSkillAutoActivateBody {
 fn extension_package_ref_for_request(
     package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
     field: &'static str,
-) -> Result<LifecyclePackageRef, RebornServicesError> {
+) -> Result<LifecyclePackageRef, ProductSurfaceError> {
     package_ref
         .and_then(LifecyclePackageRef::require_extension)
         .map_err(|_| {
-            RebornServicesError::from(WebUiInboundValidationError::new(
-                field,
-                WebUiInboundValidationCode::InvalidId,
-            ))
+            ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidId)
         })
 }
 

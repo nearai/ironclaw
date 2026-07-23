@@ -39,11 +39,11 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
@@ -846,10 +846,8 @@ impl GenericChannelHostAssembly {
         let conversations: Arc<dyn ironclaw_conversations::ConversationBindingService> =
             Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationBindingService>;
-        let binding = ironclaw_product_workflow::ProductConversationBindingService::new(
-            conversations,
-            resolver,
-        );
+        let binding =
+            ironclaw_product::ProductConversationBindingService::new(conversations, resolver);
         Ok((
             Arc::new(binding) as Arc<dyn ConversationBindingService>,
             workflow_state,
@@ -973,8 +971,8 @@ struct TriggeredNoopConversationBindingService;
 impl ConversationBindingService for TriggeredNoopConversationBindingService {
     async fn resolve_binding(
         &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        _request: ironclaw_product::ResolveBindingRequest,
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -982,8 +980,8 @@ impl ConversationBindingService for TriggeredNoopConversationBindingService {
 
     async fn lookup_binding(
         &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        _request: ironclaw_product::ResolveBindingRequest,
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
@@ -1064,7 +1062,7 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
+        error: ironclaw_product::ProductAdapterError,
     ) {
         self.observer.observe_error(envelope, error).await;
     }

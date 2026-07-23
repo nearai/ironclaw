@@ -21,10 +21,10 @@ use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_product_workflow::{
-    OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    OperatorServiceLifecycleService, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, WebUiAuthenticatedCaller,
 };
 
 const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";
@@ -793,15 +793,15 @@ impl RebornLocalServiceLifecycle {
     fn ensure_authorized_operator(
         &self,
         caller: &WebUiAuthenticatedCaller,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         if self.operator_identity.as_ref().is_some_and(|operator| {
             caller.tenant_id == operator.tenant_id && caller.user_id == operator.user_id
         }) {
             return Ok(());
         }
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Forbidden,
+            kind: ProductSurfaceErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -822,14 +822,14 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+    ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError> {
         self.ensure_authorized_operator(&caller)?;
         let permit = self
             .operation_permits
             .clone()
             .acquire_owned()
             .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         let service = self.clone();
         let action = request.action;
         tokio::task::spawn_blocking(move || {
@@ -844,7 +844,7 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
         .await
         .map_err(|error| {
             tracing::debug!(%error, "service lifecycle task failed");
-            RebornServicesError::internal_from("service lifecycle task failed")
+            ProductSurfaceError::internal_from("service lifecycle task failed")
         })
     }
 }
@@ -1850,7 +1850,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .await
             .expect_err("non-operator rejected");
 
-        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
     }
 
@@ -1873,7 +1873,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .await
             .expect_err("cross-tenant caller rejected");
 
-        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
     }
 

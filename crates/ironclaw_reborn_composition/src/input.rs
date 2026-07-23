@@ -214,8 +214,7 @@ pub struct RebornBuildInput {
     /// per-extension activation gates and connect-strategy presentation.
     /// `WebGeneratedCode` declarations additionally get a generic pairing
     /// service composed over the durable identity/pairing stores.
-    pub(crate) account_setup_descriptors:
-        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -229,7 +228,7 @@ pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
+    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
     /// Protocol-specific inbound payload reclassification (gate-resolution
     /// replies), registered on the channel host assembly.
     pub inbound_payload_classifier:
@@ -237,7 +236,7 @@ pub struct ChannelExtensionBinding {
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec:
-        Option<std::sync::Arc<dyn ironclaw_product_workflow::PreferenceTargetCodec>>,
+        Option<std::sync::Arc<dyn ironclaw_product::PreferenceTargetCodec>>,
 }
 
 #[derive(Clone, Debug)]
@@ -705,7 +704,7 @@ impl RebornBuildInput {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     ) -> Self {
         self.account_setup_descriptors = descriptors;
         self

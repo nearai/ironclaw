@@ -37,8 +37,8 @@ use ironclaw_host_api::{
     AgentId, ExtensionId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions,
     MountView, ProjectId, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
 };
-use ironclaw_product_adapters::AdapterInstallationId;
-use ironclaw_product_workflow::ChannelConnectionNoticePolicy;
+use ironclaw_product::AdapterInstallationId;
+use ironclaw_product::ChannelConnectionNoticePolicy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1057,11 +1057,11 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
     async fn intercept(
         &self,
         installation_id: &AdapterInstallationId,
-        message: &ironclaw_product_adapters::NormalizedInboundMessage,
+        message: &ironclaw_product::NormalizedInboundMessage,
     ) -> crate::extension_host::extension_ingress::ChannelPairingInterception {
         use crate::extension_host::extension_ingress::ChannelPairingInterception;
 
-        if message.trigger != ironclaw_product_adapters::ProductTriggerReason::DirectChat {
+        if message.trigger != ironclaw_product::ProductTriggerReason::DirectChat {
             return ChannelPairingInterception::NotHandled;
         }
         let Some(code) = candidate_code(&message.text) else {
@@ -1119,18 +1119,18 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
 /// entry so activation can gate on the caller's pairing state without
 /// holding the full pairing surface.
 #[async_trait]
-impl ironclaw_product_workflow::AccountConnectionStatusSource for ChannelPairingService {
+impl ironclaw_product::AccountConnectionStatusSource for ChannelPairingService {
     async fn connected(
         &self,
         user_id: &UserId,
-    ) -> Result<bool, ironclaw_product_workflow::AccountConnectionStatusError> {
+    ) -> Result<bool, ironclaw_product::AccountConnectionStatusError> {
         let status = self.status_for(user_id).await.map_err(|error| {
             tracing::debug!(
                 target: "ironclaw::reborn::channel_pairing",
                 error = %error,
                 "channel pairing status lookup failed"
             );
-            ironclaw_product_workflow::AccountConnectionStatusError::new(
+            ironclaw_product::AccountConnectionStatusError::new(
                 "channel pairing status unavailable",
             )
         })?;

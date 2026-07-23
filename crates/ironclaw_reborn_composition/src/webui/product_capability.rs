@@ -18,9 +18,9 @@ use ironclaw_host_api::{
     TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+use ironclaw_product::{
+    ProductCapabilityInvoker, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
 };
 
@@ -102,7 +102,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         capability: CapabilityId,
         input: serde_json::Value,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, ProductSurfaceError> {
         let Self::Available {
             host_runtime,
             registry,
@@ -125,7 +125,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         let outcome = host_runtime
             .invoke_capability((context, capability, ResourceEstimate::default(), input))
             .await
-            .map_err(RebornServicesError::internal_from)?;
+            .map_err(ProductSurfaceError::internal_from)?;
         ensure_matching_capability(&requested_capability, &outcome)?;
         product_resolution(results, &scope, invocation_id, outcome).await
     }
@@ -136,7 +136,7 @@ fn product_execution_context(
     activity_id: ActivityId,
     descriptor: Option<&CapabilityDescriptor>,
     mounts: ProductCapabilityMounts,
-) -> Result<ExecutionContext, RebornServicesError> {
+) -> Result<ExecutionContext, ProductSurfaceError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     let scope = ResourceScope {
         tenant_id: caller.tenant_id.clone(),
@@ -148,7 +148,7 @@ fn product_execution_context(
         invocation_id,
     };
     let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
-        .map_err(RebornServicesError::internal_from)?;
+        .map_err(ProductSurfaceError::internal_from)?;
     let invocation_mounts = product_invocation_mounts(&scope, descriptor, mounts)?;
     let grants = descriptor
         .map(|descriptor| CapabilitySet {
@@ -173,7 +173,7 @@ fn product_execution_context(
         thread_id: None,
         run_id: None,
         origin: Some(InvocationOrigin::Product(
-            ProductKind::new("webui").map_err(RebornServicesError::internal_from)?,
+            ProductKind::new("webui").map_err(ProductSurfaceError::internal_from)?,
         )),
         extension_id,
         // Both are provisional input to the kernel. Resolve/authorize derives
@@ -186,7 +186,7 @@ fn product_execution_context(
     };
     context
         .validate()
-        .map_err(RebornServicesError::internal_from)?;
+        .map_err(ProductSurfaceError::internal_from)?;
     Ok(context)
 }
 
@@ -243,7 +243,7 @@ fn product_invocation_mounts(
     scope: &ResourceScope,
     descriptor: Option<&CapabilityDescriptor>,
     mounts: ProductCapabilityMounts,
-) -> Result<MountView, RebornServicesError> {
+) -> Result<MountView, ProductSurfaceError> {
     let Some(descriptor) = descriptor else {
         return Ok(MountView::default());
     };
@@ -253,10 +253,10 @@ fn product_invocation_mounts(
     match mounts {
         ProductCapabilityMounts::LocalDev => {
             crate::local_dev_mounts::scoped_skill_management_mount_view(scope)
-                .map_err(RebornServicesError::internal_from)
+                .map_err(ProductSurfaceError::internal_from)
         }
         ProductCapabilityMounts::Production => production_skill_management_mount_view(scope)
-            .map_err(RebornServicesError::internal_from),
+            .map_err(ProductSurfaceError::internal_from),
     }
 }
 
@@ -275,13 +275,13 @@ async fn product_resolution(
     scope: &ResourceScope,
     invocation_id: InvocationId,
     outcome: RuntimeCapabilityOutcome,
-) -> Result<Resolution, RebornServicesError> {
+) -> Result<Resolution, ProductSurfaceError> {
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
             let body = serde_json::to_vec(&completed.output)
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             if body.len() > PRODUCT_RESULT_MAX_BYTES {
-                return Err(RebornServicesError::internal_from(
+                return Err(ProductSurfaceError::internal_from(
                     "product capability result exceeded the durable output bound",
                 ));
             }
@@ -304,7 +304,7 @@ async fn product_resolution(
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             Ok(Resolution::Blocked(Blocked::Approval(
                 GateWaypoint::new(GateRef::for_approval_request(gate.approval_request_id))
                     .with_resume(resume),
@@ -312,7 +312,7 @@ async fn product_resolution(
         }
         RuntimeCapabilityOutcome::AuthRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             Ok(Resolution::Blocked(Blocked::Auth(
                 GateWaypoint::new(GateRef::for_auth_gate(gate.gate_id.as_str()))
                     .with_resume(resume),
@@ -398,7 +398,7 @@ fn fixed_summary(summary: &'static str) -> SafeSummary {
 fn ensure_matching_capability(
     requested: &CapabilityId,
     outcome: &RuntimeCapabilityOutcome,
-) -> Result<(), RebornServicesError> {
+) -> Result<(), ProductSurfaceError> {
     let actual = match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => &completed.capability_id,
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => &gate.capability_id,
@@ -409,7 +409,7 @@ fn ensure_matching_capability(
         RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
     };
     if actual != requested {
-        return Err(RebornServicesError::internal_from(
+        return Err(ProductSurfaceError::internal_from(
             "host runtime returned an outcome for a different capability",
         ));
     }
@@ -422,7 +422,7 @@ impl ProductResultFilesystem {
         scope: &ResourceScope,
         result_ref: ResultRef,
         body: Vec<u8>,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         match self {
             Self::Composite(filesystem) => {
                 persist_product_result(filesystem, scope, result_ref, body).await
@@ -442,12 +442,12 @@ async fn persist_product_result<F>(
     scope: &ResourceScope,
     result_ref: ResultRef,
     body: Vec<u8>,
-) -> Result<(), RebornServicesError>
+) -> Result<(), ProductSurfaceError>
 where
     F: RootFilesystem + ?Sized,
 {
     let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.json"))
-        .map_err(RebornServicesError::internal_from)?;
+        .map_err(ProductSurfaceError::internal_from)?;
     let write_body = body.clone();
     cas_update(
         filesystem,
@@ -472,13 +472,13 @@ where
         },
     )
     .await
-    .map_err(RebornServicesError::internal_from)
+    .map_err(ProductSurfaceError::internal_from)
 }
 
-fn product_runtime_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn product_runtime_unavailable() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: false,
         field: None,

@@ -23,7 +23,7 @@ layer = "app"
 test-support = [
     "ironclaw_host_runtime/test-support",
     "ironclaw_outbound/test-support",
-    "ironclaw_product_workflow/test-support",
+    "ironclaw_product/test-support",
     "ironclaw_runner/test-support",
 ]
 [dependencies]
@@ -57,9 +57,7 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
-ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
 ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }
@@ -78,7 +76,6 @@ ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -144,8 +141,7 @@ ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
 # The ported channel-host e2e suite drives the generic assembly with slack
 # fixtures; dev-dependency linkage of concrete extension crates is the
 # sanctioned test exception (DEL-7).

@@ -7,7 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product_workflow::*;
+use ironclaw_product::*;
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
@@ -23,10 +23,10 @@ fn caller() -> WebUiAuthenticatedCaller {
     )
 }
 
-fn service_unavailable_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn service_unavailable_error() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: false,
         field: None,
@@ -51,7 +51,7 @@ impl RecordingServices {
         _caller: WebUiAuthenticatedCaller,
         key: String,
         request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
         self.calls
             .lock()
             .expect("lock")
@@ -69,7 +69,7 @@ impl ProductSurface for RecordingServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
         if query.view_id != OPERATOR_CONFIG_KEY_VIEW.id {
             unreachable!("not exercised by this test");
         }
@@ -90,14 +90,14 @@ impl ProductSurface for RecordingServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(service_unavailable_error)?;
         match operation_id {
             ProductOperationId::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest =
                     serde_json::from_value(request.input)
-                        .map_err(RebornServicesError::internal_from)?;
+                        .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(
                     self.set_operator_config_key(
                         caller,

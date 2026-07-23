@@ -42,12 +42,12 @@ pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
 };
 pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product_workflow::PreferenceTargetCodec;
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::PreferenceTargetCodec;
+pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
 };
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };

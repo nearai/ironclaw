@@ -5,7 +5,7 @@
 //! stub [`ProductSurface`] so the regression target is the wire
 //! contract — body shape, path/query plumbing, error mapping — not just
 //! the facade method bodies that are already covered in
-//! `ironclaw_product_workflow`.
+//! `ironclaw_product`.
 
 // arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
 
@@ -28,13 +28,7 @@ use ironclaw_host_api::{
     OutcomeRefs, ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind,
     SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_product_adapters::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProgressKind, ProgressUpdateView, ProjectionCursor,
-};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
@@ -55,7 +49,8 @@ use ironclaw_product_workflow::{
     PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductOperationId,
-    ProductOperationRequest, ProductOperationResponse, ProductSurface, ProjectFsEntry,
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
@@ -89,7 +84,6 @@ use ironclaw_product_workflow::{
     RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
     RebornProjectState, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
@@ -100,9 +94,14 @@ use ironclaw_product_workflow::{
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    rejecting_reborn_services_error,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, rejecting_product_surface_error,
+};
+use ironclaw_product::{
+    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
+    ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -167,10 +166,10 @@ fn router_with_caller_only(services: Arc<dyn ProductSurface>) -> Router {
     .layer(axum::Extension(caller()))
 }
 
-fn service_unavailable_error(retryable: bool) -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+fn service_unavailable_error(retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable,
         field: None,
@@ -306,12 +305,12 @@ struct StubServices {
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
-    next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
+    next_global_auto_approve_error: Mutex<Option<ProductSurfaceError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     operation_calls: Mutex<Vec<ProductOperationRequest>>,
-    next_operation_response: Mutex<Option<Result<ProductOperationResponse, RebornServicesError>>>,
-    next_invoke_response: Mutex<Option<Result<Resolution, RebornServicesError>>>,
+    next_operation_response: Mutex<Option<Result<ProductOperationResponse, ProductSurfaceError>>>,
+    next_invoke_response: Mutex<Option<Result<Resolution, ProductSurfaceError>>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -326,14 +325,14 @@ struct StubServices {
     trace_account_traces_callers: Mutex<Vec<String>>,
     /// Forwarded caller user-ids for each `trace_account_login_link` call.
     trace_account_login_link_callers: Mutex<Vec<String>>,
-    next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_list_automations_error: Mutex<Option<ProductSurfaceError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
     list_operator_config_calls: Mutex<usize>,
     operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
-    next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
+    next_set_operator_config_key_error: Mutex<Option<ProductSurfaceError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
@@ -344,13 +343,13 @@ struct StubServices {
     set_active_llm_calls: Mutex<Vec<LlmActiveCall>>,
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
-    next_create_thread_error: Mutex<Option<RebornServicesError>>,
-    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, RebornServicesError>>>,
+    next_create_thread_error: Mutex<Option<ProductSurfaceError>>,
+    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, ProductSurfaceError>>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
     /// drive the handler through specific projection envelopes, error
     /// branches, or empty drains in a deterministic order.
-    next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
+    next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, ProductSurfaceError>>>,
     stream_events_notify: Arc<Notify>,
     stream_events_subscription_enabled: Mutex<bool>,
     subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -361,7 +360,7 @@ struct StubServices {
 }
 
 impl StubServices {
-    fn fail_create_thread(&self, error: RebornServicesError) {
+    fn fail_create_thread(&self, error: ProductSurfaceError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
     }
 
@@ -371,29 +370,29 @@ impl StubServices {
         *self.read_attachment_response.lock().expect("lock") = Some(bytes);
     }
 
-    fn fail_list_automations(&self, error: RebornServicesError) {
+    fn fail_list_automations(&self, error: ProductSurfaceError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
     }
 
-    fn enqueue_invoke_response(&self, response: Result<Resolution, RebornServicesError>) {
+    fn enqueue_invoke_response(&self, response: Result<Resolution, ProductSurfaceError>) {
         *self.next_invoke_response.lock().expect("lock") = Some(response);
     }
 
     fn enqueue_operation_response(
         &self,
-        response: Result<ProductOperationResponse, RebornServicesError>,
+        response: Result<ProductOperationResponse, ProductSurfaceError>,
     ) {
         *self.next_operation_response.lock().expect("lock") = Some(response);
     }
 
-    fn fail_set_operator_config_key(&self, error: RebornServicesError) {
+    fn fail_set_operator_config_key(&self, error: ProductSurfaceError) {
         *self
             .next_set_operator_config_key_error
             .lock()
             .expect("lock") = Some(error);
     }
 
-    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, RebornServicesError>) {
+    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, ProductSurfaceError>) {
         self.next_retry_run
             .lock()
             .expect("lock")
@@ -406,7 +405,7 @@ impl StubServices {
     /// is empty.
     fn enqueue_stream_events(
         &self,
-        response: Result<RebornStreamEventsResponse, RebornServicesError>,
+        response: Result<RebornStreamEventsResponse, ProductSurfaceError>,
     ) {
         self.next_stream_events
             .lock()
@@ -416,7 +415,7 @@ impl StubServices {
 
     fn enable_stream_events_subscription(
         &self,
-        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
+        events: Vec<Result<ProductOutboundEnvelope, ProductSurfaceError>>,
     ) {
         let (sender, receiver) = mpsc::channel(events.len().max(1));
         for event in events {
@@ -448,7 +447,7 @@ impl StubServices {
     async fn global_auto_approve_enabled(
         &self,
         _caller: WebUiAuthenticatedCaller,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, ProductSurfaceError> {
         *self.global_auto_approve_calls.lock().expect("lock") += 1;
         if *self.stall_global_auto_approve.lock().expect("lock") {
             std::future::pending::<()>().await;
@@ -468,7 +467,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         self.create_thread_calls
             .lock()
             .expect("lock")
@@ -503,7 +502,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         self.submit_turn_calls
             .lock()
             .expect("lock")
@@ -530,7 +529,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
+    ) -> Result<RebornTimelineResponse, ProductSurfaceError> {
         self.get_timeline_calls
             .lock()
             .expect("lock")
@@ -565,7 +564,7 @@ impl StubServices {
         capability: CapabilityId,
         input: ProductCapabilityInput,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, ProductSurfaceError> {
         if let ProductCapabilityInput::LlmProviderUpsert(request) = input {
             self.upsert_llm_provider_calls
                 .lock()
@@ -610,7 +609,7 @@ impl StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
         self.view_queries.lock().expect("lock").push(query.clone());
         match query.view_id.as_str() {
             id if id == RUN_ARTIFACT_VIEW.id => {
@@ -661,13 +660,13 @@ impl StubServices {
                     serde_json::from_value(query.params).expect("logs params");
                 request.cursor = query.cursor.or(request.cursor);
                 if request.tail && request.follow {
-                    return Err(RebornServicesError {
-                        code: RebornServicesErrorCode::InvalidRequest,
-                        kind: RebornServicesErrorKind::Validation,
+                    return Err(ProductSurfaceError {
+                        code: ProductSurfaceErrorCode::InvalidRequest,
+                        kind: ProductSurfaceErrorKind::Validation,
                         status_code: 400,
                         retryable: false,
                         field: Some("follow".to_string()),
-                        validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                        validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
                     });
                 }
                 self.query_logs_calls.lock().expect("lock").push(request);
@@ -1117,7 +1116,7 @@ impl StubServices {
                 .expect("project members payload"),
                 next_cursor: None,
             }),
-            _ => Err(rejecting_reborn_services_error()),
+            _ => Err(rejecting_product_surface_error()),
         }
     }
 
@@ -1125,7 +1124,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornFsReadRequest,
-    ) -> Result<ProjectFsFile, RebornServicesError> {
+    ) -> Result<ProjectFsFile, ProductSurfaceError> {
         Ok(ProjectFsFile {
             path: request.path,
             filename: Some("today.md".to_string()),
@@ -1139,16 +1138,16 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornAttachmentRequest,
-    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+    ) -> Result<RebornAttachmentBytes, ProductSurfaceError> {
         self.read_attachment_calls
             .lock()
             .expect("lock")
             .push(request);
         match self.read_attachment_response.lock().expect("lock").clone() {
             Some(bytes) => Ok(bytes),
-            None => Err(RebornServicesError {
-                code: RebornServicesErrorCode::NotFound,
-                kind: RebornServicesErrorKind::NotFound,
+            None => Err(ProductSurfaceError {
+                code: ProductSurfaceErrorCode::NotFound,
+                kind: ProductSurfaceErrorKind::NotFound,
                 status_code: 404,
                 retryable: false,
                 field: None,
@@ -1161,7 +1160,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.stream_events_calls
             .lock()
             .expect("lock")
@@ -1185,7 +1184,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
         self.subscribe_events_calls
             .lock()
             .expect("lock")
@@ -1201,14 +1200,14 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
         // Not exercised by any current handler test — `get_run_state` is on
         // the facade trait but not wired to a WebChat v2 HTTP route. Fail
         // loud rather than fabricate a response so a future caller-level
         // test that forgets to program this path can't quietly pass.
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -1220,7 +1219,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         self.cancel_run_calls
             .lock()
             .expect("lock")
@@ -1237,7 +1236,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+    ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
         self.resolve_gate_calls
             .lock()
             .expect("lock")
@@ -1255,7 +1254,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+    ) -> Result<RebornRetryRunResponse, ProductSurfaceError> {
         self.retry_run_calls
             .lock()
             .expect("lock")
@@ -1272,7 +1271,7 @@ impl StubServices {
         _caller: WebUiAuthenticatedCaller,
         key: String,
         request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorConfigGetResponse, ProductSurfaceError> {
         self.set_operator_config_key_calls
             .lock()
             .expect("lock")
@@ -1294,7 +1293,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornOperatorServiceLifecycleRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    ) -> Result<RebornOperatorCommandPlaneResponse, ProductSurfaceError> {
         self.run_operator_service_lifecycle_calls
             .lock()
             .expect("lock")
@@ -1308,7 +1307,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
-    ) -> Result<LlmProbeResult, RebornServicesError> {
+    ) -> Result<LlmProbeResult, ProductSurfaceError> {
         self.test_llm_connection_calls
             .lock()
             .expect("lock")
@@ -1323,7 +1322,7 @@ impl StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
-    ) -> Result<LlmModelsResult, RebornServicesError> {
+    ) -> Result<LlmModelsResult, ProductSurfaceError> {
         self.list_llm_models_calls
             .lock()
             .expect("lock")
@@ -1338,7 +1337,7 @@ impl StubServices {
     async fn trace_account_login_link(
         &self,
         caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+    ) -> Result<RebornAccountLoginLinkResponse, ProductSurfaceError> {
         // Capture the forwarded caller (tenant AND user — this is the trusted
         // identity boundary) so the contract test can verify the caller-scoped
         // route threads the authenticated identity, then return a hermetic
@@ -1367,7 +1366,7 @@ impl ProductSurface for StubServices {
         capability: CapabilityId,
         input: ProductCapabilityInput,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, ProductSurfaceError> {
         StubServices::invoke(self, caller, capability, input, activity_id).await
     }
 
@@ -1375,7 +1374,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
         StubServices::query(self, caller, query).await
     }
 
@@ -1383,7 +1382,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         StubServices::stream_events(self, caller, request).await
     }
 
@@ -1395,7 +1394,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+    ) -> Result<RebornStreamEventsSubscription, ProductSurfaceError> {
         StubServices::subscribe_events(self, caller, request).await
     }
 
@@ -1403,7 +1402,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
         StubServices::get_run_state(self, caller, request).await
     }
 
@@ -1411,7 +1410,7 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
         self.operation_calls
             .lock()
             .expect("lock")
@@ -2310,9 +2309,9 @@ async fn retry_run_path_overrides_body_run_id() {
 #[tokio::test]
 async fn retry_run_non_retryable_error_maps_to_conflict_body() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_retry_run(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
-        kind: RebornServicesErrorKind::Conflict,
+    services.enqueue_retry_run(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
         status_code: 409,
         retryable: false,
         field: None,
@@ -2380,9 +2379,9 @@ async fn retry_run_idempotent_replay_returns_same_response_shape() {
 #[tokio::test]
 async fn create_thread_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_create_thread(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.fail_create_thread(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -2463,9 +2462,9 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // the captured RebornStreamEventsRequest — if a future refactor flips
     // the `.or()` order, the facade will see cursor-B and this test fails.
     let header_cursor =
-        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-header").expect("cursor");
+        ironclaw_product::ProjectionCursor::new("cursor-from-header").expect("cursor");
     let query_cursor =
-        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-query").expect("cursor");
+        ironclaw_product::ProjectionCursor::new("cursor-from-query").expect("cursor");
     let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
     let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
     let query_encoded = url_encode(&query_json);
@@ -2708,13 +2707,13 @@ async fn rename_automation_dispatches_path_id_and_body_to_facade() {
 async fn rename_automation_error_maps_to_http_status() {
     for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::InvalidRequest,
+                kind: ProductSurfaceErrorKind::Validation,
                 status_code: 400,
                 retryable: false,
                 field: Some("name".to_string()),
-                validation_code: Some(WebUiInboundValidationCode::Blank),
+                validation_code: Some(ProductSurfaceValidationCode::Blank),
             },
             StatusCode::BAD_REQUEST,
             "invalid_request",
@@ -2722,9 +2721,9 @@ async fn rename_automation_error_maps_to_http_status() {
             false,
         ),
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -2966,9 +2965,9 @@ async fn delete_automation_dispatches_path_id_to_facade() {
 async fn delete_automation_error_maps_to_http_status() {
     for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -2980,9 +2979,9 @@ async fn delete_automation_error_maps_to_http_status() {
             false,
         ),
         (
-            RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Unavailable,
+                kind: ProductSurfaceErrorKind::ServiceUnavailable,
                 status_code: 503,
                 retryable: true,
                 field: None,
@@ -3080,9 +3079,9 @@ async fn list_automations_rejects_invalid_run_limit_query_with_400() {
 #[tokio::test]
 async fn list_automations_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_list_automations(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.fail_list_automations(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -3352,9 +3351,9 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
 #[tokio::test]
 async fn set_outbound_preferences_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_invoke_response(Err(RebornServicesError {
-        code: RebornServicesErrorCode::NotFound,
-        kind: RebornServicesErrorKind::NotFound,
+    services.enqueue_invoke_response(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::NotFound,
+        kind: ProductSurfaceErrorKind::NotFound,
         status_code: 404,
         retryable: false,
         field: None,
@@ -3456,7 +3455,7 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     // rather than a static frontend list that can drift. The `accept` tokens
     // must be exactly the shared format registry's output (drift kill), and
     // the budgets must match what `decode_attachments` enforces.
-    let expected = ironclaw_product_workflow::webui_attachment_capabilities();
+    let expected = ironclaw_product::webui_attachment_capabilities();
     let accept: Vec<String> = body["attachments"]["accept"]
         .as_array()
         .expect("attachments.accept is an array")
@@ -6048,7 +6047,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
 
 /// Build a minimal `ProductOutboundEnvelope` with a caller-supplied
 /// projection cursor and reply text. The exact payload shape is not the
-/// contract under test (it lives in `ironclaw_product_adapters`); these
+/// contract under test (it lives in `ironclaw_product`); these
 /// tests only care that whatever the facade hands back becomes a
 /// well-formed SSE event.
 fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
@@ -6524,9 +6523,9 @@ fn assert_no_adapter_metadata(json: &Value) {
 #[tokio::test]
 async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Forbidden,
-        kind: RebornServicesErrorKind::ParticipantDenied,
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         // The handler must NOT echo these into the SSE payload — the
@@ -6663,9 +6662,9 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
     // After draining the two real events, the next drain produces a
     // facade error so the handler exercises the redacted-error-frame +
     // close path before lifetime expiry.
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -6844,9 +6843,9 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,

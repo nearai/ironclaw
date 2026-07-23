@@ -14,7 +14,7 @@ use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
     WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
 };
-use ironclaw_product_workflow::ProductWorkflowError;
+use ironclaw_product::ProductWorkflowError;
 
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct ExtensionCapabilitySurfaceSource {

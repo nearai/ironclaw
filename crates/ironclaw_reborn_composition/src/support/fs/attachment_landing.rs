@@ -17,9 +17,9 @@ use ironclaw_attachments::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
-use ironclaw_product_workflow::{
-    InboundAttachmentLander, InboundAttachmentReader, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+use ironclaw_product::{
+    InboundAttachmentLander, InboundAttachmentReader, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind,
 };
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 
@@ -117,22 +117,22 @@ impl<F: RootFilesystem> InboundAttachmentReader for ProjectScopedAttachmentReade
         &self,
         thread_scope: &ThreadScope,
         storage_key: &str,
-    ) -> Result<Vec<u8>, RebornServicesError> {
+    ) -> Result<Vec<u8>, ProductSurfaceError> {
         let scope = thread_scope.to_resource_scope();
         self.read_attachment_bytes(&scope, storage_key)
             .await
             .map_err(|error| match error {
-                LoopAttachmentReadError::NotFound => RebornServicesError {
-                    code: RebornServicesErrorCode::NotFound,
-                    kind: RebornServicesErrorKind::NotFound,
+                LoopAttachmentReadError::NotFound => ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::NotFound,
+                    kind: ProductSurfaceErrorKind::NotFound,
                     status_code: 404,
                     retryable: false,
                     field: None,
                     validation_code: None,
                 },
-                LoopAttachmentReadError::Forbidden => RebornServicesError {
-                    code: RebornServicesErrorCode::Forbidden,
-                    kind: RebornServicesErrorKind::ParticipantDenied,
+                LoopAttachmentReadError::Forbidden => ProductSurfaceError {
+                    code: ProductSurfaceErrorCode::Forbidden,
+                    kind: ProductSurfaceErrorKind::ParticipantDenied,
                     status_code: 403,
                     retryable: false,
                     field: None,
@@ -141,7 +141,7 @@ impl<F: RootFilesystem> InboundAttachmentReader for ProjectScopedAttachmentReade
                 // Carry the cause to the log (sanitized 500 on the wire) rather
                 // than dropping it — see error-handling rule.
                 LoopAttachmentReadError::Backend(reason) => {
-                    RebornServicesError::internal_from(reason)
+                    ProductSurfaceError::internal_from(reason)
                 }
             })
     }
@@ -154,7 +154,7 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
         thread_scope: &ThreadScope,
         message_id: &str,
         attachments: Vec<InboundAttachment>,
-    ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+    ) -> Result<Vec<AttachmentRef>, ProductSurfaceError> {
         let scope = thread_scope.to_resource_scope();
         // Partition by UTC date so a project's attachments directory stays
         // browsable; the rest of the path (message id + index + filename) makes
@@ -174,7 +174,7 @@ impl<F: RootFilesystem> InboundAttachmentLander for ProjectScopedAttachmentLande
         // underlying landing failure (invalid mount path vs. write/permission
         // denied) so an operator can tell a misconfigured mount from a full disk.
         .map_err(|error| {
-            RebornServicesError::internal_from(format!(
+            ProductSurfaceError::internal_from(format!(
                 "land inbound attachments for message {message_id}: {error}"
             ))
         })
@@ -189,7 +189,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
     };
-    use ironclaw_product_workflow::RebornServicesErrorCode;
+    use ironclaw_product::ProductSurfaceErrorCode;
 
     fn workspace_fs(permissions: MountPermissions) -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let view = MountView::new(vec![MountGrant::new(
@@ -257,7 +257,7 @@ mod tests {
             )
             .await
             .expect_err("read-only workspace mount must fail closed");
-        assert_eq!(err.code, RebornServicesErrorCode::Internal);
+        assert_eq!(err.code, ProductSurfaceErrorCode::Internal);
     }
 
     #[tokio::test]

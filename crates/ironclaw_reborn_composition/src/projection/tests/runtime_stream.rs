@@ -3,7 +3,7 @@ use ironclaw_first_party_extension_ports::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
 };
 use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
     PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
 };

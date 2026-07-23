@@ -130,7 +130,7 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
     OutboundPreferencesProductFacade, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
@@ -463,14 +463,14 @@ pub struct RebornServices {
     /// policy egress from deployment bindings or the active compatibility
     /// snapshot. `None` when the composition path builds no channel egress
     /// transport.
-    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
+    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     /// The deployment-first channel delivery resolver behind the coordinator,
     /// exposed separately for host flows (e.g. DM target provisioning) that
     /// need one stable adapter + egress read outside a delivery.
     // Consumed by the DM-provisioning re-point in the deletion slice.
     #[allow(dead_code)]
     pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
     /// Registry of beta-era channel credential bridges (§11 compatibility):
     /// channel hosts whose secrets predate the extension-config store
     /// register resolution ports here.
@@ -481,8 +481,8 @@ pub struct RebornServices {
 
 struct ChannelHostWiring {
     extension_ingress: Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
-    delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
-    channel_delivery_resolver: Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+    delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
+    channel_delivery_resolver: Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -522,17 +522,13 @@ pub(crate) enum CredentialRefreshWorkerReady {
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub(crate) approval_interaction:
-        Option<Arc<dyn ironclaw_product_workflow::ApprovalInteractionService>>,
-    pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product_workflow::AuthInteractionService>>,
+    pub(crate) approval_interaction: Option<Arc<dyn ironclaw_product::ApprovalInteractionService>>,
+    pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product::AuthInteractionService>>,
     pub(crate) identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub(crate) approval_context:
-        Option<Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>>,
-    pub(crate) blocked_auth_prompts:
-        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>>,
-    pub(crate) auth_flow_cancel:
-        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCanceller>>,
-    pub(crate) run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
+    pub(crate) approval_context: Option<Arc<dyn ironclaw_product::ApprovalPromptContextSource>>,
+    pub(crate) blocked_auth_prompts: Option<Arc<dyn ironclaw_product::BlockedAuthPromptSource>>,
+    pub(crate) auth_flow_cancel: Option<Arc<dyn ironclaw_product::BlockedAuthFlowCanceller>>,
+    pub(crate) run_delivery_settings: ironclaw_product::RunDeliverySettings,
 }
 
 /// Harness-facing wiring for
@@ -543,7 +539,7 @@ pub struct ChannelHostAssemblyTestWiring {
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
+    pub run_delivery_settings: ironclaw_product::RunDeliverySettings,
 }
 
 impl RebornServices {
@@ -629,7 +625,7 @@ impl RebornServices {
             return Ok(None);
         };
         let installation_id =
-            ironclaw_product_adapters::AdapterInstallationId::new(authenticated_installation_id)
+            ironclaw_product::AdapterInstallationId::new(authenticated_installation_id)
                 .map_err(|error| error.to_string())?;
         let outcome = service
             .consume(
@@ -685,9 +681,7 @@ impl RebornServices {
 
     /// The generic delivery coordinator (extension-runtime §5.4), when this
     /// composition path built the channel egress transport.
-    pub fn delivery_coordinator(
-        &self,
-    ) -> Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>> {
+    pub fn delivery_coordinator(&self) -> Option<Arc<ironclaw_product::DeliveryCoordinator>> {
         self.delivery_coordinator.clone()
     }
 
@@ -695,9 +689,7 @@ impl RebornServices {
     /// §6.4): the production surface the WebUI setup facade and the
     /// lifecycle configure action route operator channel config through.
     /// `None` without a local-dev runtime.
-    pub fn channel_config_facade(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConfigFacade>> {
+    pub fn channel_config_facade(&self) -> Option<Arc<dyn ironclaw_product::ChannelConfigFacade>> {
         let service = self.local_runtime.as_ref()?.channel_config.clone()?;
         Some(Arc::new(
             crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
@@ -808,7 +800,7 @@ impl RebornServices {
     #[allow(dead_code)]
     pub(crate) fn channel_delivery_resolver(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>> {
+    ) -> Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>> {
         self.channel_delivery_resolver.clone()
     }
 
@@ -1061,9 +1053,9 @@ impl RebornServices {
     #[cfg(feature = "test-support")]
     pub fn local_dev_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
         Some(self.local_dev_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
     }
 
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g. a
@@ -1083,7 +1075,7 @@ impl RebornServices {
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
+    ) -> Option<Result<(), ironclaw_product::ProductWorkflowError>> {
         let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
         Some(
             extension_management
@@ -1145,9 +1137,8 @@ impl RebornServices {
     pub async fn local_dev_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
-    ) -> Option<
-        Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>,
-    > {
+    ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError>>
+    {
         let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
         Some(active_extension_authority_for_test(extension_management, grantee).await)
     }
@@ -1163,7 +1154,7 @@ pub struct ActiveExtensionAuthorityForTest {
 async fn active_extension_authority_for_test(
     extension_management: &RebornLocalExtensionManagementPort,
     grantee: &ExtensionId,
-) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError> {
+) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError> {
     let active_capabilities = extension_management
         .active_model_visible_capabilities()
         .await?;
@@ -1278,7 +1269,7 @@ fn active_extension_network_policy_for_test(
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
     pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-    pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
+    pub lander: Arc<dyn ironclaw_product::InboundAttachmentLander>,
 }
 
 #[cfg(feature = "test-support")]
@@ -1429,7 +1420,7 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// retryable error instead of skipping OAuth or pairing cleanup (see
     /// `RebornLocalExtensionManagementPort::channel_disconnect_slot`).
     pub(crate) channel_disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -2448,7 +2439,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             })?,
         ]
     };
-    let operator_tool_catalog: Arc<dyn ironclaw_product_workflow::RebornOperatorToolCatalog> =
+    let operator_tool_catalog: Arc<dyn ironclaw_product::RebornOperatorToolCatalog> =
         Arc::new(ActiveRegistryOperatorToolCatalog::new(
             operator_tool_registry,
             operator_synthetic_tools,
@@ -2599,7 +2590,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     });
                 }
                 if descriptor.connection_requirement.strategy
-                    != ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode
+                    != ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
                 {
                     continue;
                 }
@@ -2694,7 +2685,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 if !account_setups.connect(
                     &descriptor.extension_id,
                     Arc::clone(&service)
-                        as Arc<dyn ironclaw_product_workflow::AccountConnectionStatusSource>,
+                        as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
                 ) {
                     return Err(RebornBuildError::InvalidConfig {
                         reason: format!(
@@ -2715,15 +2706,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // reconciled lazily per scope before that scope's first delivery.
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
-                let resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> =
-                    Arc::new(
-                        crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
-                            generic.host.snapshot_watch(),
-                            transport,
-                        )
-                        .with_deployment_channels(Arc::clone(&deployment_channels)),
-                    );
-                let coordinator = Arc::new(ironclaw_product_workflow::DeliveryCoordinator::new(
+                let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
+                    crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
+                        generic.host.snapshot_watch(),
+                        transport,
+                    )
+                    .with_deployment_channels(Arc::clone(&deployment_channels)),
+                );
+                let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
                     Arc::clone(&store_graph.local_runtime.outbound_state)
                         as Arc<dyn ironclaw_outbound::OutboundStateStore>,
                     Arc::clone(&resolver),
@@ -2732,7 +2722,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             Arc::clone(&ingress_parts.reply_context),
                         ),
                     ),
-                    ironclaw_product_workflow::DeliveryRetryPolicy::default(),
+                    ironclaw_product::DeliveryRetryPolicy::default(),
                 ));
                 (Some(coordinator), Some(resolver))
             }

@@ -43,7 +43,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn_composition::{
     AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,

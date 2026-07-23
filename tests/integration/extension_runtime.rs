@@ -34,10 +34,10 @@ use serde_json::json;
 async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     use std::sync::Arc;
 
-    use ironclaw_product_adapters::test_support::conformance::{
+    use ironclaw_product::test_support::conformance::{
         ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
     };
-    use ironclaw_product_adapters::{
+    use ironclaw_product::{
         ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
     };
 

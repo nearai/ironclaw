@@ -14,7 +14,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
     ProductWorkflowError,
 };
@@ -436,7 +436,7 @@ mod tests {
     use super::*;
     use crate::{OAuthClientConfig, RebornBuildInput, RebornServices, build_reborn_services};
     use ironclaw_host_api::InstallationState;
-    use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
+    use ironclaw_product::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
     /// Dummy but well-formed Google OAuth backend config for tests below that
     /// exercise PER-ACCOUNT credential gating (scope coalescing, shared

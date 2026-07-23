@@ -9,7 +9,7 @@
 //!
 //! - [`InstallationState`] (§6.1) is host-owned installation-lifecycle
 //!   vocabulary defined in `ironclaw_host_api::state`. Placing it there lets the
-//!   product wire (`ironclaw_product_workflow`) and the host both name the same
+//!   product wire (`ironclaw_product`) and the host both name the same
 //!   enum without a new dependency edge (both crates already depend on
 //!   `ironclaw_host_api`). Its wire-form and transition tests live with the
 //!   definition.

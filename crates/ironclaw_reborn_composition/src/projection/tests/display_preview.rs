@@ -1,7 +1,7 @@
 use super::*;
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityDisplayOutputPreview;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView, ProductAdapterError,
     RedactedString,
 };

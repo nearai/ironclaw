@@ -26,8 +26,8 @@ use ironclaw_auth::{
     scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
-use ironclaw_product_adapters::AuthPromptChallengeKind;
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product::AuthPromptChallengeKind;
+use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -47,9 +47,7 @@ use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService,
 };
 use crate::product_auth::oauth::oauth_gate::{OAuthGateChallengeRequest, OAuthGateFlowDriver};
-use ironclaw_product_workflow::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
-};
+use ironclaw_product::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 

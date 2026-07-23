@@ -1,4 +1,4 @@
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{

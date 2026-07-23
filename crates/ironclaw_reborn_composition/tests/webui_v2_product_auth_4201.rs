@@ -20,10 +20,10 @@ use ironclaw_auth::{
 };
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_product_workflow::{
-    ProductOperationRequest, ProductOperationResponse, ProductSurface, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornServicesError, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, WebUiAuthenticatedCaller, rejecting_reborn_services_error,
+use ironclaw_product::{
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, ProductSurfaceError,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, WebUiAuthenticatedCaller, rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -78,23 +78,23 @@ impl ProductSurface for UnusedServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 
     async fn get_run_state(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+    ) -> Result<RebornGetRunStateResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
     async fn execute_command(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 }
 
@@ -1016,7 +1016,7 @@ async fn follow_up_routes_require_invocation_id() {
 
 #[test]
 fn auth_prompt_view_serialises_optional_fields_when_present() {
-    use ironclaw_product_adapters::{AuthPromptChallengeKind, AuthPromptView};
+    use ironclaw_product::{AuthPromptChallengeKind, AuthPromptView};
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1058,7 +1058,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
 
 #[test]
 fn auth_prompt_view_omits_optional_fields_when_absent() {
-    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_product::AuthPromptView;
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1108,7 +1108,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
 #[test]
 fn auth_prompt_view_deserialises_without_optional_fields() {
     // Simulate a legacy serialised row (no new fields) — must round-trip as None.
-    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_product::AuthPromptView;
 
     let legacy_json = r#"{
         "turn_run_id": "11111111-1111-1111-1111-111111111111",
@@ -1133,7 +1133,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1497,7 +1497,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1577,7 +1577,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         InMemoryAuthProductServices, NewAuthFlow, TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 

@@ -13,14 +13,14 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, VirtualPath};
-use ironclaw_product_adapters::{
+use ironclaw_product::{
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, ProductSurface,
+    RebornStreamEventsRequest, RebornTimelineRequest, TIMELINE_VIEW, WebUiAuthenticatedCaller,
+};
+use ironclaw_product::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
     ProjectionSubscriptionRequest,
-};
-use ironclaw_product_workflow::{
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, ProductSurface,
-    RebornStreamEventsRequest, RebornTimelineRequest, TIMELINE_VIEW, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{

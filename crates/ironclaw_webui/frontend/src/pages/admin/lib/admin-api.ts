@@ -1,5 +1,5 @@
 // Admin user-management client for the v2 `/api/webchat/v2/admin/*` routes
-// (backed by `ironclaw_product_workflow::AdminUserService`). Authorization
+// (backed by `ironclaw_product::AdminUserService`). Authorization
 // (operator token or admin/owner role) and last-admin protection are enforced
 // server-side; a non-admin caller receives 403 here.
 //

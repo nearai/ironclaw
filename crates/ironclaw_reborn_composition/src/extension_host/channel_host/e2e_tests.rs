@@ -46,13 +46,13 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
     DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
     ProtocolAuthEvidence, TrustedInboundContext,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
     ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
@@ -100,8 +100,8 @@ use crate::extension_host::extension_ingress::{
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::route_mounts::PublicRouteMount;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
-use ironclaw_product_workflow::AuthChallengeProvider;
-use ironclaw_product_workflow::BlockedAuthPromptSource;
+use ironclaw_product::AuthChallengeProvider;
+use ironclaw_product::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -2110,8 +2110,7 @@ async fn shared_channel_admission_follows_saved_channel_config() {
         crate::extension_host::channel_subject_routes::managed_channel_subject_user_id(
             ADAPTER,
             &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            &ironclaw_product_adapters::AdapterInstallationId::new(INSTALLATION)
-                .expect("installation"), // safety: static test installation id is valid.
+            &ironclaw_product::AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
             Some(TEAM),
             "C777",
         )
@@ -3924,7 +3923,7 @@ use crate::extension_host::channel_outbound_targets::{
 use crate::extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 use crate::outbound::OutboundDeliveryTargetProvider;
 use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
-use ironclaw_product_workflow::PreferenceTargetCodec as _;
+use ironclaw_product::PreferenceTargetCodec as _;
 
 /// The retired Slack setup surface's installation id — DIFFERENT from the
 /// durable extension installation id (`INSTALLATION`) the active snapshot

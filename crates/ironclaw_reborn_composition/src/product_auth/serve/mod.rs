@@ -52,9 +52,9 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_product_workflow::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface, RebornExtensionListResponse,
-    RebornServicesError, RebornViewQuery, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface, ProductSurfaceError,
+    RebornExtensionListResponse, RebornViewQuery, WebUiAuthenticatedCaller,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -185,7 +185,7 @@ trait InstalledExtensionLookup: Send + Sync {
         &self,
         caller: &WebUiAuthenticatedCaller,
         extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError>;
+    ) -> Result<bool, ProductSurfaceError>;
 }
 
 struct RebornServicesInstalledExtensionLookup {
@@ -198,7 +198,7 @@ impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
         &self,
         caller: &WebUiAuthenticatedCaller,
         extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, ProductSurfaceError> {
         let page = self
             .api
             .query(
@@ -211,7 +211,7 @@ impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
             )
             .await?;
         let inventory: RebornExtensionListResponse =
-            serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+            serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
         Ok(inventory.extensions.iter().any(|extension| {
             extension.package_ref.kind == LifecyclePackageKind::Extension
                 && extension.package_ref.id.as_str() == extension_id.as_str()
@@ -229,7 +229,7 @@ impl InstalledExtensionLookup for TestInstalledExtensionLookup {
         &self,
         _caller: &WebUiAuthenticatedCaller,
         _extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, ProductSurfaceError> {
         Ok(true)
     }
 }
@@ -1563,7 +1563,7 @@ mod tests {
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
-    use ironclaw_product_workflow::AuthChallengeProvider;
+    use ironclaw_product::AuthChallengeProvider;
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Mutex;
@@ -2212,7 +2212,7 @@ mod tests {
             &self,
             _caller: &WebUiAuthenticatedCaller,
             _extension_id: &ExtensionId,
-        ) -> Result<bool, RebornServicesError> {
+        ) -> Result<bool, ProductSurfaceError> {
             Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
         }
     }

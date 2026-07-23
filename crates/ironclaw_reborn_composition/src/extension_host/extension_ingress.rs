@@ -22,12 +22,12 @@ use ironclaw_extension_host::ingress::{
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_host_api::{SecretHandle, TenantId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
     NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductSourceChannel, ProtocolAuthEvidence,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
     ChannelInboundSurfaceRequest, ProductOperationRequest, ProductSurface,
     WebUiAuthenticatedCaller,
@@ -62,7 +62,7 @@ pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
-        _error: ironclaw_product_adapters::ProductAdapterError,
+        _error: ironclaw_product::ProductAdapterError,
     ) {
     }
 }
@@ -93,16 +93,13 @@ impl VerifiedEvidenceMint {
             Self::RequestSignature {
                 signature_header,
                 timestamp_header,
-            } => ironclaw_product_adapters::auth::mark_request_signature_verified(
+            } => ironclaw_product::auth::mark_request_signature_verified(
                 signature_header.clone(),
                 timestamp_header.clone(),
                 subject,
             ),
             Self::SharedSecretHeader { header } => {
-                ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
-                    header.clone(),
-                    subject,
-                )
+                ironclaw_product::auth::mark_shared_secret_header_verified(header.clone(), subject)
             }
         }
     }
@@ -801,14 +798,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_host_api::UserId;
-    use ironclaw_product_adapters::{
+    use ironclaw_product::{
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
+        ProductOperationResponse, ProductOperationTypedInput, ProductSurface, ProductSurfaceError,
+        ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    };
+    use ironclaw_product::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
         ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
-    };
-    use ironclaw_product_workflow::{
-        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
-        ProductOperationResponse, ProductOperationTypedInput, ProductSurface, RebornServicesError,
-        RebornServicesErrorCode, RebornServicesErrorKind,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -837,7 +834,7 @@ mod tests {
             &self,
             _caller: WebUiAuthenticatedCaller,
             request: ProductOperationRequest,
-        ) -> Result<ProductOperationResponse, RebornServicesError> {
+        ) -> Result<ProductOperationResponse, ProductSurfaceError> {
             let operation_id =
                 ProductOperationId::parse(request.operation_id.as_str()).ok_or_else(unavailable)?;
             if operation_id != ProductOperationId::ChannelInboundAdmit {
@@ -889,10 +886,10 @@ mod tests {
         }
     }
 
-    fn unavailable() -> RebornServicesError {
-        RebornServicesError {
-            code: RebornServicesErrorCode::Unavailable,
-            kind: RebornServicesErrorKind::ServiceUnavailable,
+    fn unavailable() -> ProductSurfaceError {
+        ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Unavailable,
+            kind: ProductSurfaceErrorKind::ServiceUnavailable,
             status_code: 503,
             retryable: false,
             field: None,

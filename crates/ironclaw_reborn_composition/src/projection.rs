@@ -25,7 +25,7 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::FilesystemOutboundStateStore;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
@@ -50,7 +50,7 @@ use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
 };
-use ironclaw_product_workflow::AuthChallengeProvider;
+use ironclaw_product::AuthChallengeProvider;
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };

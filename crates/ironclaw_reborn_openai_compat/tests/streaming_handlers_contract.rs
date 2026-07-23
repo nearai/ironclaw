@@ -9,13 +9,13 @@ use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{TenantId, ThreadId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_product::ProductSurface;
+use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalConversationRef, FinalReplyView,
     ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload,
     ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProjectionCursor,
     ProjectionSubscriptionRequest, ProtocolAuthEvidence,
 };
-use ironclaw_product_workflow::ProductSurface;
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,

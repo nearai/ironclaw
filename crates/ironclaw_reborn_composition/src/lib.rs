@@ -110,15 +110,15 @@ pub use ironclaw_auth::OAuthRedirectUri;
 pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
 };
+pub use ironclaw_product::PreferenceTargetCodec;
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product_workflow::PreferenceTargetCodec;
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
 };
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
@@ -153,7 +153,7 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
-// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// not depend on `ironclaw_product` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
@@ -161,7 +161,7 @@ pub use deployment::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
-pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
+pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,

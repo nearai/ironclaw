@@ -17,7 +17,7 @@ mod tests {
         MissionId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId, VendorAuthRecipe,
     };
-    use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+    use ironclaw_product::WebUiAuthenticatedCaller;
     use ironclaw_secrets::FilesystemSecretStore;
     use serde_json::json;
     use std::sync::Arc;

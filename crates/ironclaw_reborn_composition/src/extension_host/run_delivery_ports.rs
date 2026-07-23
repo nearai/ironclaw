@@ -1,5 +1,5 @@
 //! Composition implementations of the generic run-delivery ports
-//! (`ironclaw_product_workflow::run_delivery`): approval-gate context from
+//! (`ironclaw_product::run_delivery`): approval-gate context from
 //! the projection layer, blocked-auth prompt views from the product-auth
 //! engine, and the auth-flow cancel bridge. All delivery *semantics* live in
 //! the generic components; these adapters only surface composition-owned
@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalPromptContextSource, AuthChallengeProvider, BlockedAuthPromptSource,
 };
+use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{GateRef, TurnScope};
 
-use ironclaw_product_workflow::auth_prompt_view_for_blocked_auth;
+use ironclaw_product::auth_prompt_view_for_blocked_auth;
 
 /// Approval-gate context over the shared projection read model — the same
 /// source the WebUI gate projection renders from.
@@ -63,7 +63,7 @@ impl ProductAuthBlockedAuthPromptSource {
 impl BlockedAuthPromptSource for ProductAuthBlockedAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
         &self,
-        request: ironclaw_product_workflow::BlockedAuthPromptRequest<'_>,
+        request: ironclaw_product::BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError> {
         auth_prompt_view_for_blocked_auth(request, self.auth_challenges.as_deref()).await
     }

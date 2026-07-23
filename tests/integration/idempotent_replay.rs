@@ -9,7 +9,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason};
+use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;

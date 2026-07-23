@@ -50,8 +50,8 @@ use ironclaw_loop_host::{
     LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_observability::live_latency_started_at;
-use ironclaw_product_adapters::ProjectionStream;
-use ironclaw_product_workflow::{
+use ironclaw_product::ProjectionStream;
+use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
@@ -94,7 +94,7 @@ use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundError;
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
@@ -955,7 +955,7 @@ impl SnapshotApprovalTurnRunLocator {
 
     async fn snapshot(
         &self,
-    ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
+    ) -> Result<TurnPersistenceSnapshot, ironclaw_product::ProductWorkflowError> {
         self.turn_state.turn_run_snapshot().await.map_err(|error| {
             tracing::debug!(
                 %error,
@@ -1109,7 +1109,7 @@ impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
     async fn blocked_approval_runs(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product_workflow::ProductWorkflowError> {
+    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product::ProductWorkflowError> {
         let turn_scope = TurnScope::new(
             scope.tenant_id.clone(),
             scope.agent_id.clone(),
@@ -1142,7 +1142,7 @@ impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
         &self,
         scope: &ApprovalInteractionScope,
         gate_ref: &ironclaw_turns::GateRef,
-    ) -> Result<Option<TurnRunId>, ironclaw_product_workflow::ProductWorkflowError> {
+    ) -> Result<Option<TurnRunId>, ironclaw_product::ProductWorkflowError> {
         let turn_scope = TurnScope::new(
             scope.tenant_id.clone(),
             scope.agent_id.clone(),
@@ -1204,8 +1204,8 @@ fn snapshot_run_actor_matches(
     })
 }
 
-fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
-    ironclaw_product_workflow::ProductWorkflowError::Transient {
+fn approval_turn_locator_unavailable() -> ironclaw_product::ProductWorkflowError {
+    ironclaw_product::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
     }
 }
@@ -1323,7 +1323,7 @@ impl RebornRuntime {
     /// swaps. `None` when no LLM provider was wired at boot.
     pub(crate) fn webui_active_model_reader(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ActiveModelReader>> {
+    ) -> Option<Arc<dyn ironclaw_product::ActiveModelReader>> {
         let parts = self.llm_reload.as_ref()?;
         Some(Arc::new(
             crate::llm_admin::active_model::ProviderActiveModelReader::new(
@@ -1542,7 +1542,7 @@ impl RebornRuntime {
     /// store graph). Production-shaped builds source it from the production graph.
     pub(crate) fn reborn_project_service(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
+    ) -> Option<Arc<dyn ironclaw_product::ProjectService>> {
         if let Some(local) = self.services.local_runtime.as_ref() {
             return Some(Arc::clone(&local.project_service));
         }
@@ -1668,7 +1668,7 @@ impl RebornRuntime {
     /// channel-identity storage.
     pub(crate) fn generic_channel_connection_facade(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>> {
+    ) -> Option<Arc<dyn ironclaw_product::ChannelConnectionFacade>> {
         let local_runtime = self.services.local_runtime.as_ref()?;
         let identity_store = local_runtime.channel_identity_store.clone()?;
         let installation_store = local_runtime
@@ -2307,7 +2307,7 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_cli(
+                product_context: Some(ironclaw_turns::product_context::resolve_cli(
                     scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
                 )),
             })
@@ -3856,7 +3856,7 @@ pub async fn build_reborn_runtime(
                     local_runtime.approval_requests.clone()
                         as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
                 ),
-            ) as Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>
+            ) as Arc<dyn ironclaw_product::ApprovalPromptContextSource>
         });
         let blocked_auth_prompts = Some(Arc::new(
             crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
@@ -3866,7 +3866,7 @@ pub async fn build_reborn_runtime(
                     .and_then(|product_auth| product_auth.as_auth_challenge_provider()),
             ),
         )
-            as Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>);
+            as Arc<dyn ironclaw_product::BlockedAuthPromptSource>);
         let auth_flow_cancel = services
             .product_auth
             .as_ref()
@@ -3885,7 +3885,7 @@ pub async fn build_reborn_runtime(
             approval_context,
             blocked_auth_prompts,
             auth_flow_cancel,
-            run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings::default(),
+            run_delivery_settings: ironclaw_product::RunDeliverySettings::default(),
         })
     };
 
