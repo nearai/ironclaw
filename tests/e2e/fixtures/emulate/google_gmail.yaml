@@ -41,6 +41,7 @@ google:
       name: Secondary Google User
   messages:
     - id: msg_emulate_unread
+      thread_id: thr_emulate_unread
       user_email: e2e.google@example.com
       from: qa-sender@example.com
       to: e2e.google@example.com
