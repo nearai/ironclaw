@@ -652,7 +652,7 @@ pub enum RebornCompositionError {
         "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
     )]
     UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
-    #[error("reborn production wiring failed: {report:?}")]
+    #[error("reborn production wiring failed: {report}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
     },

@@ -18,7 +18,7 @@ pub enum RebornBuildError {
     MissingSecretMasterKey,
     #[error("reborn planned run-profile resolver build failed: {reason}")]
     PlannedRunProfileResolver { reason: String },
-    #[error("reborn composition failed production validation")]
+    #[error("reborn composition failed production validation: {report}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
     },
@@ -88,6 +88,48 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
 #[cfg(test)]
 mod tests {
     use super::RebornBuildError;
+    use ironclaw_host_runtime::{
+        ProductionWiringComponent, ProductionWiringIssue, ProductionWiringIssueKind,
+        ProductionWiringReport,
+    };
+
+    #[test]
+    fn production_wiring_error_display_names_failing_component() {
+        let report = ProductionWiringReport::for_test(vec![ProductionWiringIssue::for_test(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        )]);
+        let error = RebornBuildError::ProductionWiring { report };
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("turn_state"),
+            "expected the failing component in Display, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("local_only_implementation"),
+            "expected the issue kind in Display, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn production_composition_error_display_names_failing_component() {
+        let report = ProductionWiringReport::for_test(vec![ProductionWiringIssue::for_test(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        )]);
+        let error = crate::RebornCompositionError::ProductionWiring { report };
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("turn_state"),
+            "expected the failing component in Display, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("local_only_implementation"),
+            "expected the issue kind in Display, got: {rendered}"
+        );
+    }
 
     #[test]
     fn composition_missing_secret_master_key_stays_typed_for_facade_errors() {

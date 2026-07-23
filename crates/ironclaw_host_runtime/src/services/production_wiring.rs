@@ -1,4 +1,5 @@
 use std::any::{TypeId, type_name};
+use std::fmt;
 
 use thiserror::Error;
 
@@ -19,7 +20,7 @@ use super::{
 pub enum ProductionEventStoreWiringError {
     #[error("failed to build Reborn event stores: {0}")]
     EventStore(#[from] RebornEventStoreError),
-    #[error("host runtime production wiring failed")]
+    #[error("host runtime production wiring failed: {0}")]
     ProductionWiring(ProductionWiringReport),
 }
 
@@ -145,6 +146,17 @@ pub enum ProductionWiringIssueKind {
     UnverifiedProductionImplementation,
 }
 
+impl ProductionWiringIssueKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::UnsupportedRequirement => "unsupported_requirement",
+            Self::LocalOnlyImplementation => "local_only_implementation",
+            Self::UnverifiedProductionImplementation => "unverified_production_implementation",
+        }
+    }
+}
+
 /// One production wiring issue for a component in the host-runtime graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionWiringIssue {
@@ -188,6 +200,16 @@ impl ProductionWiringIssue {
     }
 }
 
+impl fmt::Display for ProductionWiringIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.component.as_str())?;
+        if let Some(implementation) = self.implementation {
+            write!(formatter, "={implementation}")?;
+        }
+        write!(formatter, " ({})", self.kind.as_str())
+    }
+}
+
 /// Report returned when a host-runtime graph is not production-ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionWiringReport {
@@ -216,6 +238,26 @@ impl ProductionWiringReport {
         self.issues
             .iter()
             .any(|issue| issue.component == component && issue.kind == kind)
+    }
+}
+
+impl fmt::Display for ProductionWiringReport {
+    /// Render the unwired components so an operator sees *which* component
+    /// failed production validation, not just that validation failed. The
+    /// `issues` list is built deterministically by the wiring check, so the
+    /// order is stable; `implementation` is a compile-time `type_name`, never
+    /// a secret or host path, so it is safe to surface to the operator.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.issues.is_empty() {
+            return formatter.write_str("no production wiring issues recorded");
+        }
+        for (index, issue) in self.issues.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{issue}")?;
+        }
+        Ok(())
     }
 }
 
@@ -354,5 +396,59 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             ProductionImplementationReadiness::UnverifiedProductionImplementation
         }
         () => ProductionImplementationReadiness::ProductionCandidate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_display_names_component_kind_and_implementation() {
+        let report = ProductionWiringReport {
+            issues: vec![
+                ProductionWiringIssue {
+                    component: ProductionWiringComponent::TurnState,
+                    kind: ProductionWiringIssueKind::LocalOnlyImplementation,
+                    implementation: Some("ironclaw_turns::InMemoryTurnStateStore"),
+                },
+                ProductionWiringIssue {
+                    component: ProductionWiringComponent::SecretStore,
+                    kind: ProductionWiringIssueKind::Missing,
+                    implementation: None,
+                },
+            ],
+        };
+
+        assert_eq!(
+            report.to_string(),
+            "turn_state=ironclaw_turns::InMemoryTurnStateStore (local_only_implementation); \
+             secret_store (missing)"
+        );
+    }
+
+    #[test]
+    fn report_display_handles_empty_issue_list() {
+        let report = ProductionWiringReport { issues: Vec::new() };
+
+        assert_eq!(report.to_string(), "no production wiring issues recorded");
+    }
+
+    #[test]
+    fn event_store_wiring_error_surfaces_report_detail() {
+        let error = ProductionEventStoreWiringError::from(ProductionWiringReport {
+            issues: vec![ProductionWiringIssue {
+                component: ProductionWiringComponent::EventSink,
+                kind: ProductionWiringIssueKind::LocalOnlyImplementation,
+                implementation: Some("ironclaw_host_runtime::InMemoryEventSink"),
+            }],
+        });
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("event_sink"), "got: {rendered}");
+        assert!(
+            rendered.contains("local_only_implementation"),
+            "got: {rendered}"
+        );
     }
 }
