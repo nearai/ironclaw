@@ -19,10 +19,10 @@
 
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_reborn_event_store::RebornProfile;
-use ironclaw_turns::TurnStateStoreLimits;
 use ironclaw_runtime_policy::{
     EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest,
 };
+use ironclaw_turns::TurnStateStoreLimits;
 
 use std::path::PathBuf;
 
@@ -657,8 +657,11 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
 /// resolves its runtime policy through `local_dev_from_deployment`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn local_dev_build_input(owner_id: impl Into<String>, root: PathBuf) -> RebornHostBindings {
-    let bindings =
-        RebornHostBindings::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root);
+    let bindings = RebornHostBindings::local_dev_from_deployment(
+        DeploymentConfig::local_dev(),
+        owner_id,
+        root,
+    );
     // Composition's own unit tests expect the first-party extension surface
     // (catalog + capability handlers) the production binary injects; mirror that
     // assembly from the dev-dependency inventory so a test can install /

@@ -535,9 +535,12 @@ impl RebornHostBindings {
     }
 
     pub fn requires_local_runtime_confirmed_host_home_root(&self) -> bool {
-        self.deployment.runtime_policy.as_ref().is_some_and(|policy| {
-            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
-        })
+        self.deployment
+            .runtime_policy
+            .as_ref()
+            .is_some_and(|policy| {
+                policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+            })
     }
 
     pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
@@ -545,11 +548,14 @@ impl RebornHostBindings {
     }
 
     pub fn grants_trusted_laptop_access(&self) -> bool {
-        self.deployment.runtime_policy.as_ref().is_some_and(|policy| {
-            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
-                || policy.network_mode == NetworkMode::Direct
-                || policy.secret_mode == SecretMode::InheritedEnv
-        })
+        self.deployment
+            .runtime_policy
+            .as_ref()
+            .is_some_and(|policy| {
+                policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+                    || policy.network_mode == NetworkMode::Direct
+                    || policy.secret_mode == SecretMode::InheritedEnv
+            })
     }
 
     pub fn libsql(
@@ -844,7 +850,8 @@ impl RebornHostBindings {
             existing.client = client;
             return;
         }
-        self.deployment.oauth_provider_configs
+        self.deployment
+            .oauth_provider_configs
             .push(OAuthProviderBackendConfig { vendor, client });
     }
 
@@ -1226,8 +1233,8 @@ mod tests {
             InMemoryAuthProductServices::new(),
         ));
 
-        let input =
-            RebornHostBindings::disabled("test-owner").with_product_auth_ports(product_auth.clone());
+        let input = RebornHostBindings::disabled("test-owner")
+            .with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
     }

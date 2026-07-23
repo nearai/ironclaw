@@ -192,11 +192,11 @@ pub(crate) mod test_support {
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
     use ironclaw_first_party_extensions::{
-        GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec,
-        GsuiteCredentialDispatchReason, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
-        GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
-        GsuitePackageSpec, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
-        WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor, find_gsuite_capability,
+        GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
+        GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
+        GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec,
+        WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError,
+        WebAccessDispatchRequest, WebAccessExecutor, find_gsuite_capability,
         gsuite_google_account_visible_to_requester, gsuite_package_specs,
     };
     use ironclaw_host_api::{
@@ -215,8 +215,7 @@ pub(crate) mod test_support {
 
     /// The full set of first-party handler registrars a local-dev/test build
     /// needs, mirroring `ironclaw_reborn_cli::first_party::bundled_first_party_registrars`.
-    pub(crate) fn bundled_first_party_registrars()
-    -> Vec<Arc<dyn FirstPartyHandlerRegistrar>> {
+    pub(crate) fn bundled_first_party_registrars() -> Vec<Arc<dyn FirstPartyHandlerRegistrar>> {
         vec![
             Arc::new(GsuiteFirstPartyRegistrar),
             Arc::new(WebAccessFirstPartyRegistrar),
@@ -418,9 +417,7 @@ pub(crate) mod test_support {
 
     struct GsuiteRuntimeCredentialAccountVisibilityPolicy;
 
-    impl RuntimeCredentialAccountVisibilityPolicy
-        for GsuiteRuntimeCredentialAccountVisibilityPolicy
-    {
+    impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccountVisibilityPolicy {
         fn account_visible_to_requester(
             &self,
             account: &CredentialAccount,
