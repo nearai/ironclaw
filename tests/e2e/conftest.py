@@ -6,6 +6,7 @@ Function-scoped: fresh browser context and page per test.
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 import json
 import os
 import signal
@@ -532,6 +533,7 @@ async def _run_emulate_server(
     ready_path: str,
     ready_headers: dict[str, str],
     ready_json: dict[str, Any] | None = None,
+    port: int | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """Start a pinned Emulate service and wait for a seeded endpoint."""
     if EMULATE_CLI_PATH:
@@ -552,7 +554,7 @@ async def _run_emulate_server(
     else:
         command = ["npx", "--yes", EMULATE_NPM_PACKAGE]
 
-    port = _find_free_port()
+    port = port or _find_free_port()
     url = f"http://127.0.0.1:{port}"
     env = {
         **os.environ,
@@ -611,6 +613,140 @@ async def _run_emulate_server(
             await _stop_process(proc, sig=signal.SIGINT, timeout=5)
             if proc.returncode is None:
                 await _stop_process(proc, timeout=2)
+
+
+@asynccontextmanager
+async def _emulate_service(
+    *,
+    service: str,
+    seed_path: Path,
+    ready_method: str,
+    ready_path: str,
+    ready_headers: dict[str, str],
+    port: int | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    generator = _run_emulate_server(
+        service=service,
+        seed_path=seed_path,
+        ready_method=ready_method,
+        ready_path=ready_path,
+        ready_headers=ready_headers,
+        port=port,
+    )
+    async with aclosing(generator):
+        async for server in generator:
+            yield server
+
+
+class ResettableEmulateProviderWorld:
+    """Restart seeded provider processes on stable ports between journeys."""
+
+    def __init__(self) -> None:
+        reserved = _reserve_loopback_sockets(3)
+        services = ("google", "slack", "github")
+        self._ports = {
+            service: sock.getsockname()[1]
+            for service, sock in zip(services, reserved, strict=True)
+        }
+        self._reservations = dict(zip(services, reserved, strict=True))
+        self._stacks: dict[str, AsyncExitStack] = {}
+
+    @property
+    def servers(self) -> dict[str, dict[str, str]]:
+        return {
+            service: {"url": f"http://127.0.0.1:{port}"}
+            for service, port in self._ports.items()
+        }
+
+    async def start(self, services: set[str] | None = None) -> None:
+        selected = set(self._ports) if services is None else services
+        for service in sorted(selected):
+            if service in self._stacks:
+                raise RuntimeError(f"Emulate {service} provider is already running")
+            await self._start_service(service)
+
+    async def _start_service(self, service: str) -> None:
+        stack = AsyncExitStack()
+        try:
+            if service == "google":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_GOOGLE_SEED,
+                    ready_method="GET",
+                    ready_path="/gmail/v1/users/me/messages",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            elif service == "slack":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_SLACK_SEED,
+                    ready_method="POST",
+                    ready_path="/api/auth.test",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_SLACK_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            elif service == "github":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_GITHUB_SEED,
+                    ready_method="GET",
+                    ready_path="/user",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            else:
+                raise ValueError(f"Unknown Emulate provider service: {service}")
+            reservation = self._reservations.pop(service, None)
+            if reservation is not None:
+                reservation.close()
+            await stack.enter_async_context(context)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stacks[service] = stack
+
+    async def reset(self, services: set[str]) -> None:
+        await self.close(services, reserve=True)
+        await self.start(services)
+
+    async def close(
+        self,
+        services: set[str] | None = None,
+        *,
+        reserve: bool = False,
+    ) -> None:
+        selected = set(self._stacks) if services is None else services
+        for service in sorted(selected, reverse=True):
+            stack = self._stacks.pop(service, None)
+            if stack is not None:
+                await stack.aclose()
+            if reserve:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", self._ports[service]))
+                self._reservations[service] = sock
+        if services is None:
+            reservations, self._reservations = self._reservations, {}
+            for sock in reservations.values():
+                sock.close()
+
+
+@pytest.fixture(scope="module")
+async def resettable_emulate_provider_world():
+    """Keep stable provider URLs while restoring seed state per journey."""
+    world = ResettableEmulateProviderWorld()
+    try:
+        await world.start()
+        yield world
+    finally:
+        await world.close()
 
 
 @pytest.fixture(scope="session")

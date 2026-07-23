@@ -11,54 +11,19 @@ from pathlib import Path
 import httpx
 import pytest
 
+from provider_capability_inventory import (
+    ALL_CLASSIFIED_CAPABILITY_IDS,
+    EMULATE_SUPPORTED_TOOLS,
+    LIVE_ONLY_TOOLS,
+    PROVIDER_WIRE_PREFIXES,
+    capability_id_to_wire_name,
+)
+
 pytest_plugins = ["reborn_webui_harness"]
 
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
-
-EMULATE_SUPPORTED_TOOLS = {
-    "gmail__get_message",
-    "gmail__list_messages",
-    "gmail__send_message",
-    "github__get_authenticated_user",
-    "github__get_repo",
-    "github__list_releases",
-    "google-calendar__list_calendars",
-    "google-calendar__list_events",
-    "google-docs__create_document",
-    "google-docs__insert_text",
-    "google-docs__read_content",
-    "google-drive__download_file",
-    "google-drive__list_files",
-    "google-sheets__append_values",
-    "google-sheets__create_spreadsheet",
-    "google-sheets__get_spreadsheet",
-    "google-sheets__read_values",
-    "google-sheets__rename_sheet",
-    "google-sheets__write_values",
-    "slack__get_conversation_history",
-    "slack__get_conversation_info",
-    "slack__get_thread_replies",
-    "slack__get_user_info",
-    "slack__list_conversations",
-    "slack__search_messages",
-    "slack__send_message",
-    "slack__whoami",
-}
-
-EMULATE_UNSUPPORTED_TOOLS: set[str] = set()
-
-PROVIDER_PREFIXES = (
-    "gmail__",
-    "github__",
-    "google-calendar__",
-    "google-docs__",
-    "google-drive__",
-    "google-sheets__",
-    "slack__",
-)
-
 
 def _model_cases() -> list[str]:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -287,11 +252,16 @@ def test_fixture_catalog_has_no_unowned_cases_or_provider_operations():
         call["name"]
         for case in MODEL_CASES
         for call in _tool_calls(_load_case(case))
-        if call["name"].startswith(PROVIDER_PREFIXES)
+        if call["name"].startswith(PROVIDER_WIRE_PREFIXES)
     }
-    assert observed_provider_tools == (
-        EMULATE_SUPPORTED_TOOLS | EMULATE_UNSUPPORTED_TOOLS
+    classified_tools = {
+        capability_id_to_wire_name(capability_id)
+        for capability_id in ALL_CLASSIFIED_CAPABILITY_IDS
+    }
+    assert observed_provider_tools <= classified_tools, (
+        f"unclassified={sorted(observed_provider_tools - classified_tools)}"
     )
+    assert LIVE_ONLY_TOOLS <= observed_provider_tools
 
 
 async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
