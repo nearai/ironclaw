@@ -716,9 +716,8 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_network_http_egress_for_test(egress);
         }
         if google_oauth_backend_for_test {
-            // Dummy but well-formed: only presence on `oauth_provider_configs`
-            // feeds `google_oauth_configured` (factory.rs) — the readiness-map
-            // check has no reason to touch the real client id/secret values.
+            // Dummy but well-formed boot fallback for auth-engine tests that
+            // seed Google accounts without exercising operator configuration.
             let google_client = OAuthClientConfig::new(
                 "itest-google-client-id.apps.googleusercontent.com",
                 "http://127.0.0.1/oauth/callback/google",

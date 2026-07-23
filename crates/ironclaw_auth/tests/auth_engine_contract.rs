@@ -173,6 +173,38 @@ impl EngineClientCredentialsSource for StaticClientCredentials {
     }
 }
 
+#[derive(Debug)]
+struct RotatingClientCredentials {
+    current: Mutex<(String, Option<String>)>,
+}
+
+impl RotatingClientCredentials {
+    fn new(client_id: &str, client_secret: &str) -> Self {
+        Self {
+            current: Mutex::new((client_id.to_string(), Some(client_secret.to_string()))),
+        }
+    }
+
+    fn rotate(&self, client_id: &str, client_secret: &str) {
+        *self.current.lock().unwrap() = (client_id.to_string(), Some(client_secret.to_string()));
+    }
+}
+
+#[async_trait]
+impl EngineClientCredentialsSource for RotatingClientCredentials {
+    async fn resolve(
+        &self,
+        _vendor: &str,
+        _credentials: &RecipeClientCredentials,
+    ) -> Result<EngineOAuthClientMaterial, AuthProductError> {
+        let (client_id, client_secret) = self.current.lock().unwrap().clone();
+        Ok(EngineOAuthClientMaterial {
+            client_id: OAuthClientId::new(client_id)?,
+            client_secret: client_secret.map(SecretString::from),
+        })
+    }
+}
+
 const CALLBACK_BASE: &str = "https://host.example/api/reborn/product-auth/oauth";
 
 struct Harness {
@@ -193,11 +225,18 @@ impl Harness {
                 ),
             );
         }
+        Self::with_client_credentials(recipes, Arc::new(StaticClientCredentials { by_vendor }))
+    }
+
+    fn with_client_credentials(
+        recipes: Vec<ResolvedVendorAuthRecipe>,
+        client_credentials: Arc<dyn EngineClientCredentialsSource>,
+    ) -> Self {
         let server = Arc::new(ScriptedVendorServer::default());
         let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let engine = AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
-            client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
+            client_credentials,
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
             secret_store: Arc::clone(&secrets),
             callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
@@ -667,6 +706,119 @@ async fn token_exchange_supports_post_body_and_basic_client_auth() {
             assert!(request.header("authorization").is_none());
         }
     }
+}
+
+#[tokio::test]
+async fn rotation_preserves_in_flight_callback_and_updates_later_refresh() {
+    let credentials = Arc::new(RotatingClientCredentials::new(
+        "client-before-rotation",
+        "secret-before-rotation",
+    ));
+    let harness = Harness::with_client_credentials(
+        vec![synthetic_recipe("acme", &acme_recipe_toml(""))],
+        Arc::clone(&credentials) as Arc<dyn EngineClientCredentialsSource>,
+    );
+    let scope = test_scope();
+    let flow_id = AuthFlowId::new();
+    harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "acme".to_string(),
+            scope: scope.clone(),
+            flow_id,
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: vec![ProviderScope::new("msg:read").unwrap()],
+        })
+        .await
+        .expect("flow preparation snapshots its client");
+    credentials.rotate("client-after-rotation", "secret-after-rotation");
+    harness.server.script(
+        "https://auth.acme.example/token",
+        503,
+        serde_json::json!({ "error": "temporarily_unavailable" }),
+    );
+    harness.server.script(
+        "https://auth.acme.example/token",
+        200,
+        serde_json::json!({
+            "access_token": "acme-access",
+            "refresh_token": "acme-refresh",
+            "expires_in": 3600
+        }),
+    );
+
+    let retryable_error = harness
+        .engine
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope: scope.clone(),
+                flow_id,
+            },
+            callback_request("acme", vec![ProviderScope::new("msg:read").unwrap()]),
+        )
+        .await
+        .expect_err("transient provider failure remains retryable");
+    assert_eq!(retryable_error, AuthProductError::BackendUnavailable);
+
+    let exchange = harness
+        .engine
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope: scope.clone(),
+                flow_id,
+            },
+            callback_request("acme", vec![ProviderScope::new("msg:read").unwrap()]),
+        )
+        .await
+        .expect("callback exchange succeeds after rotation");
+
+    let requests = harness
+        .server
+        .requests_for("https://auth.acme.example/token");
+    for callback_request in &requests[..2] {
+        let form = callback_request.form();
+        assert_eq!(
+            form.get("client_id").map(String::as_str),
+            Some("client-before-rotation")
+        );
+        assert_eq!(
+            form.get("client_secret").map(String::as_str),
+            Some("secret-before-rotation")
+        );
+    }
+
+    harness.server.script(
+        "https://auth.acme.example/token",
+        200,
+        serde_json::json!({
+            "access_token": "refreshed-access",
+            "expires_in": 3600
+        }),
+    );
+    harness
+        .engine
+        .refresh_token(OAuthProviderRefreshRequest {
+            provider: AuthProviderId::new("acme").unwrap(),
+            scope,
+            account_id: CredentialAccountId::new(),
+            refresh_secret: exchange.refresh_secret.expect("refresh token handle"),
+            scopes: vec![ProviderScope::new("msg:read").unwrap()],
+        })
+        .await
+        .expect("refresh uses current client after rotation");
+
+    let requests = harness
+        .server
+        .requests_for("https://auth.acme.example/token");
+    let refresh_form = requests[2].form();
+    assert_eq!(
+        refresh_form.get("client_id").map(String::as_str),
+        Some("client-after-rotation")
+    );
+    assert_eq!(
+        refresh_form.get("client_secret").map(String::as_str),
+        Some("secret-after-rotation")
+    );
 }
 
 #[tokio::test]

@@ -73,9 +73,6 @@ pub struct FirstPartyRegistrarContext {
     pub credential_account_service: Arc<dyn CredentialAccountService>,
     pub credential_account_record_source: Arc<dyn CredentialAccountRecordSource>,
     pub product_auth_runtime_ports: ProductAuthProviderRuntimePorts,
-    /// Whether a Google OAuth backend was registered at build time. Gates a
-    /// pre-dispatch "not configured" tool result (see the GSuite handler).
-    pub google_oauth_configured: bool,
 }
 
 /// A binary-assembled first-party capability handler installer. Composition
@@ -244,7 +241,6 @@ pub(crate) mod test_support {
                         context.product_auth_runtime_ports.clone(),
                     )),
                 ),
-                google_oauth_configured: context.google_oauth_configured,
             });
             for package in gsuite_package_specs() {
                 for capability in package.capabilities {
@@ -258,7 +254,6 @@ pub(crate) mod test_support {
 
     struct GsuiteFirstPartyHandler {
         executor: GsuiteExecutor,
-        google_oauth_configured: bool,
     }
 
     #[async_trait]
@@ -267,13 +262,6 @@ pub(crate) mod test_support {
             &self,
             request: FirstPartyCapabilityRequest,
         ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-            if !self.google_oauth_configured {
-                return Err(FirstPartyCapabilityError::dispatch_with_host_remediation(
-                    RuntimeDispatchErrorKind::OperationFailed,
-                    None,
-                    ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
-                ));
-            }
             let egress = request
                 .services
                 .runtime_http_egress

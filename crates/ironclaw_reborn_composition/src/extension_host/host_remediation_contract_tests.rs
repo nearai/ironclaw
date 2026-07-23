@@ -23,7 +23,7 @@
 //!
 //! Coverage is compiler-nudged, not compiler-proved. The cases come from
 //! [`HostRemediationText::all`]; its exhaustiveness witness match plus the
-//! `[HostRemediationText; 3]` length annotation force an author who adds a
+//! `[HostRemediationText; 1]` length annotation force an author who adds a
 //! VARIANT to update `ALL`. A new PRODUCER that calls
 //! `dispatch_with_host_remediation` WITHOUT adding a variant is NOT caught by
 //! the compiler and needs a manual audit
@@ -96,7 +96,7 @@ fn persists_to_thread_history(text: &str, trust: ObservationTrust) -> Result<(),
 ///
 /// Adding a `HostRemediationText` VARIANT without listing it in `ALL` fails to
 /// compile (`HostRemediationText::all`'s exhaustiveness witness plus the
-/// `[HostRemediationText; 3]` length annotation), so an enumerated text cannot
+/// `[HostRemediationText; 1]` length annotation), so an enumerated text cannot
 /// ship untested. A new PRODUCER that calls
 /// `dispatch_with_host_remediation` without adding a variant is NOT compiler-
 /// caught — that case needs a manual audit
@@ -179,9 +179,7 @@ fn host_remediation_texts_name_their_operator_step() {
     for entry in HostRemediationText::all() {
         let text = entry.text();
         let expected = match entry {
-            HostRemediationText::GoogleNotConfigured => "config set google.client_id",
-            HostRemediationText::GoogleBackendAuth => "config set google.client_secret",
-            HostRemediationText::ApplyStep => "ironclaw service restart",
+            HostRemediationText::GoogleBackendAuth => "WebUI Admin > Extension Configuration",
         };
         assert!(
             text.contains(expected),

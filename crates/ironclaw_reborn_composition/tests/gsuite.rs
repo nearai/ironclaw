@@ -37,12 +37,10 @@ fn gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
     account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
-    google_oauth_configured: bool,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = FirstPartyCapabilityRegistry::new();
     let handler = Arc::new(GsuiteFirstPartyHandler {
         executor: GsuiteExecutor::new(accounts, account_records, credential_stager),
-        google_oauth_configured,
     });
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
@@ -54,7 +52,6 @@ fn gsuite_first_party_handlers(
 
 struct GsuiteFirstPartyHandler {
     executor: GsuiteExecutor,
-    google_oauth_configured: bool,
 }
 
 #[async_trait::async_trait]
@@ -63,13 +60,6 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        if !self.google_oauth_configured {
-            return Err(FirstPartyCapabilityError::dispatch_with_host_remediation(
-                RuntimeDispatchErrorKind::OperationFailed,
-                None,
-                ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
-            ));
-        }
         let egress = request
             .services
             .runtime_http_egress
@@ -548,7 +538,6 @@ async fn bundled_gsuite_handlers_register_and_forward_runtime_egress() {
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),
-        true,
     )
     .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
@@ -585,7 +574,6 @@ async fn bundled_gsuite_handlers_stage_selected_account_secret_before_egress() {
         auth.clone(),
         auth,
         stager.clone() as Arc<dyn GsuiteCredentialStager>,
-        true,
     )
     .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
@@ -642,7 +630,6 @@ async fn bundled_gsuite_handlers_stage_oauth_account_secret_from_account_scope()
         auth.clone(),
         auth,
         stager.clone() as Arc<dyn GsuiteCredentialStager>,
-        true,
     )
     .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
@@ -679,7 +666,6 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
         auth.clone(),
         auth,
         stager as Arc<dyn GsuiteCredentialStager>,
-        true,
     )
     .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
@@ -718,7 +704,6 @@ async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),
-        true,
     )
     .unwrap();
     let expected_capability_ids = gsuite_package_specs()
@@ -747,7 +732,6 @@ async fn bundled_gsuite_handler_fails_closed_without_runtime_egress() {
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),
-        true,
     )
     .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
@@ -791,7 +775,6 @@ async fn bundled_gsuite_handler_projects_stage_auth_required_to_first_party_auth
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::auth_required()),
-        true,
     )
     .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
@@ -837,7 +820,7 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
     let registry =
-        gsuite_first_party_handlers(auth.clone(), auth, Arc::new(BackendStager), true).unwrap();
+        gsuite_first_party_handlers(auth.clone(), auth, Arc::new(BackendStager)).unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let handler = registry.get(&capability_id).expect("handler registered");
 
@@ -870,7 +853,7 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
     };
     let detail = detail.expect("BackendAuth dispatch error must carry remediation detail");
     // The TRUSTED host-remediation channel: this text is a fixed
-    // `HostRemediationText` constant naming `config set google.client_secret`,
+    // `HostRemediationText` constant naming the administrator configuration,
     // and the untrusted diagnostic channel would collapse it to the
     // safe-summary placeholder at the host_api boundary (#6299).
     let DispatchFailureDetail::HostRemediation { text } = *detail else {
@@ -879,75 +862,10 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
     let text = text.as_str();
     assert!(text.contains("rejected"), "text: {text}");
     assert!(
-        text.contains("config set google.client_secret"),
+        text.contains("WebUI Admin > Extension Configuration"),
         "text: {text}"
     );
-    assert!(text.contains("ironclaw service restart"), "text: {text}");
-}
-
-#[tokio::test]
-async fn bundled_gsuite_handler_returns_not_configured_tool_result_when_no_google_oauth_backend() {
-    let scope = scope();
-    let auth = Arc::new(InMemoryAuthProductServices::new());
-    let registry = gsuite_first_party_handlers(
-        auth.clone(),
-        auth,
-        Arc::new(RecordingCredentialStager::default()),
-        false,
-    )
-    .unwrap();
-    let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
-    let handler = registry.get(&capability_id).expect("handler registered");
-
-    let error = handler
-        .dispatch(FirstPartyCapabilityRequest::request_for_test(
-            capability_id,
-            scope,
-            json!({ "message": { "raw": "base64url-rfc822" } }),
-            // No egress supplied: the not-configured check must short-circuit
-            // before dispatch ever requires runtime HTTP egress.
-            None,
-        ))
-        .await
-        .unwrap_err();
-
-    assert!(
-        !error.is_auth_required(),
-        "not-configured must be a tool-result error, not the AuthRequired gate; got {error:?}"
-    );
-    assert_eq!(
-        error.kind(),
-        Some(RuntimeDispatchErrorKind::OperationFailed)
-    );
-    let FirstPartyCapabilityError::Dispatch { detail, .. } = error else {
-        panic!("expected Dispatch variant");
-    };
-    let detail = detail.expect("not-configured error must carry remediation detail");
-    // Trusted channel, same rationale as the BackendAuth arm above: a fixed
-    // host-authored `HostRemediationText` constant, not capability output.
-    let DispatchFailureDetail::HostRemediation { text } = *detail else {
-        panic!("expected HostRemediation detail, got {detail:?}");
-    };
-    let text = text.as_str();
-    assert!(text.contains("not configured"), "text: {text}");
-    assert!(text.contains("config set google.client_id"), "text: {text}");
-    assert!(
-        text.contains("config set google.client_secret"),
-        "text: {text}"
-    );
-    assert!(
-        text.contains("config set google.redirect_uri"),
-        "text: {text}"
-    );
-    assert!(text.contains("console.cloud.google.com"), "text: {text}");
-    assert!(text.contains("ironclaw service restart"), "text: {text}");
-    assert_eq!(
-        text.matches("service restart").count(),
-        1,
-        "the restart instruction must appear exactly once (the remediation text must not \
-         embed its own restart step on top of the appended apply_step_text): {text}"
-    );
-    assert!(!text.contains("restarts automatically"), "text: {text}");
+    assert!(!text.contains("service restart"), "text: {text}");
 }
 
 fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {

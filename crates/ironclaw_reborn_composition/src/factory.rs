@@ -34,9 +34,6 @@ use crate::extension_host::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
         insert_handler as insert_operator_config_handler,
     },
-    provider_instance_readiness::{
-        ProviderInstanceReadinessInput, provider_instance_readiness_map,
-    },
     skill_auto_activate_capability::{
         extend_builtin_first_party_package as extend_builtin_skill_auto_activate_package,
         insert_handler as insert_skill_auto_activate_handler,
@@ -104,7 +101,7 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_api::{
     HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
-    RuntimeHttpEgress, UserId, VendorId, VirtualPath, sha256_digest_token,
+    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
@@ -794,19 +791,6 @@ fn compose_product_auth_services(
         services = services.with_flow_record_source(source);
     }
     Ok(Arc::new(services))
-}
-
-/// Whether a Google OAuth backend is configured, from the composition-side
-/// signal `GsuiteFirstPartyHandler` uses to short-circuit dispatch with a
-/// "not configured" tool result instead of reaching credential resolution.
-/// Shared by `build_local_runtime` and its production-build-context
-/// counterpart so the check doesn't drift between the two call sites.
-fn google_oauth_configured(
-    oauth_provider_configs: &[crate::input::OAuthProviderBackendConfig],
-) -> bool {
-    oauth_provider_configs
-        .iter()
-        .any(|config| config.vendor == ironclaw_auth::GOOGLE_PROVIDER_ID)
 }
 
 fn production_config(
@@ -3517,20 +3501,6 @@ async fn build_backend_production(
     // The reserved host-bundled id set consulted during filesystem catalog
     // load and by the upload-import path, sourced from the injected bundles.
     let first_party_reserved_ids = first_party_reserved_extension_ids(&first_party_bundles);
-    // Computed before `oauth_provider_configs` is consumed by
-    // `compose_provider_client` below — see `google_oauth_configured`.
-    let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
-    let google_provider = VendorId::new(ironclaw_auth::GOOGLE_PROVIDER_ID).map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("provider instance readiness map could not be built: {error}"),
-        }
-    })?;
-    let provider_instance_readiness =
-        provider_instance_readiness_map([ProviderInstanceReadinessInput {
-            provider: google_provider,
-            configured: google_oauth_configured,
-            remediation: ironclaw_reborn_config::google_setup_steps_text(),
-        }]);
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
@@ -3766,14 +3736,14 @@ async fn build_backend_production(
     let services = services.try_with_host_http_egress(default_host_http_egress()?)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
-    let channel_config_credential_slot =
-        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default();
+    let admin_configuration_credential_slot =
+        crate::product_auth::credentials::product_auth_providers::AdminConfigurationCredentialSlot::default();
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        channel_config_credential_slot.clone(),
+        admin_configuration_credential_slot.clone(),
         &first_party_bundles,
     )?;
     let services = if let Some(process_port) = local_process_port {
@@ -3897,7 +3867,6 @@ async fn build_backend_production(
         credential_account_service: product_auth_services.credential_account_service(),
         credential_account_record_source: product_auth_services.credential_account_record_source(),
         product_auth_runtime_ports: product_auth_runtime_ports.clone(),
-        google_oauth_configured,
     };
     for registrar in &first_party_registrars {
         registrar
@@ -4070,7 +4039,6 @@ async fn build_backend_production(
         )
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
-        .with_provider_instance_readiness(provider_instance_readiness)
         .with_channel_disconnect_slot(Arc::clone(&channel_disconnect_slot)),
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
@@ -4096,7 +4064,10 @@ async fn build_backend_production(
         .with_available_manifests(available_manifests.clone()),
     );
     extension_management.attach_channel_config(&channel_config_service);
-    channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
+    admin_configuration_credential_slot.fill(
+        Arc::clone(&admin_configuration),
+        channel_egress_scope.clone(),
+    );
     let fold_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let channel_identity_store = Arc::new(
         crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(

@@ -60,7 +60,13 @@ impl AuthEngine {
         let scope = context.scope.resource.clone();
         let vendor = request.provider.as_str().to_string();
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), false)
+            .oauth_exchange_client_material(
+                &scope,
+                context.flow_id,
+                &vendor,
+                &recipe,
+                resource.as_deref(),
+            )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         let redirect_uri = self
@@ -120,6 +126,10 @@ impl AuthEngine {
         let stored = self
             .store_token_pair(scope, access_secret, refresh_secret, &extracted)
             .await?;
+        if recipe.client_credentials.is_some() {
+            self.delete_flow_client_snapshot(&context.scope.resource, context.flow_id)
+                .await;
+        }
 
         Ok(OAuthProviderExchange {
             provider: request.provider,

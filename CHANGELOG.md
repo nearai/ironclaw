@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider
   diagnostics or granting an unbounded retry budget.
+- **Extension admin credentials:** resolve manifest-declared OAuth client
+  credentials from WebUI Admin at operation time, ahead of boot-time
+  environment fallbacks, so Google extensions can be configured or rotated
+  without SSH access or a process restart.
 - **Hosted MCP discovery:** bound overlong valid tool descriptions at the
   generic MCP boundary instead of rejecting the provider's entire catalog.
 - **Channel delivery:** keep live source-route observers attached for normal

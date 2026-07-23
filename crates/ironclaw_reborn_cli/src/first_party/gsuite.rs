@@ -45,7 +45,6 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
                     context.product_auth_runtime_ports.clone(),
                 )),
             ),
-            google_oauth_configured: context.google_oauth_configured,
         });
         for package in gsuite_package_specs() {
             for capability in package.capabilities {
@@ -58,7 +57,6 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
 
 struct GsuiteFirstPartyHandler {
     executor: GsuiteExecutor,
-    google_oauth_configured: bool,
 }
 
 #[async_trait]
@@ -67,13 +65,6 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        // Pre-dispatch check: every GSuite capability requires a Google OAuth
-        // account, so a missing build-time OAuth backend means no dispatch can
-        // ever succeed. Short-circuit with a remediation tool result instead of
-        // a silent auth-gate stall.
-        if !self.google_oauth_configured {
-            return Err(google_oauth_not_configured_error());
-        }
         let egress = request
             .services
             .runtime_http_egress
@@ -92,19 +83,6 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
             .map_err(|error| gsuite_error(error, &request.capability_id))?;
         Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
     }
-}
-
-/// Tool-result error for a GSuite capability dispatched with no Google OAuth
-/// backend configured at all — distinct from `AuthRequired`. Rides the trusted
-/// HOST-REMEDIATION channel because the text names `config set` keys containing
-/// "secret" and console URLs that `safe_summary` / the untrusted diagnostic
-/// channel would reject or collapse.
-fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::dispatch_with_host_remediation(
-        RuntimeDispatchErrorKind::OperationFailed,
-        None,
-        ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
-    )
 }
 
 fn runtime_credentials(

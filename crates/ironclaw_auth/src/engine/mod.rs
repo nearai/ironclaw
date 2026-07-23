@@ -30,12 +30,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{Duration, Utc};
 use ironclaw_host_api::{
     OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
-    VendorAuthRecipe,
+    SecretHandle, VendorAuthRecipe,
 };
-use ironclaw_secrets::SecretStore;
-use secrecy::SecretString;
+use ironclaw_secrets::{SecretMaterial, SecretStore};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
@@ -49,6 +51,15 @@ use crate::{
 };
 
 pub use dcr::DCR_CLIENT_HANDLE_PREFIX;
+
+const FLOW_CLIENT_SNAPSHOT_HANDLE_PREFIX: &str = "oauth-flow-client";
+const FLOW_CLIENT_SNAPSHOT_TTL_MINUTES: i64 = 15;
+
+#[derive(Serialize, Deserialize)]
+struct StoredFlowClientSnapshot {
+    client_id: String,
+    client_secret: Option<String>,
+}
 
 /// One vendor's recipe, resolved from active extensions or bundled manifests.
 ///
@@ -303,6 +314,114 @@ impl AuthEngine {
             .await
     }
 
+    async fn persist_flow_client_snapshot(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+        material: &EngineOAuthClientMaterial,
+    ) -> Result<(), AuthProductError> {
+        let stored = StoredFlowClientSnapshot {
+            client_id: material.client_id.as_str().to_string(),
+            client_secret: material
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.expose_secret().to_string()),
+        };
+        let encoded =
+            serde_json::to_string(&stored).map_err(|_| AuthProductError::BackendUnavailable)?;
+        self.secret_store
+            .put(
+                scope.clone(),
+                flow_client_snapshot_handle(flow_id)?,
+                SecretMaterial::from(encoded),
+                Some(Utc::now() + Duration::minutes(FLOW_CLIENT_SNAPSHOT_TTL_MINUTES)),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::warn!(%error, "OAuth flow client snapshot write failed");
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    async fn flow_client_snapshot(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<EngineOAuthClientMaterial>, AuthProductError> {
+        let handle = flow_client_snapshot_handle(flow_id)?;
+        let lease = match self.secret_store.lease_once(scope, &handle).await {
+            Ok(lease) => lease,
+            Err(error) if error.is_unknown_secret() => return Ok(None),
+            Err(error) => {
+                tracing::warn!(%error, "OAuth flow client snapshot lease failed");
+                return Err(AuthProductError::BackendUnavailable);
+            }
+        };
+        let material = self
+            .secret_store
+            .consume(scope, lease.id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "OAuth flow client snapshot consume failed");
+                AuthProductError::BackendUnavailable
+            })?;
+        let stored: StoredFlowClientSnapshot = serde_json::from_str(material.expose_secret())
+            .map_err(|_| {
+                tracing::warn!("OAuth flow client snapshot decode failed");
+                AuthProductError::BackendUnavailable
+            })?;
+        Ok(Some(EngineOAuthClientMaterial {
+            client_id: OAuthClientId::new(stored.client_id)?,
+            client_secret: stored.client_secret.map(SecretString::from),
+        }))
+    }
+
+    async fn delete_flow_client_snapshot(&self, scope: &ResourceScope, flow_id: AuthFlowId) {
+        let Ok(handle) = flow_client_snapshot_handle(flow_id) else {
+            return;
+        };
+        if let Err(error) = self.secret_store.delete(scope, &handle).await {
+            tracing::warn!(%error, "OAuth flow client snapshot cleanup failed");
+        }
+    }
+
+    async fn oauth_exchange_client_material(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+        vendor: &str,
+        recipe: &OAuth2CodeRecipe,
+        resource: Option<&str>,
+    ) -> Result<exchange::EffectiveOAuthClient, AuthProductError> {
+        let material = if recipe.client_credentials.is_some() {
+            match self.flow_client_snapshot(scope, flow_id).await? {
+                Some(material) => material,
+                None => {
+                    // Compatibility for flows created before encrypted client
+                    // snapshots were introduced. Every newly prepared static
+                    // flow has a snapshot; only an already-pending upgraded
+                    // flow reaches this live-resolution path.
+                    let credentials = recipe
+                        .client_credentials
+                        .as_ref()
+                        .ok_or(AuthProductError::MalformedConfig)?;
+                    self.client_credentials.resolve(vendor, credentials).await?
+                }
+            }
+        } else {
+            return self
+                .dcr_client(scope, vendor, recipe, resource, false)
+                .await;
+        };
+        Ok(exchange::EffectiveOAuthClient {
+            client_id: material.client_id,
+            client_secret: material.client_secret,
+            authorization_endpoint: recipe.authorization_endpoint.as_str().to_string(),
+            token_endpoint: recipe.token_endpoint.as_str().to_string(),
+        })
+    }
+
     /// Host-constructed authorize URL + state + PKCE for one vendor flow
     /// (AUTH-2/AUTH-4). Scope widening beyond the recipe ceiling is rejected
     /// here — before any vendor interaction.
@@ -350,6 +469,18 @@ impl AuthEngine {
             &pkce_secret,
             &requested_scopes,
         )?;
+        if recipe.client_credentials.is_some() {
+            let material = EngineOAuthClientMaterial {
+                client_id: client.client_id.clone(),
+                client_secret: client.client_secret.clone(),
+            };
+            // Static-client authorization codes are bound to the client that
+            // minted the authorization request. Persist that pair before
+            // returning the URL so a later operator rotation affects new
+            // flows and refreshes without corrupting this callback.
+            self.persist_flow_client_snapshot(&request.scope.resource, request.flow_id, &material)
+                .await?;
+        }
 
         Ok(PreparedOAuthFlow {
             provider,
@@ -360,6 +491,14 @@ impl AuthEngine {
             pkce_verifier,
         })
     }
+}
+
+fn flow_client_snapshot_handle(flow_id: AuthFlowId) -> Result<SecretHandle, AuthProductError> {
+    SecretHandle::new(format!(
+        "{FLOW_CLIENT_SNAPSHOT_HANDLE_PREFIX}-{}",
+        flow_id.as_uuid().simple()
+    ))
+    .map_err(|_| AuthProductError::BackendUnavailable)
 }
 
 #[async_trait]

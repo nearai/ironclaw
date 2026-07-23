@@ -48,7 +48,6 @@ pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
 pub(crate) mod operator_config_capability;
-pub(crate) mod provider_instance_readiness;
 pub(crate) mod reply_contexts;
 pub(crate) mod run_delivery_ports;
 pub(crate) mod skill_auto_activate_capability;

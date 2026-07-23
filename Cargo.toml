@@ -240,6 +240,10 @@ name = "reborn_group_extensions"
 path = "tests/integration/group_extensions/main.rs"
 
 [[test]]
+name = "reborn_integration_admin_oauth_runtime"
+path = "tests/integration/admin_oauth_runtime/main.rs"
+
+[[test]]
 name = "reborn_group_triggers"
 path = "tests/integration/group_triggers/main.rs"
 

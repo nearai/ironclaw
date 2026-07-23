@@ -1671,8 +1671,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 "binding access denied",
             )))
         }
-        ProductWorkflowError::InvalidBindingRequest { reason }
-        | ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
+        ProductWorkflowError::InvalidBindingRequest { reason } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
                 reason.clone(),
@@ -1875,31 +1874,6 @@ mod tests {
                     && rejection.disposition()
                         == crate::ProductRejectionDisposition::Permanent
         ));
-    }
-
-    #[test]
-    fn terminal_ack_for_error_settles_provider_instance_not_configured() {
-        // Shares its match arm with `InvalidBindingRequest` (both map to a
-        // permanent `PolicyDenied` rejection carrying the reason verbatim);
-        // this pins that the shared arm behaves identically for the new
-        // variant.
-        let reason =
-            "ironclaw config set google.client_id <id>.apps.googleusercontent.com".to_string();
-        let ack = terminal_ack_for_error(&ProductWorkflowError::ProviderInstanceNotConfigured {
-            reason: reason.clone(),
-        })
-        .expect("provider instance not configured is terminal");
-        match ack {
-            ProductInboundAck::Rejected(rejection) => {
-                assert_eq!(rejection.kind, ProductRejectionKind::PolicyDenied);
-                assert_eq!(
-                    rejection.disposition(),
-                    crate::ProductRejectionDisposition::Permanent
-                );
-                assert_eq!(rejection.reason, RedactedString::new(reason));
-            }
-            other => panic!("expected rejected ack, got {other:?}"),
-        }
     }
 
     #[test]

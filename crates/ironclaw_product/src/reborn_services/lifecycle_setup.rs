@@ -300,13 +300,6 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> ProductSurface
         | ProductWorkflowError::UnsupportedActionKind { .. } => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
         }
-        // WebUI gets a plain 400 with no free text (the wire contract has no
-        // free-text field): the exact `config set` remediation reaches users
-        // via the LLM tool path and `ironclaw status`; bespoke WebUI
-        // messaging is a deliberately deferred scope-cut.
-        ProductWorkflowError::ProviderInstanceNotConfigured { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        }
         ProductWorkflowError::BindingAccessDenied => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }
@@ -329,28 +322,5 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> ProductSurface
         | ProductWorkflowError::DuplicateAction { .. }
         | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::UnknownInstallation => ProductSurfaceError::internal_invariant(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Scope-cut: the WebUI facade gets a plain sanitized 400, never the
-    /// host-authored `reason` text — no free-text field exists on the wire
-    /// contract (see the variant's doc comment in
-    /// `ironclaw_product::error`).
-    #[test]
-    fn provider_instance_not_configured_maps_to_sanitized_400() {
-        let error = ProductWorkflowError::ProviderInstanceNotConfigured {
-            reason: "ironclaw config set google.client_id <id>.apps.googleusercontent.com"
-                .to_string(),
-        };
-
-        let mapped = map_lifecycle_error(error);
-
-        assert_eq!(mapped.code, ProductSurfaceErrorCode::InvalidRequest);
-        assert_eq!(mapped.status_code, 400);
-        assert!(!mapped.retryable);
     }
 }

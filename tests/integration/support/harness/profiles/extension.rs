@@ -117,12 +117,8 @@ fn hosted_mcp_discovery_fixture_response(
     Some((200, response))
 }
 
-/// [`extension_lifecycle_tools_profile`], plus a composition-time Google
-/// OAuth backend (the "config set" + restart arm of the provider-instance
-/// readiness map) — the no-false-positive counterpart proving the
-/// readiness-map check clears
-/// once an operator configures the instance, and the run falls through to
-/// the ordinary per-account credential gate instead.
+/// [`extension_lifecycle_tools_profile`], plus composition-time Google OAuth
+/// fallback material for scenarios that seed Google credential accounts.
 pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured()
 -> HarnessResult<ToolsProfile> {
     let mut profile = extension_lifecycle_tools_profile()?;
@@ -135,7 +131,7 @@ pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured()
 /// [`extension_lifecycle_tools_profile_for_user`] documents. Callers that align
 /// the harness's dispatch scope to a real turn's binding subject (the
 /// `RebornBinaryE2EHarness` extension-lifecycle constructor) need BOTH the
-/// aligned seed user and the configured-instance signal, which neither
+/// aligned seed user and the boot fallback, which neither
 /// single-axis constructor above provides on its own.
 pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured_for_user(
     user_id: &str,

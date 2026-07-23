@@ -611,30 +611,9 @@ async fn build_harness_at(
     .await
 }
 
-/// Harness with NO Google OAuth backend configured at composition time, so
-/// the provider-instance readiness map's `google` entry stays populated (see
-/// `provider_instance_readiness_map`) and a google-family extension
-/// activation fails closed with the sanitized 400 before it ever reaches the
-/// per-account credential gate. Backs
-/// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`.
-async fn build_harness_without_google_oauth_backend() -> Harness {
-    let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
-    build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
-        storage_root,
-        Some(root),
-        Arc::new(ToolCallingGateway::default()),
-        local_dev_effective_policy(),
-        USER,
-        USER,
-        None,
-    )
-    .await
-}
-
-/// Dummy but well-formed Google OAuth backend for harnesses that need
-/// Gmail/GSuite setup+activation to reach the per-account credential gate
-/// instead of failing closed at the provider-instance readiness map.
+/// Dummy but well-formed Google OAuth boot fallback for harnesses that seed
+/// Google credential accounts without driving the administrator configuration
+/// surface.
 fn test_google_oauth_backend() -> OAuthClientConfig {
     OAuthClientConfig::new(
         "e2e-google-client-id.apps.googleusercontent.com",
@@ -652,15 +631,9 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     runtime_owner_id: &str,
     authenticated_user_id: &str,
 ) -> Harness {
-    // This shared harness backs WebUI e2e tests that exercise Gmail/GSuite
-    // setup+activation over the real v2 router, not the provider-instance
-    // readiness map — without a configured Google OAuth backend,
-    // `webui_v2_gmail_oauth_setup_complete_allows_activation` and any other
-    // google-family activation test here fails closed with the
-    // readiness-map's 400 before it ever reaches the per-account gate under
-    // test. `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`
-    // is the dedicated test for that 400 path and uses
-    // `build_harness_without_google_oauth_backend` instead.
+    // These tests seed Google credential accounts directly rather than driving
+    // the administrator configuration surface, so supply the legacy boot
+    // fallback they need for OAuth operations.
     build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         storage_root,
         root,
@@ -673,13 +646,7 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     .await
 }
 
-/// Harness variant with composition-time Google OAuth configuration under the
-/// caller's control. `google_oauth_backend: None` leaves the provider-instance
-/// readiness map's `google` entry populated, so a google-family extension
-/// activation fails closed with the sanitized 400 before it ever reaches the
-/// per-account credential gate — the shape
-/// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`
-/// needs to drive the real HTTP activate route through that path.
+/// Harness variant with optional boot-time Google OAuth fallback material.
 async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     storage_root: PathBuf,
     root: Option<tempfile::TempDir>,
@@ -1626,96 +1593,6 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     );
     assert_eq!(activate_body["success"], true);
     assert_eq!(activate_body["activated"], true);
-}
-
-/// The provider-instance readiness map's 400 path
-/// (`ProviderInstanceNotConfigured` -> `map_lifecycle_error` -> sanitized
-/// `InvalidRequest`) had crate-tier coverage for the port contract
-/// (`google_family_activation_fails_closed_when_provider_instance_not_configured`
-/// in `extension_lifecycle.rs`) and for the WebUI mapping function
-/// (`lifecycle_setup::provider_instance_not_configured_maps_to_sanitized_400`),
-/// but nothing drove the real HTTP activate route end-to-end. This proves the
-/// whole chain: a composition build with NO Google OAuth backend configured
-/// -> the readiness map's `google` entry -> `activation_credential_requirements`
-/// failing closed -> the real `POST .../activate` handler returning 400 with
-/// the sanitized wire body (no remediation text, no `reason` field at all).
-#[tokio::test]
-async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_configured() {
-    let harness = build_harness_without_google_oauth_backend().await;
-
-    let package_ref = json!({"kind": "extension", "id": "gmail"});
-    let install = harness
-        .router
-        .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/install",
-            json!({
-                "package_ref": package_ref,
-                "client_action_id": "webui-v2-gmail-install-without-provider"
-            }),
-        ))
-        .await
-        .expect("install Gmail oneshot");
-    let install_status = install.status();
-    let install_body = read_json(install).await;
-    assert_eq!(
-        install_status,
-        StatusCode::OK,
-        "install body: {install_body}"
-    );
-    assert_eq!(
-        install_body["success"], true,
-        "install body: {install_body}"
-    );
-
-    let activate = harness
-        .router
-        .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/gmail/activate",
-            json!({
-                "client_action_id": "webui-v2-gmail-activate-without-provider"
-            }),
-        ))
-        .await
-        .expect("activate Gmail oneshot");
-    let activate_status = activate.status();
-    let activate_body = read_json(activate).await;
-    assert_eq!(
-        activate_status,
-        StatusCode::BAD_REQUEST,
-        "activation must fail closed before any per-account credential gate when the \
-         operator never configured this instance's Google OAuth backend at all: {activate_body}"
-    );
-    assert_eq!(activate_body["error"], "invalid_request");
-    assert_eq!(activate_body["kind"], "validation");
-    assert_eq!(activate_body["retryable"], false);
-    assert!(
-        activate_body.get("field").is_none(),
-        "sanitized 400 body must carry no field hint: {activate_body}"
-    );
-    assert!(
-        activate_body.get("validation_code").is_none(),
-        "sanitized 400 body must carry no validation code: {activate_body}"
-    );
-    let body_text = activate_body.to_string().to_ascii_lowercase();
-    for leaked in [
-        "config set",
-        "client_secret",
-        "client_id",
-        "console.cloud.google.com",
-    ] {
-        assert!(
-            !body_text.contains(leaked),
-            "sanitized 400 body must not leak remediation text: {activate_body}"
-        );
-    }
-
-    harness
-        .runtime
-        .shutdown()
-        .await
-        .expect("runtime shutdown clean");
 }
 
 #[tokio::test]

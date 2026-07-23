@@ -12,19 +12,9 @@
 //! and turn 2's dispatch-time staging pass via the google account this
 //! scenario seeds under the capability dispatch scope.
 //!
-//! Runs on its OWN freshly built group with a Google OAuth backend
-//! configured, rather than the shared `g` every other scenario in this
-//! binary runs on: `g` is deliberately built WITHOUT a Google OAuth backend so
-//! Scenario 4.5's readiness-map chokepoint has something to fire on, and
-//! that chokepoint gates the "google" PROVIDER build-time-wide — not just
-//! the specific package — so a "gmail" activation on `g` would now hit the
-//! same early-fail Scenario 4.5 pins, never reaching the seeded credential
-//! account this scenario actually wants to exercise. This scenario shares no
-//! cross-thread state with `g` (its own doc always called out "gmail,
-//! untouched by scenarios 1-4"), so an isolated
-//! `extension_lifecycle_google_oauth_configured()` group — the same
-//! constructor Scenario 4.5's Phase 2 uses — is the honest fix rather than a
-//! readiness-map carve-out.
+//! Runs on its own freshly built group with Google OAuth boot fallback
+//! material so its seeded account and activation state cannot affect sibling
+//! scenarios in the shared group.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;

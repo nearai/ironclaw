@@ -231,6 +231,7 @@ async def reborn_qa_emulate_runtime(
         extra_env={
             "IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP": rewrite_map,
             "IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "reborn-qa-emulate-client",
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET": "reborn-qa-emulate-secret",
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI": (
                 "http://127.0.0.1/api/reborn/product-auth/oauth/google/callback"
             ),

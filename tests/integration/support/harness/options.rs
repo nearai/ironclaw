@@ -114,15 +114,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`.
     /// Opt-in; every other harness stays byte-identical.
     pub(crate) trigger_active_run_lookup_requested: bool,
-    /// Provider-instance readiness map, "config set" + restart arm: when
-    /// `true`, registers a dummy Google OAuth backend on the `RebornHostBindings`
-    /// via the SAME generic production builder
-    /// (`RebornHostBindings::with_vendor_oauth_client`)
-    /// that `ironclaw config set google.client_id`/`client_secret` feeds in
-    /// production — proving the readiness-map check clears once an operator
-    /// configures the instance, with no test-only bypass. `false` (the
-    /// default) matches every pre-existing harness: no Google OAuth backend,
-    /// i.e. this instance is "unconfigured".
+    /// When `true`, registers dummy Google OAuth boot fallback material on
+    /// `RebornBuildInput`. Scenarios use this when they seed Google credential
+    /// accounts without driving the operator configuration surface.
     pub(crate) google_oauth_backend_for_test: bool,
 }
 

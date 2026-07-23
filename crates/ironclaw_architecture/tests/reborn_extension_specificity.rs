@@ -1209,9 +1209,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
     ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    // DEL-7: the `google_oauth_configured` build-time signal on the neutral
-    // first-party registrar context (a field name, not an extension branch —
-    // the concrete GSuite handler lives in the binary). `nearaimcp` is the
+    // DEL-7: test-support conversion of the concrete first-party GSuite
+    // inventory into the neutral bundle/registrar seams. Production
+    // composition receives those seams from the binary. `nearaimcp` is the
     // deferred nearai-slice concern above, folded forward in factory wiring.
     (
         "crates/ironclaw_reborn_composition/src/extension_host/first_party.rs",
@@ -1250,10 +1250,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
         "github",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google",
     ),
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
