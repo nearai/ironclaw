@@ -340,6 +340,18 @@ impl RebornScopedSandboxCommandTransport {
                     ))
                 })?;
         }
+        // Pre-create npm's redirected global prefix (see
+        // `exec_transport::user_container_launch_config`'s NPM_CONFIG_PREFIX)
+        // so `npm install -g` never trips over a missing directory. It lives
+        // inside the already-0o700 `.home`, so no separate chmod is needed.
+        let npm_global = home.join(".npm-global");
+        tokio::fs::create_dir_all(&npm_global)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace npm global prefix could not be initialized: {error}"
+                ))
+            })?;
         tokio::fs::canonicalize(&workspace).await.map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox workspace could not be resolved: {error}"

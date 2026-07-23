@@ -490,12 +490,13 @@ pub struct RebornServices {
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
-    /// D4-1 orphan-sandbox-container reaper, already spawned (guarded on a
-    /// successful, independent Docker connect) for the tenant-sandboxed
-    /// profile only. `build_reborn_runtime` moves this onto `RebornRuntime`
-    /// so `RebornRuntime::shutdown` can cancel it alongside every other owned
-    /// background worker. `None` on every non-sandboxed profile and when the
-    /// reaper's own Docker connect could not be established.
+    /// Sandbox-profile runtime bindings (activity registry, orphan-container
+    /// reaper, egress proxy, secret-lease daemon), always present —
+    /// `SandboxRuntimeBindings::none()` (see `sandbox_composition.rs`) is the
+    /// inert value non-sandboxed profiles carry, so this field never needs
+    /// unwrapping at call sites. `build_reborn_runtime` moves it onto
+    /// `RebornRuntime` so `RebornRuntime::shutdown` can cancel any spawned
+    /// background workers alongside every other owned worker.
     pub(crate) sandbox_runtime_bindings: crate::sandbox_composition::SandboxRuntimeBindings,
 }
 

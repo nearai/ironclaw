@@ -5,6 +5,7 @@
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 
+mod cli_session;
 mod echo;
 mod http;
 mod http_output;
@@ -46,6 +47,7 @@ use crate::{
 
 pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 
+pub use cli_session::CLI_SESSION_CAPABILITY_ID;
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
 pub use json::JSON_CAPABILITY_ID;
@@ -93,11 +95,13 @@ pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
 
-// `builtin.shell` is the only built-in first-party handler that directly
-// requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
-// SpawnProcess as an authorization effect, but child-run scheduling is governed
-// by runtime-policy planning rather than this process-port capability list.
-const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] = &[SHELL_CAPABILITY_ID];
+// `builtin.shell` and `builtin.cli_session` are the built-in first-party
+// handlers that directly require a RuntimeProcessPort. `builtin.spawn_subagent`
+// declares SpawnProcess as an authorization effect, but child-run scheduling is
+// governed by runtime-policy planning rather than this process-port capability
+// list.
+const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] =
+    &[SHELL_CAPABILITY_ID, CLI_SESSION_CAPABILITY_ID];
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
@@ -189,6 +193,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     http::manifest()?,
                     http::save_manifest()?,
                     shell::manifest()?,
+                    cli_session::manifest()?,
                     spawn_subagent::manifest()?,
                     trace_commons::onboard_manifest()?,
                     trace_commons::status_manifest()?,
@@ -415,7 +420,11 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
             CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
             handler.clone(),
         )
-        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
+        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone())
+        .with_handler(
+            CapabilityId::new(CLI_SESSION_CAPABILITY_ID)?,
+            handler.clone(),
+        );
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
     }
@@ -594,24 +603,11 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
-                let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
-                let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)
-                    .map_err(|error| {
-                        error.with_usage(
-                            ResourceUsage::default()
-                                .set_wall_clock_ms(wall_clock_ms)
-                                .set_network_egress_bytes(network_egress_bytes)
-                                .set_process_count(1),
-                        )
-                    })?;
-                return Ok(FirstPartyCapabilityResult::new(
-                    output,
-                    ResourceUsage::default()
-                        .set_wall_clock_ms(wall_clock_ms)
-                        .set_output_bytes(output_bytes)
-                        .set_network_egress_bytes(network_egress_bytes)
-                        .set_process_count(1),
-                ));
+                return finish_process_backed_dispatch(output, duration);
+            }
+            CLI_SESSION_CAPABILITY_ID => {
+                let (output, duration) = cli_session::dispatch(&request).await?;
+                return finish_process_backed_dispatch(output, duration);
             }
             SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
             // arch-exempt: network_egress_bytes not surfaced for the onboard
@@ -796,6 +792,34 @@ fn resource_profile() -> Option<ResourceProfile> {
             sandbox: None,
         }),
     })
+}
+
+/// Shared resource-accounting tail for process-port-backed builtins
+/// (`builtin.shell`, `builtin.cli_session`): both dispatch through
+/// `RuntimeProcessPort::run_command` and report only wall-clock time,
+/// bounded output bytes, and a fixed `process_count: 1` — neither tracks
+/// its own network-egress bytes (that field only ever gets set by the
+/// HTTP arms above), so it is intentionally left at its zero default.
+fn finish_process_backed_dispatch(
+    output: serde_json::Value,
+    duration: std::time::Duration,
+) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+    let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
+    let output_bytes =
+        bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES).map_err(|error| {
+            error.with_usage(
+                ResourceUsage::default()
+                    .set_wall_clock_ms(wall_clock_ms)
+                    .set_process_count(1),
+            )
+        })?;
+    Ok(FirstPartyCapabilityResult::new(
+        output,
+        ResourceUsage::default()
+            .set_wall_clock_ms(wall_clock_ms)
+            .set_output_bytes(output_bytes)
+            .set_process_count(1),
+    ))
 }
 
 fn input_error() -> FirstPartyCapabilityError {

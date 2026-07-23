@@ -160,7 +160,33 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
-        // NOTE: this schema is published by the host_runtime first-party
+        "schemas/builtin/cli_session.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "send", "read", "kill"],
+                    "description": "start: launch a detached tmux session running one command. send: type text into a running session's active program, followed by Enter. read: return the currently rendered pane screen (not scrollback). kill: end the session. Sessions run inside the caller's persistent sandbox container and are lost if the container stops or is recycled — do not rely on them for anything that must survive an idle period."
+                },
+                "session": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                    "description": "Session identifier you choose. ASCII letters, digits, '-', '_' only, starting with a letter or digit, at most 64 characters. Reuse the same session name across start/send/read/kill calls to address the same session."
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Required for action 'start'. Shell command the session runs, e.g. an interactive REPL, dev server, or long-running CLI."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Required for action 'send'. Literal text typed into the session followed by Enter; not interpreted as shell syntax."
+                }
+            },
+            "required": ["action", "session"],
+            "additionalProperties": false
+        }), // NOTE: this schema is published by the host_runtime first-party
         // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
         // The decorator path (`ironclaw_loop_host::build_spawn_subagent_parameters_schema`)
         // builds an equivalent schema dynamically from the registered flavor
@@ -979,6 +1005,29 @@ mod tests {
             schema["properties"]["output_limit"]["minimum"].as_u64(),
             Some(1024),
             "output_limit schema floor must match SHELL_OUTPUT_LIMIT_MIN_BYTES"
+        );
+    }
+
+    #[test]
+    fn cli_session_schema_declares_action_enum_and_session_pattern() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/cli_session.input.v1.json")
+            .expect("cli_session schema is registered");
+
+        let actions = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum present")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actions, vec!["start", "send", "read", "kill"]);
+
+        assert_eq!(
+            schema["properties"]["session"]["pattern"].as_str(),
+            Some("^[A-Za-z0-9][A-Za-z0-9_-]*$")
+        );
+        assert_eq!(
+            schema["required"].as_array().unwrap(),
+            &vec![serde_json::json!("action"), serde_json::json!("session")]
         );
     }
 }

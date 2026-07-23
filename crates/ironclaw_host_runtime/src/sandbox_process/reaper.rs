@@ -31,8 +31,32 @@
 //! this module's job: in the fixed-owner single-tenant profile users never
 //! disappear, so that sweep has no trigger yet — it is a named follow-up
 //! for a future multi-user profile.
+//!
+//! **Idle-stop veto (live background jobs).** The activity registry only
+//! records *foreground* exec activity, so a `background:true` dev server
+//! started once and then left running never touches it again — a naive
+//! idle-stop would hard-kill a live server out from under the user. Before
+//! [`SandboxReaper::scan_and_reap`] acts on an idle-stop verdict it runs a
+//! live `ps` probe against the container (see
+//! [`SandboxReaper::probe_live_background`]); a surviving non-PID-1 process
+//! vetoes the stop for this scan. The probe never gates forced recycle,
+//! which stays unconditional — nothing runs past `forced_recycle_after`
+//! regardless of what is live inside it. A probe failure counts as "live"
+//! (never reap on uncertainty).
+//!
+//! **Remove debounce.** `docker rm` is destructive and irreversible, so
+//! [`ReapAction::Remove`] only executes once the *same* container id has
+//! produced a `Remove` verdict on two consecutive scans (see
+//! [`RemoveDebounce`]) — one bad sweep (a label race, a transient inspect
+//! failure shape) marks the container pending instead of removing it
+//! outright. `Stop` is not debounced: a stopped container is trivially
+//! restartable, so there is no comparable risk to guard against.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use bollard::{
     Docker,
@@ -44,7 +68,9 @@ use ironclaw_host_api::{TenantId, UserId};
 
 use crate::RuntimeProcessError;
 
+use super::ContainerWorkdir;
 use super::LABEL_PREFIX;
+use super::exec_transport;
 use super::registry::{self, SandboxActivityRegistry, UserContainerCandidate};
 use super::user_key::RebornSandboxUserKey;
 
@@ -130,6 +156,15 @@ impl Default for SandboxReaperConfig {
     }
 }
 
+/// Pure helper shared by [`decide_reap_action`] and
+/// [`SandboxReaper::scan_and_reap`] (the latter needs it to decide whether a
+/// container is even a candidate for the idle-stop live probe) so the two
+/// never compute "how old is this container" in two places that could
+/// drift apart.
+fn age_since(now: DateTime<Utc>, created_at: DateTime<Utc>) -> Duration {
+    (now - created_at).to_std().unwrap_or(Duration::ZERO)
+}
+
 /// What [`decide_reap_action`] concluded a container should have done to
 /// it. Pure decision output — [`SandboxReaper::scan_and_reap`] is the only
 /// caller that turns this into a Docker call.
@@ -153,26 +188,45 @@ pub(crate) enum ReapAction {
 /// unparseable/absent `finished_at` is left alone, not force-removed,
 /// because "unknown" must never be reinterpreted as "eligible" just because
 /// another signal (age) happens to be known.
+///
+/// `idle_stop_veto` is the caller's live-probe result (module doc's
+/// "Idle-stop veto" section): when `true`, an idle-stop that would
+/// otherwise fire is suppressed for this scan (`Stop` becomes `None`). The
+/// veto applies only to the idle-stop branch — it never suppresses forced
+/// recycle, which stays unconditional regardless of what is live inside
+/// the container.
 pub(crate) fn decide_reap_action(
     now: DateTime<Utc>,
     created_at: DateTime<Utc>,
     running: bool,
     finished_at: Option<DateTime<Utc>>,
     idle: Option<Duration>,
+    idle_stop_veto: bool,
     config: &SandboxReaperConfig,
 ) -> ReapAction {
-    let age = (now - created_at).to_std().unwrap_or(Duration::ZERO);
+    let age = age_since(now, created_at);
     let past_forced_recycle_age = age >= config.forced_recycle_after;
 
     if running {
-        // Forced recycle overrides the idle window outright: a running
-        // container's age is always known (it is the container's own
-        // `created_at` label), so there is no uncertainty to defer to here.
+        // Forced recycle overrides the idle window (and the veto) outright:
+        // a running container's age is always known (it is the container's
+        // own `created_at` label), so there is no uncertainty to defer to
+        // here, and nothing — including a live background job — runs past
+        // this backstop.
         if past_forced_recycle_age {
             return ReapAction::Stop;
         }
         return match idle {
-            Some(idle) if idle >= config.idle_stop_after => ReapAction::Stop,
+            Some(idle) if idle >= config.idle_stop_after => {
+                if idle_stop_veto {
+                    // A live-probe found a surviving background process:
+                    // suppress the stop for this scan rather than kill a
+                    // running dev server out from under the user.
+                    ReapAction::None
+                } else {
+                    ReapAction::Stop
+                }
+            }
             _ => ReapAction::None, // no activity record: never reap on uncertainty
         };
     }
@@ -202,12 +256,56 @@ pub struct ReapSummary {
     pub reaped: usize,
 }
 
+/// In-memory debounce for [`ReapAction::Remove`] (module doc's "Remove
+/// debounce" section): `docker rm` only fires once the same container id
+/// has produced a `Remove` verdict on two *consecutive* [`observe`] calls.
+/// Any call for that id whose verdict is not `Remove` clears the pending
+/// mark, so the debounce never carries a stale "one Remove sighting" across
+/// an unrelated intervening scan. Interior mutability (a `Mutex`, mirroring
+/// [`SandboxActivityRegistry`]'s own pattern) because `SandboxReaper` only
+/// ever hands out `&self`.
+///
+/// [`observe`]: RemoveDebounce::observe
+#[derive(Default)]
+struct RemoveDebounce {
+    pending: Mutex<HashSet<String>>,
+}
+
+impl RemoveDebounce {
+    /// Records this sweep's verdict for `container_id` and returns whether
+    /// the caller should act on it now.
+    ///
+    /// - `is_remove_verdict == false`: clears any pending mark for this id
+    ///   and returns `false`.
+    /// - `is_remove_verdict == true`, first sighting: marks the id pending
+    ///   and returns `false` (do not act yet).
+    /// - `is_remove_verdict == true`, second *consecutive* sighting: clears
+    ///   the mark and returns `true` (act now).
+    fn observe(&self, container_id: &str, is_remove_verdict: bool) -> bool {
+        let mut pending = match self.pending.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !is_remove_verdict {
+            pending.remove(container_id);
+            return false;
+        }
+        if pending.remove(container_id) {
+            true
+        } else {
+            pending.insert(container_id.to_string());
+            false
+        }
+    }
+}
+
 /// Periodically stops idle and removes retention-expired persistent
 /// per-user sandbox containers.
 pub struct SandboxReaper {
     docker: Docker,
     activity: Arc<SandboxActivityRegistry>,
     config: SandboxReaperConfig,
+    remove_debounce: RemoveDebounce,
 }
 
 impl SandboxReaper {
@@ -220,6 +318,7 @@ impl SandboxReaper {
             docker,
             activity,
             config,
+            remove_debounce: RemoveDebounce::default(),
         }
     }
 
@@ -283,25 +382,49 @@ impl SandboxReaper {
                 self.finished_at(&candidate.container_id).await
             };
 
+            // Only spend a live probe when the pure decision would *idle*-stop
+            // this container — forced recycle is unconditional and must never
+            // be gated behind a probe, and a container that isn't headed for
+            // idle-stop has nothing for the veto to suppress.
+            let age = age_since(now, candidate.created_at);
+            let past_forced_recycle_age = age >= self.config.forced_recycle_after;
+            let would_idle_stop = running
+                && !past_forced_recycle_age
+                && idle.is_some_and(|idle| idle >= self.config.idle_stop_after);
+            let idle_stop_veto = if would_idle_stop {
+                self.probe_live_background(&candidate.container_id).await
+            } else {
+                false
+            };
+
             let action = decide_reap_action(
                 now,
                 candidate.created_at,
                 running,
                 finished_at,
                 idle,
+                idle_stop_veto,
                 &self.config,
             );
 
             match action {
-                ReapAction::None => {}
+                ReapAction::None => {
+                    self.remove_debounce.observe(&candidate.container_id, false);
+                }
                 ReapAction::Stop => {
+                    self.remove_debounce.observe(&candidate.container_id, false);
                     self.stop_container(&candidate.container_id).await;
                     summary.reaped += 1;
                 }
                 ReapAction::Remove => {
-                    self.remove_container(&candidate.container_id).await;
-                    self.activity.forget(&key);
-                    summary.reaped += 1;
+                    // Debounced: only act once the same container id has
+                    // produced a `Remove` verdict on two consecutive sweeps
+                    // (see the module doc's "Remove debounce" section).
+                    if self.remove_debounce.observe(&candidate.container_id, true) {
+                        self.remove_container(&candidate.container_id).await;
+                        self.activity.forget(&key);
+                        summary.reaped += 1;
+                    }
                 }
             }
         }
@@ -357,6 +480,47 @@ impl SandboxReaper {
             return None;
         }
         Some(parsed.with_timezone(&Utc))
+    }
+
+    /// Live-probes `container_id` for a surviving background job to decide
+    /// whether an idle-stop should be vetoed (module doc's "Idle-stop veto"
+    /// section). Only called when the pure decision would otherwise
+    /// idle-stop this container.
+    ///
+    /// The persistent container's PID 1 is always `sleep infinity` (see
+    /// `exec_transport::user_container_launch_config`), and by scan time
+    /// every *foreground* shell invocation's own `setsid`-wrapped exec
+    /// session has exited (`exec_in_container` waits for it, and this probe
+    /// only runs between commands — see
+    /// `RebornScopedSandboxCommandTransport::reconcile_background_jobs` for
+    /// the sibling in-band sweep that trims dead pids from the footer). So
+    /// any pid other than PID 1 that this `ps` snapshot observes is
+    /// necessarily a detached, model-launched background process (e.g. a
+    /// `background:true` dev server) — the same shape
+    /// `reconcile_background_jobs` sweeps, just probed here without a
+    /// tracked-pid list to check against.
+    ///
+    /// Probe failure (exec error, container race, timeout) returns `true`
+    /// (veto/"live") — never reap on uncertainty.
+    async fn probe_live_background(&self, container_id: &str) -> bool {
+        let probed = exec_transport::exec_in_container(
+            &self.docker,
+            container_id,
+            ContainerWorkdir::workspace_root(),
+            Vec::new(),
+            "ps -o pid= --no-headers".to_string(),
+            Duration::from_secs(5),
+            4096,
+        )
+        .await;
+        let Ok(probed) = probed else {
+            return true;
+        };
+        probed
+            .output
+            .split_whitespace()
+            .filter_map(|token| token.trim().parse::<u32>().ok())
+            .any(|pid| pid != 1)
     }
 
     /// Best-effort stop: never fail the scan over a single container's
@@ -442,6 +606,7 @@ mod decision_tests {
             true,
             None,
             Some(Duration::from_secs(60)),
+            false,
             &config(),
         );
         assert_eq!(action, ReapAction::None);
@@ -456,9 +621,28 @@ mod decision_tests {
             true,
             None,
             Some(Duration::from_secs(1_000)),
+            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Stop);
+    }
+
+    #[test]
+    fn running_container_past_idle_threshold_with_live_background_veto_is_left_alone() {
+        // A `background:true` dev server only touches the activity registry
+        // once at launch, so idle crosses the threshold while it is still
+        // running. A live `ps` probe finding it suppresses the idle-stop.
+        let now = Utc::now();
+        let action = decide_reap_action(
+            now,
+            now,
+            true,
+            None,
+            Some(Duration::from_secs(1_000)),
+            true,
+            &config(),
+        );
+        assert_eq!(action, ReapAction::None);
     }
 
     #[test]
@@ -468,7 +652,7 @@ mod decision_tests {
         // every composition restart. Mirrors the old reaper's "never
         // reap on uncertainty" rule.
         let now = Utc::now();
-        let action = decide_reap_action(now, now, true, None, None, &config());
+        let action = decide_reap_action(now, now, true, None, None, false, &config());
         assert_eq!(action, ReapAction::None);
     }
 
@@ -482,6 +666,7 @@ mod decision_tests {
             false,
             Some(finished_at),
             None,
+            false,
             &config(),
         );
         assert_eq!(action, ReapAction::None);
@@ -497,6 +682,7 @@ mod decision_tests {
             false,
             Some(finished_at),
             None,
+            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Remove);
@@ -511,6 +697,7 @@ mod decision_tests {
             false,
             None,
             None,
+            false,
             &config(),
         );
         assert_eq!(action, ReapAction::None);
@@ -525,6 +712,24 @@ mod decision_tests {
             true,
             None,
             Some(Duration::ZERO),
+            false,
+            &config(),
+        );
+        assert_eq!(action, ReapAction::Stop);
+    }
+
+    #[test]
+    fn running_container_past_forced_recycle_age_is_stopped_even_with_veto() {
+        // Forced recycle is unconditional: a live background job never
+        // outlives the 7-day backstop, unlike an ordinary idle-stop.
+        let now = Utc::now();
+        let action = decide_reap_action(
+            now,
+            now - ChronoDuration::days(8),
+            true,
+            None,
+            Some(Duration::ZERO),
+            true,
             &config(),
         );
         assert_eq!(action, ReapAction::Stop);
@@ -540,6 +745,7 @@ mod decision_tests {
             false,
             Some(finished_at),
             None,
+            false,
             &config(),
         );
         assert_eq!(action, ReapAction::Remove);
@@ -588,5 +794,60 @@ mod tests {
             resolve_duration_secs_from_raw(Some("120".to_string()), 42),
             Duration::from_secs(120)
         );
+    }
+}
+
+#[cfg(test)]
+mod remove_debounce_tests {
+    use super::*;
+
+    #[test]
+    fn first_remove_verdict_does_not_act_and_marks_pending() {
+        let debounce = RemoveDebounce::default();
+        assert!(!debounce.observe("container-a", true));
+    }
+
+    #[test]
+    fn second_consecutive_remove_verdict_acts() {
+        let debounce = RemoveDebounce::default();
+        assert!(!debounce.observe("container-a", true));
+        assert!(debounce.observe("container-a", true));
+    }
+
+    #[test]
+    fn a_third_consecutive_remove_verdict_debounces_again() {
+        // After acting, the mark is cleared — the *next* Remove verdict is
+        // treated as a fresh first sighting, not an already-armed one.
+        let debounce = RemoveDebounce::default();
+        assert!(!debounce.observe("container-a", true));
+        assert!(debounce.observe("container-a", true));
+        assert!(!debounce.observe("container-a", true));
+        assert!(debounce.observe("container-a", true));
+    }
+
+    #[test]
+    fn an_interleaved_non_remove_verdict_clears_the_pending_mark() {
+        let debounce = RemoveDebounce::default();
+        assert!(!debounce.observe("container-a", true));
+        assert!(!debounce.observe("container-a", false));
+        // The pending mark was cleared by the None/Stop sweep in between, so
+        // this Remove verdict is a fresh first sighting, not a second one.
+        assert!(!debounce.observe("container-a", true));
+    }
+
+    #[test]
+    fn a_non_remove_verdict_with_no_prior_pending_mark_is_a_no_op() {
+        let debounce = RemoveDebounce::default();
+        assert!(!debounce.observe("container-a", false));
+    }
+
+    #[test]
+    fn distinct_container_ids_are_debounced_independently() {
+        let debounce = RemoveDebounce::default();
+        assert!(!debounce.observe("container-a", true));
+        // container-b's first sighting must not be treated as container-a's
+        // second.
+        assert!(!debounce.observe("container-b", true));
+        assert!(debounce.observe("container-a", true));
     }
 }

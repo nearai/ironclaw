@@ -189,6 +189,19 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "GitHub content API allowlist for skill installation",
     ),
     (
+        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "github",
+        "default sandboxed-shell egress allowlist includes github.com/\
+         raw.githubusercontent.com/codeload.github.com for ordinary `git clone`/release-\
+         archive workflows — GitHub as a code host, not the github extension",
+    ),
+    (
+        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "api.github.com",
+        "default sandboxed-shell egress allowlist includes GitHub's content API host for \
+         `gh`/archive-download workflows — GitHub as a code host, not the github extension",
+    ),
+    (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
         "github",
         "skill-install tool description names GitHub as a skill source",

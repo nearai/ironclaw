@@ -24,23 +24,23 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
-    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
-    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    APPLY_PATCH_CAPABILITY_ID, CLI_SESSION_CAPABILITY_ID, CapabilitySurfacePolicy,
+    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
+    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport,
+    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend,
@@ -85,6 +85,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             HTTP_CAPABILITY_ID
             | HTTP_SAVE_CAPABILITY_ID
             | SHELL_CAPABILITY_ID
+            | CLI_SESSION_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_UPDATE_CAPABILITY_ID
@@ -299,6 +300,7 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(!ids.contains(&CLI_SESSION_CAPABILITY_ID));
     assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     assert!(ids.contains(&ECHO_CAPABILITY_ID));
     assert!(
@@ -315,6 +317,7 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
     )
     .unwrap();
     assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(!handlers.contains_handler(&capability_id(CLI_SESSION_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
 }
@@ -329,6 +332,12 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
             .iter()
             .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
     );
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == CLI_SESSION_CAPABILITY_ID)
+    );
 
     let handlers = builtin_first_party_handlers_for_process_backend(
         Arc::new(InMemoryTriggerRepository::default()),
@@ -336,6 +345,7 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     )
     .unwrap();
     assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(CLI_SESSION_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -3435,6 +3445,78 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
     );
     assert!(requests[0].extra_env.is_empty());
     assert_eq!(requests[0].scope.user_id.as_str(), "user");
+}
+
+#[tokio::test]
+async fn builtin_cli_session_delegates_start_command_to_process_port() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime = runtime_with_process_port(Arc::clone(&process_port));
+
+    let output = invoke_with_context(
+        &runtime,
+        CLI_SESSION_CAPABILITY_ID,
+        json!({"action": "start", "session": "devserver", "command": "npm run dev"}),
+        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["session"], json!("ic-devserver"));
+    assert_eq!(output["success"], json!(true));
+    let requests = process_port.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].command,
+        "tmux new-session -d -s 'ic-devserver' 'npm run dev'; \
+         printf '\\n---IRONCLAW-CLI-SESSIONS---\\n'; \
+         tmux list-sessions -F '#S' 2>/dev/null || true"
+    );
+    assert_eq!(requests[0].timeout_secs, Some(20));
+    assert_eq!(requests[0].scope.user_id.as_str(), "user");
+}
+
+#[tokio::test]
+async fn builtin_cli_session_send_and_kill_omit_the_session_footer() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime = runtime_with_process_port(Arc::clone(&process_port));
+
+    invoke_with_context(
+        &runtime,
+        CLI_SESSION_CAPABILITY_ID,
+        json!({"action": "send", "session": "devserver", "text": "hello"}),
+        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+    invoke_with_context(
+        &runtime,
+        CLI_SESSION_CAPABILITY_ID,
+        json!({"action": "kill", "session": "devserver"}),
+        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let requests = process_port.requests.lock().unwrap();
+    assert_eq!(
+        requests[0].command,
+        "tmux send-keys -t 'ic-devserver' -l -- 'hello' && tmux send-keys -t 'ic-devserver' Enter"
+    );
+    assert_eq!(requests[1].command, "tmux kill-session -t 'ic-devserver'");
+}
+
+#[tokio::test]
+async fn builtin_cli_session_rejects_invalid_session_name_before_dispatch() {
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        CLI_SESSION_CAPABILITY_ID,
+        json!({"action": "read", "session": "sess; rm -rf /"}),
+        execution_context_with_network([CLI_SESSION_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
 }
 
 #[tokio::test]
@@ -9352,6 +9434,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
+        CLI_SESSION_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
         TRACE_COMMONS_STATUS_CAPABILITY_ID,

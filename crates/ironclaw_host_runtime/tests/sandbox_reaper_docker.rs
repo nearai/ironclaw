@@ -137,7 +137,13 @@ async fn create_labeled_container(
         ..Default::default()
     };
     docker
-        .create_container(Some(CreateContainerOptions { name, platform: None }), config)
+        .create_container(
+            Some(CreateContainerOptions {
+                name,
+                platform: None,
+            }),
+            config,
+        )
         .await
         .expect("container create should succeed against a reachable daemon")
         .id
@@ -275,7 +281,9 @@ async fn stopped_container_past_forced_recycle_age_is_removed() {
 
     let docker = Docker::connect_with_local_defaults().unwrap();
     // Already stopped (known finished_at) and past forced-recycle age: removed
-    // outright even though it is still within the normal retention window.
+    // outright even though it is still within the normal retention window —
+    // but only once the same container has produced a Remove verdict on two
+    // consecutive scans (the removal debounce).
     let labels = user_labels(Utc::now() - chrono::Duration::seconds(120));
     let container_id = start_then_exit_container(&docker, &image, labels).await;
 
@@ -287,7 +295,18 @@ async fn stopped_container_past_forced_recycle_age_is_removed() {
     reaper
         .scan_and_reap()
         .await
-        .expect("scan against a reachable daemon should succeed");
+        .expect("first scan against a reachable daemon should succeed");
+
+    let survived_first_scan = container_exists(&docker, &container_id).await;
+    assert!(
+        survived_first_scan,
+        "the first Remove verdict must only mark the container pending, not remove it"
+    );
+
+    reaper
+        .scan_and_reap()
+        .await
+        .expect("second scan against a reachable daemon should succeed");
 
     let survived = container_exists(&docker, &container_id).await;
     if survived {
@@ -295,6 +314,7 @@ async fn stopped_container_past_forced_recycle_age_is_removed() {
     }
     assert!(
         !survived,
-        "a stopped container past forced-recycle age must be removed"
+        "a stopped container past forced-recycle age must be removed on the second \
+         consecutive Remove verdict"
     );
 }

@@ -43,16 +43,19 @@ RUN chmod +x /usr/local/bin/process-sandbox-entrypoint \
     && mkdir -p /workspace/.home /ironclaw/state/tools /ironclaw/state/cache /ironclaw/broker \
     && chown -R sandbox:sandbox /workspace /ironclaw
 
-# Rust toolchain, installed as the sandbox user under the workspace-relative
-# HOME so it survives container-rm/recreate only via the bind-mounted
-# workspace (matches the design's "HOME=/workspace/.home so caches/dotfiles
-# persist" decision) — installed at build time into a location Cargo can
-# still find once HOME is redirected to /workspace/.home at runtime via
-# CARGO_HOME/RUSTUP_HOME pointed at a workspace-relative path is NOT done at
-# build time (the workspace doesn't exist yet); instead rustup installs to
-# the image's default /home/sandbox/.cargo, and the container launch env
-# additionally sets CARGO_HOME=/workspace/.home/.cargo, RUSTUP_HOME=/workspace/.home/.rustup
-# with a first-run copy step in the entrypoint script — see entrypoint change below.
+# Rust toolchain, installed as the sandbox user under the image's default
+# HOME (/home/sandbox) at build time, since the workspace-relative HOME
+# doesn't exist yet at build time. At runtime the container launch env sets
+# ONLY HOME=/workspace/.home (see exec_transport::user_container_launch_config)
+# — it does NOT set CARGO_HOME/RUSTUP_HOME. Cargo/rustup resolve their config
+# and cache dirs relative to $HOME by default, so they transparently follow
+# HOME to the workspace-relative path; the entrypoint script seeds a
+# first-run copy of /home/sandbox/.cargo and .rustup into /workspace/.home so
+# the toolchain is available there too, and the result persists across
+# container-rm/recreate via the bind-mounted workspace (matches the design's
+# "HOME=/workspace/.home so caches/dotfiles persist" decision). npm, by
+# contrast, does NOT default its global prefix to $HOME, so it is redirected
+# explicitly via NPM_CONFIG_PREFIX in the same launch env.
 USER sandbox
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH="/home/sandbox/.cargo/bin:${PATH}"
