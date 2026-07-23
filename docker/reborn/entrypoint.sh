@@ -14,6 +14,20 @@ railway_runtime_detected() {
     || [ -n "${RAILWAY_SERVICE_ID:-}" ]
 }
 
+# `ironclaw service restart` (see crates/ironclaw_reborn_cli's service/mod.rs
+# `ServicePlatform::Container`) signals the running `serve` process and
+# trusts an external restart policy to relaunch it — that's only safe when
+# one actually exists, which no signal observable from inside the container
+# can prove (not even being a container at all: a bare `docker run --rm`
+# with no `--restart` is a real container with nothing to relaunch `serve`).
+# So it's an explicit opt-in, not auto-detected. Declare it here for
+# Railway, which manages its own restart policy by default, so operators on
+# that platform don't have to configure it themselves; an operator who has
+# already set the var (in either direction) is left untouched.
+if railway_runtime_detected && [ -z "${IRONCLAW_REBORN_CONTAINER_SUPERVISED:-}" ]; then
+  export IRONCLAW_REBORN_CONTAINER_SUPERVISED=true
+fi
+
 railway_volume_mount=""
 if [ -n "${RAILWAY_VOLUME_MOUNT_PATH:-}" ]; then
   railway_volume_mount="${RAILWAY_VOLUME_MOUNT_PATH%/}"

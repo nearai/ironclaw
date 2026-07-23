@@ -12,11 +12,14 @@
 //! `ironclaw service restart`.
 //!
 //! [`super::ServicePlatform::detect`] resolves to `Container` on Linux when
-//! systemd is not the running init (no `/run/systemd/system`) AND `/.dockerenv`
-//! is present — systemd-absence alone is not enough (WSL2, OpenRC distros, a
-//! plain VM running `ironclaw onboard` directly all lack systemd too, and
-//! `restart`'s kill-and-trust-a-restart-policy behavior would be destructive
-//! on them without a positive container signal; see
+//! systemd is not the running init (no `/run/systemd/system`) AND the
+//! deployment has explicitly declared a managed restart policy via
+//! `IRONCLAW_REBORN_CONTAINER_SUPERVISED` — systemd-absence alone is not
+//! enough, and neither is merely being *a* container (WSL2, OpenRC distros,
+//! a plain VM running `ironclaw onboard` directly, or a real Docker
+//! container started with no restart policy at all, e.g. the documented
+//! `docker run --rm ...` local-run command, all lack a guarantee that
+//! anything relaunches `serve` after `restart` kills it; see
 //! [`super::ServicePlatform::linux_platform`]'s doc). In `Container` mode:
 //!
 //! - `restart` terminates the running `serve` process. The container's main
