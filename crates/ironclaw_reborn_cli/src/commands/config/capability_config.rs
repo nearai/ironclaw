@@ -394,10 +394,10 @@ mod tests {
         assert!(google.contains("config set google.client_secret"));
         assert!(google.contains("config set google.redirect_uri"));
         // The remediation text itself must NOT embed the restart step: that
-        // sentence is appended exactly once by the surface (CLI's
-        // `print_apply_step` / composition's `apply_step_text`), never
-        // baked into the remediation text, or callers that append it too
-        // produce a duplicate "service restart" instruction.
+        // sentence is appended exactly once by the CLI surface's
+        // `print_apply_step`, never baked into the remediation text, or
+        // callers that append it also produce a duplicate "service restart"
+        // instruction.
         assert_eq!(
             google.matches("service restart").count(),
             0,

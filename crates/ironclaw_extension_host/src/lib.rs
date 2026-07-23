@@ -33,8 +33,8 @@ pub use active::{
     ActiveExtension, ActiveSnapshot, Generation, ResolvedToolBinding, SnapshotConflict,
 };
 pub use admin_configuration_service::{
-    AdminConfigurationFieldState, AdminConfigurationGroupState, AdminConfigurationService,
-    AdminConfigurationServiceError, AdminConfigurationSubmittedValue,
+    AdminConfigurationFieldState, AdminConfigurationGroupState, AdminConfigurationResolvedValues,
+    AdminConfigurationService, AdminConfigurationServiceError, AdminConfigurationSubmittedValue,
 };
 pub use admin_configuration_store::{
     AdminConfigurationCommit, AdminConfigurationIdempotencyKey, AdminConfigurationRecord,

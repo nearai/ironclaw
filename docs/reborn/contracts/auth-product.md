@@ -206,14 +206,31 @@ updates the pre-authorized account id captured in the flow. Completed flows
 return their stored credential account id on callback retry/replay, so provider
 code is not re-exchanged after a completed durable claim.
 
-OAuth providers resolve manifest-declared client credential handles through the
-tenant-scoped admin-configuration store when each authorization, callback,
-refresh, or revocation operation starts. Saved admin values take precedence over
-the host-composed `OAuthClientConfig`; the latter remains a bootstrap fallback
-for deployments that still configure Google through environment variables.
-Redirect URI and hosted-domain metadata remain host-owned because they are not
-declared as admin credential handles. Both sources pass through the typed OAuth
-client validators before provider use.
+OAuth providers resolve a recipe's complete manifest-declared client credential
+handle set through one tenant-scoped admin-configuration record revision. An
+admin record is authoritative as a whole: partial records and storage failures
+fail closed, and values are never mixed with the retired `[channel.config]`
+store. When no admin record has been saved, the complete host-composed
+`OAuthClientConfig` pair remains a bootstrap fallback for deployments that
+still configure Google through environment variables.
+
+Authorization starts and refreshes resolve the latest committed revision. A
+static-client authorization start also stores an encrypted, expiring snapshot
+of that pair under the flow scope; its callback consumes that snapshot because
+an authorization code is bound to the client that minted the authorization
+request. Rotation therefore affects new starts and later refreshes without
+breaking an already-open callback. A flow that was already pending when this
+snapshot mechanism was deployed may resolve live credentials once as an
+upgrade-compatibility fallback; newly prepared flows never rely on it. Redirect
+URI and hosted-domain metadata remain host-owned because they are not declared
+as admin credential handles. Both sources pass through the typed OAuth client
+validators before provider use.
+
+The WebUI administrator surface and this live source are assembled by the local
+runtime substrate, which includes local development and hosted single-tenant
+deployments. The production-shaped multi-tenant substrate does not yet expose
+extension management or administrator configuration; it remains boot-config
+only until those scoped surfaces are added there.
 
 The HA-safe PKCE decision for this slice is documented sticky callback routing:
 the mounted WebUI OAuth route keeps raw PKCE verifiers in process-local bounded

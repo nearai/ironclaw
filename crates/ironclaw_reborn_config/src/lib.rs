@@ -39,7 +39,7 @@ pub use budget::{
     ROUTINE_LIGHTWEIGHT_USD_ENV, ROUTINE_STANDARD_USD_ENV, USER_DAILY_USD_ENV,
 };
 pub use capability_remediation::{
-    HostRemediationText, apply_step_text, google_backend_auth_text, google_remediation_text,
+    HostRemediationText, google_backend_auth_text, google_remediation_text,
 };
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,

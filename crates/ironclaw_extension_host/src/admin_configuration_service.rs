@@ -55,6 +55,16 @@ pub struct AdminConfigurationGroupState {
     pub fields: Vec<AdminConfigurationFieldState>,
 }
 
+/// One runtime read of a manifest-declared administrator configuration group.
+///
+/// All returned values come from the same committed revision. Secret material
+/// remains redacted in `Debug` through [`SecretMaterial`].
+#[derive(Clone, Debug)]
+pub struct AdminConfigurationResolvedValues {
+    pub revision: u64,
+    pub values: BTreeMap<SecretHandle, SecretMaterial>,
+}
+
 /// Stable, value-free service failures suitable for an API adapter.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdminConfigurationServiceError {
@@ -163,6 +173,98 @@ where
             .map_err(map_store_error)?;
         let commit = record.as_ref().map(commit_from_record);
         Ok(render_group(descriptor, commit.as_ref()))
+    }
+
+    /// Resolve a set of manifest-declared handles from one committed group
+    /// revision.
+    ///
+    /// `None` means no descriptor declares the complete handle set. Multiple
+    /// matching groups fail closed instead of allowing handle collisions to
+    /// choose another extension's administrator configuration. An existing
+    /// descriptor with no saved record returns revision zero and no values.
+    pub async fn resolve_values_for_handles(
+        &self,
+        scope: &ResourceScope,
+        handles: &[SecretHandle],
+    ) -> Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError> {
+        if handles.is_empty() {
+            return Err(AdminConfigurationServiceError::InvalidDescriptor);
+        }
+        let requested = handles.iter().collect::<BTreeSet<_>>();
+        if requested.len() != handles.len() {
+            return Err(AdminConfigurationServiceError::DuplicateField);
+        }
+        let mut matching = self.descriptors.values().filter(|descriptor| {
+            requested.iter().all(|handle| {
+                descriptor
+                    .fields
+                    .iter()
+                    .any(|field| &field.handle == *handle)
+            })
+        });
+        let Some(descriptor) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() {
+            return Err(AdminConfigurationServiceError::DescriptorConflict);
+        }
+        let record = self
+            .store
+            .get(scope, &descriptor.group_id)
+            .await
+            .map_err(map_store_error)?;
+        let Some(record) = record else {
+            return Ok(Some(AdminConfigurationResolvedValues {
+                revision: 0,
+                values: BTreeMap::new(),
+            }));
+        };
+        let shared_scope = scope.tenant_shared_managed_scope();
+        let mut values = BTreeMap::new();
+        for handle in handles {
+            let field = descriptor
+                .fields
+                .iter()
+                .find(|field| field.handle == *handle)
+                .ok_or(AdminConfigurationServiceError::UnknownField)?;
+            let Some(value) = record.values.get(handle) else {
+                continue;
+            };
+            let material = match (field.secret, value) {
+                (false, AdminConfigurationValueRef::Inline(value)) => {
+                    SecretMaterial::from(value.clone())
+                }
+                (true, AdminConfigurationValueRef::Secret(stored_handle)) => {
+                    let lease = self
+                        .secrets
+                        .lease_once(&shared_scope, stored_handle)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(
+                                error = ?error,
+                                "admin-configuration snapshot secret lease failed"
+                            );
+                            AdminConfigurationServiceError::Unavailable
+                        })?;
+                    self.secrets
+                        .consume(&shared_scope, lease.id)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(
+                                error = ?error,
+                                "admin-configuration snapshot secret consume failed"
+                            );
+                            AdminConfigurationServiceError::Unavailable
+                        })?
+                }
+                _ => return Err(AdminConfigurationServiceError::InvalidDescriptor),
+            };
+            values.insert(handle.clone(), material);
+        }
+        Ok(Some(AdminConfigurationResolvedValues {
+            revision: record.revision,
+            values,
+        }))
     }
 
     /// Resolve one non-secret value for a runtime consumer. The manifest

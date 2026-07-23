@@ -207,6 +207,64 @@ async fn runtime_resolvers_follow_descriptor_kinds_and_return_effective_values()
 }
 
 #[tokio::test]
+async fn runtime_snapshot_resolves_the_complete_pair_from_one_revision() {
+    let (service, _) = service();
+    let scope = sample_scope("tenant-a", "operator-a");
+    service
+        .replace(
+            &scope,
+            &group_id(),
+            &idempotency_key("save-1"),
+            0,
+            submitted("client-a", "secret-a"),
+        )
+        .await
+        .unwrap();
+    let handles = [
+        SecretHandle::new("client_id").unwrap(),
+        SecretHandle::new("client_secret").unwrap(),
+    ];
+
+    let snapshot = service
+        .resolve_values_for_handles(&scope, &handles)
+        .await
+        .unwrap()
+        .expect("descriptor declares the pair");
+
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&snapshot.values[&handles[0]]),
+        "client-a"
+    );
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&snapshot.values[&handles[1]]),
+        "secret-a"
+    );
+}
+
+#[tokio::test]
+async fn runtime_snapshot_rejects_ambiguous_handle_groups() {
+    let store =
+        FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
+    let secrets = Arc::new(FilesystemSecretStore::ephemeral());
+    let mut other = descriptor();
+    other.group_id = AdminConfigurationGroupId::new("vendor.other").unwrap();
+    let service =
+        AdminConfigurationService::new(store, secrets, vec![descriptor(), other]).unwrap();
+    let handles = [
+        SecretHandle::new("client_id").unwrap(),
+        SecretHandle::new("client_secret").unwrap(),
+    ];
+
+    let error = service
+        .resolve_values_for_handles(&sample_scope("tenant-a", "operator-a"), &handles)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, AdminConfigurationServiceError::DescriptorConflict);
+}
+
+#[tokio::test]
 async fn exact_replay_does_not_stage_again_after_a_later_revision() {
     let (service, secrets) = service();
     let scope = sample_scope("tenant-a", "operator-a");

@@ -257,13 +257,10 @@ fn write_google_client_secret(
 /// agent's own shell tool, a script) rather than branching on TTY-ness or
 /// service state.
 ///
-/// This is the CLI-surface twin of
-/// `ironclaw_reborn_config::apply_step_text` (the canonical sentence used
-/// by the composition-layer tool-error surface, e.g. `gsuite.rs`) — kept
-/// as a separate literal rather than unified onto that helper because
-/// several CLI tests already pin this exact `  to apply: ...` wording;
-/// treat `apply_step_text` as the source of truth for the *content* of
-/// this instruction if the two ever need to change together.
+/// This CLI-owned instruction is intentionally separate from runtime
+/// remediation because `config set` still writes boot configuration and
+/// therefore requires a restart. Several CLI tests pin the exact
+/// `  to apply: ...` wording.
 fn print_apply_step() {
     println!("  to apply: ironclaw service restart");
 }

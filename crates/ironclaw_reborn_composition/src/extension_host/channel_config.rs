@@ -336,89 +336,6 @@ impl ChannelConfigService {
             .map(|(_, value)| value))
     }
 
-    /// Resolve one auth-recipe client-credential handle from manifest-declared
-    /// administrator configuration, including extensions with no channel
-    /// surface. The retired channel-config store remains a compatibility
-    /// fallback for older manifests. Per-request resolution means an operator
-    /// save takes effect on the next OAuth start without rewiring.
-    pub(crate) async fn credential_handle_value(
-        &self,
-        handle: &str,
-    ) -> Result<Option<secrecy::SecretString>, ChannelConfigError> {
-        let installed_manifests = self
-            .installation_store
-            .list_manifests()
-            .await
-            .map_err(storage_error)?;
-        let typed_handle = SecretHandle::new(handle).map_err(storage_error)?;
-        if let Some(admin) = &self.admin_configuration {
-            let available = self.available_manifests.values().cloned();
-            let installed = installed_manifests
-                .iter()
-                .map(|record| Arc::new(record.resolved().clone()));
-            for manifest in available.chain(installed) {
-                let Some((descriptor, field)) =
-                    manifest.admin_configuration.iter().find_map(|descriptor| {
-                        descriptor
-                            .fields
-                            .iter()
-                            .find(|field| field.handle == typed_handle)
-                            .map(|field| (descriptor, field))
-                    })
-                else {
-                    continue;
-                };
-                if field.secret {
-                    let material = admin
-                        .service
-                        .secret_material(&admin.scope, &descriptor.group_id, &typed_handle)
-                        .await
-                        .map_err(admin_configuration_error)?;
-                    if let Some(material) = material {
-                        return Ok(Some(secrecy::SecretString::from(
-                            secrecy::ExposeSecret::expose_secret(&material).to_string(),
-                        )));
-                    }
-                } else if let Some(value) = admin
-                    .service
-                    .non_secret_value(&admin.scope, &descriptor.group_id, &typed_handle)
-                    .await
-                    .map_err(admin_configuration_error)?
-                {
-                    return Ok(Some(secrecy::SecretString::from(value)));
-                }
-            }
-        }
-        for record in installed_manifests {
-            let Some(channel) = record.resolved().channel.as_ref() else {
-                continue;
-            };
-            let Some(field) = channel
-                .config
-                .fields
-                .iter()
-                .find(|field| field.handle.as_str() == handle)
-            else {
-                continue;
-            };
-            if field.secret {
-                let extension_id = record.resolved().id.clone();
-                let material = self.secret_material(&extension_id, &field.handle).await?;
-                return Ok(material.map(|material| {
-                    secrecy::SecretString::from(
-                        secrecy::ExposeSecret::expose_secret(&material).to_string(),
-                    )
-                }));
-            }
-            let extension_id = record.resolved().id.clone();
-            return self
-                .non_secret_value(&extension_id, handle)
-                .await
-                .map(|value| value.map(secrecy::SecretString::from));
-        }
-        Ok(None)
-    }
-
     /// Resolve the non-secret configuration passed to `ChannelAdapter::activate`.
     /// Manifest-declared tenant admin values take precedence over the retired
     /// per-installation configure surface while preserving it as a compatibility
@@ -643,16 +560,11 @@ fn map_channel_config_error(error: ChannelConfigError) -> RebornServicesError {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_extension_host::{
-        AdminConfigurationIdempotencyKey, AdminConfigurationService,
-        AdminConfigurationSubmittedValue, FilesystemAdminConfigurationStore,
-    };
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
         ManifestSource,
     };
-    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, SecretHandle, UserId};
     use ironclaw_secrets::FilesystemSecretStore;
 
@@ -729,9 +641,6 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 "#;
-
-    const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str =
-        include_str!("../../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 
     struct RecordingReactivation {
         calls: AtomicUsize,
@@ -842,72 +751,6 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             scope,
             reactivation,
             extension_id: ExtensionId::new("acmechat").expect("extension id"),
-        }
-    }
-
-    #[tokio::test]
-    async fn non_channel_auth_credentials_resolve_from_manifest_admin_configuration() {
-        let installation_store = installed_store(NON_CHANNEL_ADMIN_FIXTURE_MANIFEST, "gmail").await;
-        let manifest = installation_store
-            .get_manifest(&ExtensionId::new("gmail").unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(manifest.resolved().channel.is_none());
-        assert!(!manifest.resolved().admin_configuration.is_empty());
-
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-        let admin = Arc::new(
-            AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
-                    filesystem,
-                    crate::invocation_mount_view,
-                ))),
-                Arc::clone(&secrets),
-                manifest.resolved().admin_configuration.clone(),
-            )
-            .unwrap(),
-        );
-        let scope = test_scope();
-        let group = manifest.resolved().admin_configuration[0].group_id.clone();
-        admin
-            .replace(
-                &scope,
-                &group,
-                &AdminConfigurationIdempotencyKey::new("gmail-admin-save").unwrap(),
-                0,
-                vec![
-                    AdminConfigurationSubmittedValue {
-                        handle: SecretHandle::new("google_oauth_client_id").unwrap(),
-                        value: SecretMaterial::from("client-id".to_string()),
-                    },
-                    AdminConfigurationSubmittedValue {
-                        handle: SecretHandle::new("google_oauth_client_secret").unwrap(),
-                        value: SecretMaterial::from("client-secret".to_string()),
-                    },
-                ],
-            )
-            .await
-            .unwrap();
-        let service = ChannelConfigService::new(
-            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
-            Arc::clone(&secrets),
-            scope.clone(),
-            Arc::new(RecordingReactivation::new()),
-        )
-        .with_admin_configuration(admin, scope);
-
-        for (handle, expected) in [
-            ("google_oauth_client_id", "client-id"),
-            ("google_oauth_client_secret", "client-secret"),
-        ] {
-            let value = service
-                .credential_handle_value(handle)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(secrecy::ExposeSecret::expose_secret(&value), expected);
         }
     }
 
@@ -1117,68 +960,6 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                 .expect("read config")
                 .len(),
             1
-        );
-    }
-
-    #[tokio::test]
-    async fn credential_handle_value_resolves_declared_fields_only() {
-        let fixture = channel_fixture(RecordingReactivation::new()).await;
-
-        // Declared but not yet saved: no value, not an error.
-        assert!(
-            fixture
-                .service
-                .credential_handle_value("acmechat_api_token")
-                .await
-                .expect("declared-but-unsaved lookup succeeds")
-                .is_none()
-        );
-
-        fixture
-            .service
-            .save(
-                &fixture.extension_id,
-                vec![
-                    ("acmechat_api_token".to_string(), "tok-123".to_string()),
-                    (
-                        "acmechat_public_url".to_string(),
-                        "https://x.example".to_string(),
-                    ),
-                ],
-            )
-            .await
-            .expect("save succeeds");
-
-        // Secret field -> scoped secret store material.
-        let secret = fixture
-            .service
-            .credential_handle_value("acmechat_api_token")
-            .await
-            .expect("secret lookup succeeds")
-            .expect("stored secret resolves");
-        assert_eq!(secrecy::ExposeSecret::expose_secret(&secret), "tok-123");
-
-        // Non-secret field -> durable installation config value.
-        let non_secret = fixture
-            .service
-            .credential_handle_value("acmechat_public_url")
-            .await
-            .expect("non-secret lookup succeeds")
-            .expect("stored value resolves");
-        assert_eq!(
-            secrecy::ExposeSecret::expose_secret(&non_secret),
-            "https://x.example"
-        );
-
-        // A handle no installed manifest declares resolves to nothing —
-        // the auth engine falls through to its not-configured path.
-        assert!(
-            fixture
-                .service
-                .credential_handle_value("undeclared_handle")
-                .await
-                .expect("undeclared lookup succeeds")
-                .is_none()
         );
     }
 

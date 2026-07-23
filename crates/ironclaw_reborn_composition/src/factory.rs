@@ -2005,18 +2005,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     services = apply_post_edit_check_from_env(services)?;
     services = attach_hosted_mcp_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
-    // The auth engine's client-credential fallback over the operator channel
-    // configuration: the configure service is built after the engine (its
-    // durable stores land below), so the engine holds a slot filled once the
-    // service exists.
-    let channel_config_credential_slot =
-        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default();
+    // The auth engine's manifest-administrator credential source is built
+    // after the engine's durable dependencies, so the engine holds a slot
+    // filled once the administrator service exists.
+    let admin_configuration_credential_slot =
+        crate::product_auth::credentials::product_auth_providers::AdminConfigurationCredentialSlot::default();
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        channel_config_credential_slot.clone(),
+        admin_configuration_credential_slot.clone(),
     )?;
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
@@ -2276,7 +2275,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .with_available_manifests(available_manifests.clone()),
     );
     extension_management.attach_channel_config(&channel_config_service);
-    channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
+    admin_configuration_credential_slot.fill(
+        Arc::clone(&admin_configuration),
+        channel_egress_scope.clone(),
+    );
     // The generic channel-identity and DM-target stores (extension-runtime
     // §5.4–§5.5): the fold below seeds them from retired lane state, and the
     // channel host assembly resolves verified inbound actors through them.
@@ -5368,14 +5370,15 @@ where
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
-    // The production-shaped path has no `[channel.config]` configure service
-    // yet; the engine's fallback slot stays unfilled (resolves nothing).
+    // This production substrate has no scoped extension-management/WebUI
+    // administrator surface yet. Select boot-only resolution explicitly
+    // instead of leaving a deferred administrator slot accidentally unfilled.
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default(),
+        crate::product_auth::credentials::product_auth_providers::AdminConfigurationCredentialSlot::boot_only(),
     )?;
     let services = apply_production_runtime_process_binding(
         services,

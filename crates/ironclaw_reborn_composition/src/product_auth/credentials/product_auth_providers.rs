@@ -17,13 +17,14 @@ use ironclaw_auth::{
     EngineCallbackBase, EngineClientCredentialsSource, EngineOAuthClientMaterial, OAuthClientId,
     StaticAuthRecipeResolver,
 };
-use ironclaw_host_api::{RecipeClientCredentials, RuntimeHttpEgress};
+use ironclaw_extension_host::{AdminConfigurationResolvedValues, AdminConfigurationServiceError};
+use ironclaw_host_api::{RecipeClientCredentials, ResourceScope, RuntimeHttpEgress, SecretHandle};
 use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
 use ironclaw_secrets::SecretStore;
 use secrecy::SecretString;
 
 use crate::RebornBuildError;
-use crate::extension_host::channel_config::ChannelConfigService;
+use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
 use crate::input::{OAuthDcrCallbackConfig, OAuthProviderBackendConfig};
 use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
 use crate::product_auth::oauth::staged_egress::ObligationStagedAuthEgress;
@@ -48,32 +49,100 @@ pub(crate) enum ClientCredentialValue {
     Static(SecretString),
 }
 
-/// Deferred handle source over the operator channel configuration
-/// (`[channel.config]`): the configure service is built after the auth
-/// engine (its durable stores land later in factory assembly), so the
-/// engine holds this slot and resolves handles through it at request time.
-/// Unfilled (startup window, or a composition path without the configure
-/// surface) it resolves nothing — the engine's existing not-configured
-/// path applies.
-#[derive(Clone, Default)]
-pub(crate) struct ChannelConfigCredentialSlot {
-    inner: Arc<std::sync::OnceLock<Arc<ChannelConfigService>>>,
+#[async_trait]
+trait AdminClientCredentialSource: Send + Sync + fmt::Debug {
+    async fn resolve(
+        &self,
+        handles: &[SecretHandle],
+    ) -> Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError>;
 }
 
-impl ChannelConfigCredentialSlot {
-    pub(crate) fn fill(&self, service: Arc<ChannelConfigService>) {
-        let _ = self.inner.set(service);
+struct ComposedAdminClientCredentialSource {
+    service: Arc<ComposedAdminConfigurationService>,
+    scope: ResourceScope,
+}
+
+impl fmt::Debug for ComposedAdminClientCredentialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ComposedAdminClientCredentialSource")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl AdminClientCredentialSource for ComposedAdminClientCredentialSource {
+    async fn resolve(
+        &self,
+        handles: &[SecretHandle],
+    ) -> Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError> {
+        self.service
+            .resolve_values_for_handles(&self.scope, handles)
+            .await
+    }
+}
+
+#[derive(Debug)]
+struct BootOnlyAdminClientCredentialSource;
+
+#[async_trait]
+impl AdminClientCredentialSource for BootOnlyAdminClientCredentialSource {
+    async fn resolve(
+        &self,
+        _handles: &[SecretHandle],
+    ) -> Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError> {
+        Ok(None)
+    }
+}
+
+/// Deferred manifest-admin credential source. The administrator service is
+/// built after the auth engine's durable dependencies, so composition fills
+/// this slot once and the engine resolves a complete revisioned value set at
+/// request time. Paths without the WebUI administrator surface leave it
+/// unfilled and use boot values only.
+#[derive(Clone, Default)]
+pub(crate) struct AdminConfigurationCredentialSlot {
+    inner: Arc<std::sync::OnceLock<Arc<dyn AdminClientCredentialSource>>>,
+}
+
+impl AdminConfigurationCredentialSlot {
+    /// Explicitly scope a composition path to bootstrap credentials. This is
+    /// distinct from an accidentally unfilled deferred slot.
+    pub(crate) fn boot_only() -> Self {
+        let slot = Self::default();
+        let _ = slot
+            .inner
+            .set(Arc::new(BootOnlyAdminClientCredentialSource));
+        slot
     }
 
-    fn get(&self) -> Option<Arc<ChannelConfigService>> {
+    pub(crate) fn fill(
+        &self,
+        service: Arc<ComposedAdminConfigurationService>,
+        scope: ResourceScope,
+    ) {
+        let _ = self
+            .inner
+            .set(Arc::new(ComposedAdminClientCredentialSource {
+                service,
+                scope,
+            }));
+    }
+
+    #[cfg(test)]
+    fn fill_source(&self, source: Arc<dyn AdminClientCredentialSource>) {
+        let _ = self.inner.set(source);
+    }
+
+    fn get(&self) -> Option<Arc<dyn AdminClientCredentialSource>> {
         self.inner.get().cloned()
     }
 }
 
-impl fmt::Debug for ChannelConfigCredentialSlot {
+impl fmt::Debug for AdminConfigurationCredentialSlot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ChannelConfigCredentialSlot")
+            .debug_struct("AdminConfigurationCredentialSlot")
             .field("filled", &self.inner.get().is_some())
             .finish()
     }
@@ -87,7 +156,7 @@ impl fmt::Debug for ChannelConfigCredentialSlot {
 #[derive(Clone, Default)]
 pub(crate) struct CompositionClientCredentials {
     values: BTreeMap<String, ClientCredentialValue>,
-    channel_config: Option<ChannelConfigCredentialSlot>,
+    admin_configuration: Option<AdminConfigurationCredentialSlot>,
 }
 
 impl CompositionClientCredentials {
@@ -96,31 +165,17 @@ impl CompositionClientCredentials {
             .insert(handle.into(), ClientCredentialValue::Static(value));
     }
 
-    /// Attach the operator channel-config fallback for unregistered handles.
-    pub(crate) fn with_channel_config_fallback(&mut self, slot: ChannelConfigCredentialSlot) {
-        self.channel_config = Some(slot);
+    pub(crate) fn with_admin_configuration_source(
+        &mut self,
+        slot: AdminConfigurationCredentialSlot,
+    ) {
+        self.admin_configuration = Some(slot);
     }
 
-    async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
-        if let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) {
-            let configured = service
-                .credential_handle_value(handle)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        %error,
-                        handle,
-                        "operator admin-configuration client-credential lookup failed"
-                    );
-                    AuthProductError::BackendUnavailable
-                })?;
-            if configured.is_some() {
-                return Ok(configured);
-            }
-        }
-        Ok(self.values.get(handle).map(|value| match value {
+    fn static_value(&self, handle: &SecretHandle) -> Option<SecretString> {
+        self.values.get(handle.as_str()).map(|value| match value {
             ClientCredentialValue::Static(value) => value.clone(),
-        }))
+        })
     }
 }
 
@@ -141,10 +196,52 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
         credentials: &RecipeClientCredentials,
     ) -> Result<EngineOAuthClientMaterial, AuthProductError> {
         use secrecy::ExposeSecret as _;
-        let Some(client_id) = self
-            .resolve_handle(credentials.client_id_handle.as_str())
-            .await?
-        else {
+        let mut handles = vec![credentials.client_id_handle.clone()];
+        if let Some(client_secret_handle) = &credentials.client_secret_handle {
+            handles.push(client_secret_handle.clone());
+        }
+        if let Some(source) = self
+            .admin_configuration
+            .as_ref()
+            .and_then(AdminConfigurationCredentialSlot::get)
+        {
+            let snapshot = source.resolve(&handles).await.map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    vendor,
+                    "operator admin-configuration client-credential lookup failed"
+                );
+                AuthProductError::BackendUnavailable
+            })?;
+            if let Some(snapshot) = snapshot
+                && !snapshot.values.is_empty()
+            {
+                let Some(client_id) = snapshot.values.get(&credentials.client_id_handle) else {
+                    return Err(AuthProductError::MalformedConfig);
+                };
+                let client_secret = match &credentials.client_secret_handle {
+                    Some(handle) => Some(
+                        snapshot
+                            .values
+                            .get(handle)
+                            .cloned()
+                            .ok_or(AuthProductError::MalformedConfig)?,
+                    ),
+                    None => None,
+                };
+                tracing::debug!(
+                    vendor,
+                    revision = snapshot.revision,
+                    "resolved OAuth client material from manifest administrator configuration"
+                );
+                return Ok(EngineOAuthClientMaterial {
+                    client_id: OAuthClientId::new(client_id.expose_secret())?,
+                    client_secret,
+                });
+            }
+        }
+
+        let Some(client_id) = self.static_value(&credentials.client_id_handle) else {
             tracing::debug!(
                 vendor,
                 handle = credentials.client_id_handle.as_str(),
@@ -154,8 +251,11 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
         };
         let client_secret = match &credentials.client_secret_handle {
             None => None,
-            Some(handle) => self.resolve_handle(handle.as_str()).await?,
+            Some(handle) => self.static_value(handle),
         };
+        if credentials.client_secret_handle.is_some() && client_secret.is_none() {
+            return Err(AuthProductError::MalformedConfig);
+        }
         Ok(EngineOAuthClientMaterial {
             client_id: OAuthClientId::new(client_id.expose_secret())?,
             client_secret,
@@ -172,7 +272,7 @@ pub(crate) fn compose_provider_client(
     dcr_callback: Option<OAuthDcrCallbackConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
-    channel_config_credentials: ChannelConfigCredentialSlot,
+    admin_configuration_credentials: AdminConfigurationCredentialSlot,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
         crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes()
@@ -185,7 +285,7 @@ pub(crate) fn compose_provider_client(
     for config in &configs {
         register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
     }
-    client_credentials.with_channel_config_fallback(channel_config_credentials);
+    client_credentials.with_admin_configuration_source(admin_configuration_credentials);
     let callback_base = dcr_callback
         .map(|dcr| {
             EngineCallbackBase::new(format!(
@@ -305,4 +405,187 @@ pub(crate) fn compose_auth_engine(
         engine: Some(engine),
         gate_driver: Some(gate_driver),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_secrets::SecretMaterial;
+    use secrecy::ExposeSecret as _;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct StubAdminSource {
+        result: Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError>,
+        calls: AtomicUsize,
+    }
+
+    impl StubAdminSource {
+        fn new(
+            result: Result<
+                Option<AdminConfigurationResolvedValues>,
+                AdminConfigurationServiceError,
+            >,
+        ) -> Self {
+            Self {
+                result,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AdminClientCredentialSource for StubAdminSource {
+        async fn resolve(
+            &self,
+            _handles: &[SecretHandle],
+        ) -> Result<Option<AdminConfigurationResolvedValues>, AdminConfigurationServiceError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    fn recipe_credentials() -> RecipeClientCredentials {
+        RecipeClientCredentials {
+            client_id_handle: SecretHandle::new("client_id").expect("client-id handle"),
+            client_secret_handle: Some(
+                SecretHandle::new("client_secret").expect("client-secret handle"),
+            ),
+        }
+    }
+
+    fn boot_credentials() -> CompositionClientCredentials {
+        let mut credentials = CompositionClientCredentials::default();
+        credentials.register_static("client_id", SecretString::from("boot-id".to_string()));
+        credentials.register_static(
+            "client_secret",
+            SecretString::from("boot-secret".to_string()),
+        );
+        credentials
+    }
+
+    fn admin_snapshot(revision: u64, values: &[(&str, &str)]) -> AdminConfigurationResolvedValues {
+        AdminConfigurationResolvedValues {
+            revision,
+            values: values
+                .iter()
+                .map(|(handle, value)| {
+                    (
+                        SecretHandle::new(*handle).expect("admin handle"),
+                        SecretMaterial::from((*value).to_string()),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_configuration_pair_overrides_boot_values_with_one_snapshot_read() {
+        let source = Arc::new(StubAdminSource::new(Ok(Some(admin_snapshot(
+            7,
+            &[("client_id", "admin-id"), ("client_secret", "admin-secret")],
+        )))));
+        let slot = AdminConfigurationCredentialSlot::default();
+        slot.fill_source(Arc::clone(&source) as Arc<dyn AdminClientCredentialSource>);
+        let mut credentials = boot_credentials();
+        credentials.with_admin_configuration_source(slot);
+
+        let resolved = credentials
+            .resolve("example", &recipe_credentials())
+            .await
+            .expect("admin pair resolves");
+
+        assert_eq!(resolved.client_id.as_str(), "admin-id");
+        assert_eq!(
+            resolved
+                .client_secret
+                .expect("admin client secret")
+                .expose_secret(),
+            "admin-secret"
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_admin_configuration_falls_back_to_complete_boot_pair() {
+        let source = Arc::new(StubAdminSource::new(Ok(Some(admin_snapshot(0, &[])))));
+        let slot = AdminConfigurationCredentialSlot::default();
+        slot.fill_source(source as Arc<dyn AdminClientCredentialSource>);
+        let mut credentials = boot_credentials();
+        credentials.with_admin_configuration_source(slot);
+
+        let resolved = credentials
+            .resolve("example", &recipe_credentials())
+            .await
+            .expect("boot pair resolves");
+
+        assert_eq!(resolved.client_id.as_str(), "boot-id");
+        assert_eq!(
+            resolved
+                .client_secret
+                .expect("boot client secret")
+                .expose_secret(),
+            "boot-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_only_composition_uses_complete_boot_pair() {
+        let mut credentials = boot_credentials();
+        credentials.with_admin_configuration_source(AdminConfigurationCredentialSlot::boot_only());
+
+        let resolved = credentials
+            .resolve("example", &recipe_credentials())
+            .await
+            .expect("boot-only pair resolves");
+
+        assert_eq!(resolved.client_id.as_str(), "boot-id");
+        assert_eq!(
+            resolved
+                .client_secret
+                .expect("boot client secret")
+                .expose_secret(),
+            "boot-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_admin_configuration_never_mixes_with_boot_values() {
+        let source = Arc::new(StubAdminSource::new(Ok(Some(admin_snapshot(
+            3,
+            &[("client_id", "admin-id")],
+        )))));
+        let slot = AdminConfigurationCredentialSlot::default();
+        slot.fill_source(source as Arc<dyn AdminClientCredentialSource>);
+        let mut credentials = boot_credentials();
+        credentials.with_admin_configuration_source(slot);
+
+        let error = credentials
+            .resolve("example", &recipe_credentials())
+            .await
+            .expect_err("partial administrator revision fails closed");
+
+        assert_eq!(error, AuthProductError::MalformedConfig);
+    }
+
+    #[tokio::test]
+    async fn admin_configuration_failure_never_falls_back_to_boot_values() {
+        let source = Arc::new(StubAdminSource::new(Err(
+            AdminConfigurationServiceError::Unavailable,
+        )));
+        let slot = AdminConfigurationCredentialSlot::default();
+        slot.fill_source(source as Arc<dyn AdminClientCredentialSource>);
+        let mut credentials = boot_credentials();
+        credentials.with_admin_configuration_source(slot);
+
+        let error = credentials
+            .resolve("example", &recipe_credentials())
+            .await
+            .expect_err("administrator read failure fails closed");
+
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+    }
 }

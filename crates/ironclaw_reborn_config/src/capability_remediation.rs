@@ -18,15 +18,6 @@ pub fn google_remediation_text() -> String {
         .to_string()
 }
 
-/// Canonical "apply the change" follow-up sentence: `config set` never
-/// restarts the service itself (see the module-level design note in
-/// `google_remediation_text` and `ironclaw_reborn_cli::commands::config::set`),
-/// so every surface that tells a caller "go configure this" must also tell
-/// them the explicit next step rather than implying it happens automatically.
-pub fn apply_step_text() -> &'static str {
-    "Run `ironclaw service restart` to apply the change, then ask again."
-}
-
 /// "The account resolved but Google rejected the credentials" text — the
 /// backend-auth arm, distinct from an ordinary auth gate (no/expired account).
 ///
@@ -59,8 +50,6 @@ pub fn google_backend_auth_text() -> String {
 pub enum HostRemediationText {
     /// `gsuite`: Google rejected the configured credentials.
     GoogleBackendAuth,
-    /// The shared "restart to apply" follow-up sentence.
-    ApplyStep,
 }
 
 impl HostRemediationText {
@@ -68,7 +57,6 @@ impl HostRemediationText {
     pub fn text(self) -> String {
         match self {
             Self::GoogleBackendAuth => google_backend_auth_text(),
-            Self::ApplyStep => apply_step_text().to_string(),
         }
     }
 
@@ -82,17 +70,13 @@ impl HostRemediationText {
     /// annotation on `ALL` is the second guard: adding an entry without
     /// bumping it fails to compile.
     pub fn all() -> Vec<Self> {
-        const ALL: [HostRemediationText; 2] = [
-            HostRemediationText::GoogleBackendAuth,
-            HostRemediationText::ApplyStep,
-        ];
+        const ALL: [HostRemediationText; 1] = [HostRemediationText::GoogleBackendAuth];
         for entry in ALL {
             // Exhaustiveness witness — one arm per variant, no catch-all. A new
             // variant breaks THIS match, forcing `ALL` (and the coverage test
             // that reads it) to be updated.
             match entry {
                 Self::GoogleBackendAuth => {}
-                Self::ApplyStep => {}
             }
         }
         ALL.to_vec()
@@ -102,13 +86,6 @@ impl HostRemediationText {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn apply_step_text_names_the_explicit_restart_command() {
-        let text = apply_step_text();
-        assert!(text.contains("ironclaw service restart"));
-        assert!(!text.contains("automatically"));
-    }
 
     #[test]
     fn remediation_text_points_at_the_right_surfaces() {
