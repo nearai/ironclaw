@@ -112,6 +112,7 @@ full-path Emulate tests still start the legacy gateway binary.
 | File | What it tests |
 |------|--------------|
 | `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
+| `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`. |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
 | `test_extension_uninstall_cleanup.py` | Install/remove for WASM tools/channels, shared Google tools, MCP; uninstall deletes secrets, preserves shared creds |
@@ -190,6 +191,10 @@ Cross-provider ordering is retained, fresh Docs and
 Sheets IDs are bound from earlier real tool results, redacted provider IDs are
 mapped to deterministic seeded resources, and assertions target capability
 success plus provider readback rather than recorded final-answer wording.
+`ProviderOperationCase` adds typed provider service, capability, argument,
+baseline, and readback cases for operations not yet present in harvested
+journeys. These cases reuse the same Reborn process and reset only their mutable
+provider world.
 Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
 loopback IP socket targets after the original destination has passed the normal
 network policy and DNS checks. Release binaries fail startup if that test-only
