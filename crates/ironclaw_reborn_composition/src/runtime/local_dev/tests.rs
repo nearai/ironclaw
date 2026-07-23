@@ -2342,6 +2342,12 @@ mod tests {
         );
         assert!(
             descriptor
+                .safe_description
+                .contains("Ambiguous names fail without loading a skill"),
+            "skill_activate description must not imply every visible bare name is actionable"
+        );
+        assert!(
+            descriptor
                 .parameters_schema
                 .get("properties")
                 .and_then(|properties| properties.get("names"))

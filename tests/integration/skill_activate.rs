@@ -135,7 +135,9 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
     harness
         .assert_model_message_content_in_order(&[
             "Review the available skills below before answering.",
-            "If a listed skill could help with any part of the task, call builtin.skill_activate",
+            "If a listed skill could help with any part of the task, call builtin.skill_activate with its exact name before continuing; its full instructions will then be loaded.",
+            "You may activate multiple relevant skills when the task spans more than one workflow.",
+            "If activation reports an ambiguous name, do not guess; explain the conflict.",
             "Do not activate skills that are unrelated to the task.",
         ])
         .await

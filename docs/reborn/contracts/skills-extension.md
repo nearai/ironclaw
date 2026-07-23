@@ -117,7 +117,10 @@ before answering, then request full context for chosen exact skill names through
 the local-dev synthetic `skill_activate` capability. Natural-language activation
 criteria may rank or describe skills, but they must not inject full runtime
 skill context in this flow. Explicit `$skill-name` mentions remain a direct
-activation path. The model-facing instruction is covered by
+activation path. If more than one visible skill has the requested bare name,
+activation fails recoverably and the model must report the ambiguity rather
+than guessing; source-qualified activation is deferred. The model-facing
+instruction is covered by
 `tests/integration/skill_activate.rs::skill_criteria_auto_activation_stays_off_on_coordinator_path`
 (`cargo test --test reborn_integration_skill_activate`).
 

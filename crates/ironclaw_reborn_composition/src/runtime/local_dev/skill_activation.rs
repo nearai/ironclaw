@@ -17,7 +17,7 @@ use crate::runtime::{
 
 pub(crate) const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
-const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use only exact listed names.";
+const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use only exact listed names. Ambiguous names fail without loading a skill.";
 const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
 pub(super) fn skill_activation_capability(
