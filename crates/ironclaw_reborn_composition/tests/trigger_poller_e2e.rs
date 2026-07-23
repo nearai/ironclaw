@@ -8,16 +8,19 @@
 #![cfg(feature = "test-support")]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
 use ironclaw_host_api::{
-    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ProviderToolName, ResourceEstimate, RunId, RuntimeKind, TenantId, TrustClass, UserId,
+    AdapterInstallationId as ProductAdapterInstallationId, AgentId, CapabilityGrant,
+    CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
+    GrantConstraints, MountView, NetworkPolicy, Principal, ProviderToolName, ResourceEstimate,
+    RunId, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
@@ -27,20 +30,30 @@ use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
+use ironclaw_network::{
+    NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+};
+use ironclaw_outbound::{
+    CommunicationPreferenceRecord, DeliveryDefaultScope, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryStore,
+};
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, RebornOutboundDeliveryTargetId};
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
+    ChannelExtensionBinding, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
+    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::run_profile::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -48,6 +61,18 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
+const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
+const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
+const QA_9D_RESULT: &str = "QA_9D scheduled release digest complete";
+const SLACK_TEAM: &str = "T-TRIGGER-E2E";
+const SLACK_USER: &str = "U-TRIGGER-E2E";
+const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
+const SLACK_PER_TRIGGER_CHANNEL: &str = "C-TRIGGER-OVERRIDE";
+const QA_9B_TARGET_ID: &str = "slack:personal-dm:T-TRIGGER-E2E:trigger-e2e-owner";
+const QA_9D_TARGET_ID: &str = "slack:shared-channel:T-TRIGGER-E2E:C-TRIGGER-OVERRIDE";
+const TEST_SECRET_MASTER_KEY: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// Name of the trigger the fired run's capability call attempts to create.
 /// Issue #5505's fix strips `builtin.trigger_create` from the model-visible
 /// surface for a `scheduled_trigger` fire, so this name must NEVER appear in
@@ -110,6 +135,130 @@ impl HostManagedModelGateway for RecordingGateway {
         Ok(HostManagedModelResponse::assistant_reply(
             "trigger e2e ok".to_string(),
         ))
+    }
+}
+
+#[derive(Debug, Default)]
+struct DeliveryJourneyGateway {
+    requests: TokioMutex<Vec<HostManagedModelRequest>>,
+}
+
+impl DeliveryJourneyGateway {
+    async fn request_count_containing(&self, needle: &str) -> usize {
+        self.requests
+            .lock()
+            .await
+            .iter()
+            .filter(|request| {
+                request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains(needle))
+            })
+            .count()
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for DeliveryJourneyGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let reply = if request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_9B_PROMPT))
+        {
+            QA_9B_RESULT
+        } else if request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_9D_PROMPT))
+        {
+            QA_9D_RESULT
+        } else {
+            "unexpected scheduled-trigger prompt"
+        };
+        self.requests.lock().await.push(request);
+        Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SlackWireMessage {
+    url: String,
+    authorization: Option<String>,
+    body: Value,
+}
+
+#[derive(Debug, Default)]
+struct FakeSlackProvider {
+    wire_messages: StdMutex<Vec<SlackWireMessage>>,
+    provider_messages: StdMutex<Vec<Value>>,
+    next_message_id: AtomicUsize,
+}
+
+impl FakeSlackProvider {
+    fn wire_messages(&self) -> Vec<SlackWireMessage> {
+        self.wire_messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn provider_messages(&self) -> Vec<Value> {
+        self.provider_messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl NetworkHttpEgress for FakeSlackProvider {
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let authorization = request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone());
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap_or(Value::Null);
+        if request.url.ends_with("/api/chat.postMessage") {
+            self.wire_messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(SlackWireMessage {
+                    url: request.url.clone(),
+                    authorization,
+                    body: body.clone(),
+                });
+            self.provider_messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(body.clone());
+        }
+        let message_id = self.next_message_id.fetch_add(1, Ordering::SeqCst);
+        let response_body = serde_json::json!({
+            "ok": true,
+            "channel": body["channel"],
+            "ts": format!("1710000001.{message_id:06}"),
+        })
+        .to_string()
+        .into_bytes();
+        Ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            usage: NetworkUsage {
+                request_bytes: request.body.len() as u64,
+                response_bytes: response_body.len() as u64,
+                resolved_ip: None,
+            },
+            body: response_body,
+        })
     }
 }
 
@@ -390,6 +539,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     model_gateway: Arc<G>,
     trigger_poller: TriggerPollerSettings,
 ) -> RebornRuntime {
+    seed_test_secret_master_key(root.path());
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
@@ -416,6 +566,269 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     build_reborn_runtime(input).await.expect("runtime builds")
 }
 
+async fn build_runtime_with_slack_delivery(
+    root: &tempfile::TempDir,
+    model_gateway: Arc<DeliveryJourneyGateway>,
+    slack_provider: Arc<FakeSlackProvider>,
+) -> RebornRuntime {
+    seed_test_secret_master_key(root.path());
+    let host_home_root = root.path().join("host-home");
+    std::fs::create_dir_all(&host_home_root).expect("host home root");
+    let input = local_runtime_build_input_with_options(
+        RebornCompositionProfile::LocalDevYolo,
+        USER,
+        root.path().join("local-dev"),
+        RebornRuntimeProfileOptions {
+            confirm_host_access: true,
+        },
+    )
+    .expect("local-yolo runtime input")
+    .with_local_dev_confirmed_host_home_root(host_home_root)
+    .with_bundled_first_party_for_test()
+    .with_network_http_egress_for_test(slack_provider)
+    .with_channel_extension_bindings(vec![ChannelExtensionBinding {
+        extension_id: "slack".to_string(),
+        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        preference_target_codec: Some(Arc::new(
+            ironclaw_slack_extension::SlackPreferenceTargetCodec,
+        )),
+    }]);
+    let input = RebornRuntimeInput::from_build_input(input)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "trigger-delivery-e2e-source".to_string(),
+            reply_target_binding_id: "trigger-delivery-e2e-reply".to_string(),
+        })
+        .with_trigger_poller_settings(
+            TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
+                .with_worker_config(
+                    TriggerPollerWorkerConfig::default()
+                        .set_poll_interval(Duration::from_millis(20)),
+                ),
+        )
+        .with_model_gateway_override(model_gateway);
+
+    build_reborn_runtime(input).await.expect("runtime builds")
+}
+
+async fn configure_and_activate_slack_for_delivery(runtime: &RebornRuntime) {
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+        .expect("valid Slack package ref");
+    runtime
+        .install_extension_for_test(package_ref.clone())
+        .await
+        .expect("install Slack through the production lifecycle port");
+    runtime
+        .configure_admin_group_for_test(
+            "extension.slack",
+            vec![
+                (
+                    "slack_bot_token".to_string(),
+                    "xoxb-trigger-e2e".to_string(),
+                ),
+                (
+                    "slack_signing_secret".to_string(),
+                    "signing-trigger-e2e".to_string(),
+                ),
+                ("slack_team_id".to_string(), SLACK_TEAM.to_string()),
+                ("slack_api_app_id".to_string(), "A-TRIGGER-E2E".to_string()),
+                (
+                    "slack_installation_id".to_string(),
+                    "I-TRIGGER-E2E".to_string(),
+                ),
+                (
+                    "slack_bot_user_id".to_string(),
+                    "U-BOT-TRIGGER-E2E".to_string(),
+                ),
+                (
+                    "slack_oauth_client_id".to_string(),
+                    "trigger-e2e-client".to_string(),
+                ),
+                (
+                    "slack_oauth_client_secret".to_string(),
+                    "trigger-e2e-client-secret".to_string(),
+                ),
+            ],
+        )
+        .await
+        .expect("configure Slack through the production admin-configuration resolver");
+    runtime
+        .activate_extension_for_test(package_ref)
+        .await
+        .expect("activate Slack through the production lifecycle port");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !runtime
+        .active_channel_preference_codec_ids_for_test()
+        .iter()
+        .any(|extension_id| extension_id == "slack")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "Slack activation never became routable through the generic channel host"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn slack_reply_target(channel: &str, actor: Option<&str>) -> ReplyTargetBindingRef {
+    let installation =
+        ProductAdapterInstallationId::new("slack").expect("valid deployment installation id");
+    let agent = AgentId::new(AGENT).expect("valid agent id");
+    match actor {
+        Some(actor) => ironclaw_slack_extension::slack_personal_dm_reply_target_binding_ref(
+            &installation,
+            &agent,
+            None,
+            SLACK_TEAM,
+            channel,
+            actor,
+        )
+        .expect("valid Slack DM target"),
+        None => ironclaw_slack_extension::slack_shared_channel_reply_target_binding_ref(
+            &installation,
+            &agent,
+            None,
+            SLACK_TEAM,
+            channel,
+        )
+        .expect("valid Slack shared-channel target"),
+    }
+}
+
+async fn configure_delivery_targets(runtime: &RebornRuntime) {
+    let tenant_id = TenantId::new(TENANT).expect("valid tenant id");
+    let user_id = UserId::new(USER).expect("valid user id");
+    register_delivery_targets(runtime);
+    runtime
+        .local_dev_outbound_preferences_for_test()
+        .expect("local runtime exposes outbound preferences")
+        .put_communication_preference(CommunicationPreferenceRecord {
+            scope: DeliveryDefaultScope::personal(tenant_id, user_id.clone()),
+            final_reply_target: Some(slack_reply_target(SLACK_DEFAULT_DM, Some(SLACK_USER))),
+            progress_target: None,
+            approval_prompt_target: None,
+            auth_prompt_target: None,
+            default_modality: None,
+            updated_at: Utc::now(),
+            updated_by: user_id,
+        })
+        .await
+        .expect("seed the creator's default Slack DM");
+}
+
+fn register_delivery_targets(runtime: &RebornRuntime) {
+    runtime
+        .register_static_outbound_delivery_target_for_test(
+            "qa-9b-static",
+            RebornOutboundDeliveryTargetId::new(QA_9B_TARGET_ID).expect("valid default target id"),
+            "slack",
+            "QA 9B default DM",
+            Some("scheduled-trigger default target"),
+            slack_reply_target(SLACK_DEFAULT_DM, Some(SLACK_USER)),
+        )
+        .expect("register the default Slack DM target");
+    runtime
+        .register_static_outbound_delivery_target_for_test(
+            "qa-9d-static",
+            RebornOutboundDeliveryTargetId::new(QA_9D_TARGET_ID)
+                .expect("valid per-trigger target id"),
+            "slack",
+            "QA 9D override",
+            Some("scheduled-trigger target override"),
+            slack_reply_target(SLACK_PER_TRIGGER_CHANNEL, None),
+        )
+        .expect("register the per-trigger Slack target");
+}
+
+async fn pair_trigger_creator(runtime: &RebornRuntime) {
+    runtime
+        .trigger_conversation_pairing()
+        .expect("trigger poller exposes its conversation pairing service")
+        .pair_external_actor(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("valid adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("valid trigger installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, USER)
+                .expect("valid trigger actor ref"),
+            UserId::new(USER).expect("valid user id"),
+        )
+        .await
+        .expect("pair trigger creator");
+}
+
+async fn seed_due_delivery_trigger(
+    repository: &Arc<dyn TriggerRepository>,
+    prompt: &str,
+    delivery_target: Option<&str>,
+) -> TriggerId {
+    let trigger_id = TriggerId::new();
+    let fire_at = Utc::now() - chrono::Duration::seconds(120);
+    repository
+        .upsert_trigger(TriggerRecord {
+            trigger_id,
+            tenant_id: TenantId::new(TENANT).expect("valid tenant id"),
+            creator_user_id: UserId::new(USER).expect("valid user id"),
+            agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
+            project_id: None,
+            name: format!("{prompt} trigger"),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
+            prompt: prompt.to_string(),
+            delivery_target: delivery_target.map(|target| {
+                TriggerDeliveryTargetId::new(target).expect("valid trigger delivery target")
+            }),
+            state: TriggerState::Scheduled,
+            next_run_at: fire_at,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed due delivery trigger");
+    trigger_id
+}
+
+async fn wait_for_delivered_run(
+    repository: &Arc<dyn TriggerRepository>,
+    delivery_store: &Arc<dyn TriggeredRunDeliveryStore>,
+    trigger_id: TriggerId,
+) -> TurnRunId {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let history = repository
+            .list_trigger_run_history(
+                TenantId::new(TENANT).expect("valid tenant id"),
+                trigger_id,
+                1,
+            )
+            .await
+            .expect("read trigger run history");
+        if let Some(run_id) = history.first().and_then(|run| run.run_id)
+            && let Some(record) = delivery_store
+                .load_triggered_run_delivery(run_id)
+                .await
+                .expect("read triggered delivery outcome")
+        {
+            assert_eq!(
+                record.outcome,
+                TriggeredRunDeliveryOutcomeKind::Delivered,
+                "triggered run must reach the provider successfully"
+            );
+            return run_id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trigger {trigger_id} did not record a delivery outcome within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Same as [`build_runtime_with`], but with an explicit
 /// [`ToolDisclosureMode`] instead of the implicit `Off` default. Kept
 /// separate (rather than adding a parameter to `build_runtime_with`) because
@@ -428,6 +841,7 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
     trigger_poller: TriggerPollerSettings,
     tool_disclosure: ToolDisclosureMode,
 ) -> RebornRuntime {
+    seed_test_secret_master_key(root.path());
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
@@ -453,6 +867,19 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
         .with_tool_disclosure(tool_disclosure);
 
     build_reborn_runtime(input).await.expect("runtime builds")
+}
+
+/// Keep parallel runtime tests off the ambient OS keychain. The production
+/// resolver deliberately prefers this cached dotfile, so this still exercises
+/// the real local-dev secret-store construction without process-global env
+/// mutation or platform keychain serialization.
+fn seed_test_secret_master_key(root: &Path) {
+    let local_dev_root = root.join("local-dev");
+    std::fs::create_dir_all(&local_dev_root).expect("local-dev root");
+    let key_path = local_dev_root.join(".reborn-local-dev-secrets-master-key");
+    if !key_path.exists() {
+        std::fs::write(key_path, TEST_SECRET_MASTER_KEY).expect("seed test secret master key");
+    }
 }
 
 async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
@@ -692,6 +1119,145 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         final_record.state,
         TriggerState::Completed,
         "once schedule: state must be Completed after clear_active_fire — record: {final_record:?}",
+    );
+}
+
+/// QA-9B + QA-9D whole-path regression:
+///
+/// due trigger -> trusted ingress -> real Reborn run -> persisted final reply
+/// -> generic triggered-delivery hook -> real Slack adapter -> host-mediated
+/// credential injection -> fake Slack HTTP boundary.
+///
+/// The two arms prove that the creator's default DM is used when the trigger
+/// has no target and that an explicit per-trigger target overrides that
+/// default. Re-polling and rebuilding the runtime over the same durable store
+/// must not repeat either provider mutation.
+#[tokio::test]
+async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let model_gateway = Arc::new(DeliveryJourneyGateway::default());
+    let slack_provider = Arc::new(FakeSlackProvider::default());
+    let runtime = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+
+    configure_and_activate_slack_for_delivery(&runtime).await;
+    configure_delivery_targets(&runtime).await;
+    pair_trigger_creator(&runtime).await;
+
+    let repository = runtime.trigger_repository();
+    let delivery_store = runtime
+        .triggered_run_delivery_store_for_test()
+        .expect("local runtime exposes the production triggered-delivery store");
+    let default_target_trigger = seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None).await;
+    let explicit_target_trigger =
+        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
+
+    wait_for_delivered_run(&repository, &delivery_store, default_target_trigger).await;
+    wait_for_delivered_run(&repository, &delivery_store, explicit_target_trigger).await;
+
+    let provider_messages = slack_provider.provider_messages();
+    assert_eq!(
+        provider_messages.len(),
+        2,
+        "one provider-side message per scheduled trigger: {provider_messages:?}"
+    );
+    assert_slack_message(
+        &provider_messages,
+        QA_9B_RESULT,
+        SLACK_DEFAULT_DM,
+        "QA-9B default delivery",
+    );
+    assert_slack_message(
+        &provider_messages,
+        QA_9D_RESULT,
+        SLACK_PER_TRIGGER_CHANNEL,
+        "QA-9D per-trigger override",
+    );
+
+    let wire_messages = slack_provider.wire_messages();
+    assert_eq!(
+        wire_messages.len(),
+        2,
+        "exactly two Slack wire mutations: {wire_messages:?}"
+    );
+    assert!(
+        wire_messages.iter().all(|message| {
+            message.url == "https://slack.com/api/chat.postMessage"
+                && message.authorization.as_deref() == Some("Bearer xoxb-trigger-e2e")
+                && provider_messages.contains(&message.body)
+        }),
+        "each provider mutation must cross the real Slack adapter and host credential boundary: \
+         {wire_messages:?}"
+    );
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9B_PROMPT).await,
+        1,
+        "QA-9B must execute exactly one model run"
+    );
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9D_PROMPT).await,
+        1,
+        "QA-9D must execute exactly one model run"
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        slack_provider.provider_messages().len(),
+        2,
+        "re-polling completed one-shot triggers must not duplicate delivery"
+    );
+    runtime.shutdown().await.expect("first runtime shutdown");
+
+    let restarted = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+    register_delivery_targets(&restarted);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    restarted
+        .shutdown()
+        .await
+        .expect("restarted runtime shutdown");
+
+    assert_eq!(
+        slack_provider.provider_messages().len(),
+        2,
+        "restart over the same durable trigger state must not duplicate provider effects"
+    );
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9B_PROMPT).await,
+        1,
+        "restart must not rerun QA-9B"
+    );
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9D_PROMPT).await,
+        1,
+        "restart must not rerun QA-9D"
+    );
+}
+
+fn assert_slack_message(
+    messages: &[Value],
+    expected_text: &str,
+    expected_channel: &str,
+    scenario: &str,
+) {
+    let matching = messages.iter().filter(|message| {
+        message["channel"] == expected_channel
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(expected_text))
+    });
+    assert_eq!(
+        matching.count(),
+        1,
+        "{scenario} must create exactly one message in {expected_channel}: {messages:?}"
     );
 }
 
