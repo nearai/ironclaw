@@ -3330,7 +3330,9 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":null}"#))
+                .body(Body::from(
+                    r#"{"final_reply_target_id":null,"client_action_id":"outbound-clear-1"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -3376,7 +3378,7 @@ async fn set_outbound_preferences_error_maps_to_http_status() {
                 .uri("/api/webchat/v2/outbound/preferences")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"final_reply_target_id":"target-does-not-exist"}"#,
+                    r#"{"final_reply_target_id":"target-does-not-exist","client_action_id":"outbound-error-1"}"#,
                 ))
                 .expect("request"),
         )
@@ -5509,7 +5511,7 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
                 .uri("/api/webchat/v2/llm/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1"}"#,
+                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1","client_action_id":"llm-upsert-acme-1"}"#,
                 ))
                 .expect("request"),
         )
