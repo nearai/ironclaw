@@ -15,10 +15,10 @@ Owns the product-surface adapter boundary for IronClaw Reborn (issue #3269).
   `tests/product_adapter_contract.rs` enforce this with cargo metadata and
   source scans.
 - Adapters do not resolve canonical user/thread ids and do not call
-  `TurnCoordinator` directly. The product workflow facade (`ProductWorkflow`)
-  is the only path adapters use into the inbound pipeline; the workflow itself
-  binds external refs to canonical scope, resolves projection subscriptions,
-  stages attachments, and submits via `TurnCoordinator`.
+  `TurnCoordinator` directly. Host ingress submits trusted, normalized adapter
+  DTOs through `ProductSurface`; the product surface binds external refs to
+  canonical scope, resolves projection subscriptions, stages attachments, and
+  submits via `TurnCoordinator`.
 - Adapters return `ParsedProductInbound` from `parse_inbound`. Trusted fields
   (`ProductAdapterId`, `AdapterInstallationId`, verified auth claim, and
   `received_at`) are host-stamped through `TrustedInboundContext` before a

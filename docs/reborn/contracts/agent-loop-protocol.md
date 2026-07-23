@@ -170,6 +170,12 @@ Those blocked states are host-managed transitions driven by approval or auth ser
   agent loop owns recovery: it retries the model call with a model-visible
   repair hint in the prompt bundle, and exhausted retries fail the run as
   `invalid_model_output`.
+- Recoverable `context_overflow`, `content_filtered`, and `invalid_output`
+  failures may receive one additional observation-assisted model attempt after
+  their ordinary retry budget. The observation is loop-owned, typed, and
+  host-authored: provider summaries, diagnostics, and blocked content never
+  enter the retry prompt. Content-filter recovery asks for a policy-compliant
+  alternative without reproducing blocked content.
 - `BlockedApproval` / `BlockedAuth` is host control-plane state
 
 These must not be collapsed into a single vague text outcome.
@@ -189,6 +195,15 @@ Recommended durable distinction:
 - capability results
 - approval/auth blocking milestones
 - child-thread/job creation milestones
+
+Model-error retry accounting and pending prompt controls are also checkpointed
+loop state. A `BeforeModel` retry-transition checkpoint records the consumed
+attempt budget, any pending typed observation, and any invalid-output repair
+directive. Prompt construction does not clear those controls; the executor
+clears them only after issuing the model request. A worker restart can therefore
+replay a pending control at least once, but cannot silently lose it or grant a
+fresh recovery budget. Unsupported observation schema versions fail prompt
+construction before a model call.
 
 This keeps projections, debugging, and compaction grounded in typed state rather than inferences from transcript prose alone.
 

@@ -8,7 +8,7 @@
 //!
 //! Real path: scripted tool call → first-party runtime → `PermissionMode::Ask`
 //! with auto-approve OFF → `TurnStatus::BlockedApproval` → real
-//! `ApprovalInteractionService::resolve` (via `DefaultProductWorkflow::submit_inbound`)
+//! `ApprovalInteractionService::resolve` (via `DefaultProductSurface::submit_inbound`)
 //! → `coordinator.resume_turn` → the gated capability re-dispatches (approve)
 //! or the run finalizes an authorization failure (deny).
 

@@ -16,6 +16,17 @@ use ironclaw_reborn_traces::contribution::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::{
+    ProductCapabilityInvoker, ProductView, RebornServices, RebornServicesError, RebornViewProvider,
+    WebUiAuthenticatedCaller,
+};
+
+pub const TRACE_CREDITS_VIEW: ProductView<serde_json::Value, RebornTraceCreditsResponse> =
+    ProductView::unpaginated("trace_credits");
+
+pub const TRACE_ACCOUNT_TRACES_VIEW: ProductView<serde_json::Value, RebornAccountTracesResponse> =
+    ProductView::unpaginated("trace_account_traces");
+
 /// Server-authoritative framing returned with every credits response.
 /// Mirrors the note `builtin.trace_commons.credits` reports.
 pub(super) const TRACE_CREDITS_NOTE: &str = "Local view as of last sync; final credit can change \
@@ -69,7 +80,7 @@ pub struct RebornTraceHold {
 
 /// One submitted trace record as returned by the Trace Commons server.
 /// Carries only the fields the UI needs; unknown server fields are ignored.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAccountTrace {
     pub submission_id: String,
     pub status: String,
@@ -87,7 +98,7 @@ pub struct RebornAccountTrace {
 /// `traces` is the server-returned list in reverse-chronological order;
 /// an empty list is normal for an enrolled user who has not yet submitted
 /// any traces.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAccountTracesResponse {
     pub enrolled: bool,
     pub traces: Vec<RebornAccountTrace>,
@@ -212,6 +223,34 @@ pub(super) async fn account_traces_for_user(
         enrolled: true,
         traces,
     })
+}
+
+impl<I, V> RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    pub(super) async fn build_trace_credits_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornTraceCreditsResponse, RebornServicesError> {
+        let actor = caller.actor();
+        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+            caller.tenant_id.as_str(),
+            actor.user_id.as_str(),
+        );
+        local_trace_credits_for_user(&scope).map_err(RebornServicesError::internal_from)
+    }
+
+    pub(super) async fn build_trace_account_traces_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        let actor = caller.actor();
+        account_traces_for_user(&caller.tenant_id, &actor.user_id)
+            .await
+            .map_err(RebornServicesError::internal_from)
+    }
 }
 
 /// Authorize the caller-scoped held manual-review trace for submission.

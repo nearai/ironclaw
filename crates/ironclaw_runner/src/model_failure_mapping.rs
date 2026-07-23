@@ -43,6 +43,7 @@ mod tests {
             | K::InvalidInvocation
             | K::Invalid
             | K::InvalidOutput
+            | K::ContentFiltered
             | K::PolicyDenied
             | K::BudgetExceeded
             | K::BudgetApprovalRequired
@@ -61,6 +62,7 @@ mod tests {
             K::InvalidInvocation,
             K::Invalid,
             K::InvalidOutput,
+            K::ContentFiltered,
             K::PolicyDenied,
             K::BudgetExceeded,
             K::BudgetApprovalRequired,

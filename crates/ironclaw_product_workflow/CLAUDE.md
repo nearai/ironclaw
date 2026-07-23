@@ -1,6 +1,6 @@
 # ironclaw_product_workflow
 
-Product-facing workflow facade for IronClaw Reborn (issue #3280).
+Product-facing surface orchestration for IronClaw Reborn (issue #3280).
 
 ## Purpose
 
@@ -13,7 +13,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 | Type | Role |
 |------|------|
-| `DefaultProductWorkflow` | Top-level orchestrator implementing `ProductWorkflow` trait |
+| `DefaultProductSurface` | Top-level orchestrator implementing the `ProductSurface` trait |
 | `InboundTurnService` / `DefaultInboundTurnService` | User-message turn submission path |
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
@@ -27,11 +27,11 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
 | `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
 | `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
-| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
+| `ProductSurface` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
 
 ## Dependencies
 
-- `ironclaw_product_adapters` — trait definitions, envelope/ack types, `ProjectionStream` for SSE
+- `ironclaw_product_adapters` — adapter DTOs, envelope/ack types, `ProjectionStream` for SSE
 - `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
 - `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership

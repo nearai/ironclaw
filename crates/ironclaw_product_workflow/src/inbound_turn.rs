@@ -16,7 +16,7 @@ use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection,
+    ProductRejection, ProductSourceChannel,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
@@ -126,6 +126,15 @@ struct PreparedUserMessage {
     source_binding_id: String,
     submit_idempotency_key: String,
     adapter_id: ProductAdapterId,
+    source_channel: ProductSourceChannel,
+    surface_type: TurnSurfaceType,
+}
+
+struct ReplaySubmissionContext {
+    binding: ResolvedBinding,
+    thread_scope: ThreadScope,
+    adapter_id: ProductAdapterId,
+    source_channel: ProductSourceChannel,
     surface_type: TurnSurfaceType,
 }
 
@@ -378,6 +387,7 @@ where
             source_binding_id,
             submit_idempotency_key,
             adapter_id: envelope.adapter_id().clone(),
+            source_channel: envelope.source_channel().clone(),
             surface_type,
         })
     }
@@ -490,6 +500,7 @@ where
             idempotency_key_raw: prepared.submit_idempotency_key,
             received_at: envelope.received_at(),
             adapter_id: prepared.adapter_id,
+            source_channel: prepared.source_channel,
             surface_type: prepared.surface_type,
             requested_model: payload.requested_model.clone(),
         }))
@@ -544,15 +555,23 @@ impl ProductInboundTurnHandoff {
     ) -> Result<Self, ProductWorkflowError> {
         let binding = binding_from_replay(&replay)?;
         let thread_scope = replay.scope.clone();
+        let source_channel = ProductSourceChannel::new(adapter_id.as_str()).map_err(|e| {
+            ProductWorkflowError::TurnSubmissionRejected {
+                reason: format!("invalid source channel: {e}"),
+            }
+        })?;
         Self::from_replay_parts(
             replay,
             submit_idempotency_key,
             received_at,
-            binding,
-            thread_scope,
-            adapter_id,
-            // Surface type is unknown at replay time without the original trigger.
-            TurnSurfaceType::Direct,
+            ReplaySubmissionContext {
+                binding,
+                thread_scope,
+                adapter_id,
+                source_channel,
+                // Surface type is unknown at replay time without the original trigger.
+                surface_type: TurnSurfaceType::Direct,
+            },
         )
     }
 
@@ -566,10 +585,13 @@ impl ProductInboundTurnHandoff {
             replay,
             submit_idempotency_key,
             received_at,
-            prepared.binding.clone(),
-            prepared.thread_scope.clone(),
-            prepared.adapter_id.clone(),
-            prepared.surface_type,
+            ReplaySubmissionContext {
+                binding: prepared.binding.clone(),
+                thread_scope: prepared.thread_scope.clone(),
+                adapter_id: prepared.adapter_id.clone(),
+                source_channel: prepared.source_channel.clone(),
+                surface_type: prepared.surface_type,
+            },
         )
     }
 
@@ -577,11 +599,15 @@ impl ProductInboundTurnHandoff {
         replay: AcceptedInboundMessageReplay,
         submit_idempotency_key: String,
         received_at: DateTime<Utc>,
-        binding: ResolvedBinding,
-        thread_scope: ThreadScope,
-        adapter_id: ProductAdapterId,
-        surface_type: TurnSurfaceType,
+        context: ReplaySubmissionContext,
     ) -> Result<Self, ProductWorkflowError> {
+        let ReplaySubmissionContext {
+            binding,
+            thread_scope,
+            adapter_id,
+            source_channel,
+            surface_type,
+        } = context;
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
         if replay.status == MessageStatus::Submitted {
@@ -654,6 +680,7 @@ impl ProductInboundTurnHandoff {
                 idempotency_key_raw: submit_idempotency_key,
                 received_at,
                 adapter_id,
+                source_channel,
                 surface_type,
                 // The requested model is not persisted in the message store, so an
                 // idempotent resubmission of an accepted message falls back to the
@@ -707,6 +734,7 @@ struct AcceptedProductInboundTurn {
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
     adapter_id: ProductAdapterId,
+    source_channel: ProductSourceChannel,
     surface_type: TurnSurfaceType,
     requested_model: Option<String>,
 }
@@ -730,6 +758,7 @@ impl AcceptedProductInboundTurn {
             idempotency_key_raw,
             received_at,
             adapter_id,
+            source_channel,
             surface_type,
             requested_model,
         } = self;
@@ -773,9 +802,14 @@ impl AcceptedProductInboundTurn {
                     reason: e.to_string(),
                 }
             })?;
-        let product_context = ironclaw_product_context::resolve_inbound(
+        let run_source_channel = ironclaw_turns::RunOriginAdapter::new(source_channel.as_str())
+            .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+                reason: e.to_string(),
+            })?;
+        let product_context = ironclaw_product_context::resolve_inbound_with_source_channel(
             ironclaw_product_context::InboundClassification::Untrusted,
             run_adapter,
+            Some(run_source_channel),
             Some(surface_type),
             turn_scope.product_owner(&actor),
         );
@@ -1404,6 +1438,7 @@ mod tests {
             source_binding_id: "src:alpha".to_string(),
             submit_idempotency_key: "turn-key".to_string(),
             adapter_id: ProductAdapterId::new("test_adapter").unwrap(),
+            source_channel: ProductSourceChannel::new("test_adapter").unwrap(),
             surface_type: TurnSurfaceType::Direct,
         };
 
@@ -1454,6 +1489,7 @@ mod tests {
             source_binding_id: "src:shared".to_string(),
             submit_idempotency_key: "turn-key-shared".to_string(),
             adapter_id: ProductAdapterId::new("slack").unwrap(),
+            source_channel: ProductSourceChannel::new("slack").unwrap(),
             // BotMention shared route maps to Channel surface type.
             surface_type: TurnSurfaceType::Channel,
         };
@@ -1490,6 +1526,13 @@ mod tests {
             ctx.surface_type,
             Some(TurnSurfaceType::Channel),
             "BotMention shared route must carry Channel surface type"
+        );
+        assert_eq!(
+            ctx.source_channel
+                .as_ref()
+                .map(ironclaw_turns::RunOriginAdapter::as_str),
+            Some("slack"),
+            "shared route must preserve source channel"
         );
     }
 

@@ -38,6 +38,7 @@ mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
 mod observability;
+mod operator_tool_catalog;
 mod outbound;
 mod product_auth;
 mod production_runtime_policy;

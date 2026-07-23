@@ -880,6 +880,11 @@ impl CapabilityStage {
                 .on_capability_error(&state, &summary)
                 .await
             {
+                RecoveryOutcome::ModelErrorObservation { .. } => {
+                    return Err(AgentLoopExecutorError::PlannerContract {
+                        detail: "ModelErrorObservation on capability error",
+                    });
+                }
                 RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
                     append_blocked_capability_error_result(

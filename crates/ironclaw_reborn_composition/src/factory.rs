@@ -31,8 +31,16 @@ use crate::extension_host::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    operator_config_capability::{
+        extend_builtin_first_party_package as extend_builtin_operator_config_package,
+        insert_handler as insert_operator_config_handler,
+    },
     provider_instance_readiness::{
         ProviderInstanceReadinessInput, provider_instance_readiness_map,
+    },
+    skill_auto_activate_capability::{
+        extend_builtin_first_party_package as extend_builtin_skill_auto_activate_package,
+        insert_handler as insert_skill_auto_activate_handler,
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
@@ -40,6 +48,14 @@ use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_au
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+};
+use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
+use crate::outbound::outbound_preferences_capability::{
+    extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
+    insert_handler as insert_outbound_preferences_handler,
+};
+use crate::outbound::{
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
 };
 use crate::product_auth::credentials::product_auth_providers::{
     OAuthProviderComposition, compose_provider_client,
@@ -116,7 +132,7 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
-    ProductAuthTurnGateResumeDispatcher, ProjectService,
+    OutboundPreferencesProductFacade, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::FilesystemBudgetGateStore;
@@ -2394,6 +2410,78 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
     })?;
+    let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        store_graph.local_runtime.auto_approve_settings.clone();
+    let operator_tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::ToolPermissionOverrideStore,
+    > = store_graph.local_runtime.tool_permission_overrides.clone();
+    let operator_persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+    > = store_graph
+        .local_runtime
+        .persistent_approval_policies
+        .clone();
+    let operator_tool_registry = store_graph
+        .local_runtime
+        .shared_extension_registry
+        .clone()
+        .unwrap_or_else(|| {
+            Arc::new(SharedExtensionRegistry::new(
+                store_graph
+                    .local_runtime
+                    .extension_registry
+                    .as_ref()
+                    .clone(),
+            ))
+        });
+    let operator_synthetic_tools = {
+        let provider = outbound_delivery_synthetic_provider().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+            }
+        })?;
+        vec![
+            outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("outbound delivery operator tool is invalid: {error}"),
+                }
+            })?,
+        ]
+    };
+    let operator_tool_catalog: Arc<dyn ironclaw_product_workflow::RebornOperatorToolCatalog> =
+        Arc::new(ActiveRegistryOperatorToolCatalog::new(
+            operator_tool_registry,
+            operator_synthetic_tools,
+            store_graph.local_runtime.extension_management.clone(),
+        ));
+    insert_operator_config_handler(
+        &mut first_party_registry,
+        operator_auto_approve_settings,
+        operator_tool_permission_overrides,
+        operator_persistent_approval_policies,
+        operator_tool_catalog,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("operator configuration handler is invalid: {error}"),
+    })?;
+    let outbound_target_provider = Arc::clone(&store_graph.local_runtime.outbound_delivery_targets)
+        as Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>;
+    let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
+        Arc::new(crate::outbound::RebornOutboundPreferencesFacade::new(
+            Arc::clone(&store_graph.local_runtime.outbound_preferences),
+            outbound_target_provider,
+        ));
+    insert_outbound_preferences_handler(&mut first_party_registry, outbound_preferences_facade)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("outbound preferences handler is invalid: {error}"),
+        })?;
+    insert_skill_auto_activate_handler(
+        &mut first_party_registry,
+        Arc::clone(&store_graph.local_runtime.skill_auto_activate_learned),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("skill auto-activation handler is invalid: {error}"),
+    })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     // Generic extension host (extension-runtime P2): loaders over the fully
@@ -3078,8 +3166,8 @@ async fn validate_trigger_delivery_target_against_registry(
         kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
         reason,
     };
-    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
-        .map_err(|error| {
+    let target_id =
+        ironclaw_outbound::OutboundDeliveryTargetId::new(target.as_str()).map_err(|error| {
             tracing::debug!(
                 target = "ironclaw::reborn::trigger_create",
                 %error,
@@ -3087,11 +3175,9 @@ async fn validate_trigger_delivery_target_against_registry(
             );
             invalid("delivery target id is not a valid outbound target id".to_string())
         })?;
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let caller = ironclaw_outbound::OutboundDeliveryTargetScope::new(
         scope.tenant_id.clone(),
         scope.user_id.clone(),
-        scope.agent_id.clone(),
-        scope.project_id.clone(),
     );
     use crate::outbound::OutboundDeliveryTargetProvider as _;
     match registry
@@ -4484,6 +4570,21 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
             reason: format!("local-dev administrator configuration package is invalid: {error}"),
         }
     })?;
+    let package = extend_builtin_operator_config_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev operator configuration package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_outbound_preferences_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev outbound preferences package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_skill_auto_activate_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev skill auto-activation package is invalid: {error}"),
+        }
+    })?;
     registry
         .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -5199,7 +5300,7 @@ where
     .await
 }
 
-fn production_skill_management_mount_view(
+pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
     MountView::new(vec![
