@@ -283,13 +283,19 @@ pub enum NearAction {
         /// Beneficiary account id.
         beneficiary_id: String,
     },
-    /// Meta-transaction delegate action (NEP-366). Carries the inner action's
-    /// fields needed for the signed commitment.
+    /// Meta-transaction delegate action (NEP-366). Carries the full inner
+    /// `DelegateAction`, including its inner actions, so the signed commitment
+    /// is injective over them.
     Delegate {
         /// The account whose key signs the delegate action.
         sender_id: String,
         /// The receiver of the delegated actions.
         receiver_id: String,
+        /// The inner actions the delegate authorizes. NEP-366 types these as
+        /// `NonDelegateAction`: a delegate may not nest another delegate. A
+        /// nested `Delegate` here is unrepresentable on-chain and is rejected
+        /// (fail closed) at canonicalization time rather than serialized.
+        actions: Vec<NearAction>,
         /// Nonce for the delegate action.
         nonce: u64,
         /// Block height past which the delegate action is invalid.
