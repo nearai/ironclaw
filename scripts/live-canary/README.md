@@ -1,19 +1,25 @@
 # Live Canary Local and GitHub Setup
 
-This directory contains the unified entrypoints for the live regression lanes:
+This directory contains the unified entrypoints for the retained live
+regression lanes:
 
 - `run.sh` dispatches named lanes and writes artifacts
 - `scrub-artifacts.sh` scans artifacts before upload
 - `upgrade-canary.sh` checks previous-release DB compatibility
 
-The auth-focused Python runners remain the executors behind the auth lanes:
+The former auth-focused Python runners remain temporarily as migration input
+for #6561:
 
 - `scripts/auth_canary/run_canary.py` — mock-backed pytest matrix (fresh-machine)
 - `scripts/auth_live_canary/run_live_canary.py` — live-provider runner with two
   modes: `--mode seeded` (token persistence and refresh) and `--mode browser`
   (OAuth consent in Playwright)
 
-Their shared auth canary setup, provider registry, and runtime helpers live in:
+They are no longer selectable through `run.sh` or the GitHub workflow. Their
+replacement coverage is recorded in [MIGRATION.md](MIGRATION.md), and #6562
+removes the obsolete infrastructure after the retained scenarios migrate.
+
+Their shared setup, provider registry, and runtime helpers live in:
 
 - `scripts/live_canary/common.py`
 - `scripts/live_canary/auth_registry.py`
@@ -41,17 +47,13 @@ Run commands from the repository root.
 - `release-public-full`
 - `upgrade-canary`
 
-### Auth lanes added on this branch
-
-- `auth-smoke`
-- `auth-full`
-- `auth-channels`
-- `auth-live-seeded`
-- `auth-browser-consent`
-
 ### Reborn WebUI v2 QA lane
 
 - `reborn-webui-v2-live-qa`
+
+This is the retained Python live lane. It launches the shipping
+`ironclaw serve` binary with an isolated home and workspace, loopback-only
+listener, bounded readiness check, child-only credentials, and captured logs.
 
 PR-targeted runs execute the reviewed PR binary with live integration secrets.
 They must pass the `reborn-live-canary-pr` GitHub environment gate and have an
@@ -76,33 +78,6 @@ SCENARIO=mission_daily_news_digest_with_followup \
 scripts/live-canary/run.sh
 ```
 
-Run the auth smoke lane:
-
-```bash
-LANE=auth-smoke scripts/live-canary/run.sh
-```
-
-Run the seeded auth live lane:
-
-```bash
-LANE=auth-live-seeded scripts/live-canary/run.sh
-```
-
-Run the browser-consent auth lane:
-
-```bash
-LANE=auth-browser-consent scripts/live-canary/run.sh
-```
-
-Run selected auth provider cases:
-
-```bash
-LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
-LANE=auth-browser-consent CASES=google,notion scripts/live-canary/run.sh
-# Browser cases: google, notion only. github is PAT-only (not OAuth) so
-# it lives in auth-live-seeded instead — see scripts/live_canary/auth_registry.py.
-```
-
 Run the Reborn WebUI v2 live QA lane against the local copied Reborn home:
 
 ```bash
@@ -117,16 +92,16 @@ Run the full QA-sheet-backed Reborn suite:
 LANE=reborn-webui-v2-live-qa CASES=all scripts/live-canary/run.sh
 ```
 
-Use CI-style browser installation for auth browser lanes:
+Use CI-style browser installation:
 
 ```bash
-LANE=auth-browser-consent PLAYWRIGHT_INSTALL=with-deps scripts/live-canary/run.sh
+LANE=reborn-webui-v2-live-qa PLAYWRIGHT_INSTALL=with-deps scripts/live-canary/run.sh
 ```
 
 Reuse an existing build and Python environment:
 
 ```bash
-LANE=auth-smoke SKIP_BUILD=1 SKIP_PYTHON_BOOTSTRAP=1 scripts/live-canary/run.sh
+LANE=reborn-webui-v2-live-qa SKIP_BUILD=1 SKIP_PYTHON_BOOTSTRAP=1 scripts/live-canary/run.sh
 ```
 
 Run an upgrade canary:
@@ -168,5 +143,5 @@ Seeded auth live-provider credentials:
 ## GitHub Workflow
 
 GitHub Actions uses `.github/workflows/live-canary.yml` as the single scheduled
-and manual entrypoint. That workflow now contains both the upstream live LLM
-jobs and the auth-specific canary jobs.
+and manual entrypoint. Retired legacy-gateway jobs are statically disabled
+until #6562 removes their definitions.

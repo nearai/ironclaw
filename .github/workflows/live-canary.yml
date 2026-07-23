@@ -3,8 +3,8 @@ run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
   # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
-  # Legacy canary lanes remain available through workflow_dispatch for
-  # manual diagnosis, but do not run on cron.
+  # Retired legacy-gateway lanes and their replacement coverage are recorded
+  # in scripts/live-canary/MIGRATION.md.
   schedule:
     # Every 3 hours. Only reborn-webui-v2-live-qa has a matching guard.
     - cron: "0 */3 * * *"
@@ -24,12 +24,6 @@ on:
           - provider-matrix
           - release-public-full
           - upgrade-canary
-          - auth-smoke
-          - auth-full
-          - auth-channels
-          - auth-live-seeded
-          - auth-browser-consent
-          - workflow-canary
           - reborn-webui-v2-live-qa
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
@@ -94,8 +88,8 @@ env:
 jobs:
   auth-smoke:
     name: Auth Smoke
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke')
+    # Retained temporarily as migration input for #6561; unreachable from CI.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -125,8 +119,8 @@ jobs:
 
   auth-full:
     name: Auth Full
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')
+    # Retained temporarily as migration input for #6561; unreachable from CI.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -156,8 +150,8 @@ jobs:
 
   auth-channels:
     name: Auth Channels
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')
+    # Retained temporarily as migration input for #6561; unreachable from CI.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -187,8 +181,8 @@ jobs:
 
   auth-live-seeded:
     name: Auth Live Seeded
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded')
+    # Retained temporarily as migration input for #6561; unreachable from CI.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -276,8 +270,8 @@ jobs:
 
   auth-browser-consent:
     name: Auth Browser Consent
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent')
+    # Retained temporarily as migration input for #6561; unreachable from CI.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -377,8 +371,8 @@ jobs:
 
   workflow-canary:
     name: Workflow Canary
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary')
+    # Retained temporarily as migration input for #6561; unreachable from CI.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
