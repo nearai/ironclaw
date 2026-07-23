@@ -1134,6 +1134,77 @@ mod tests {
         }
     }
 
+    async fn admit_text_through_sink(text: &str) -> Arc<CountingSurface> {
+        let surface = Arc::new(CountingSurface::new());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            surface: Arc::clone(&surface) as Arc<dyn ProductSurface>,
+            observer: None,
+        });
+        sink.admit(admission_for(text))
+            .await
+            .expect("normalized message reaches the workflow");
+        surface
+    }
+
+    #[tokio::test]
+    async fn ambiguous_verb_first_chat_reaches_the_workflow_as_a_user_message_turn() {
+        // Regression (#6520): the shared sink classifies every inbound message
+        // for gate-resolution commands. A normal chat message that merely
+        // *starts* with a command verb ("approve this design") is not the
+        // reserved gate-command shape, so it must NOT be pulled out of the
+        // conversation as a no-op and silently settled. It falls through to
+        // normal turn handling — the sink hands the workflow a UserMessage
+        // (which submits a turn), never a NoOp.
+        let surface = admit_text_through_sink("approve this design").await;
+        let payloads = surface.payloads();
+        assert_eq!(
+            payloads.len(),
+            1,
+            "the message must reach the workflow once"
+        );
+        assert!(
+            matches!(payloads[0], ProductInboundPayload::UserMessage(_)),
+            "ambiguous verb-first chat must submit a turn, not settle as a no-op: {:?}",
+            payloads[0]
+        );
+        assert_eq!(
+            surface.submit_count(),
+            1,
+            "the ambiguous message must be submitted, not swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn confident_gate_commands_still_classify_as_resolutions_at_the_shared_sink() {
+        // The fall-through fix must not weaken the confident, reserved
+        // gate-command shapes. Targeted `approve gate:<ref>` still reaches the
+        // workflow as an ApprovalResolution (which resolves the gate), and a
+        // bare `deny` still reaches it as a ScopedApprovalResolution (the
+        // delivered-gate-thread reply grammar) — neither becomes a user message.
+        let targeted = admit_text_through_sink("approve gate:approval-xyz").await;
+        assert!(
+            matches!(
+                targeted.payloads().as_slice(),
+                [ProductInboundPayload::ApprovalResolution(_)]
+            ),
+            "`approve gate:<ref>` must reach the workflow as an ApprovalResolution: {:?}",
+            targeted.payloads()
+        );
+        let scoped = admit_text_through_sink("deny").await;
+        assert!(
+            matches!(
+                scoped.payloads().as_slice(),
+                [ProductInboundPayload::ScopedApprovalResolution(_)]
+            ),
+            "bare `deny` must reach the workflow as a ScopedApprovalResolution: {:?}",
+            scoped.payloads()
+        );
+    }
+
     struct FailingSink;
 
     #[async_trait]
