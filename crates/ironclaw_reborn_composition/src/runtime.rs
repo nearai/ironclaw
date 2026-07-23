@@ -92,7 +92,7 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_outbound::OutboundError;
+use ironclaw_outbound::{OutboundDeliveryTargetRegistrationOutcome, OutboundError};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::run_profile::UserProfileContext;
@@ -102,8 +102,6 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 use crate::deployment::{DeploymentConfig, RuntimeSubstrate, TrafficPolicy};
 use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
-#[cfg(any(test, feature = "test-support"))]
-use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,

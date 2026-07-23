@@ -17,7 +17,7 @@ let stagedSeq = 0;
 export const FALLBACK_ATTACHMENT_LIMITS = {
   accept: [],
   maxCount: 10,
-  maxFileBytes: 5 * 1024 * 1024,
+  maxFileBytes: 10 * 1024 * 1024,
   maxTotalBytes: 10 * 1024 * 1024,
 };
 

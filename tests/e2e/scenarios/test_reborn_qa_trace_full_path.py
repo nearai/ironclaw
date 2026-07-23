@@ -22,6 +22,7 @@ from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,
+    client_action_id,
     close_reborn_server,
     create_thread,
     enable_reborn_global_auto_approve,
@@ -433,7 +434,8 @@ async def _install_extensions(base_url: str, extension_ids: tuple[str, ...]) -> 
             installed = await client.post(
                 f"{base_url}/api/webchat/v2/extensions/install",
                 json={
-                    "package_ref": {"kind": "extension", "id": extension_id}
+                    "package_ref": {"kind": "extension", "id": extension_id},
+                    "client_action_id": client_action_id(),
                 },
                 timeout=30,
             )
@@ -445,6 +447,7 @@ async def _activate_extensions(base_url: str, extension_ids: tuple[str, ...]) ->
         for extension_id in extension_ids:
             activated = await client.post(
                 f"{base_url}/api/webchat/v2/extensions/{extension_id}/activate",
+                json={"client_action_id": client_action_id()},
                 timeout=30,
             )
             activated.raise_for_status()

@@ -101,7 +101,8 @@ use ironclaw_product_workflow::{
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, parse_webui_client_action_id,
+    webui_attachment_capabilities,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -109,7 +110,6 @@ use serde::{Deserialize, Serialize};
 use ironclaw_host_api::{
     ActivityId, Blocked, FailureKind, Resolution, SecretHandle, ThreadId, UserId,
 };
-use secrecy::ExposeSecret;
 use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
@@ -1889,11 +1889,13 @@ pub async fn set_outbound_preferences(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornSetOutboundPreferencesRequest>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let resolution = invoke_product_capability(
+    let activity_id = outbound_preferences_activity_id(&caller, &body)?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller.clone(),
         OUTBOUND_PREFERENCES_SET_CAPABILITY,
         body,
+        activity_id,
     )
     .await?;
     capability_resolution_succeeded(
@@ -2268,11 +2270,20 @@ pub async fn install_extension(
     Json(body): Json<InstallExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
-    let resolution = invoke_product_capability(
+    let client_action_id =
+        parse_webui_client_action_id(body.client_action_id).map_err(RebornServicesError::from)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_INSTALL_CAPABILITY,
+        &package_ref,
+        client_action_id.as_str(),
+    )?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller,
         EXTENSION_INSTALL_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2308,16 +2319,26 @@ pub async fn activate_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+    Json(body): Json<ExtensionLifecycleActionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let resolution = invoke_product_capability(
+    let client_action_id =
+        parse_webui_client_action_id(body.client_action_id).map_err(RebornServicesError::from)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_ACTIVATE_CAPABILITY,
+        &package_ref,
+        client_action_id.as_str(),
+    )?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller.clone(),
         EXTENSION_ACTIVATE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
     )
     .await?;
     let response =
@@ -2330,16 +2351,26 @@ pub async fn remove_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+    Json(body): Json<ExtensionLifecycleActionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let resolution = invoke_product_capability(
+    let client_action_id =
+        parse_webui_client_action_id(body.client_action_id).map_err(RebornServicesError::from)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        &package_ref,
+        client_action_id.as_str(),
+    )?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller,
         EXTENSION_REMOVE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2531,19 +2562,29 @@ pub async fn setup_extension(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
+    let client_action_id = parse_webui_client_action_id(body.client_action_id.clone())
+        .map_err(RebornServicesError::from)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_SETUP_SUBMIT_CAPABILITY,
+        &package_ref,
+        client_action_id.as_str(),
+    )?;
     let mut input = serde_json::to_value(body).map_err(RebornServicesError::internal_from)?;
     let input_object = input
         .as_object_mut()
         .ok_or_else(|| RebornServicesError::internal_from("setup request did not encode object"))?;
+    input_object.remove("client_action_id");
     input_object.insert(
         "extension_id".to_string(),
         serde_json::Value::String(package_ref.id.as_str().to_string()),
     );
-    let resolution = invoke_product_capability(
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller.clone(),
         EXTENSION_SETUP_SUBMIT_CAPABILITY,
         input,
+        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2695,9 +2736,14 @@ where
     T: Serialize,
 {
     let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
-    let activity_id = product_capability_activity_id(&caller, capability, &input)?;
-    invoke_product_capability_with_activity_id(services, caller, capability, input, activity_id)
-        .await
+    invoke_product_capability_with_activity_id(
+        services,
+        caller,
+        capability,
+        input,
+        ActivityId::new(),
+    )
+    .await
 }
 
 async fn invoke_product_capability_with_activity_id<T>(
@@ -2713,37 +2759,6 @@ where
     capability
         .invoke_on(services.as_ref(), caller, input, activity_id)
         .await
-}
-
-fn product_capability_activity_id(
-    caller: &WebUiAuthenticatedCaller,
-    capability: ProductCapabilityDescriptor,
-    input: &serde_json::Value,
-) -> Result<ActivityId, RebornServicesError> {
-    let capability_id = capability.capability_id()?;
-    let input_bytes = serde_json::to_vec(input).map_err(RebornServicesError::internal_from)?;
-    let mut seed = Vec::new();
-    for segment in [
-        "webui-product-capability",
-        caller.tenant_id.as_str(),
-        caller.user_id.as_str(),
-        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
-        caller
-            .project_id
-            .as_ref()
-            .map(|id| id.as_str())
-            .unwrap_or(""),
-        capability_id.as_str(),
-    ] {
-        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
-        seed.extend_from_slice(segment.as_bytes());
-    }
-    seed.extend_from_slice(&(input_bytes.len() as u64).to_be_bytes());
-    seed.extend_from_slice(&input_bytes);
-    Ok(ActivityId::from_uuid(Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        &seed,
-    )))
 }
 
 fn llm_provider_upsert_activity_id(
@@ -2774,13 +2789,79 @@ fn llm_provider_upsert_activity_id(
         seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
         seed.extend_from_slice(segment.as_bytes());
     }
-    if let Some(api_key) = request.api_key.as_ref() {
-        let secret = api_key.expose_secret().as_bytes();
-        seed.extend_from_slice(&(secret.len() as u64).to_be_bytes());
-        seed.extend_from_slice(secret);
-    } else {
-        seed.extend_from_slice(&0_u64.to_be_bytes());
+    for present in [
+        request.name.is_some(),
+        request.base_url.is_some(),
+        request.default_model.is_some(),
+        request.model.is_some(),
+        request.api_key.is_some(),
+    ] {
+        seed.extend_from_slice(&u64::from(present).to_be_bytes());
     }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+fn extension_lifecycle_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    package_ref: &LifecyclePackageRef,
+    client_action_id: &str,
+) -> Result<ActivityId, RebornServicesError> {
+    let capability_id = capability.capability_id()?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-extension-lifecycle",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+        package_ref.id.as_str(),
+        client_action_id,
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+fn outbound_preferences_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    request: &RebornSetOutboundPreferencesRequest,
+) -> Result<ActivityId, RebornServicesError> {
+    let capability_id = OUTBOUND_PREFERENCES_SET_CAPABILITY.capability_id()?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-outbound-preferences",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+        request
+            .final_reply_target_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    seed.extend_from_slice(&u64::from(request.final_reply_target_id.is_some()).to_be_bytes());
     Ok(ActivityId::from_uuid(Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         &seed,
@@ -3664,6 +3745,14 @@ pub struct ExtensionPackagePath {
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
+    #[serde(default)]
+    pub client_action_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionLifecycleActionBody {
+    #[serde(default)]
+    pub client_action_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

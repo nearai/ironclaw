@@ -5020,13 +5020,14 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     let router = router_with(services.clone());
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"}}"#,
+                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"},"client_action_id":"install-nearai-mcp"}"#,
                 ))
                 .expect("request"),
         )
@@ -5036,8 +5037,24 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["success"], true);
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let retry_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"},"client_action_id":"install-nearai-mcp"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(retry_response.status(), StatusCode::OK);
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(invoke_calls.len(), 2);
     assert_eq!(
         invoke_calls[0].0,
         CapabilityId::new(EXTENSION_INSTALL_CAPABILITY_ID).expect("capability id")
@@ -5045,6 +5062,10 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     assert_eq!(
         invoke_calls[0].1,
         serde_json::json!({ "extension_id": "nearai-mcp" })
+    );
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "the client action id must survive response-lost retries as the ProductSurface activity id"
     );
 }
 
@@ -5213,7 +5234,10 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/google-calendar/activate")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"activate-google-calendar"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -5242,7 +5266,10 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/google-calendar/remove")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"remove-google-calendar"}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -5308,7 +5335,9 @@ async fn setup_extension_invokes_product_surface_capability() {
                 .method(Method::POST)
                 .uri("/api/webchat/v2/extensions/telegram/setup")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"action":"begin"}"#))
+                .body(Body::from(
+                    r#"{"client_action_id":"setup-telegram","action":"begin"}"#,
+                ))
                 .expect("request"),
         )
         .await

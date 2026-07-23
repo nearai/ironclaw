@@ -3,7 +3,7 @@
 // - The v2 backend owns the registry/list/install/activate/remove/setup
 //   projection and maps those operations to the extension registry.
 
-import { apiFetch, setupExtension } from "../../../lib/api";
+import { apiFetch, clientActionId, setupExtension } from "../../../lib/api";
 import { redeemPairingCode } from "./pairing-api";
 
 const OAUTH_START_TTL_MS = 5 * 60 * 1000;
@@ -17,18 +17,29 @@ export function fetchExtensionRegistry() {
 export function installExtension(packageRef) {
   return apiFetch("/api/webchat/v2/extensions/install", {
     method: "POST",
-    body: JSON.stringify({ package_ref: packageRef }),
+    body: JSON.stringify({
+      package_ref: packageRef,
+      client_action_id: clientActionId(),
+    }),
   });
 }
 export function activateExtension(packageRef) {
-  return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/activate`, {
-    method: "POST",
-  });
+  return apiFetch(
+    `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/activate`,
+    {
+      method: "POST",
+      body: JSON.stringify({ client_action_id: clientActionId() }),
+    }
+  );
 }
 export function removeExtension(packageRef) {
-  return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/remove`, {
-    method: "POST",
-  });
+  return apiFetch(
+    `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/remove`,
+    {
+      method: "POST",
+      body: JSON.stringify({ client_action_id: clientActionId() }),
+    }
+  );
 }
 export function fetchExtensionSetup(packageRef) {
   return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup`);
