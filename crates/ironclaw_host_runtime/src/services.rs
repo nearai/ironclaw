@@ -70,10 +70,10 @@ use crate::obligations::{
     SharedSecretStore,
 };
 use crate::{
-    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort, HostRuntimeError,
-    HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    LocalInvocationServicesResolver, PostEditCheckConfig, ProcessObligationLifecycleStore,
+    BuiltinObligationHandler, CapabilitySurfaceVersion, ConfiguredInvocationServicesResolver,
+    DefaultHostRuntime, FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort,
+    HostRuntimeError, HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest,
+    InvocationServicesResolver, PostEditCheckConfig, ProcessObligationLifecycleStore,
     RuntimeBackendHealth, RuntimeProcessPort, RuntimeSecretMaterialStager, RuntimeSecretStageError,
     TenantSandboxProcessPort, ToolCallHttpEgress,
 };
@@ -591,7 +591,7 @@ where
     /// The configured closed runtime-lane executor shared by the registry
     /// resolver and extension tool binder.
     fn runtime_lane_executor(&self) -> Arc<RuntimeLaneExecutor<F, G>> {
-        let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
+        let mut invocation_services_resolver = ConfiguredInvocationServicesResolver::new(
             Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
             runtime_http_egress(&self.runtime_http_egress),
             Arc::clone(&self.process_port),

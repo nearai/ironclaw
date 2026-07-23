@@ -211,6 +211,7 @@ jobs:
         run: >-
           pytest
           tests/e2e/scenarios/test_provider_capability_inventory.py
+          tests/e2e/scenarios/test_provider_fault_proxy.py
           tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py
           tests/e2e/scenarios/test_reborn_qa_trace_replay.py
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py

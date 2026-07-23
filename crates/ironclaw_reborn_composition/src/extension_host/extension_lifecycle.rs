@@ -117,7 +117,7 @@ const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 // reconciliation and final removal mirror lifecycle-managed packages into or
 // out of active_registry. Caller membership/readiness is stored separately
 // from the shared runtime publication.
-pub(crate) struct RebornLocalExtensionManagementPort {
+pub(crate) struct ExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: Arc<RwLock<AvailableExtensionCatalog>>,
     installation_store: Arc<dyn ExtensionInstallationStore>,
@@ -157,7 +157,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
     /// Late-binding slot for the generic per-user channel-connection facade
     /// (extension-runtime §6.4), shared with
-    /// `RebornLocalRuntimeServices::channel_disconnect_slot`. Removing
+    /// the runtime `channel_disconnect_slot`. Removing
     /// an extension whose manifest declares a channel surface disconnects the
     /// authenticated caller through it (revoke any personal vendor credential
     /// → vendor/pairing cleanup → delete identity bindings) at this single
@@ -380,7 +380,7 @@ async fn remove_retired_internal_installation(
     Ok(true)
 }
 
-impl RebornLocalExtensionManagementPort {
+impl ExtensionManagementPort {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         catalog: AvailableExtensionCatalog,
@@ -715,7 +715,7 @@ impl RebornLocalExtensionManagementPort {
 
     /// Share the composition's late-binding channel-connection facade slot
     /// (see the field doc). Composition passes the SAME `Arc` stored on
-    /// `RebornLocalRuntimeServices` so a fill by runtime composition (or the
+    /// runtime services so a fill by runtime composition (or the
     /// channel-connection test bundle) is visible to the removal path here.
     pub(crate) fn with_channel_disconnect_slot(
         mut self,
@@ -728,7 +728,7 @@ impl RebornLocalExtensionManagementPort {
     /// Test-support access to the extension installation store.
     ///
     /// Mirrors the `installation_store` field that `build_local_runtime` wires
-    /// in when constructing `RebornLocalExtensionManagementPort`. For tests
+    /// in when constructing `ExtensionManagementPort`. For tests
     /// only — zero bytes shipped in production builds.
     #[cfg(feature = "test-support")]
     pub(crate) fn installation_store_for_test(&self) -> Arc<dyn ExtensionInstallationStore> {
@@ -2555,7 +2555,7 @@ pub(crate) fn complete_install_response(
 /// policy: it only exposes the stores and runtime publishers assembled by the
 /// composition root.
 struct ComposedExtensionActivationOperations<'a> {
-    management: &'a RebornLocalExtensionManagementPort,
+    management: &'a ExtensionManagementPort,
     credential_gate: &'a dyn ExtensionActivationCredentialGate,
 }
 
@@ -4191,7 +4191,7 @@ supports_threads = true
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -4796,7 +4796,7 @@ supports_threads = true
             .await
             .expect("install extension");
 
-        let restarted_port = RebornLocalExtensionManagementPort::new(
+        let restarted_port = ExtensionManagementPort::new(
             Arc::clone(&installed_port.filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             installation_store.clone(),
@@ -7401,7 +7401,7 @@ output_schema_ref = "schemas/search.output.json"
             .insert(package)
             .expect("active package");
         let active_registry = Arc::new(SharedExtensionRegistry::new(active_registry_initial));
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = ExtensionManagementPort::new(
             Arc::new(filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             Arc::new(filesystem_installation_store()),
@@ -7766,7 +7766,7 @@ output_schema_ref = "schemas/search.output.json"
     fn extension_lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -7781,7 +7781,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -7794,7 +7794,7 @@ output_schema_ref = "schemas/search.output.json"
     fn github_extension_lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -7925,7 +7925,7 @@ output_schema_ref = "schemas/search.output.json"
     async fn ui_facade_extension_remove_revokes_exclusive_credential_at_convergence_point() {
         // Convergence coverage: the WebUI facade removal door (`ExtensionRemove`)
         // and the `builtin.extension_remove` agent capability both call
-        // `RebornLocalExtensionManagementPort::remove`, so credential revocation
+        // `ExtensionManagementPort::remove`, so credential revocation
         // cannot be bypassed through the UI door — the door users actually use.
         let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
@@ -8052,7 +8052,7 @@ output_schema_ref = "schemas/search.output.json"
         // Simulate a process restart after the bundled catalog dropped or
         // renamed the entry. The persisted manifest remains the authoritative
         // record of the cleanup owed by this installed package.
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = ExtensionManagementPort::new(
             Arc::clone(&installed_port.filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             installation_store,
@@ -8106,7 +8106,7 @@ output_schema_ref = "schemas/search.output.json"
             .install(package_ref.clone(), &removal_scope.user_id)
             .await
             .expect("install github");
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = ExtensionManagementPort::new(
             Arc::clone(&installed_port.filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             installation_store.clone(),
@@ -8201,7 +8201,7 @@ output_schema_ref = "schemas/search.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
         let removal_scope = hosted_mcp_scope("lifecycle-owner");
-        let repair_port = RebornLocalExtensionManagementPort::new(
+        let repair_port = ExtensionManagementPort::new(
             Arc::clone(&base_port.filesystem),
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
             installation_store.clone(),
@@ -8227,7 +8227,7 @@ output_schema_ref = "schemas/search.output.json"
                 .is_some(),
             "catalog repair metadata must survive a cleanup failure"
         );
-        let no_catalog_port = RebornLocalExtensionManagementPort::new(
+        let no_catalog_port = ExtensionManagementPort::new(
             Arc::clone(&base_port.filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             installation_store.clone(),
@@ -8283,7 +8283,7 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("simulate failed installation restoration");
 
-        let retry_port = RebornLocalExtensionManagementPort::new(
+        let retry_port = ExtensionManagementPort::new(
             Arc::clone(&port.filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             installation_store.clone(),
@@ -8358,7 +8358,7 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("delete manifest");
 
-        let repair_port = RebornLocalExtensionManagementPort::new(
+        let repair_port = ExtensionManagementPort::new(
             Arc::clone(&port.filesystem),
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
             installation_store,
@@ -8421,7 +8421,7 @@ output_schema_ref = "schemas/search.output.json"
             .expect("remove runtime registry entry");
         assert!(storage_root.join("system/extensions/github").exists());
 
-        let repair_port = RebornLocalExtensionManagementPort::new(
+        let repair_port = ExtensionManagementPort::new(
             Arc::clone(&port.filesystem),
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
             installation_store,
@@ -8501,7 +8501,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8526,7 +8526,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8551,7 +8551,7 @@ output_schema_ref = "schemas/search.output.json"
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(filesystem_installation_store());
         let extension_management = Arc::new(
-            RebornLocalExtensionManagementPort::new(
+            ExtensionManagementPort::new(
                 root_filesystem,
                 catalog,
                 installation_store.clone(),
@@ -8576,7 +8576,7 @@ output_schema_ref = "schemas/search.output.json"
     fn extension_management_port_fixture_with_credential_cleanup(
         catalog: AvailableExtensionCatalog,
         credential_cleanup: Arc<dyn ExtensionCredentialCleanup>,
-    ) -> (tempfile::TempDir, Arc<RebornLocalExtensionManagementPort>) {
+    ) -> (tempfile::TempDir, Arc<ExtensionManagementPort>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
@@ -8596,7 +8596,7 @@ output_schema_ref = "schemas/search.output.json"
         let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(filesystem_installation_store());
-        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        let extension_management = Arc::new(ExtensionManagementPort::new(
             root_filesystem,
             catalog,
             installation_store,
@@ -8746,7 +8746,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
@@ -8775,7 +8775,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8800,7 +8800,7 @@ output_schema_ref = "schemas/search.output.json"
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(filesystem_installation_store());
-        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        let extension_management = Arc::new(ExtensionManagementPort::new(
             root_filesystem,
             catalog,
             installation_store.clone(),
@@ -8825,7 +8825,7 @@ output_schema_ref = "schemas/search.output.json"
     /// variant below exercises the readiness-map chokepoint in
     /// `activation_credential_requirements` directly, since the OTHER port
     /// fixtures in this module deliberately build with
-    /// `RebornLocalExtensionManagementPort::new` alone (proving the opt-in
+    /// `ExtensionManagementPort::new` alone (proving the opt-in
     /// default stays empty for them).
     fn extension_management_port_fixture_with_readiness_map(
         catalog: AvailableExtensionCatalog,
@@ -8834,7 +8834,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8860,7 +8860,7 @@ output_schema_ref = "schemas/search.output.json"
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(filesystem_installation_store());
         let extension_management = Arc::new(
-            RebornLocalExtensionManagementPort::new(
+            ExtensionManagementPort::new(
                 root_filesystem,
                 catalog,
                 installation_store.clone(),
@@ -8922,7 +8922,7 @@ output_schema_ref = "schemas/search.output.json"
     // `activation_credential_requirements` test in this module (e.g.
     // `slack_tools_extension_activation_requires_personal_oauth` above, the
     // telegram tests below) builds its port via
-    // `RebornLocalExtensionManagementPort::new` with no
+    // `ExtensionManagementPort::new` with no
     // `.with_provider_instance_readiness` call and keeps passing unchanged —
     // proving the opt-in default-empty map is a true no-op for every port
     // that never opts in. No new test is added for this: it is exactly what
@@ -8934,7 +8934,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8952,7 +8952,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8974,7 +8974,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8997,8 +8997,8 @@ output_schema_ref = "schemas/search.output.json"
             .expect("mount system extensions");
         let filesystem = Arc::new(filesystem);
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-        let skill_management = Arc::new(
-            crate::extension_host::lifecycle::RebornLocalSkillManagementPort::new(
+        let skill_management =
+            Arc::new(crate::extension_host::lifecycle::SkillManagementPort::new(
                 UserId::new("lifecycle-owner").expect("valid user"),
                 root_filesystem.clone(),
                 MountView::new(vec![MountGrant::new(
@@ -9007,11 +9007,10 @@ output_schema_ref = "schemas/search.output.json"
                     MountPermissions::read_write_list_delete(),
                 )])
                 .expect("valid mount view"),
-            ),
-        );
+            ));
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(filesystem_installation_store());
-        let mut extension_management_port = RebornLocalExtensionManagementPort::new(
+        let mut extension_management_port = ExtensionManagementPort::new(
             root_filesystem,
             catalog,
             installation_store.clone(),
@@ -9028,9 +9027,8 @@ output_schema_ref = "schemas/search.output.json"
                 extension_management_port.with_channel_disconnect_slot(slot);
         }
         let extension_management = Arc::new(extension_management_port);
-        let facade =
-            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
-                .with_extension_management(extension_management);
+        let facade = crate::extension_host::lifecycle::LifecycleFacade::new(skill_management)
+            .with_extension_management(extension_management);
         (
             dir,
             storage_root,
@@ -9044,7 +9042,7 @@ output_schema_ref = "schemas/search.output.json"
         initial_active_registry: ExtensionRegistry,
     ) -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        ExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -9057,7 +9055,7 @@ output_schema_ref = "schemas/search.output.json"
 
     fn extension_port_with_delete_manifest_failing_store() -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        ExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -9073,7 +9071,7 @@ output_schema_ref = "schemas/search.output.json"
         failing_store: DeleteInstallationFailingStore,
     ) -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        ExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -9091,7 +9089,7 @@ output_schema_ref = "schemas/search.output.json"
         lifecycle_service: ExtensionLifecycleService,
     ) -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        ExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -9118,7 +9116,7 @@ output_schema_ref = "schemas/search.output.json"
         let trust_policy = test_extension_trust_policy();
         let failing_store = Arc::new(failing_store);
         let installation_store: Arc<dyn ExtensionInstallationStore> = failing_store.clone();
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = ExtensionManagementPort::new(
             root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
             installation_store,
@@ -9134,7 +9132,7 @@ output_schema_ref = "schemas/search.output.json"
 
     fn extension_port_with_file_delete_failing_filesystem() -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        ExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
@@ -9164,7 +9162,7 @@ output_schema_ref = "schemas/search.output.json"
         let installation_store = Arc::new(filesystem_installation_store());
         let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
             installation_store.clone();
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = ExtensionManagementPort::new(
             root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
             extension_installation_store,
@@ -9866,7 +9864,7 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     /// The fixture's tenant-operator identity — matches the operator user id
-    /// wired into every test `RebornLocalExtensionManagementPort`.
+    /// wired into every test `ExtensionManagementPort`.
     fn lifecycle_owner() -> UserId {
         UserId::new("lifecycle-owner").expect("valid user")
     }

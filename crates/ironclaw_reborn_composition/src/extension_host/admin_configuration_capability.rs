@@ -27,7 +27,7 @@ use ironclaw_secrets::SecretMaterial;
 use serde::Deserialize;
 
 use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 
 pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
@@ -41,7 +41,7 @@ pub(crate) fn insert_handler(
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
     affected_extensions: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<ExtensionManagementPort>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)?,
@@ -97,7 +97,7 @@ struct AdminConfigurationReplaceHandler {
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
     affected_extensions: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<ExtensionManagementPort>,
 }
 
 #[derive(Deserialize)]

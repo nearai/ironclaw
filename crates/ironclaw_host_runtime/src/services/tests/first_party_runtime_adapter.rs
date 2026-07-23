@@ -22,7 +22,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -90,7 +90,7 @@ async fn first_party_adapter_forwards_scheduled_loop_origin_unchanged() {
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -187,7 +187,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -251,7 +251,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -309,7 +309,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -375,7 +375,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -432,7 +432,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -627,7 +627,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -728,7 +728,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -843,7 +843,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
     ));
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),

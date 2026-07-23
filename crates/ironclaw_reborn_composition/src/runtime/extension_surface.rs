@@ -8,21 +8,19 @@ use ironclaw_host_api::{
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use crate::extension_host::{
-    extension_lifecycle::ActiveExtensionCapability, lifecycle::RebornLocalLifecycleFacade,
+    extension_lifecycle::ActiveExtensionCapability, lifecycle::LifecycleFacade,
 };
 use ironclaw_product::{LifecycleProductContext, ProductWorkflowError};
 
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct ExtensionCapabilitySurfaceSource {
-    readiness_source: Option<Arc<RebornLocalLifecycleFacade>>,
+    readiness_source: Option<Arc<LifecycleFacade>>,
     #[cfg(test)]
     static_surface: Option<ExtensionCapabilitySurface>,
 }
 
 impl ExtensionCapabilitySurfaceSource {
-    pub(in crate::runtime) fn new(
-        readiness_source: Option<Arc<RebornLocalLifecycleFacade>>,
-    ) -> Self {
+    pub(in crate::runtime) fn new(readiness_source: Option<Arc<LifecycleFacade>>) -> Self {
         Self {
             readiness_source,
             #[cfg(test)]
@@ -69,7 +67,7 @@ impl ExtensionCapabilitySurface {
     }
 
     pub(super) async fn from_readiness_source_for_caller(
-        readiness_source: &RebornLocalLifecycleFacade,
+        readiness_source: &LifecycleFacade,
         caller: LifecycleProductContext,
     ) -> Result<Self, ProductWorkflowError> {
         Ok(Self {

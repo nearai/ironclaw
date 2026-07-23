@@ -1356,7 +1356,7 @@ fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHo
 #[test]
 fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
     let owner = UserId::new("hosted-nearai-owner").expect("owner");
-    let identity = RebornLocalRuntimeIdentity {
+    let identity = RuntimeOwnerIdentity {
         tenant_id: ironclaw_host_api::TenantId::new("hosted-nearai-tenant").expect("tenant"),
         agent_id: ironclaw_host_api::AgentId::new("hosted-nearai-agent").expect("agent"),
     };
@@ -1397,7 +1397,7 @@ fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
 #[test]
 fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
-    let identity = RebornLocalRuntimeIdentity {
+    let identity = RuntimeOwnerIdentity {
         tenant_id: TenantId::new("configured-tenant").expect("tenant"),
         agent_id: ironclaw_host_api::AgentId::new("configured-agent").expect("agent"),
     };

@@ -10,7 +10,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 use crate::extension_host::extension_lifecycle_capabilities::EXTENSION_INSTALL_CAPABILITY_ID;
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
@@ -279,7 +279,7 @@ async fn invoke_outcome_with_context(
 }
 
 async fn active_extension_capability_ids(
-    extension_management: &RebornLocalExtensionManagementPort,
+    extension_management: &ExtensionManagementPort,
 ) -> Vec<String> {
     extension_management
         .active_model_visible_capabilities()

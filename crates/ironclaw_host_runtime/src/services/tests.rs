@@ -38,9 +38,9 @@ use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use super::{
-    CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostProcessPort,
-    HostRuntimeHttpEgressPort, HostRuntimeServices, LocalInvocationServicesResolver,
+    CapabilitySurfaceVersion, ConfiguredInvocationServicesResolver, DeploymentMode,
+    EffectiveRuntimePolicy, FilesystemBackendKind, FirstPartyCapabilityRegistry,
+    FirstPartyRuntimeAdapter, HostProcessPort, HostRuntimeHttpEgressPort, HostRuntimeServices,
     McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore,
     ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
     RuntimeAdapter, RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile,
@@ -739,7 +739,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -803,7 +803,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -857,7 +857,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -924,7 +924,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -982,7 +982,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -1114,7 +1114,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
@@ -1289,7 +1289,7 @@ async fn assert_first_party_denies_before_handler(
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
+        Arc::new(ConfiguredInvocationServicesResolver::new(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
