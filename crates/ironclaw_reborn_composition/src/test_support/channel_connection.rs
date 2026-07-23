@@ -31,8 +31,10 @@
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
-use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ResourceScope, TenantId, UserId,
+};
+use ironclaw_product::ChannelConnectionFacade;
 
 use crate::extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionFacade,
@@ -232,7 +234,7 @@ impl ChannelConnectionTestBundle {
 
     /// Surface (a) of the extensions page: what `list_extensions` merges via
     /// [`ChannelConnectionFacade::caller_channel_connections`]
-    /// (`ironclaw_product_workflow/src/reborn_services/extensions.rs`).
+    /// (`ironclaw_product/src/reborn_services/extensions.rs`).
     /// Returns the entry for `extension_id`; an absent entry reads as `false`
     /// — the generic facade discovers channel extensions from the durable
     /// installation store, so a removed (or never-installed) extension has no
@@ -244,7 +246,7 @@ impl ChannelConnectionTestBundle {
     ) -> Result<bool, String> {
         let connections = self
             .facade
-            .caller_channel_connections(WebUiAuthenticatedCaller::new(
+            .caller_channel_connections(ProductSurfaceCaller::new(
                 self.tenant_id.clone(),
                 user_id.clone(),
                 Some(self.agent_id.clone()),

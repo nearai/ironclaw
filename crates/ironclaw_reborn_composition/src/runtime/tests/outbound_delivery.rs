@@ -12,7 +12,7 @@ use ironclaw_outbound::{
     OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetScope,
     OutboundDeliveryTargetSummary, OutboundError,
 };
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,

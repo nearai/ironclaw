@@ -23,7 +23,7 @@ use ironclaw_extension_host::{
     InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
 };
 use ironclaw_host_api::ToolAdapter;
-use ironclaw_product_adapters::ChannelAdapter;
+use ironclaw_product::ChannelAdapter;
 
 struct Harness {
     host: ExtensionHost,

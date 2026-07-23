@@ -444,13 +444,12 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
 pub(crate) struct AcmeFixtureChannelAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
+impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
-        request: ironclaw_product_adapters::VerifiedInbound<'_>,
-    ) -> Result<ironclaw_product_adapters::InboundOutcome, ironclaw_product_adapters::ChannelError>
-    {
-        use ironclaw_product_adapters::{
+        request: ironclaw_product::VerifiedInbound<'_>,
+    ) -> Result<ironclaw_product::InboundOutcome, ironclaw_product::ChannelError> {
+        use ironclaw_product::{
             ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
             ImmediateResponse, InboundOutcome, NormalizedInboundMessage, ProductTriggerReason,
         };
@@ -505,11 +504,10 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
     /// fixture.
     async fn deliver(
         &self,
-        envelope: ironclaw_product_adapters::OutboundEnvelope,
+        envelope: ironclaw_product::OutboundEnvelope,
         egress: &dyn ironclaw_host_api::RestrictedEgress,
-    ) -> Result<ironclaw_product_adapters::DeliveryReport, ironclaw_product_adapters::ChannelError>
-    {
-        use ironclaw_product_adapters::{ChannelError, OutboundPart, PartDeliveryOutcome};
+    ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
+        use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -560,7 +558,7 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
                 break;
             }
         }
-        Ok(ironclaw_product_adapters::DeliveryReport { parts })
+        Ok(ironclaw_product::DeliveryReport { parts })
     }
 }
 
@@ -798,22 +796,21 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
 /// (`ironclaw_reborn_cli::runtime::account_setups`) the same way
 /// [`TelegramFixtureFactory`] mirrors the native factory: the harness
 /// composes its own runtime and cannot depend on the CLI crate.
-fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAccountSetupDescriptor
-{
+fn telegram_account_setup_descriptor() -> ironclaw_product::ExtensionAccountSetupDescriptor {
     let extension_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
-    let connection_requirement = ironclaw_product_workflow::ChannelConnectionRequirement {
+    let connection_requirement = ironclaw_product::ChannelConnectionRequirement {
         channel: "telegram".to_string(),
         display_name: "Telegram".to_string(),
-        strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+        strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
         instructions: "Pair your Telegram account from the pairing panel.".to_string(),
         input_placeholder: String::new(),
         submit_label: "Open pairing".to_string(),
         error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
     };
-    let connection_notices = ironclaw_product_workflow::ChannelConnectionNoticePolicy::generic(
+    let connection_notices = ironclaw_product::ChannelConnectionNoticePolicy::generic(
         &connection_requirement.display_name,
     );
-    ironclaw_product_workflow::ExtensionAccountSetupDescriptor {
+    ironclaw_product::ExtensionAccountSetupDescriptor {
         extension_id: extension_id.clone(),
         auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
             provider: ironclaw_host_api::VendorId::new("telegram").expect("provider id"),

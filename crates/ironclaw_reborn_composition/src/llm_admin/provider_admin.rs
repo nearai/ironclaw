@@ -421,7 +421,7 @@ impl RebornProviderAdmin {
             }
         })?;
         let base_url = candidate_probe_base_url(definition);
-        let request = ironclaw_product_workflow::LlmProbeRequest {
+        let request = ironclaw_product::LlmProbeRequest {
             adapter: provider_protocol_wire_name(definition.protocol),
             base_url,
             provider_id: provider_id.to_string(),

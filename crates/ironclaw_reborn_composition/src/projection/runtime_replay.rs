@@ -6,9 +6,9 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::EventCursor;
 use ironclaw_host_api::InvocationId;
-use ironclaw_product_adapters::{ProductAdapterError, ProductOutboundPayload};
+use ironclaw_product::{ProductAdapterError, ProductOutboundPayload};
 
-use super::WEBUI_RUNTIME_ITEM_MAX_PAYLOADS;
+use super::PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS;
 
 pub(crate) enum RuntimePayloadCandidate {
     State { runs: Vec<RunStatusProjection> },
@@ -92,13 +92,13 @@ pub(crate) fn snapshot_payload_candidates(
     runtime_payload_candidates(
         snapshot.runs,
         snapshot.capability_activities,
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
+        PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS,
     )
 }
 
 pub(crate) fn replay_payload_candidates(replay: &ProjectionReplay) -> Vec<RuntimePayloadCandidate> {
     let state_payloads = usize::from(!replay.runs.is_empty());
-    let activity_payloads = WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(state_payloads);
+    let activity_payloads = PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(state_payloads);
     let mut candidates = Vec::with_capacity(replay_candidate_capacity(
         state_payloads,
         activity_payloads,

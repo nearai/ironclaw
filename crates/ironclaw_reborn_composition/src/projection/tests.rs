@@ -17,7 +17,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
     RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId, VendorId,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use ironclaw_product_workflow::AuthChallengeView;
+use ironclaw_product::AuthChallengeView;
 
 mod cursor_validation;
 mod display_preview;

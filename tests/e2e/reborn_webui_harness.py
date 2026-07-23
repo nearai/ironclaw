@@ -424,7 +424,7 @@ def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
 
 
 def client_action_id() -> str:
-    """Idempotency key accepted by ``webui_inbound::parse_client_action_id``."""
+    """Idempotency key accepted by ``product_surface_inbound::parse_client_action_id``."""
     return str(uuid.uuid4())
 
 

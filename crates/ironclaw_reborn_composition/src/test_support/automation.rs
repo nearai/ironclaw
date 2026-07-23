@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_product_workflow::AutomationProductFacade;
+use ironclaw_product::AutomationProductFacade;
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
 use ironclaw_turns::FilesystemTurnStateRowStore;
 
@@ -16,7 +16,7 @@ use crate::turn_run_snapshot::TurnRunSnapshotSource;
 /// Build the production `RebornAutomationProductFacade` over
 /// `trigger_repository` plus the harness's own turn-state store, for
 /// `RebornServices::with_automation_product_facade`
-/// (`ironclaw_product_workflow::RebornServices`) test wiring. The turn-state
+/// (`ironclaw_product::RebornServices`) test wiring. The turn-state
 /// store backs the active-hold projection from the same run state the harness
 /// coordinator writes, mirroring production's automation-backing pair (#5886).
 #[cfg(feature = "test-support")]

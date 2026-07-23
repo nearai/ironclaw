@@ -4,11 +4,13 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_host_api::{ExtensionId, InstallationState, InvocationId, ResourceScope};
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceScope,
+};
+use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    LifecyclePackageRef, LifecycleProductPayload,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -448,14 +450,14 @@ fn nearai_mcp_bootstrap_existing_credential_decision(
     NearAiMcpBootstrapExistingCredentialDecision::Submit { existing_account }
 }
 
-fn is_nearai_mcp_disabled_or_removed(error: &RebornServicesError) -> bool {
-    error.code == RebornServicesErrorCode::Forbidden
-        && error.kind == RebornServicesErrorKind::ParticipantDenied
+fn is_nearai_mcp_disabled_or_removed(error: &ProductSurfaceError) -> bool {
+    error.code == ProductSurfaceErrorCode::Forbidden
+        && error.kind == ProductSurfaceErrorKind::ParticipantDenied
 }
 
-fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &RebornServicesError) -> bool {
-    error.code == RebornServicesErrorCode::Unavailable
-        && error.kind == RebornServicesErrorKind::ServiceUnavailable
+fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &ProductSurfaceError) -> bool {
+    error.code == ProductSurfaceErrorCode::Unavailable
+        && error.kind == ProductSurfaceErrorKind::ServiceUnavailable
         && error.retryable
 }
 

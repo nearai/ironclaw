@@ -9,11 +9,11 @@
 //! never token bytes in adapter scope.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{NetworkMethod, RestrictedEgress, RestrictedEgressRequest, SecretHandle};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ChannelAdapter, ChannelContext, ChannelError, DeliveryReport,
     InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
 };
+use ironclaw_host_api::{NetworkMethod, RestrictedEgress, RestrictedEgressRequest, SecretHandle};
 
 use ironclaw_telegram_v2_adapter::{
     GroupTriggerPolicy, TELEGRAM_API_HOST, TelegramInboundEvent, normalize_telegram_update,
@@ -407,8 +407,8 @@ fn bot_api_request(method: &str, body: serde_json::Value) -> RestrictedEgressReq
 mod tests {
     use std::sync::Mutex;
 
+    use ironclaw_host_api::product_adapter::ProductTriggerReason;
     use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
-    use ironclaw_product_adapters::ProductTriggerReason;
 
     use super::*;
 
@@ -616,11 +616,11 @@ mod deliver_tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
-    use ironclaw_product_adapters::{
+    use ironclaw_host_api::product_adapter::{
         ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
         PartDeliveryOutcome,
     };
+    use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
 
     use super::*;
 

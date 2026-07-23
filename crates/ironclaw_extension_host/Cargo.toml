@@ -27,7 +27,7 @@ ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

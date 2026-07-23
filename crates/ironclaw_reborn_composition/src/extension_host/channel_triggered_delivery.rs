@@ -23,7 +23,7 @@ use ironclaw_outbound::{
     OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     PreferenceTargetCodec, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
     triggered_run_delivery_settings,
 };

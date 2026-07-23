@@ -16,7 +16,7 @@ use ironclaw_loop_host::{
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
+use ironclaw_product::ProductTriggerReason;
 use ironclaw_turns::{
     LoopMessageRef, TurnStatus,
     run_profile::{LoopRunContext, PromptMode},

@@ -17,7 +17,10 @@ layer = "kernel"
 [features]
 # In-memory turn-state store double (`test_support::in_memory_turn_state_store`)
 # for cross-crate tests. Enabled via dev-dependencies; never in production.
-test-support = []
+test-support = ["ironclaw_host_api/test-support"]
+# Enables trusted host-only helpers that mark product ingress authentication as
+# verified. Product terminals must not enable this directly.
+host-auth-mint = ["ironclaw_host_api/host-auth-mint"]
 
 [dependencies]
 async-trait = "0.1"

@@ -482,7 +482,7 @@ export function useChat(threadId) {
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.ts`
-  // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
+  // (`stageFiles`); we split them into the `ProductInboundAttachment` wire
   // shape for the send and the render shape for the optimistic bubble so
   // cards/thumbnails appear immediately, matching what the timeline
   // projection returns after the run.

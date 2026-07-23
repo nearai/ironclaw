@@ -1,30 +1,31 @@
 //! Shared axum mounting + request helpers for the real `webui_v2_router`
 //! over a real `RebornServices` facade (W5-WEBUI-API-1). Mirrors
 //! `webui_v2_router_smoke.rs::smoke_router`'s shape; auth bypassed by
-//! injecting `WebUiAuthenticatedCaller` directly instead of the bearer middleware.
+//! injecting `ProductSurfaceCaller` directly instead of the bearer middleware.
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
-use ironclaw_product_workflow::{ProductSurface, ResolvedBinding, WebUiAuthenticatedCaller};
+use ironclaw_host_api::{ProductSurface, ProductSurfaceCaller};
+use ironclaw_product::ResolvedBinding;
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;
 use tower::ServiceExt;
 
-/// Build the `WebUiAuthenticatedCaller` resolving to the SAME
+/// Build the `ProductSurfaceCaller` resolving to the SAME
 /// `TurnScope`/`ThreadScope` owner a harness turn ran under.
 /// `subject_user_id` is the execution-scope user; falls back to
 /// `actor_user_id` for legacy bindings without one.
-pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> WebUiAuthenticatedCaller {
+pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> ProductSurfaceCaller {
     let user_id = binding
         .subject_user_id
         .clone()
         .unwrap_or_else(|| binding.actor_user_id.clone());
-    WebUiAuthenticatedCaller::new(
+    ProductSurfaceCaller::new(
         binding.tenant_id.clone(),
         user_id,
         binding.agent_id.clone(),
@@ -38,7 +39,7 @@ pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> WebUiAuthenticatedC
 /// facade/router contract, not HTTP auth).
 pub(crate) fn mount_webui_v2_router(
     services: Arc<dyn ProductSurface>,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,

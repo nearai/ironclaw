@@ -8,8 +8,8 @@ pub(crate) use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
-use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
+use ironclaw_host_api::{ProductSurfaceError, ResourceScope, UserId};
+use ironclaw_product::ProductWorkflowError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtensionRemovalCleanupContext {
@@ -34,7 +34,7 @@ pub(crate) trait ExtensionRemovalCleanupAdapter: Send + Sync {
         &self,
         context: &ExtensionRemovalCleanupContext,
         binding: &ExtensionRemovalCleanupBinding,
-    ) -> Result<(), RebornServicesError>;
+    ) -> Result<(), ProductSurfaceError>;
 }
 
 pub(crate) struct ExtensionRemovalCleanupRegistry {
@@ -111,8 +111,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
-    use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
+    use ironclaw_host_api::{
+        AgentId, InvocationId, ProductSurfaceError, ProjectId, ResourceScope, TenantId, UserId,
+    };
+    use ironclaw_product::ProductWorkflowError;
 
     use super::*;
 
@@ -153,9 +155,9 @@ mod tests {
             &self,
             _context: &ExtensionRemovalCleanupContext,
             binding: &ExtensionRemovalCleanupBinding,
-        ) -> Result<(), RebornServicesError> {
+        ) -> Result<(), ProductSurfaceError> {
             if let Some(detail) = self.failure_detail {
-                return Err(RebornServicesError::internal_from(detail));
+                return Err(ProductSurfaceError::internal_from(detail));
             }
             let ExtensionRemovalCleanupBinding::ChannelConnection { channel } = binding;
             self.calls
