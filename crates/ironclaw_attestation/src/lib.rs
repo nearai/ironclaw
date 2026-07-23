@@ -10,15 +10,27 @@
 //! trusted signer/account — into the [`ApprovedTxHash`] from
 //! `ironclaw_signing_provider`.
 //!
-//! ## Purity invariant
+//! ## Layering invariant
 //!
-//! This crate depends ONLY on `ironclaw_signing_provider`, `serde`,
-//! `thiserror`, `sha2`, and `async-trait` (PR3 added the async store/ledger
-//! traits). It carries **no chain SDK** (no `solana-sdk`,
-//! `near-*`, `alloy`), **no secrets**, and **no webauthn** — those land in
-//! PR4/PR6. The architecture boundary test
+//! This crate depends on `ironclaw_signing_provider`, `serde`/`serde_json`,
+//! `thiserror`, `sha2`, `async-trait`, and — as of PR4 — the pure-Rust,
+//! openssl-free WebAuthn crypto trio (`coset` for COSE_Key CBOR, `p256` for
+//! ES256, `ed25519-dalek` for EdDSA; NOT `webauthn-rs-core`, which would link
+//! `openssl`). It still carries **no chain SDK** (no `solana-sdk`,
+//! `near-*`, `alloy`), **no EVM crypto primitives** (`k256`/`sha3`), and **no
+//! key custody** (`ironclaw_secrets` / `ironclaw_chain_signing`) — the custody
+//! keys and per-chain decode/sign/broadcast land in PR6. The architecture
+//! boundary test
 //! (`crates/ironclaw_architecture/tests/attested_signing_boundaries.rs`)
 //! enforces this.
+//!
+//! ## PR4 additions
+//!
+//! - [`challenge`]: the durable one-shot [`ChallengeStore`] + the
+//!   [`ChallengePreimage`] that binds a challenge to the exact operation.
+//! - [`webauthn`]: the [`WebAuthnCredentialRegistry`] and
+//!   [`verify_assertion`] full RP-validation verifier (UV-required,
+//!   challenge-echo, rpIdHash, origin, signCount-regression, BE/BS).
 //!
 //! ## Anti-field-smuggling guarantee
 //!
@@ -34,10 +46,12 @@
 
 mod approved_tx_hash;
 mod canonical;
+mod challenge;
 mod decoded_tx;
 mod error;
 mod fields;
 mod rendered;
+mod webauthn;
 
 mod wire;
 
@@ -58,6 +72,10 @@ pub mod ledger;
 
 pub use approved_tx_hash::approved_tx_hash_for;
 pub use canonical::canonical_signing_bytes;
+pub use challenge::{
+    ChallengeCommitment, ChallengeError, ChallengeId, ChallengePreimage, ChallengeStore,
+    ConsumedChallenge, CredentialId, DeliveryAttemptId, InMemoryChallengeStore, IssuedChallenge,
+};
 pub use decoded_tx::{
     Bytes32, DecodedTransaction, EvmAccessListEntry, EvmAddress, EvmTransaction, NearAccessKey,
     NearAccessKeyPermission, NearAction, NearPublicKey, NearTransaction, RenderingSchemaVersion,
@@ -73,6 +91,13 @@ pub use ledger::{
     InMemorySigningLedger, LedgerError, LedgerKey, SigningLedger, SigningLedgerState,
 };
 pub use rendered::{RenderedField, RenderedTx, render};
+pub use webauthn::{
+    Aaguid, AssertionInput, AttestationPolicy, BackupFlagPolicy, BootstrapPolicy, CoseError,
+    CosePublicKey, InMemoryWebAuthnCredentialRegistry, OriginContext, OriginPolicy,
+    RegisteredCredential, RegistrationError, RegistrationRequest, SignCountPolicy,
+    StandardOriginPolicy, VerificationError, VerifiedAssertion, WebAuthnCredentialRegistry,
+    verify_assertion,
+};
 
 /// Test-only re-export of the low-level component hasher.
 ///
