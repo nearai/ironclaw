@@ -403,7 +403,7 @@ pub struct RebornServices {
     /// binding store + assembled driver, dispatched by the gate/resolve ingress
     /// (PR11) once a turn reaches `AttestedResolved`. `None` for production until
     /// the durable backends (PR12) are wired.
-    pub(crate) attested_signing: Option<Arc<crate::attested::RebornAttestedComposition>>,
+    pub(crate) attested_signing: Option<Arc<crate::attested::LocalDevAttestedComposition>>,
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
@@ -2824,7 +2824,7 @@ where
 /// turn store, so a raised gate's binding is visible to the continuation driver.
 fn build_attested_composition(
     bindings: Arc<InMemoryAttestedGateBindingStore>,
-) -> crate::attested::RebornAttestedComposition {
+) -> crate::attested::LocalDevAttestedComposition {
     use ironclaw_attestation::InMemorySealedGrantStore;
     use ironclaw_attested_runtime::{CustodialMainnetShipGate, ProviderRegistry};
     use ironclaw_chain_signing::SecretsKeyStore;
@@ -2833,12 +2833,12 @@ fn build_attested_composition(
     let keystore = Arc::new(SecretsKeyStore::new(SecretsCrypto::generate()));
     let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
     let grants = Arc::new(InMemorySealedGrantStore::new());
-    crate::attested::RebornAttestedComposition::new(
+    crate::attested::LocalDevAttestedComposition::new_in_memory(
         bindings,
         keystore,
         ship_gate,
         grants,
-        |_grants| ProviderRegistry::new(),
+        ProviderRegistry::new(),
     )
 }
 
@@ -2954,7 +2954,8 @@ async fn build_local_runtime_store_graph(
     let attested_gate_bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let attested_resume_port: Arc<dyn AttestedResumePort> = Arc::new(
         RuntimeAttestedResumePort::new(
-            Arc::clone(&attested_gate_bindings),
+            Arc::clone(&attested_gate_bindings)
+                as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
             Arc::new(InMemoryResumeGuard::new()),
         ),
     );

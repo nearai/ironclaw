@@ -16,10 +16,25 @@ repository = "https://github.com/nearai/ironclaw"
 [package.metadata.dist]
 dist = false
 
+[features]
+default = []
+# Live JSON-RPC broadcasters (EVM eth_sendRawTransaction, Solana sendTransaction,
+# NEAR broadcast_tx_async) over an injected HTTP endpoint. Off by default so the
+# pure decode/render/sign core carries no HTTP/TLS stack; the composition layer
+# opts in. reqwest is rustls-only (no default-tls) to keep the substrate
+# openssl-free.
+broadcast-http = ["dep:reqwest", "dep:serde_json", "dep:base64", "dep:bs58"]
+
 [dependencies]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+# Live broadcaster HTTP/JSON-RPC stack (feature-gated, rustls-only).
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls-native-roots"] }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+bs58 = { version = "0.5", optional = true }
 
 # Attested-signing substrate (lower PRs in the stack).
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }

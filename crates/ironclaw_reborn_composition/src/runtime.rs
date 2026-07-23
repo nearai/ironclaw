@@ -1220,7 +1220,7 @@ impl RebornRuntime {
     /// the assembled driver and the authoritative binding store through this.
     pub fn attested_signing(
         &self,
-    ) -> Option<&Arc<crate::attested::RebornAttestedComposition>> {
+    ) -> Option<&Arc<crate::attested::LocalDevAttestedComposition>> {
         self.services.attested_signing.as_ref()
     }
 

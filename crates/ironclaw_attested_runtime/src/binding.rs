@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use ironclaw_attestation::{DecodedTransaction, RenderingSchemaVersion};
 use ironclaw_chain_signing::{ChainKeyId, recompute_approved_hash};
@@ -68,9 +69,24 @@ impl std::fmt::Display for BindingError {
 
 impl std::error::Error for BindingError {}
 
+/// Synchronous binding read.
+///
+/// The reborn resume port runs inside the turn store's *synchronous* critical
+/// section and therefore cannot `.await`. Every [`AttestedGateBindingStore`]
+/// usable from the resume path must also expose this sync read. The in-memory
+/// store reads its map directly; durable stores serve it from a write-through
+/// cache hydrated at startup and updated on every [`AttestedGateBindingStore::put`].
+pub trait SyncBindingRead: Send + Sync {
+    /// Read the authoritative binding for `gate_ref` without awaiting.
+    fn get_sync(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding>;
+}
+
 /// Everything the resume path needs to verify and continue an attested-signing
 /// gate, persisted authoritatively when the gate is raised.
-#[derive(Debug, Clone)]
+///
+/// Serde-serializable so durable backends can persist it as a single JSON
+/// column (every component type is already `Serialize`/`Deserialize`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestedGateBinding {
     /// Which provider drove the ceremony (selects the verifier on resume).
     pub provider_id: ProviderId,
@@ -142,7 +158,7 @@ pub fn validate_binding(key: &GateRef, binding: &AttestedGateBinding) -> Result<
 /// are INSERT-ONLY (CAS) and fully validated ([`validate_binding`]); durable
 /// backends (PR12) carry identical semantics.
 #[async_trait]
-pub trait AttestedGateBindingStore: Send + Sync {
+pub trait AttestedGateBindingStore: SyncBindingRead {
     /// Persist the authoritative binding for a freshly-raised attested gate.
     ///
     /// INSERT-ONLY: errors [`BindingError::AlreadyExists`] if a binding already
@@ -169,11 +185,13 @@ impl InMemoryAttestedGateBindingStore {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
+impl SyncBindingRead for InMemoryAttestedGateBindingStore {
     /// Synchronous read used by the resume port, which runs inside the turn
     /// store's sync critical section and therefore cannot `.await`. The async
     /// trait method is for the driver / ingress paths.
-    pub fn get_sync(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
+    fn get_sync(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
         self.bindings
             .lock()
             .ok()
