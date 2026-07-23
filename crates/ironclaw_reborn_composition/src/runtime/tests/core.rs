@@ -3629,6 +3629,43 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         .await
         .expect("activate Notion MCP with scripted discovery");
 
+    // #6520 caller-phase surface: notion tools are model-visible only when the
+    // caller's notion credential account resolves. Seed a Configured account
+    // whose secret handle has no stored material — the surface becomes
+    // visible while dispatch-time injection still raises the auth gate this
+    // test drives.
+    {
+        use ironclaw_auth::{
+            AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+            CredentialAccountStatus, CredentialOwnership, NewCredentialAccount,
+        };
+        let mut scope = runtime.thread_scope.to_resource_scope();
+        scope.user_id = runtime.actor_user_id.clone();
+        scope.mission_id = None;
+        scope.thread_id = None;
+        scope.invocation_id = InvocationId::new();
+        runtime
+            .product_auth
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::credential_owner(&scope, AuthSurface::Api),
+                provider: AuthProviderId::new("notion").expect("provider"),
+                label: CredentialAccountLabel::new("notion").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("notion-test-token".to_string())
+                        .expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .expect("create configured notion account without secret material");
+    }
+
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
         .enable_global_auto_approve_for_test(&conversation)

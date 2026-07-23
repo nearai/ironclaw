@@ -1117,7 +1117,9 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let (status, body) = post_json(
         mount_webui_v2_router(Arc::clone(&webui.api), caller_for(bob_id)),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({
+            "client_action_id": "webui-api2-membership-bob-final-remove"
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "bob final remove response: {body}");

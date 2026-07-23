@@ -631,6 +631,7 @@ mod tests {
         let run_context = run_context(label).await;
         install_gsuite_extensions(
             &services,
+            &run_context,
             &UserId::new(user).expect("surface user id"),
             extension_state,
         )
@@ -665,11 +666,128 @@ mod tests {
         }
     }
 
+    /// Seed a Configured credential account + its access secret for one
+    /// vendor in the caller's scope — the #6520 caller-phase surface shows an
+    /// extension's tools only when the caller's readiness is Active, which
+    /// requires the manifest-declared credentials to resolve.
+    async fn seed_configured_account_and_secret_with_scopes(
+        services: &crate::factory::RebornRuntimeStores,
+        scope: &ironclaw_host_api::ResourceScope,
+        provider: &str,
+        scopes: &[&str],
+    ) {
+        use ironclaw_auth::{
+            AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+            CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+        };
+        services
+            .product_auth
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),
+                provider: AuthProviderId::new(provider).expect("provider"),
+                label: CredentialAccountLabel::new(provider).expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                        .expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new((*scope).to_string()).expect("valid scope"))
+                    .collect(),
+            })
+            .await
+            .expect("create configured account");
+        let owner_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        services
+            .secret_store()
+            .put(
+                owner_scope.resource,
+                ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                    .expect("secret handle"),
+                ironclaw_secrets::SecretMaterial::from(format!("{provider}-access-token")),
+                None,
+            )
+            .await
+            .expect("seed access token");
+    }
+
+    async fn seed_configured_account_and_secret(
+        services: &crate::factory::RebornRuntimeStores,
+        scope: &ironclaw_host_api::ResourceScope,
+        provider: &str,
+    ) {
+        seed_configured_account_and_secret_with_scopes(services, scope, provider, &[]).await;
+    }
+
+    /// Account WITHOUT secret material: satisfies caller-phase readiness (the
+    /// tool surfaces) while dispatch-time injection still raises the OAuth
+    /// gate for the missing secret.
+    async fn seed_configured_account_without_secret_with_scopes(
+        services: &crate::factory::RebornRuntimeStores,
+        scope: &ironclaw_host_api::ResourceScope,
+        provider: &str,
+        scopes: &[&str],
+    ) {
+        use ironclaw_auth::{
+            AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+            CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+        };
+        services
+            .product_auth
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),
+                provider: AuthProviderId::new(provider).expect("provider"),
+                label: CredentialAccountLabel::new(provider).expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                        .expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new((*scope).to_string()).expect("valid scope"))
+                    .collect(),
+            })
+            .await
+            .expect("create configured account");
+    }
+
     async fn install_gsuite_extensions(
         services: &crate::factory::RebornRuntimeStores,
+        run_context: &LoopRunContext,
         surface_user: &UserId,
         extension_state: GsuiteExtensionState,
     ) {
+        // Caller-phase readiness (#6520): the surface shows an extension's
+        // tools only when the caller's google account resolves, so Activated
+        // seeds a Configured account under the run scope. Material is
+        // deliberately withheld — surface visibility keys on the account,
+        // dispatch-time injection keys on the secret, letting the gmail
+        // auth-gate test drive an OAuth gate on a visible tool.
+        if matches!(extension_state, GsuiteExtensionState::Activated) {
+            let seed_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
+                run_context,
+                surface_user,
+            );
+            seed_configured_account_without_secret_with_scopes(
+                services,
+                &seed_scope,
+                "google",
+                ironclaw_first_party_extensions::GSUITE_PROVIDER_SCOPES,
+            )
+            .await;
+        }
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
@@ -3749,8 +3867,8 @@ mod tests {
             .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
             .expect("set tool definition should exist");
         assert!(
-            set_tool.description.contains("DEFAULT"),
-            "set tool description should frame the preference as the user-wide default"
+            set_tool.description.contains("FALLBACK"),
+            "set tool description should frame the preference as the source-route fallback"
         );
         assert!(
             set_tool
@@ -5173,6 +5291,11 @@ mod tests {
         .await
         .expect("local-dev services rebuild");
         let run_context = run_context("github-surface").await;
+        let restore_seed_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
+            &run_context,
+            &UserId::new("local-dev-github-user").expect("user id"),
+        );
+        seed_configured_account_and_secret(&services, &restore_seed_scope, "github").await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
@@ -5245,6 +5368,11 @@ mod tests {
         // AS the surface user whose capability port is asserted; there is no
         // separate Activate action — prechecked activation publishes directly.
         let surface_user = UserId::new("local-dev-live-github-user").expect("user id");
+        let seed_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
+            &run_context,
+            &surface_user,
+        );
+        seed_configured_account_and_secret(&services, &seed_scope, "github").await;
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         extension_management
@@ -5405,6 +5533,11 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context("mid-response").await;
+        let mid_response_seed_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
+            &run_context,
+            &UserId::new("local-dev-mid-response-user").expect("user id"),
+        );
+        seed_configured_account_and_secret(&services, &mid_response_seed_scope, "github").await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),

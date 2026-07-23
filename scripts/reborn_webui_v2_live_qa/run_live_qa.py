@@ -977,7 +977,10 @@ async def _apply_extension_setup_api_after_start(
             install_response = await client.post(
                 f"{extensions_url}/install",
                 headers=headers,
-                json={"package_ref": {"kind": "extension", "id": package_id}},
+                json={
+                    "package_ref": {"kind": "extension", "id": package_id},
+                    "client_action_id": f"live-qa-{uuid.uuid4()}",
+                },
             )
             install_body = _require_extension_setup_response(install_response, "install")
             if install_body.get("success") is not True:
@@ -992,6 +995,7 @@ async def _apply_extension_setup_api_after_start(
             json={
                 "action": "submit",
                 "payload": {"secrets": secrets, "fields": fields},
+                "client_action_id": f"live-qa-{uuid.uuid4()}",
             },
         )
         status = _require_extension_setup_response(response, "submit")
@@ -2789,7 +2793,10 @@ async def _ensure_extension_installed_on_page(
         page,
         "POST",
         "/api/webchat/v2/extensions/install",
-        {"package_ref": {"kind": "extension", "id": package_id}},
+        {
+            "package_ref": {"kind": "extension", "id": package_id},
+            "client_action_id": f"live-qa-{uuid.uuid4()}",
+        },
     )
     if install_body.get("success") is not True:
         raise AssertionError(
@@ -4245,7 +4252,10 @@ async def _ensure_extension_authenticated_on_page(
             page,
             "POST",
             "/api/webchat/v2/extensions/install",
-            {"package_ref": {"kind": "extension", "id": package_id}},
+            {
+                "package_ref": {"kind": "extension", "id": package_id},
+                "client_action_id": f"live-qa-{uuid.uuid4()}",
+            },
         )
         observed[f"{prefix}_install_message"] = install_body.get("message")
         observed[f"{prefix}_install_onboarding_state"] = install_body.get("onboarding_state")

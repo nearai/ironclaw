@@ -2178,8 +2178,10 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
+    // #6520 three-state lifecycle: the facade projects setup_needed for an
+    // extension awaiting configuration (the "unsupported" literal is retired).
     assert!(
-        body.contains("\"phase\":\"unsupported\""),
+        body.contains("\"phase\":\"setup_needed\""),
         "setup_extension must surface lifecycle phase, got: {body}",
     );
     assert!(

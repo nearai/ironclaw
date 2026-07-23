@@ -61,7 +61,9 @@ fn extension_search_json_finds_binary_bundled_first_party_package() {
         .filter_map(|extension| extension["package_ref"]["id"].as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(json["phase"], "installed");
+    // Search envelopes keep the neutral public phase (#6520 three-state
+    // lifecycle retired the "installed" wire literal).
+    assert_eq!(json["phase"], "setup_needed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert!(
         ids.contains(&"github"),

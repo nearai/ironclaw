@@ -806,11 +806,17 @@ async fn qa_installing_bundled_extensions_exposes_complete_model_surface_e2e() {
         .expect("final reply");
 
     let invocations = harness.capability_invocations();
+    // Count distinct install gestures (activity ids), not raw dispatches:
+    // hosted-MCP packages (nearai, notion) may re-dispatch the same install
+    // invocation during bounded discovery retries, and the capability layer
+    // dedupes them by activity id (#6520 gesture idempotency).
     assert_eq!(
         invocations
             .iter()
             .filter(|invocation| invocation.capability_id == install)
-            .count(),
+            .map(|invocation| invocation.activity_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         BUNDLED_EXTENSION_IDS.len(),
         "each bundled extension should be installed through the lifecycle tool"
     );

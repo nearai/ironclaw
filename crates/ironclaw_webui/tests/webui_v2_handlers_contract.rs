@@ -5124,6 +5124,11 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     let body = read_json(response).await;
     assert_eq!(body["success"], true);
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    // The membership read-back must see the newly installed package, so prime
+    // the stub view for the second install target.
+    services.set_extensions_view(RebornExtensionListResponse {
+        extensions: vec![extension_info("nearai-mcp", false)],
+    });
     let retry_response = router
         .oneshot(
             Request::builder()
@@ -5150,8 +5155,9 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
         serde_json::json!({ "extension_id": "google-calendar" })
     );
     let queries = services.view_queries.lock().expect("lock").clone();
-    assert_eq!(queries.len(), 1);
+    assert_eq!(queries.len(), 2);
     assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+    assert_eq!(queries[1].view_id, EXTENSIONS_VIEW.id);
 }
 
 #[tokio::test]
@@ -5170,7 +5176,7 @@ async fn install_extension_accepts_auth_gate_only_after_setup_needed_read_back()
                 .uri("/api/webchat/v2/extensions/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"}}"#,
+                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"},"client_action_id":"install-auth-gate"}"#,
                 ))
                 .expect("request"),
         )
@@ -5199,7 +5205,7 @@ async fn install_extension_rejects_capability_success_without_exact_membership_r
                 .uri("/api/webchat/v2/extensions/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"package_ref":{"kind":"extension","id":"github"}}"#,
+                    r#"{"package_ref":{"kind":"extension","id":"github"},"client_action_id":"install-github"}"#,
                 ))
                 .expect("request"),
         )
@@ -5551,7 +5557,10 @@ async fn setup_extension_invokes_product_surface_capability() {
     let retry_body = read_json(retry_response).await;
     assert_eq!(retry_body["package_ref"]["id"], "telegram");
     assert_eq!(retry_body["package_ref"]["kind"], "extension");
-    assert_eq!(retry_body["phase"], "unsupported");
+    // The stub setup view reports SetupNeeded on every read; the retry echoes
+    // the same read-back phase (main's stub used InstallationState::Unsupported,
+    // retired by the #6520 lifecycle model).
+    assert_eq!(retry_body["phase"], "setup_needed");
 
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
     assert_eq!(invoke_calls.len(), 2);

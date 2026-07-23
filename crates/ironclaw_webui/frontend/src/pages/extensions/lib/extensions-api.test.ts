@@ -48,7 +48,6 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
     },
     encodeURIComponent,
     globalThis: {},
-    redeemPairingCode: () => {},
     clientActionId: () => "client-action-test",
     setupExtension: () => {},
   };
@@ -113,7 +112,6 @@ test("extension lifecycle mutations include a client action id", async () => {
     },
     encodeURIComponent,
     globalThis: {},
-    redeemPairingCode: () => {},
     clientActionId: () => "client-action-test",
     setupExtension: async (extensionName, options) => {
       setupCalls.push({ extensionName, options });

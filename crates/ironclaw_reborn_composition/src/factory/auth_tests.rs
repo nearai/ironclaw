@@ -721,22 +721,49 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     .await
     .expect("local-dev services build");
     let product_auth = &services.product_auth;
-    let auth_scope = auth_scope_for_turn(
-        &turn_scope(),
-        &TurnActor::new(UserId::new("alice").unwrap()),
-    );
+    // #6520: a lifecycle-activation continuation reconciles a real installed
+    // extension, so install GitHub for the caller before completing its OAuth
+    // flow (an unknown package would fail the continuation dispatch).
+    let extension_management = services
+        .local_runtime_for_test()
+        .expect("local runtime")
+        .extension_management
+        .clone();
+    let user_id = UserId::new("alice").expect("user id");
+    let product_package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
+        ironclaw_product_workflow::LifecyclePackageKind::Extension,
+        "github",
+    )
+    .expect("product package ref");
+    extension_management
+        .install(product_package_ref.clone(), &user_id)
+        .await
+        .expect("install GitHub before its OAuth continuation");
+    let auth_scope = auth_scope_for_turn(&turn_scope(), &TurnActor::new(user_id.clone()));
     let continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
+        package_ref: LifecyclePackageRef::new("github").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 
     let response = product_auth
-        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
         .await
-        .expect("lifecycle continuation is deferred");
+        .expect("lifecycle continuation activates the installed extension");
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        auth_scope.resource,
+        product_auth.runtime_credential_account_selection_service(),
+    );
+    let projection = extension_management
+        .project(product_package_ref, &user_id, Some(&credential_gate))
+        .await
+        .expect("project GitHub after OAuth continuation");
+    assert_eq!(
+        projection.phase,
+        ironclaw_product_workflow::LifecyclePublicState::Active
+    );
 }
 
 #[tokio::test]

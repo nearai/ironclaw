@@ -86,7 +86,8 @@ async fn users_install_and_remove_the_same_extension_independently() {
             fixture.member_router(caller),
             "/api/webchat/v2/extensions/install",
             serde_json::json!({
-                "package_ref": {"kind": "extension", "id": EXTENSION_ID}
+                "package_ref": {"kind": "extension", "id": EXTENSION_ID},
+                "client_action_id": format!("isolation-install-{name}")
             }),
         )
         .await;
@@ -101,7 +102,7 @@ async fn users_install_and_remove_the_same_extension_independently() {
     let (status, body) = post_json(
         fixture.member_router(fixture.alice()),
         &format!("/api/webchat/v2/extensions/{EXTENSION_ID}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({"client_action_id": "isolation-remove-alice"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "Alice remove response: {body}");
@@ -111,7 +112,7 @@ async fn users_install_and_remove_the_same_extension_independently() {
     let (status, body) = post_json(
         fixture.member_router(fixture.bob()),
         &format!("/api/webchat/v2/extensions/{EXTENSION_ID}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({"client_action_id": "isolation-remove-bob"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "Bob remove response: {body}");
@@ -139,7 +140,8 @@ async fn legacy_tenant_owned_installation_migrates_to_operator_private_state() {
         fixture.member_router(fixture.alice()),
         "/api/webchat/v2/extensions/install",
         serde_json::json!({
-            "package_ref": {"kind": "extension", "id": EXTENSION_ID}
+            "package_ref": {"kind": "extension", "id": EXTENSION_ID},
+            "client_action_id": "isolation-legacy-seed-install"
         }),
     )
     .await;
@@ -211,7 +213,7 @@ async fn legacy_tenant_owned_installation_migrates_to_operator_private_state() {
     let (status, body) = post_json(
         rebuilt.member_router(rebuilt.operator()),
         &format!("/api/webchat/v2/extensions/{EXTENSION_ID}/remove"),
-        serde_json::json!({}),
+        serde_json::json!({"client_action_id": "isolation-remove-operator"}),
     )
     .await;
     assert_eq!(

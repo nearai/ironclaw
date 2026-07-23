@@ -111,7 +111,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
     PostEditCheckConfig, ProductAuthProviderRuntimePorts, TriggerCreateHook,
-    builtin_first_party_package,
+    builtin_first_party_package, register_outbound_delivery_first_party_handler,
 };
 use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
@@ -126,7 +126,7 @@ use ironclaw_product_workflow::{
     ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
     CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry, FilesystemChannelPairingStore,
     LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ProductAuthTurnGateResumeDispatcher, ProjectService, RunFinalReplyRoutingService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::FilesystemBudgetGateStore;
@@ -1940,6 +1940,50 @@ pub(crate) struct OutboundStores {
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
+/// The host-owned outbound target registry always exposes the WebApp
+/// final-reply destination (#6520 run-scoped delivery): channel extensions add
+/// their targets at activation, but "store the answer in run history" is a
+/// host affordance that must exist even with zero channels active.
+fn host_owned_outbound_delivery_target_registry()
+-> Result<Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>, RebornBuildError> {
+    let registry = Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
+    let web_app = ironclaw_outbound::OutboundDeliveryTargetSummary::new(
+        ironclaw_outbound::OutboundDeliveryTargetId::new(
+            ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+        )
+        .map_err(|reason| RebornBuildError::InvalidConfig {
+            reason: format!("host-owned WebApp target id is invalid: {reason}"),
+        })?,
+        "web_app",
+        "Web app only",
+        Some("Store the final answer in run history without external delivery.".to_string()),
+    )
+    .map_err(|reason| RebornBuildError::InvalidConfig {
+        reason: format!("host-owned WebApp delivery target is invalid: {reason}"),
+    })?;
+    registry
+        .register_provider(
+            ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+            Arc::new(
+                ironclaw_outbound::HostOwnedOutboundDeliveryTargetProvider::new(
+                    web_app,
+                    ironclaw_outbound::DeliveryTargetCapabilities {
+                        final_replies: true,
+                        progress: false,
+                        gate_prompts: false,
+                        auth_prompts: false,
+                        modalities: Vec::new(),
+                    },
+                    ironclaw_outbound::RunFinalReplyDestination::WebApp,
+                ),
+            ),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("host-owned WebApp delivery target registration failed: {error}"),
+        })?;
+    Ok(registry)
+}
+
 fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> OutboundStores {
     // One store instance over the composition-owned per-user scoped filesystem
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
@@ -3655,8 +3699,7 @@ async fn build_backend_production(
         approval_settings_provider,
     );
     let outbound_stores = local_dev_outbound_store(Arc::clone(&stores.filesystem));
-    let outbound_delivery_targets =
-        Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
+    let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
     let current_delivery_targets = Arc::new(
         crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver::new(
             Arc::clone(&outbound_delivery_targets),
@@ -3767,6 +3810,20 @@ async fn build_backend_production(
         trigger_active_run_lookup,
         process_backend,
     )?;
+    // Replace the registry's fail-closed `UnavailableRunFinalReplyRouter`
+    // default with the product-owned routing service so the model-facing
+    // `builtin.outbound_delivery_target_route_current` capability can route
+    // this run's final reply (#6520 run-scoped delivery).
+    register_outbound_delivery_first_party_handler(
+        &mut first_party_registry,
+        Arc::new(RunFinalReplyRoutingService::new(
+            Arc::clone(&current_delivery_targets) as Arc<dyn CurrentDeliveryTargetResolver>,
+            Arc::clone(&outbound_stores.outbound_state),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("outbound delivery first-party handler is invalid: {error}"),
+    })?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(

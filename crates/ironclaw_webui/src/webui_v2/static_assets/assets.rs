@@ -332,8 +332,15 @@ mod tests {
         assert!(!channels_tab.to_ascii_lowercase().contains("slack"));
 
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
+        // Lane F split the expression into `const connection =
+        // channelConnection(extension)` + `isWebGeneratedCodeConnection(connection)`;
+        // the contract is unchanged: strategy derives from the manifest surface.
         assert!(
-            configure_modal.contains("isWebGeneratedCodeConnection(channelConnection(extension))"),
+            configure_modal.contains("channelConnection(extension)"),
+            "WebGeneratedCode routing derives directly from the manifest surface"
+        );
+        assert!(
+            configure_modal.contains("isWebGeneratedCodeConnection(connection)"),
             "WebGeneratedCode routing derives directly from the manifest surface"
         );
         assert!(!configure_modal.contains("getExtensionPairingStatus"));
@@ -406,11 +413,20 @@ mod tests {
 
         // chat.ts renders the pairing card off a pairing gate carrying a
         // connection, on the same auth-gate switch as the token / oauth cards.
+        // Lane F (eebd239be) centralized the pairing-gate predicate in
+        // gates.ts::channelConnectionFromGate so the composer affordance and
+        // the card selector cannot disagree; the chat surface consumes the
+        // derived `channelConnectionGate` instead of re-reading raw gate
+        // fields.
         let chat = source_text("pages/chat/chat.tsx");
         assert!(chat.contains("OnboardingPairingCard"));
-        assert!(chat.contains("pendingGate.connection"));
-        assert!(chat.contains("pendingGate.challengeKind === \"pairing\""));
+        assert!(chat.contains("channelConnectionFromGate(pendingGate)"));
+        assert!(chat.contains("channelConnectionGate"));
         assert!(!chat.contains("submitChannelConnectionPairing"));
+        assert!(
+            gates.contains("channelConnectionFromGate"),
+            "the shared predicate owns pairing-gate recognition"
+        );
 
         for deleted in [
             "pages/extensions/lib/pairing-api.ts",

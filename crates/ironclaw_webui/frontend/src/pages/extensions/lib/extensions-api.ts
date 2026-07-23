@@ -4,7 +4,6 @@
 //   projection and maps those operations to the extension registry.
 
 import { apiFetch, clientActionId, setupExtension } from "../../../lib/api";
-import { redeemPairingCode } from "./pairing-api";
 
 const OAUTH_START_TTL_MS = 5 * 60 * 1000;
 type ExtensionMutationOptions = { clientActionId?: string };
