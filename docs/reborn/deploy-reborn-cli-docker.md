@@ -44,6 +44,20 @@ The bundled Docker config selects NearAI in `[llm.default]`; set
 `NEARAI_API_KEY` for that provider. To change provider or model, mount a custom
 config and point `IRONCLAW_REBORN_DEFAULT_CONFIG` at it for the first start.
 
+## Managed Container Deployments
+
+For a container host that restarts the container when its main process exits,
+set this variable in the deployment configuration (not the shared image):
+
+```bash
+IRONCLAW_CONTAINER_SUPERVISE=true
+```
+
+This enables `ironclaw service status` and `ironclaw service restart` inside
+the container. `restart` terminates `ironclaw serve`; the external restart
+policy must recreate the container. Do not set it for an ad-hoc
+`docker run --rm` session; manage that container from Docker instead.
+
 Google product-auth setup:
 
 ```bash
@@ -87,6 +101,7 @@ Minimum Railway variables for the hosted single-tenant Postgres profile:
 
 ```bash
 IRONCLAW_REBORN_PROFILE=hosted-single-tenant
+IRONCLAW_CONTAINER_SUPERVISE=true
 IRONCLAW_REBORN_POSTGRES_URL=<postgres-url>
 IRONCLAW_REBORN_SECRET_MASTER_KEY=<random-secret-master-key>
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
@@ -98,6 +113,7 @@ Minimum Railway variables for the hosted single-tenant volume profile:
 
 ```bash
 IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume
+IRONCLAW_CONTAINER_SUPERVISE=true
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
 NEARAI_API_KEY=<nearai-api-key>
