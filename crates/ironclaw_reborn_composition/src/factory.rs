@@ -1619,7 +1619,7 @@ pub async fn build_reborn_services(
     tracing::debug!(
         profile = %input.profile(),
         owner_id = %input.owner_id,
-        "building Reborn composition facades"
+        "building IronClaw composition facades"
     );
     // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
     // match: the config says which substrate to assemble and this dispatches
@@ -4693,7 +4693,7 @@ async fn build_production_shaped(
         RebornStorageInput::Disabled | RebornStorageInput::LocalDev { .. } => {
             Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "profile={} requires durable database-backed Reborn storage",
+                    "profile={} requires durable database-backed IronClaw storage",
                     profile
                 ),
             })
@@ -4701,7 +4701,7 @@ async fn build_production_shaped(
         RebornStorageInput::HostedSingleTenantPostgres { .. } => {
             Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "profile={} requires production-shaped Reborn storage, not hosted single-tenant Postgres storage",
+                    "profile={} requires production-shaped IronClaw storage, not hosted single-tenant Postgres storage",
                     profile
                 ),
             })

@@ -18,7 +18,7 @@ pub enum RebornExtensionLifecycleCommand {
 
 #[derive(Debug, Error)]
 pub enum RebornExtensionLifecycleCommandError {
-    #[error("extension lifecycle is available only for local-dev Reborn services")]
+    #[error("extension lifecycle is available only for local-dev IronClaw services")]
     LocalRuntimeUnavailable,
     #[error("extension lifecycle failed: {0}")]
     Product(#[from] ProductWorkflowError),
@@ -54,10 +54,7 @@ pub fn render_reborn_extension_lifecycle_response(
     response: &LifecycleProductResponse,
 ) -> String {
     let mut output = String::new();
-    push_line(
-        &mut output,
-        format_args!("IronClaw Reborn extension {label}"),
-    );
+    push_line(&mut output, format_args!("IronClaw extension {label}"));
     push_line(
         &mut output,
         format_args!("phase: {}", response.phase.as_str()),

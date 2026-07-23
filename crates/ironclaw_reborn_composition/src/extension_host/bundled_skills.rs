@@ -110,7 +110,7 @@ pub(crate) fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, Rebo
 fn embedded_reborn_skill_summaries() -> Result<Vec<EmbeddedRebornSkillSummary>, RebornBuildError> {
     serde_json::from_str(EMBEDDED_REBORN_SKILL_SUMMARIES_JSON).map_err(|error| {
         invalid_config(format!(
-            "failed to parse embedded Reborn skill summaries: {error}"
+            "failed to parse embedded IronClaw skill summaries: {error}"
         ))
     })
 }
@@ -118,7 +118,7 @@ fn embedded_reborn_skill_summaries() -> Result<Vec<EmbeddedRebornSkillSummary>, 
 fn embedded_reborn_skill_bundles() -> Result<Vec<EmbeddedRebornSkillBundle>, RebornBuildError> {
     serde_json::from_str(EMBEDDED_REBORN_SKILL_BUNDLES_JSON).map_err(|error| {
         invalid_config(format!(
-            "failed to parse embedded Reborn skill bundles: {error}"
+            "failed to parse embedded IronClaw skill bundles: {error}"
         ))
     })
 }
@@ -256,7 +256,7 @@ async fn install_bundled_skill(
             tracing::warn!(
                 skill_name = %skill.name,
                 path = %skill_dir,
-                "skipping bundled Reborn skill because an unmanaged system skill already exists"
+                "skipping bundled IronClaw skill because an unmanaged system skill already exists"
             );
             return Ok(());
         };

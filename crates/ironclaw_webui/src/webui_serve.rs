@@ -744,7 +744,7 @@ struct RebornHealthResponse {
 async fn reborn_health_handler() -> Json<RebornHealthResponse> {
     Json(RebornHealthResponse {
         status: "healthy",
-        channel: "reborn",
+        channel: "ironclaw",
     })
 }
 

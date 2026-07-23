@@ -63,28 +63,28 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             MEMORY_SEARCH_CAPABILITY_ID,
-            "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope. This does not search connected app or extension data.",
+            "Search only IronClaw internal persistent memory documents in the current tenant/user/agent/project scope. This does not search connected app or extension data.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
+            "Write, append, or patch IronClaw persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Allow,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             MEMORY_READ_CAPABILITY_ID,
-            "Read a Reborn persistent memory document in the current tenant/user/agent/project scope",
+            "Read an IronClaw persistent memory document in the current tenant/user/agent/project scope",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             MEMORY_TREE_CAPABILITY_ID,
-            "List Reborn persistent memory documents as a compact tree",
+            "List IronClaw persistent memory documents as a compact tree",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),

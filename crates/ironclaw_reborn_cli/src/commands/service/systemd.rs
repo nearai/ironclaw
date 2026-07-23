@@ -63,7 +63,7 @@ fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Resul
 
     Ok(format!(
         "[Unit]\n\
-         Description=IronClaw Reborn daemon\n\
+         Description=IronClaw daemon\n\
          After=network.target\n\
          \n\
          [Service]\n\

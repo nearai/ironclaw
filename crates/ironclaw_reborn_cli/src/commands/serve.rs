@@ -88,7 +88,7 @@ impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMint
 
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
-    /// Host interface for the Reborn WebChat v2 HTTP listener.
+    /// Host interface for the IronClaw WebChat v2 HTTP listener.
     /// Overrides `[webui].listen_host` from the boot config file.
     /// Default (when neither is set) is `127.0.0.1`.
     //
@@ -101,7 +101,7 @@ pub(crate) struct ServeCommand {
     #[arg(long)]
     host: Option<IpAddr>,
 
-    /// Port for the Reborn WebChat v2 HTTP listener. `0` lets the
+    /// Port for the IronClaw WebChat v2 HTTP listener. `0` lets the
     /// kernel pick a free port (useful for tests). Overrides
     /// `[webui].listen_port` from the boot config file. Default
     /// (when neither is set) is 3000.
@@ -305,7 +305,7 @@ impl ServeCommand {
             webui_notion_dcr_callback_origin(listen_addr, canonical_host.as_deref())?;
         if let Some(callback_origin) = callback_origin {
             let services = runtime_input.services.take().ok_or_else(|| {
-                anyhow!("WebChat v2 serve requires Reborn runtime services before OAuth wiring")
+                anyhow!("WebChat v2 serve requires IronClaw runtime services before OAuth wiring")
             })?;
             runtime_input.services = Some(
                 with_notion_dcr_oauth_backend(services, &callback_origin)
@@ -427,7 +427,7 @@ impl ServeCommand {
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
-                .context("failed to assemble Reborn runtime for `serve`")?;
+                .context("failed to assemble IronClaw runtime for `serve`")?;
 
             // Tenant-shared tool credentials from the environment (#5459):
             // `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs, parsed by
@@ -464,7 +464,7 @@ impl ServeCommand {
                 default_project_id.clone(),
             )
             .await
-            .context("failed to compose OpenAI-compatible Reborn routes")?;
+            .context("failed to compose OpenAI-compatible IronClaw routes")?;
 
             // Only SSO-enabled WebUI needs the canonical Reborn identity
             // resolver: an env-bearer-only deployment resolves its single
@@ -475,9 +475,9 @@ impl ServeCommand {
             // resolver is available.
             let identity_resolver = if sso_startup.is_some() {
                 match runtime.open_reborn_identity_resolver(&tenant_id).await {
-                    Some(result) => {
-                        Some(result.context("failed to initialize the Reborn identity resolver")?)
-                    }
+                    Some(result) => Some(
+                        result.context("failed to initialize the IronClaw identity resolver")?,
+                    ),
                     None => None,
                 }
             } else {
@@ -632,7 +632,7 @@ impl ServeCommand {
             // background tasks and turn-runner state shut down cleanly.
             let shutdown_result = runtime.shutdown().await;
             serve_result.context("WebChat v2 serve loop failed")?;
-            shutdown_result.context("Reborn runtime shutdown failed")?;
+            shutdown_result.context("IronClaw runtime shutdown failed")?;
             Ok::<(), anyhow::Error>(())
         })?;
 

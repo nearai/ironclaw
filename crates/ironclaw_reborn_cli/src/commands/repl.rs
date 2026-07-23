@@ -3,7 +3,7 @@ use clap::Args;
 use crate::context::RebornCliContext;
 use crate::runtime::RuntimeInputOptions;
 
-/// Start an interactive Reborn CLI session backed by the composed runtime.
+/// Start an interactive IronClaw CLI session backed by the composed runtime.
 #[derive(Debug, Args)]
 pub(crate) struct ReplCommand {
     /// Confirm trusted-laptop host filesystem access for local-dev-yolo.

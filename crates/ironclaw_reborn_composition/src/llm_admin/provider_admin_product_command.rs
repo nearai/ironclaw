@@ -151,24 +151,24 @@ fn provider_admin_workflow_error(error: RebornProviderAdminError) -> ProductWork
     match error {
         RebornProviderAdminError::UnknownProvider { provider, .. } => {
             ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("unknown Reborn LLM provider `{provider}`"),
+                reason: format!("unknown IronClaw LLM provider `{provider}`"),
             }
         }
         RebornProviderAdminError::InvalidRequest { reason } => {
             ProductWorkflowError::InvalidBindingRequest { reason }
         }
         RebornProviderAdminError::LoadRegistry { reason, .. } => ProductWorkflowError::Transient {
-            reason: format!("load Reborn provider catalog failed: {reason}"),
+            reason: format!("load IronClaw provider catalog failed: {reason}"),
         },
         RebornProviderAdminError::LoadConfig { source, .. } => ProductWorkflowError::Transient {
             reason: format!(
-                "load Reborn config failed: {}",
+                "load IronClaw config failed: {}",
                 config_load_error_reason(source.as_ref())
             ),
         },
         RebornProviderAdminError::UpdateConfig { source, .. } => ProductWorkflowError::Transient {
             reason: format!(
-                "update Reborn config failed: {}",
+                "update IronClaw config failed: {}",
                 config_update_error_reason(source.as_ref())
             ),
         },

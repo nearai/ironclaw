@@ -132,7 +132,7 @@ fn json_to_config_value(value: &serde_json::Value) -> ConfigValue {
 
 impl Renderable for ConfigListDto {
     fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn config ({})", self.config_file.display())?;
+        writeln!(w, "IronClaw config ({})", self.config_file.display())?;
         writeln!(w)?;
         for entry in &self.entries {
             match &entry.value {

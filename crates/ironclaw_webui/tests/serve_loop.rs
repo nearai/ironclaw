@@ -181,6 +181,12 @@ async fn deferred_startup_router_serves_health_then_delegates_when_ready() {
         http::StatusCode::OK,
         "startup health must pass before runtime assembly finishes"
     );
+    let health_json: serde_json::Value = health_response
+        .json()
+        .await
+        .expect("startup health response must be JSON");
+    assert_eq!(health_json["status"], "healthy");
+    assert_eq!(health_json["channel"], "ironclaw");
 
     let before_ready = test_client()
         .get(format!("http://{bound}/ping"))
@@ -192,6 +198,11 @@ async fn deferred_startup_router_serves_health_then_delegates_when_ready() {
         http::StatusCode::SERVICE_UNAVAILABLE,
         "non-health routes must not accept traffic before the runtime router is ready"
     );
+    let before_ready_body = before_ready
+        .text()
+        .await
+        .expect("pre-ready response must have a body");
+    assert_eq!(before_ready_body, "IronClaw runtime is starting");
 
     let ready_router = build_test_router().await;
     ready_handle

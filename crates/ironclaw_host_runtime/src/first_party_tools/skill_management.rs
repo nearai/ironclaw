@@ -32,14 +32,14 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             SKILL_LIST_CAPABILITY_ID,
-            "List Reborn filesystem skills visible to the current local-dev agent",
+            "List IronClaw filesystem skills visible to the current local-dev agent",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             SKILL_INSTALL_CAPABILITY_ID,
-            "Install a SKILL.md document, HTTPS SKILL.md URL, ZIP bundle, or GitHub skill repository/tree into the current user's Reborn skill root",
+            "Install a SKILL.md document, HTTPS SKILL.md URL, ZIP bundle, or GitHub skill repository/tree into the current user's IronClaw skill root",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -51,21 +51,21 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             SKILL_UPDATE_CAPABILITY_ID,
-            "Update a user-installed Reborn filesystem skill",
+            "Update a user-installed IronClaw filesystem skill",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-            "Enable or disable criteria-based activation for a user-installed Reborn filesystem skill",
+            "Enable or disable criteria-based activation for a user-installed IronClaw filesystem skill",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             SKILL_REMOVE_CAPABILITY_ID,
-            "Remove a user-installed Reborn filesystem skill",
+            "Remove a user-installed IronClaw filesystem skill",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,

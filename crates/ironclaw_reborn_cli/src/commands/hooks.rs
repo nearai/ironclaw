@@ -10,7 +10,7 @@ pub(crate) struct HooksCommand {
 
 #[derive(Debug, Subcommand)]
 enum HooksSubcommand {
-    /// List configured Reborn hooks.
+    /// List configured IronClaw hooks.
     List(HooksListCommand),
 }
 

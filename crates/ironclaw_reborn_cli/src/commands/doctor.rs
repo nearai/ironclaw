@@ -34,7 +34,7 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     let report = RebornDoctorReport::from_config(context.boot_config().clone());
 
     checks.push(DoctorCheck {
-        name: "reborn_home".to_string(),
+        name: "ironclaw_home".to_string(),
         category: CheckCategory::Core,
         outcome: if report.home_path().is_dir() {
             CheckOutcome::Pass
@@ -164,7 +164,7 @@ fn driver_check(name: &str, status: &RebornRuntimeComponentStatus) -> DoctorChec
 
 impl Renderable for DoctorDto {
     fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn doctor")?;
+        writeln!(w, "IronClaw doctor")?;
         writeln!(w)?;
         let mut current_category: Option<CheckCategory> = None;
         for check in &self.checks {

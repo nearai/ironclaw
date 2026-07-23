@@ -255,7 +255,7 @@ fn reject_reserved_broker_env_overrides(env: &[String]) -> Result<(), RuntimePro
         };
         if RESERVED_BROKER_ENV_KEYS.contains(&key) {
             return Err(RuntimeProcessError::ExecutionFailed(format!(
-                "environment variable {key} is reserved for the Reborn sandbox"
+                "environment variable {key} is reserved for the IronClaw sandbox"
             )));
         }
     }
@@ -272,7 +272,7 @@ fn push_reserved_env(
         .any(|entry| entry.starts_with(&format!("{key}=")))
     {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "environment variable {key} is reserved for the Reborn sandbox"
+            "environment variable {key} is reserved for the IronClaw sandbox"
         )));
     }
     reject_nul("environment variable name", key)?;

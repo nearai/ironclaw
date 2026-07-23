@@ -394,7 +394,7 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
         // home has no directory yet, and `open_local_dev_secret_store` opens
         // a libSQL file directly under it without creating parents itself.
         std::fs::create_dir_all(home_path).map_err(|error| {
-            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
+            anyhow::anyhow!("create IronClaw home {}: {error}", home_path.display())
         })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
@@ -412,7 +412,7 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
         // See `open_llm_key_store` above: `config set` is a write command,
         // so create the reborn home directory before opening the store.
         std::fs::create_dir_all(home_path).map_err(|error| {
-            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
+            anyhow::anyhow!("create IronClaw home {}: {error}", home_path.display())
         })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {

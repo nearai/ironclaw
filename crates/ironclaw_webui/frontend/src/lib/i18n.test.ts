@@ -310,7 +310,7 @@ test("locale packs include workspace labels and accept a formatted size", () => 
   }
 });
 
-test("zh-CN localizes Reborn settings copy and compact automation filters", () => {
+test("zh-CN localizes IronClaw settings copy and compact automation filters", () => {
   const pack = loadLocalePack("zh-CN");
 
   assert.equal(pack["settings.traceCommons"], "跟踪共享");
@@ -326,7 +326,7 @@ test("zh-CN localizes Reborn settings copy and compact automation filters", () =
   assert.equal(pack["automations.filter.paused"], "已暂停");
 });
 
-test("zh-CN localizes Reborn Projects summary copy", () => {
+test("zh-CN localizes IronClaw Projects summary copy", () => {
   const pack = loadLocalePack("zh-CN");
 
   assert.equal(pack["projects.summary.projects"], "项目");

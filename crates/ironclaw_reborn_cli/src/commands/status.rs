@@ -187,10 +187,10 @@ pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) ->
 
 impl Renderable for StatusDto {
     fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn status")?;
+        writeln!(w, "IronClaw status")?;
         writeln!(w)?;
         kv(w, "version", &self.version)?;
-        kv(w, "reborn_home", &self.reborn_home.display().to_string())?;
+        kv(w, "ironclaw_home", &self.reborn_home.display().to_string())?;
         kv(w, "home_source", self.home_source)?;
         kv(w, "profile", &self.profile)?;
         kv(

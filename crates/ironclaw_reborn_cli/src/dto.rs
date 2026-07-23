@@ -7,6 +7,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct StatusDto {
     pub version: String,
+    #[serde(rename = "ironclaw_home")]
     pub reborn_home: PathBuf,
     pub home_source: &'static str,
     pub profile: String,
@@ -15,7 +16,7 @@ pub(crate) struct StatusDto {
     pub model_slots: Vec<String>,
     pub drivers: DriversSnapshot,
     /// CLI-token `/login?token=` bootstrap link, present only when a valid
-    /// `webui-token` file exists under `reborn_home`.
+    /// `webui-token` file exists under the IronClaw home.
     ///
     /// `skip_serializing`: carries a live bearer token in the query string;
     /// `status --json` is diagnostic data pasted into issues/logs and must

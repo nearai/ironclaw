@@ -4,7 +4,7 @@ use ironclaw_reborn_composition::reborn_runtime_readiness_snapshot;
 use crate::context::RebornCliContext;
 use crate::runtime::RuntimeInputOptions;
 
-/// Start the standalone Reborn runtime. Sends `--message` if provided
+/// Start the IronClaw runtime. Sends `--message` if provided
 /// (single-shot mode), otherwise drops into a stdin REPL.
 #[derive(Debug, Args)]
 pub(crate) struct RunCommand {
@@ -46,10 +46,10 @@ fn run_dry(context: RebornCliContext) -> anyhow::Result<()> {
     let readiness = reborn_runtime_readiness_snapshot();
     let driver_registry_initialized =
         readiness.text_only_driver.is_initialized() && readiness.planned_driver.is_initialized();
-    println!("IronClaw Reborn runtime readiness snapshot");
+    println!("IronClaw runtime readiness snapshot");
     println!("binary: ironclaw");
     println!("version: {}", env!("CARGO_PKG_VERSION"));
-    println!("reborn_home: {}", config.home().path().display());
+    println!("ironclaw_home: {}", config.home().path().display());
     println!("home_source: {}", config.home().source_label());
     println!("profile: {}", config.profile());
     println!("v1_state: not-used");

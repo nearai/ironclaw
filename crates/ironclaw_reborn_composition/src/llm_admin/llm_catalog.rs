@@ -94,7 +94,7 @@ pub enum RebornLlmCatalogError {
     )]
     BaseUrlUnconfigured { provider: String },
     /// Explicit Reborn provider overlay could not be loaded.
-    #[error("could not load Reborn provider catalog: {source}")]
+    #[error("could not load IronClaw provider catalog: {source}")]
     CatalogLoad {
         #[source]
         source: ironclaw_llm::registry::ProviderRegistryLoadError,

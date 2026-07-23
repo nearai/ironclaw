@@ -128,7 +128,7 @@ impl RebornProviderAdmin {
             .as_ref()
             .and_then(|selection| selection.provider_id.as_deref())
             .ok_or_else(|| RebornProviderAdminError::InvalidRequest {
-                reason: "no default Reborn provider is configured; set a provider first"
+                reason: "no default IronClaw provider is configured; set a provider first"
                     .to_string(),
             })?
             .to_string();
@@ -620,14 +620,14 @@ impl fmt::Display for RebornModelRoutesState {
 
 #[derive(Debug, Error)]
 pub enum RebornProviderAdminError {
-    #[error("load Reborn provider catalog `{}`: {reason}", path.display())]
+    #[error("load IronClaw provider catalog `{}`: {reason}", path.display())]
     LoadRegistry { path: PathBuf, reason: String },
-    #[error("load Reborn config `{}`: {source}", path.display())]
+    #[error("load IronClaw config `{}`: {source}", path.display())]
     LoadConfig {
         path: PathBuf,
         source: Box<ironclaw_reborn_config::RebornConfigFileError>,
     },
-    #[error("unknown Reborn LLM provider `{provider}` in {}; available providers: {}", providers_file.display(), known.join(", "))]
+    #[error("unknown IronClaw LLM provider `{provider}` in {}; available providers: {}", providers_file.display(), known.join(", "))]
     UnknownProvider {
         provider: String,
         providers_file: PathBuf,
@@ -635,7 +635,7 @@ pub enum RebornProviderAdminError {
     },
     #[error("{reason}")]
     InvalidRequest { reason: String },
-    #[error("update Reborn config `{}`: {source}", path.display())]
+    #[error("update IronClaw config `{}`: {source}", path.display())]
     UpdateConfig {
         path: PathBuf,
         source: Box<ironclaw_reborn_config::RebornConfigFileUpdateError>,

@@ -867,7 +867,7 @@ fn resolve_postgres_storage_from_config_and_env(
         Some(StorageBackend::Unknown(backend)) => {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "PostgreSQL-backed Reborn storage supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
+                    "PostgreSQL-backed IronClaw storage supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
                 ),
             });
         }
@@ -886,10 +886,10 @@ fn resolve_postgres_storage_from_config_and_env(
         .as_deref()
         .unwrap_or(DEFAULT_REBORN_SECRET_MASTER_KEY_ENV);
     let database_url =
-        required_production_url_env(url_env, "Reborn PostgreSQL URL", "storage.url_env")?;
+        required_production_url_env(url_env, "IronClaw PostgreSQL URL", "storage.url_env")?;
     let secret_master_key = required_production_key_env(
         secret_master_key_env,
-        "Reborn secret master key",
+        "IronClaw secret master key",
         "storage.secret_master_key_env",
     )?;
     let process_local_resource_governor_singleton =
@@ -900,7 +900,7 @@ fn resolve_postgres_storage_from_config_and_env(
         %profile,
         pool_max_size,
         pool_max_size_source,
-        "resolved Reborn PostgreSQL pool size"
+        "resolved IronClaw PostgreSQL pool size"
     );
     let tls_options = postgres_pool_tls_options_from_env()?;
     let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(

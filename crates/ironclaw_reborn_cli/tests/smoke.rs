@@ -1128,10 +1128,7 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn profiles"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IronClaw profiles"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
     assert!(stdout.contains("hosted-single-tenant"), "stdout: {stdout}");
@@ -1246,13 +1243,10 @@ fn skills_list_reports_reborn_skill_data() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn skills"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IronClaw skills"), "stdout: {stdout}");
     assert!(stdout.contains("configured:"), "stdout: {stdout}");
     assert!(
-        stdout.contains("source: reborn-local-dev"),
+        stdout.contains("source: ironclaw-local"),
         "stdout: {stdout}"
     );
     assert!(
@@ -1298,7 +1292,7 @@ fn skills_list_verbose_reports_reborn_skill_details() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
-    assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
+    assert!(stdout.contains("ironclaw_home:"), "stdout: {stdout}");
     assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
     assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
     assert!(stdout.contains("version: 1.2.3"), "stdout: {stdout}");
@@ -1339,7 +1333,7 @@ fn skills_list_json_reports_reborn_skill_data() {
         json["configured"].as_u64().expect("configured count") > 1,
         "json: {json}"
     );
-    assert_eq!(json["source"], "reborn-local-dev");
+    assert_eq!(json["source"], "ironclaw-local");
     assert_skill_source(&json, "code-review", "system");
     assert_skill_source(&json, "json-helper", "user");
     assert_eq!(json["details"]["profile"], "local-dev");
@@ -1410,7 +1404,7 @@ fn models_list_reports_reborn_provider_catalog_without_v1_state() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("IronClaw Reborn LLM providers"),
+        stdout.contains("IronClaw LLM providers"),
         "stdout: {stdout}"
     );
     assert!(stdout.contains("providers_file:"), "stdout: {stdout}");
@@ -1585,7 +1579,7 @@ fn models_set_without_provider_fails_without_panicking() {
     assert!(!output.status.success(), "models set should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no default Reborn provider is configured"),
+        stderr.contains("no default IronClaw provider is configured"),
         "stderr: {stderr}"
     );
     assert!(!stderr.contains("panicked"), "stderr: {stderr}");
@@ -1665,12 +1659,9 @@ fn config_path_reports_reborn_home_without_touching_v1_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("IronClaw config path"), "stdout: {stdout}");
     assert!(
-        stdout.contains("IronClaw Reborn config path"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains(&format!("reborn_home: {}", reborn_home.display())),
+        stdout.contains(&format!("ironclaw_home: {}", reborn_home.display())),
         "stdout: {stdout}"
     );
     assert!(
@@ -1711,7 +1702,7 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(&format!("reborn_home: {}", reborn_home.display())),
+        stdout.contains(&format!("ironclaw_home: {}", reborn_home.display())),
         "stdout: {stdout}"
     );
     assert!(stdout.contains("home_source: default"), "stdout: {stdout}");
@@ -3024,7 +3015,7 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("IronClaw Reborn runtime readiness snapshot"),
+        stdout.contains("IronClaw runtime readiness snapshot"),
         "stdout: {stdout}"
     );
     assert!(
@@ -3073,10 +3064,7 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn doctor"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IronClaw doctor"), "stdout: {stdout}");
     assert!(
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
@@ -3108,7 +3096,7 @@ fn repl_help_mentions_composed_runtime() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("composed Reborn CLI REPL"),
+        stdout.contains("composed IronClaw CLI REPL"),
         "stdout: {stdout}"
     );
 }
@@ -3355,7 +3343,10 @@ fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Reborn REPL commands:"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("IronClaw REPL commands:"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("/exit"), "stderr: {stderr}");
     assert!(stderr.contains("/quit"), "stderr: {stderr}");
 }
@@ -3391,7 +3382,10 @@ fn run_help_command_prints_repl_commands_and_exits_on_quit() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Reborn REPL commands:"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("IronClaw REPL commands:"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("/exit"), "stderr: {stderr}");
     assert!(stderr.contains("/quit"), "stderr: {stderr}");
 }
@@ -3428,7 +3422,7 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("reborn run did not produce an assistant reply"),
+        stderr.contains("IronClaw run did not produce an assistant reply"),
         "stderr: {stderr}"
     );
     let config_path = reborn_home.join("config.toml");
@@ -3474,7 +3468,7 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("reborn run did not produce an assistant reply"),
+        stderr.contains("IronClaw run did not produce an assistant reply"),
         "stderr: {stderr}"
     );
 
@@ -3530,7 +3524,7 @@ fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("reborn run did not produce an assistant reply"),
+        stderr.contains("IronClaw run did not produce an assistant reply"),
         "stderr: {stderr}"
     );
 }
@@ -3971,10 +3965,7 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn onboarding"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IronClaw onboarding"), "stdout: {stdout}");
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
     assert!(
         reborn_home.join("config.toml").exists(),
@@ -5013,7 +5004,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
     let _ = child.wait();
 
     assert!(
-        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        pre_banner_stderr.contains("resolved LLM selection for IronClaw runtime"),
         "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
     );
     // Regression pin for PR #6174 item A: `openai` has `api_key_required =
@@ -5113,7 +5104,7 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
     let _ = child.wait();
 
     assert!(
-        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        pre_banner_stderr.contains("resolved LLM selection for IronClaw runtime"),
         "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
     );
     assert!(
@@ -5217,7 +5208,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
     let _ = child.wait();
 
     assert!(
-        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        pre_banner_stderr.contains("resolved LLM selection for IronClaw runtime"),
         "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
     );
     assert!(
@@ -5523,7 +5514,7 @@ fn onboard_dry_run_is_read_only() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("IronClaw Reborn onboarding dry run"),
+        stdout.contains("IronClaw onboarding dry run"),
         "stdout: {stdout}"
     );
     assert!(
@@ -5903,10 +5894,7 @@ fn status_reports_reborn_home_without_touching_v1_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn status"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IronClaw status"), "stdout: {stdout}");
     assert!(
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
@@ -5944,7 +5932,7 @@ fn status_json_reports_reborn_home_without_touching_v1_state() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(
-        json["reborn_home"],
+        json["ironclaw_home"],
         reborn_home.to_str().expect("utf8 path")
     );
     assert_eq!(json["profile"], "local-dev");
@@ -6013,10 +6001,7 @@ fn config_list_reports_entries_without_creating_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn config"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("IronClaw config"), "stdout: {stdout}");
     assert!(stdout.contains("api_version"), "stdout: {stdout}");
     assert!(stdout.contains("boot.profile"), "stdout: {stdout}");
     assert!(stdout.contains("harness.id"), "stdout: {stdout}");
@@ -6559,7 +6544,7 @@ default_owner = "operator"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("reborn run did not produce an assistant reply"),
+        stderr.contains("IronClaw run did not produce an assistant reply"),
         "stderr should reach normal runtime failure; got: {stderr}"
     );
     assert!(

@@ -17,7 +17,7 @@ use super::{
 
 #[derive(Debug, Error)]
 pub enum ProductionEventStoreWiringError {
-    #[error("failed to build Reborn event stores: {0}")]
+    #[error("failed to build IronClaw event stores: {0}")]
     EventStore(#[from] RebornEventStoreError),
     #[error("host runtime production wiring failed")]
     ProductionWiring(ProductionWiringReport),

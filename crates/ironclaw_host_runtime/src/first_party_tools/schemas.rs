@@ -49,11 +49,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/memory_search.input.v1.json" => json!({
             "type": "object",
-            "description": "Searches only Reborn internal persistent memory. This does not search connected app or extension data.",
+            "description": "Searches only IronClaw internal persistent memory. This does not search connected app or extension data.",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Preferred natural language search query for Reborn internal persistent memory"
+                    "description": "Preferred natural language search query for IronClaw internal persistent memory"
                 },
                 "q": {
                     "type": "string",
@@ -429,7 +429,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Optional extension, product, provider, or service name to search in the local Reborn extension catalog. Omit to list bundled and installed extensions." }
+                "query": { "type": "string", "description": "Optional extension, product, provider, or service name to search in the local IronClaw extension catalog. Omit to list bundled and installed extensions." }
             },
             "additionalProperties": false
         }),

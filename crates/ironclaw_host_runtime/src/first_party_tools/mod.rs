@@ -170,7 +170,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
             id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             name: "Built-in first-party capabilities".to_string(),
             version: "0.1.0".to_string(),
-            description: "Host-owned built-in Reborn capabilities".to_string(),
+            description: "Host-owned built-in IronClaw capabilities".to_string(),
             source: ManifestSource::HostBundled,
             requested_trust: RequestedTrustClass::FirstPartyRequested,
             // Effective first-party trust is assigned by host policy at

@@ -39,7 +39,7 @@ pub enum RebornServicesErrorKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[error("Reborn WebUI service error: {code:?}")]
+#[error("IronClaw WebUI service error: {code:?}")]
 pub struct RebornServicesError {
     pub code: RebornServicesErrorCode,
     pub kind: RebornServicesErrorKind,

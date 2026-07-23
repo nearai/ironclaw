@@ -4,6 +4,7 @@
 //! `POST /api/webchat/v2/operator/service`. It intentionally accepts only the
 //! fixed `ironclaw-reborn` unit/label and fixed command argv shapes; browser
 //! input can select an action, not a command line.
+// arch-exempt: large_file, copy-only product identity updates with no lifecycle behavior change, plan #6550
 
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
@@ -507,7 +508,7 @@ impl RebornLocalServiceLifecycle {
         RebornServiceLifecycleResponse {
             action,
             state: RebornServiceLifecycleState::Installed,
-            message: "local Reborn service unit is installed".to_string(),
+            message: "local IronClaw service unit is installed".to_string(),
             remediation: None,
         }
     }
@@ -525,7 +526,7 @@ impl RebornLocalServiceLifecycle {
                     "systemctl",
                     &["--user", "start", SYSTEMD_UNIT],
                     RebornServiceLifecycleState::Running,
-                    "local Reborn service is running",
+                    "local IronClaw service is running",
                 )
             }
             ServicePlatform::Macos => {
@@ -543,7 +544,7 @@ impl RebornLocalServiceLifecycle {
                     "launchctl",
                     &["start", LAUNCHD_LABEL],
                     RebornServiceLifecycleState::Running,
-                    "local Reborn service is running",
+                    "local IronClaw service is running",
                 )
             }
             ServicePlatform::Unsupported => Self::unsupported_response(action),
@@ -558,7 +559,7 @@ impl RebornLocalServiceLifecycle {
                 "systemctl",
                 &["--user", "stop", SYSTEMD_UNIT],
                 RebornServiceLifecycleState::Stopped,
-                "local Reborn service is stopped",
+                "local IronClaw service is stopped",
             ),
             ServicePlatform::Macos => {
                 let path = match self.service_file_for_action(action) {
@@ -579,7 +580,7 @@ impl RebornLocalServiceLifecycle {
                 RebornServiceLifecycleResponse {
                     action,
                     state: RebornServiceLifecycleState::Stopped,
-                    message: "local Reborn service is stopped".to_string(),
+                    message: "local IronClaw service is stopped".to_string(),
                     remediation: None,
                 }
             }
@@ -598,7 +599,7 @@ impl RebornLocalServiceLifecycle {
                     Ok(output) if output.success && output.stdout_text().trim() == "active" => {
                         Self::status_response(
                             RebornServiceLifecycleState::Running,
-                            "local Reborn service is running",
+                            "local IronClaw service is running",
                         )
                     }
                     Ok(output)
@@ -606,16 +607,16 @@ impl RebornLocalServiceLifecycle {
                     {
                         Self::status_response(
                             RebornServiceLifecycleState::Stopped,
-                            "local Reborn service is stopped",
+                            "local IronClaw service is stopped",
                         )
                     }
                     Ok(output) if output.stdout_text().trim() == "failed" => Self::status_response(
                         RebornServiceLifecycleState::Failed,
-                        "local Reborn service is failed",
+                        "local IronClaw service is failed",
                     ),
                     Ok(_) => Self::status_response(
                         RebornServiceLifecycleState::Unknown,
-                        "local Reborn service state is unknown",
+                        "local IronClaw service state is unknown",
                     ),
                     Err(error) => Self::status_query_failed_response(action, error),
                 }
@@ -626,15 +627,15 @@ impl RebornLocalServiceLifecycle {
                     Ok(output) => match launchd_status(output.stdout_text().as_ref()) {
                         LaunchdStatus::Running => Self::status_response(
                             RebornServiceLifecycleState::Running,
-                            "local Reborn service is running",
+                            "local IronClaw service is running",
                         ),
                         LaunchdStatus::Stopped => Self::status_response(
                             RebornServiceLifecycleState::Stopped,
-                            "local Reborn service is stopped",
+                            "local IronClaw service is stopped",
                         ),
                         LaunchdStatus::Failed => Self::status_response(
                             RebornServiceLifecycleState::Failed,
-                            "local Reborn service is failed",
+                            "local IronClaw service is failed",
                         ),
                     },
                     Err(error) => Self::status_query_failed_response(action, error),
@@ -734,7 +735,7 @@ impl RebornLocalServiceLifecycle {
             .map_err(|message| Self::failed_response(action, message))?;
         Ok(format!(
             "[Unit]\n\
-             Description=IronClaw Reborn WebUI service\n\
+             Description=IronClaw WebUI service\n\
              After=network.target\n\
              \n\
              [Service]\n\
@@ -947,8 +948,8 @@ fn webui_env_names_for_boot_config(
     };
     let config_path = boot.home().config_file_path();
     let config = ironclaw_reborn_config::RebornConfigFile::load(&config_path).map_err(|error| {
-        tracing::debug!(%error, "Reborn config file could not be loaded for service lifecycle");
-        "Reborn config file could not be loaded".to_string()
+        tracing::debug!(%error, "IronClaw config file could not be loaded for service lifecycle");
+        "IronClaw config file could not be loaded".to_string()
     })?;
     let Some(webui) = config.and_then(|config| config.webui) else {
         return Ok(WebuiEnvNames::default());
@@ -1287,7 +1288,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
         let error = webui_env_names_for_boot_config(Some(&boot)).expect_err("load error");
 
-        assert_eq!(error, "Reborn config file could not be loaded");
+        assert_eq!(error, "IronClaw config file could not be loaded");
         assert!(!error.contains(temp.path().to_string_lossy().as_ref()));
     }
 
@@ -1470,7 +1471,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .expect("status response");
 
         assert_eq!(response.state, RebornServiceLifecycleState::Running);
-        assert_eq!(response.message, "local Reborn service is running");
+        assert_eq!(response.message, "local IronClaw service is running");
         assert!(!response.message.contains("systemctl"));
     }
 

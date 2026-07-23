@@ -284,7 +284,7 @@ test("Tool rows localize descriptions when backend payload omits description", (
 test("Tool rows localize extension and provider capability descriptions", () => {
   const { exports } = renderToolsModule({
     translations: {
-      "tools.description.builtin.extension_search": "搜索本地 Reborn 扩展目录",
+      "tools.description.builtin.extension_search": "搜索本地 IronClaw 扩展目录",
       "tools.description.nearai.web_search": "通过 NEAR AI MCP 服务器搜索",
     },
   });
@@ -304,7 +304,7 @@ test("Tool rows localize extension and provider capability descriptions", () => 
       })
     );
 
-  assert.ok(renderDescription("builtin.extension_search").includes("搜索本地 Reborn 扩展目录"));
+  assert.ok(renderDescription("builtin.extension_search").includes("搜索本地 IronClaw 扩展目录"));
   assert.ok(renderDescription("nearai.web_search").includes("通过 NEAR AI MCP 服务器搜索"));
 });
 

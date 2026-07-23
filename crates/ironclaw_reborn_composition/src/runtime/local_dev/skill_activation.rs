@@ -18,7 +18,7 @@ use crate::runtime::{
 pub(crate) const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
 const SKILL_ACTIVATE_DESCRIPTION: &str =
-    "Activate one or more listed Reborn skills for the current loop run";
+    "Activate one or more listed IronClaw skills for the current loop run";
 const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
 pub(super) fn skill_activation_capability(

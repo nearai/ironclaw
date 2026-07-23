@@ -60,7 +60,7 @@ async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
-    assert!(reason.contains("profile=disabled must not start live Reborn runtime traffic"));
+    assert!(reason.contains("profile=disabled must not start live IronClaw runtime traffic"));
 }
 
 #[tokio::test]
@@ -94,7 +94,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
     };
     assert!(
         reason.contains("profile=migration-dry-run")
-            && reason.contains("must not start live Reborn runtime traffic"),
+            && reason.contains("must not start live IronClaw runtime traffic"),
         "reason: {reason}"
     );
 }

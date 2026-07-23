@@ -19,7 +19,7 @@ use prompts::{LlmCredentialPromptError, StdinPromptSource};
 
 const ONBOARDING_MARKER_FILE: &str = ".onboard-completed.json";
 
-/// Initialize the standalone Reborn home and first-run setup marker.
+/// Initialize the IronClaw home and first-run setup marker.
 #[derive(Debug, Args)]
 pub(crate) struct OnboardCommand {
     /// Overwrite generated config.toml, providers.json, and the completion marker.
@@ -95,8 +95,8 @@ impl OnboardCommand {
             llm_configured,
         )?;
 
-        println!("IronClaw Reborn onboarding");
-        println!("reborn_home: {}", home.path().display());
+        println!("IronClaw onboarding");
+        println!("ironclaw_home: {}", home.path().display());
         println!("home_source: {}", home.source_label());
         println!("{}", outcome.config.display_line());
         println!("{}", outcome.providers.display_line());
@@ -115,14 +115,14 @@ impl OnboardCommand {
             println!(
                 "master_key_note: OS keychain unavailable; set SECRETS_MASTER_KEY yourself or \
                  let the first `serve`/`onboard` run auto-generate and cache \
-                 .reborn-local-dev-secrets-master-key in the Reborn home"
+                 .reborn-local-dev-secrets-master-key in the IronClaw home"
             );
         }
         println!("llm_credentials: {}", llm_outcome.display_line());
         println!("v1_state: not-used");
         println!();
         println!("completed:");
-        println!("- reborn home initialized");
+        println!("- IronClaw home initialized");
         println!("- config.toml and providers.json available");
         println!("- webui bearer token provisioned (used by `serve` when the env var is unset)");
         println!("- onboarding completion marker available");
@@ -267,8 +267,8 @@ fn print_dry_run(
     force: bool,
     import_history: bool,
 ) -> anyhow::Result<()> {
-    println!("IronClaw Reborn onboarding dry run");
-    println!("reborn_home: {}", home.path().display());
+    println!("IronClaw onboarding dry run");
+    println!("ironclaw_home: {}", home.path().display());
     println!("home_source: {}", home.source_label());
     println!("would_ensure: {}", home.path().display());
     println!(

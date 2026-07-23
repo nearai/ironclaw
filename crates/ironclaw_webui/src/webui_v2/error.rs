@@ -33,7 +33,7 @@ impl WebUiV2HttpError {
             tracing::error!(
                 target = "ironclaw_webui_v2::error",
                 status_code = self.0.status_code,
-                "RebornServicesError carried a non-HTTP status code; coercing to 500"
+                "runtime services error carried a non-HTTP status code; coercing to 500"
             );
             StatusCode::INTERNAL_SERVER_ERROR
         });

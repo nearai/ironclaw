@@ -10,13 +10,13 @@ pub(crate) struct ModelsCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModelsSubcommand {
-    /// List Reborn LLM providers, or show one provider.
+    /// List IronClaw LLM providers, or show one provider.
     List(ModelsListCommand),
-    /// Show Reborn model route status.
+    /// Show IronClaw model route status.
     Status(ModelsStatusCommand),
-    /// Set the default Reborn model for the active provider.
+    /// Set the default IronClaw model for the active provider.
     Set(ModelsSetCommand),
-    /// Set the default Reborn LLM provider.
+    /// Set the default IronClaw LLM provider.
     SetProvider(ModelsSetProviderCommand),
 }
 
@@ -126,7 +126,7 @@ impl ModelsSetProviderCommand {
 }
 
 fn print_provider_list(list: &ironclaw_reborn_composition::RebornProviderList, verbose: bool) {
-    println!("IronClaw Reborn LLM providers");
+    println!("IronClaw LLM providers");
     println!("config_file: {}", list.config_file.display());
     println!("providers_file: {}", list.providers_file.display());
     match list.providers.iter().find(|provider| provider.active) {
@@ -224,7 +224,7 @@ fn print_provider_detail(list: &ironclaw_reborn_composition::RebornProviderList)
 }
 
 fn print_status(status: &ironclaw_reborn_composition::RebornProviderStatus) {
-    println!("IronClaw Reborn model status");
+    println!("IronClaw model status");
     println!("config_file: {}", status.config_file.display());
     println!("providers_file: {}", status.providers_file.display());
     match status.default.as_ref() {

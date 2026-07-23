@@ -47,7 +47,7 @@ fn sample_doctor() -> DoctorDto {
     DoctorDto {
         checks: vec![
             DoctorCheck {
-                name: "reborn_home".to_string(),
+                name: "ironclaw_home".to_string(),
                 category: CheckCategory::Core,
                 outcome: CheckOutcome::Pass,
                 detail: "/home/user/.ironclaw/reborn".to_string(),
@@ -105,6 +105,8 @@ fn status_json_round_trips() {
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["version"], "0.1.0");
+    assert_eq!(parsed["ironclaw_home"], "/home/user/.ironclaw/reborn");
+    assert!(parsed.get("reborn_home").is_none());
     assert_eq!(parsed["profile"], "local-dev");
     assert_eq!(parsed["config_file"]["present"], true);
     assert_eq!(parsed["providers_file"]["present"], false);
@@ -133,10 +135,10 @@ fn status_json_round_trips() {
 #[test]
 fn status_render_text_contains_all_fields() {
     let text = render_to_string(&sample_status());
-    assert!(text.contains("IronClaw Reborn status"));
+    assert!(text.contains("IronClaw status"));
     assert!(text.contains("version:"));
     assert!(text.contains("0.1.0"));
-    assert!(text.contains("reborn_home:"));
+    assert!(text.contains("ironclaw_home:"));
     assert!(text.contains("/home/user/.ironclaw/reborn"));
     assert!(text.contains("home_source:"));
     assert!(text.contains("profile:"));
@@ -205,7 +207,7 @@ fn doctor_json_round_trips() {
     let dto = sample_doctor();
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
-    assert_eq!(parsed["checks"][0]["name"], "reborn_home");
+    assert_eq!(parsed["checks"][0]["name"], "ironclaw_home");
     assert_eq!(parsed["checks"][0]["outcome"], "pass");
     assert_eq!(parsed["checks"][1]["outcome"], "fail");
     assert_eq!(parsed["checks"][3]["outcome"], "skip");
@@ -241,7 +243,7 @@ fn config_list_json_round_trips() {
 #[test]
 fn config_list_render_text_covers_entries() {
     let text = render_to_string(&sample_config_list());
-    assert!(text.contains("IronClaw Reborn config"));
+    assert!(text.contains("IronClaw config"));
     assert!(text.contains("config.toml"));
     assert!(text.contains("boot.profile"));
     assert!(text.contains("local-dev"));

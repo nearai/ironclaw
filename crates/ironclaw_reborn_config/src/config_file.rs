@@ -834,27 +834,27 @@ pub enum RebornConfigFileError {
 
 #[derive(Debug, Error)]
 pub enum RebornConfigFileUpdateError {
-    #[error("lock Reborn config `{}`: {source}", path.display())]
+    #[error("lock IronClaw config `{}`: {source}", path.display())]
     Lock {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("read Reborn config `{}`: {source}", path.display())]
+    #[error("read IronClaw config `{}`: {source}", path.display())]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("parse Reborn config `{}` as TOML: {source}", path.display())]
+    #[error("parse IronClaw config `{}` as TOML: {source}", path.display())]
     Parse {
         path: PathBuf,
         source: toml_edit::TomlError,
     },
-    #[error("validate Reborn config `{}`: {source}", path.display())]
+    #[error("validate IronClaw config `{}`: {source}", path.display())]
     Validate {
         path: PathBuf,
         source: Box<RebornConfigFileError>,
     },
-    #[error("write Reborn config `{}`: {source}", path.display())]
+    #[error("write IronClaw config `{}`: {source}", path.display())]
     Write {
         path: PathBuf,
         source: std::io::Error,
