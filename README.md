@@ -345,3 +345,5 @@ Licensed under either of:
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+<!-- dummy-canary-marker: verifying /benchmark micro-pinchbench-13 canary after nearai/benchmarks Actions access-policy fix (2026-07-23) -->
