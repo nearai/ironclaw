@@ -617,9 +617,18 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(RebornServicesError::internal_from(error)),
     };
-    let summary = replay_product_result_summary(filesystem, scope, result_ref)
-        .await?
-        .unwrap_or_else(|| fixed_summary("capability completed"));
+    let summary = match replay_product_result_summary(filesystem, scope, result_ref).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => fixed_summary("capability completed"),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %result_ref,
+                "ignoring unreadable product result summary sidecar during replay"
+            );
+            fixed_summary("capability completed")
+        }
+    };
     Ok(Some(Resolution::Done(Outcome {
         refs: OutcomeRefs {
             result: result_ref,
@@ -905,6 +914,40 @@ mod tests {
         assert_eq!(outcome.refs.result, result_ref);
         assert_eq!(outcome.refs.byte_len, body.len() as u64);
         assert_eq!(outcome.verdict, ToolVerdict::Success);
+    }
+
+    #[tokio::test]
+    async fn product_result_replay_ignores_unreadable_summary_sidecar() {
+        let filesystem = scoped_product_results_filesystem();
+        let scope = resource_scope();
+        let invocation_id = InvocationId::new();
+        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+        let body = br#"{"status":"installed"}"#.to_vec();
+
+        persist_product_result(&filesystem, &scope, result_ref, body.clone())
+            .await
+            .expect("product result persists");
+        filesystem
+            .write_bytes(
+                &scope,
+                &product_result_summary_path(result_ref).expect("summary path"),
+                br#"{"summary":"#.to_vec(),
+            )
+            .await
+            .expect("invalid summary sidecar persists");
+
+        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+            .await
+            .expect("product result replays despite invalid summary")
+            .expect("persisted result should replay");
+
+        let Resolution::Done(outcome) = replayed else {
+            panic!("persisted product result should replay as a completed outcome");
+        };
+        assert_eq!(outcome.refs.result, result_ref);
+        assert_eq!(outcome.refs.byte_len, body.len() as u64);
+        assert_eq!(outcome.verdict, ToolVerdict::Success);
+        assert_eq!(outcome.summary.as_str(), "capability completed");
     }
 
     #[tokio::test]
