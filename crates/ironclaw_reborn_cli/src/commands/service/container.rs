@@ -14,9 +14,8 @@
 //! [`super::ServicePlatform::detect`] resolves to `Container` on Linux when
 //! systemd is not the running init (no `/run/systemd/system`) AND the
 //! deployment has explicitly declared a managed restart policy via
-//! `IRONCLAW_REBORN_CONTAINER_SUPERVISED`, or is Railway (whose deployment
-//! markers identify its managed restart policy) — systemd-absence alone is
-//! not enough, and neither is merely being *a* container (WSL2, OpenRC distros,
+//! `IRONCLAW_CONTAINER_SUPERVISE=true` — systemd-absence alone is not enough,
+//! and neither is merely being *a* container (WSL2, OpenRC distros,
 //! a plain VM running `ironclaw onboard` directly, or a real Docker
 //! container started with no restart policy at all, e.g. the documented
 //! `docker run --rm ...` local-run command, all lack a guarantee that

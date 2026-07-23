@@ -171,13 +171,11 @@ impl ServicePlatform {
     /// trusts an external restart policy to relaunch it — no signal
     /// observable from inside the container (not `/.dockerenv`, not a
     /// cgroup, not any other ambient marker) can actually prove that policy
-    /// exists. The one platform-specific exception is Railway: its
-    /// deployment markers identify a platform which provides the restart
-    /// policy, matching `docker/reborn/entrypoint.sh`. Elsewhere, the policy
-    /// must be declared explicitly. When neither applies, fall back to
-    /// `Linux`: that host gets the old systemd-manager path, which fails loud
-    /// (a plain `systemctl` ENOENT) rather than guessing and taking a
-    /// destructive action with no recovery guarantee.
+    /// exists. Every container host, including Railway, must declare that
+    /// policy explicitly. When it is not declared, fall back to `Linux`: that
+    /// host gets the old systemd-manager path, which fails loud (a plain
+    /// `systemctl` ENOENT) rather than guessing and taking a destructive
+    /// action with no recovery guarantee.
     fn linux_platform(systemd_booted: bool, container_supervised_declared: bool) -> Self {
         if systemd_booted {
             Self::Linux
@@ -344,56 +342,23 @@ fn systemd_booted_under(root: &Path) -> bool {
 }
 
 /// Env var a deployment sets to explicitly declare "I run under a managed
-/// restart policy". An explicit value always wins; otherwise Railway's
-/// deployment markers imply its managed restart policy, matching
-/// `docker/reborn/entrypoint.sh`.
-const CONTAINER_SUPERVISED_ENV_VAR: &str = "IRONCLAW_REBORN_CONTAINER_SUPERVISED";
-const RAILWAY_ENVIRONMENT_ENV_VAR: &str = "RAILWAY_ENVIRONMENT";
-const RAILWAY_PROJECT_ID_ENV_VAR: &str = "RAILWAY_PROJECT_ID";
-const RAILWAY_SERVICE_ID_ENV_VAR: &str = "RAILWAY_SERVICE_ID";
+/// restart policy". This deployment contract is provider-neutral: Docker,
+/// Railway, Kubernetes, and other container hosts must opt in explicitly.
+const CONTAINER_SUPERVISED_ENV_VAR: &str = "IRONCLAW_CONTAINER_SUPERVISE";
 
 /// Whether a deployment declares a managed restart policy. Combined with
 /// [`systemd_booted`] absence, this is [`ServicePlatform::linux_platform`]'s
 /// second signal for `Container` mode.
 fn container_supervised_declared() -> bool {
-    container_supervised_declared_from_signals(
-        std::env::var_os(CONTAINER_SUPERVISED_ENV_VAR).as_deref(),
-        railway_runtime_detected(),
+    is_truthy_env(
+        std::env::var_os(CONTAINER_SUPERVISED_ENV_VAR)
+            .as_deref()
+            .and_then(std::ffi::OsStr::to_str),
     )
 }
 
-/// Matches `docker/reborn/entrypoint.sh`'s `railway_runtime_detected()`.
-fn railway_runtime_detected() -> bool {
-    railway_runtime_detected_from_signals([
-        std::env::var_os(RAILWAY_ENVIRONMENT_ENV_VAR).as_deref(),
-        std::env::var_os(RAILWAY_PROJECT_ID_ENV_VAR).as_deref(),
-        std::env::var_os(RAILWAY_SERVICE_ID_ENV_VAR).as_deref(),
-    ])
-}
-
-fn railway_runtime_detected_from_signals(signals: [Option<&std::ffi::OsStr>; 3]) -> bool {
-    signals
-        .into_iter()
-        .any(|signal| signal.is_some_and(|value| !value.is_empty()))
-}
-
-/// The actual supervision decision, parameterized so tests do not mutate the
-/// process environment. Explicit supervision settings, including explicit
-/// false values, override Railway's ambient deployment markers.
-fn container_supervised_declared_from_signals(
-    explicit_supervision: Option<&std::ffi::OsStr>,
-    railway_detected: bool,
-) -> bool {
-    match explicit_supervision {
-        Some(value) => is_truthy_env(value.to_str()),
-        None => railway_detected,
-    }
-}
-
-/// `container_supervised_declared_from_signals`' explicit-value check.
-/// Matches `docker/reborn/entrypoint.sh`'s `is_truthy()` shell helper
-/// exactly, so a value that's truthy in the entrypoint script is truthy
-/// here too.
+/// Parses [`CONTAINER_SUPERVISED_ENV_VAR`] without mutating the process
+/// environment in tests.
 fn is_truthy_env(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
 }
@@ -841,47 +806,16 @@ mod tests {
     }
 
     #[test]
-    fn railway_markers_select_container_when_supervision_is_not_explicitly_set() {
-        let railway_detected = railway_runtime_detected_from_signals([
-            Some(std::ffi::OsStr::new("production")),
-            None,
-            None,
-        ]);
-        assert!(railway_detected);
-        assert!(container_supervised_declared_from_signals(
-            None,
-            railway_detected,
-        ));
-        assert_eq!(
-            ServicePlatform::linux_platform(
-                false,
-                container_supervised_declared_from_signals(None, railway_detected),
-            ),
-            ServicePlatform::Container
-        );
-    }
-
-    #[test]
-    fn explicit_false_supervision_overrides_railway_markers() {
-        let railway_detected = railway_runtime_detected_from_signals([
-            None,
-            Some(std::ffi::OsStr::new("project-id")),
-            None,
-        ]);
-        assert!(!container_supervised_declared_from_signals(
-            Some(std::ffi::OsStr::new("false")),
-            railway_detected,
-        ));
-        assert_eq!(
-            ServicePlatform::linux_platform(
-                false,
-                container_supervised_declared_from_signals(
-                    Some(std::ffi::OsStr::new("false")),
-                    railway_detected,
-                ),
-            ),
-            ServicePlatform::Linux
-        );
+    fn container_supervision_requires_an_explicit_truthy_declaration() {
+        for truthy in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(is_truthy_env(Some(truthy)), "{truthy} must opt in");
+        }
+        for falsey in [None, Some(""), Some("false"), Some("railway")] {
+            assert!(
+                !is_truthy_env(falsey),
+                "{falsey:?} must not opt in without an explicit truthy value"
+            );
+        }
     }
 
     #[test]
