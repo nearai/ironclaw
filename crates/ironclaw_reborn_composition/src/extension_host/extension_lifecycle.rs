@@ -204,6 +204,9 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
     /// Manifest-declared network egress allowlist, independent of credentials.
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
+    /// Manifest-declared per-capability egress cap (bytes), applied to the
+    /// minted `NetworkPolicy.max_egress_bytes`. `None` = no cap.
+    pub(crate) max_egress_bytes: Option<u64>,
     /// Who the providing extension's installation belongs to (#5459 P1).
     /// Tenant-owned capabilities are grant-minted for every user; user-owned
     /// ones only for their owner (filtered in `ExtensionCapabilitySurface`).
@@ -219,6 +222,7 @@ impl ActiveExtensionCapability {
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
             network_targets: descriptor.network_targets.clone(),
+            max_egress_bytes: descriptor.max_egress_bytes,
             owner,
         }
     }
@@ -1263,9 +1267,10 @@ impl RebornLocalExtensionManagementPort {
                 reason: "import decode limiter is closed".to_string(),
             }
         })?;
+        let reserved_bundled_ids = self.catalog.read().await.reserved_bundled_ids().to_vec();
         let package = tokio::task::spawn_blocking(move || {
             let files = unzip_extension_bundle(&bundle)?;
-            imported_extension_package(files)
+            imported_extension_package(files, &reserved_bundled_ids)
         })
         .await
         .map_err(|error| ProductWorkflowError::Transient {
@@ -10063,6 +10068,8 @@ output_schema_ref = "schemas/search.output.json"
                 },
             ],
             onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
         }
     }
 

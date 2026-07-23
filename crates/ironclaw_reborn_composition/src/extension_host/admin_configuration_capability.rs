@@ -78,6 +78,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: Some(ResourceProfile {
             default_estimate: ResourceEstimate::default()
                 .set_wall_clock_ms(500)

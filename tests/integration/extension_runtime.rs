@@ -5,7 +5,7 @@
 //! internal readiness/publication checkpoint it can,
 //! the lifecycle facade mirrors the activation into the generic extension
 //! host, the fixture's `first_party` native factory (assembled through the
-//! same `RebornBuildInput` seam the binary uses) binds its adapters, and the
+//! same `RebornHostBindings` seam the binary uses) binds its adapters, and the
 //! fixture tool dispatches from the ACTIVE SNAPSHOT — the registry lane
 //! serves built-ins only, so a passing dispatch here proves the snapshot
 //! path end to end (resolve → policy → credentials → invoke → record).

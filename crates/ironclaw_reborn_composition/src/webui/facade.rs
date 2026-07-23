@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
+#[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
@@ -78,27 +79,12 @@ pub(crate) struct AutomationBacking {
     pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
 }
 
-/// Resolves the [`AutomationBacking`] pair for whichever runtime is wired:
-/// local-dev first, then production runtime as a fallback. Returns `None` when
-/// neither runtime is present.
-pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<AutomationBacking> {
-    let from_local = services
-        .local_runtime
-        .as_ref()
-        .map(|local_runtime| AutomationBacking {
-            repository: Arc::clone(&local_runtime.trigger_repository),
-            snapshot_source: Arc::clone(&local_runtime.turn_state)
-                as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
-        });
-    from_local.or_else(|| {
-        services
-            .production_runtime
-            .as_ref()
-            .map(|production_runtime| AutomationBacking {
-                repository: production_runtime.trigger_repository(),
-                snapshot_source: production_runtime.turn_run_snapshot_source(),
-            })
-    })
+/// Resolves the [`AutomationBacking`] pair from the runtime-owned stores.
+pub(crate) fn automation_backing(runtime: &RebornRuntime) -> AutomationBacking {
+    AutomationBacking {
+        repository: Arc::clone(&runtime.trigger_repository),
+        snapshot_source: Arc::clone(&runtime.turn_run_snapshot_source),
+    }
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.
@@ -129,48 +115,30 @@ pub(crate) fn build_webui_services_with_channel_connection(
     channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    let services = runtime.services();
-    if services.local_runtime.is_some()
-        && let Some(provider) = runtime.outbound_delivery_target_provider()
-    {
+    if let Some(provider) = runtime.outbound_delivery_target_provider() {
         outbound_delivery_target_providers.push(provider);
     }
 
-    let admin_configuration_view = services
-        .local_runtime
-        .as_ref()
-        .and_then(|local_runtime| {
-            Some(AdminConfigurationViewProvider::new(
-                local_runtime.admin_configuration.clone()?,
-                local_runtime.admin_configuration_uses.as_ref().clone(),
-                local_runtime
-                    .extension_management
-                    .as_ref()?
-                    .installation_store_handle(),
-            ))
-        })
-        .unwrap_or_default();
+    let admin_configuration_view = AdminConfigurationViewProvider::new(
+        runtime.admin_configuration.clone(),
+        runtime.admin_configuration_uses.as_ref().clone(),
+        runtime.extension_management.installation_store_handle(),
+    );
     let mut api = ProductRebornServices::new_with_product_ports(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-        RuntimeProductCapabilityInvoker::from_services(services),
+        RuntimeProductCapabilityInvoker::from_runtime(runtime),
         admin_configuration_view,
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
-    // Admin user-management surface: wired only when the identity directory,
-    // the admin secret provisioner, and a token minter are all available.
-    // Otherwise the fail-closed RejectingAdminUserService default stands and
-    // admin routes report the service unavailable.
-    if let (Some(directory), Some(provisioner), Some(minter)) = (
-        runtime.reborn_user_directory(),
-        runtime.reborn_admin_secret_provisioner(),
-        runtime.reborn_admin_token_minter(),
-    ) {
+    // Admin user-management surface: the directory and secret provisioner are
+    // core runtime handles; only token minting is deployment-supplied.
+    if let Some(minter) = runtime.reborn_admin_token_minter() {
         api = api.with_admin_user_service(Arc::new(
             crate::admin_user_directory::RebornAdminUserDirectory::new(
-                directory,
-                provisioner,
+                runtime.reborn_user_directory(),
+                runtime.reborn_admin_secret_provisioner(),
                 minter,
             ),
         ));
@@ -229,22 +197,18 @@ pub(crate) fn build_webui_services_with_channel_connection(
             },
         );
     }
-    if let Some(local_runtime) = &services.local_runtime {
+    {
+        let tool_permission_overrides = &runtime.tool_permission_overrides;
+        let auto_approve_settings = &runtime.auto_approve_settings;
+        let persistent_approval_policies = &runtime.persistent_approval_policies;
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            local_runtime.tool_permission_overrides.clone();
+            tool_permission_overrides.clone();
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-            local_runtime.auto_approve_settings.clone();
+            auto_approve_settings.clone();
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
-        > = local_runtime.persistent_approval_policies.clone();
-        let tool_registry = local_runtime
-            .shared_extension_registry
-            .clone()
-            .unwrap_or_else(|| {
-                Arc::new(SharedExtensionRegistry::new(
-                    local_runtime.extension_registry.as_ref().clone(),
-                ))
-            });
+        > = persistent_approval_policies.clone();
+        let tool_registry = runtime.shared_extension_registry.clone();
         let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
             Vec::new()
         } else {
@@ -268,96 +232,71 @@ pub(crate) fn build_webui_services_with_channel_connection(
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
                 synthetic_operator_tools,
-                local_runtime.extension_management.clone(),
+                Some(runtime.extension_management.clone()),
             )),
         );
         let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
-        if let Some(extension_management) = &local_runtime.extension_management {
-            lifecycle_facade =
-                lifecycle_facade.with_extension_management(extension_management.clone());
-        }
-        if let Some(admin_configuration_resolver) = &local_runtime.admin_configuration_resolver {
-            lifecycle_facade = lifecycle_facade
-                .with_admin_configuration_resolver(admin_configuration_resolver.clone());
-        }
-        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+            RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
+        lifecycle_facade =
+            lifecycle_facade.with_extension_management(runtime.extension_management.clone());
+        lifecycle_facade = lifecycle_facade
+            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone());
+        if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
-        if let Some(product_auth) = &services.product_auth {
-            lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
-                product_auth.runtime_credential_account_selection_service(),
-            );
-        }
+        lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+            runtime
+                .product_auth
+                .runtime_credential_account_selection_service(),
+        );
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
-    if let Some(skill_management) = &services.skill_management {
-        // Share the activation selector's live master switch so a Settings
-        // toggle here changes the next turn's selection. Only the local-dev
-        // runtime builds a selector that reads this flag, so it is wired only
-        // when `local_runtime` is present. When absent (e.g. the production
-        // assembly, which has no flag-reading selector), the facade gets `None`
-        // and the toggle reports unavailable rather than silently writing to an
-        // orphan flag that controls nothing.
-        let auto_activate_flag = services
-            .local_runtime
-            .as_ref()
-            .map(|local_runtime| Arc::clone(&local_runtime.skill_auto_activate_learned));
-        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
-            Arc::clone(skill_management),
-            auto_activate_flag,
-        )));
-    }
-    if let Some(product_auth) = &services.product_auth {
-        api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
-            Arc::clone(product_auth),
-        )));
-    }
-    if let Some(backing) = automation_backing(services) {
-        let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
-            crate::automation::trigger_poller::SnapshotActiveRunLookup::new(
-                backing.snapshot_source,
-            ),
-        );
-        api = api.with_automation_product_facade(Arc::new(
-            RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
-                .with_scheduler_enabled(services.readiness.workers.trigger_poller),
-        ));
-    }
+    // The manifest-declared administrator-configuration surface is rendered and
+    // routed through `admin_configuration_view` (built above from the canonical
+    // Admin Configuration service); no separate channel-config facade port.
+    // Share the activation selector's live master switch when the selected skill
+    // context reads it. Deployments without that selector pass `None`, so the
+    // toggle reports unavailable rather than writing to an orphan flag.
+    let auto_activate_flag = Some(runtime.skill_auto_activate_learned.clone());
+    api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
+        Arc::clone(&runtime.skill_management),
+        auto_activate_flag,
+    )));
+    api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
+        Arc::clone(&runtime.product_auth),
+    )));
+    let backing = automation_backing(runtime);
+    let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
+        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(backing.snapshot_source),
+    );
+    api = api.with_automation_product_facade(Arc::new(
+        RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
+            .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
+    ));
     // First-class projects + membership (ACL). Built once per runtime over the
-    // scoped substrate — local-dev from `local_runtime`, production-shaped from
-    // the production store graph — via the shared `reborn_project_service`
-    // accessor so both build paths wire the same access-controlled facade.
-    if let Some(project_service) = runtime.reborn_project_service() {
-        api = api.with_project_service(project_service);
-    }
-    if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
-            Arc::clone(&local_runtime.outbound_preferences),
-            Arc::new(OutboundDeliveryTargetRegistry::new(
-                outbound_delivery_target_providers,
-            )),
-        )));
-    } else if !outbound_delivery_target_providers.is_empty() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "outbound delivery target providers require local runtime services".to_string(),
-        });
-    }
+    // scoped substrate and shared by every deployment path.
+    api = api.with_project_service(runtime.reborn_project_service());
+    api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
+        Arc::clone(&runtime.outbound_preferences),
+        Arc::new(OutboundDeliveryTargetRegistry::new(
+            outbound_delivery_target_providers,
+        )),
+    )));
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_facade(channel_connection);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
-        services.readiness.clone(),
+        runtime.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
-    if let Some(local_runtime) = &services.local_runtime {
+    {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
             RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
-                local_runtime.owner_user_id.clone(),
+                runtime.owner_user_id.clone(),
                 webui_boot_config,
             ),
         ));
@@ -379,8 +318,8 @@ pub(crate) fn build_webui_services_with_channel_connection(
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),
-        product_auth: services.product_auth.clone(),
-        readiness: services.readiness.clone(),
+        product_auth: Some(Arc::clone(&runtime.product_auth)),
+        readiness: runtime.readiness.clone(),
     })
 }
 
@@ -394,7 +333,7 @@ pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
-    let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
+    let keys = crate::LlmKeyStore::new(runtime.secret_store());
     let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);
@@ -430,10 +369,11 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
-    // The skill activation selector's live master switch (see
-    // `RebornRuntimeSubstrate::skill_auto_activate_learned`). The read facade
-    // reports it for the skills view; writes go through the first-party
-    // `builtin.skill_auto_activate_learned_set` capability.
+    // `RebornRuntimeStores::skill_auto_activate_learned`); the read facade
+    // reports it for the skills view. Writes go through the first-party
+    // `builtin.skill_auto_activate_learned_set` capability. `None` when no
+    // flag-reading selector is wired (the production assembly) — the toggle then
+    // reports unavailable instead of writing to a flag nothing reads.
     //
     // Process-global by design: this is a single-operator local-dev switch, so it
     // is intentionally not scoped per caller. A future multi-user surface would

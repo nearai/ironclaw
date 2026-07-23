@@ -9,7 +9,7 @@
 /// the integration harness prove capability-produced durable state survives a
 /// reopen, paralleling `assert_reply_persists_after_reopen`. Delegates to the
 /// production filesystem mounts + install-store load in `factory` so the reopen
-/// path never drifts from `build_reborn_services`. Tests only.
+/// path never drifts from `build_runtime_substrate`. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_local_dev_extension_installation_store_for_test(
     storage_root: &std::path::Path,

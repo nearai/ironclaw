@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountView, NetworkPolicy, SecretHandle, TenantId, UserId,
+    AgentId, CapabilityId, EffectKind, ExtensionId, MountView, NetworkPolicy, SecretHandle,
+    TenantId, UserId,
 };
 use ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER;
 use ironclaw_network::NetworkHttpEgress;
@@ -14,6 +15,11 @@ use super::{HarnessResult, HostRuntimeCapabilityHarness};
 pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) mounts: MountView,
     pub(crate) runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    /// Override the local runtime tenant/agent before the composed runtime is
+    /// built. Group harnesses set this to the canonical product scope so
+    /// runtime-owned facades keyed by tenant (for example channel connections)
+    /// match the turns that dispatch through the group.
+    pub(crate) local_runtime_identity: Option<(TenantId, AgentId)>,
     pub(crate) seed_extension_credentials: bool,
     /// Tenant the E-SKILL skill context source is constructed under, when this
     /// harness surfaces the synthetic `skill_activate` capability. Only
@@ -24,6 +30,10 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// so `skill_activate` resolves the seeded user skill against the same
     /// tenant the turn runs under. `None` for every other harness variant.
     pub(crate) skill_activation_tenant: Option<TenantId>,
+    /// System-skill fixtures copied into the local-dev storage root before
+    /// runtime construction. The runtime warms the system-skill descriptor cache
+    /// during build, so system fixtures must exist before `build_runtime`.
+    pub(crate) system_skill_fixtures: Vec<SystemSkillFixture>,
     /// Injected outbound-delivery facade double + `target_set` approval flag
     /// for the synthetic list/set test seam. The current-run router is a normal
     /// first-party capability and is not backed by this double. Only
@@ -35,7 +45,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
         bool,
     )>,
     /// C-JOURNEY: override the local-dev host network HTTP egress
-    /// (`RebornBuildInput::with_network_http_egress_for_test`). Without this,
+    /// (`RebornHostBindings::with_network_http_egress_for_test`). Without this,
     /// `build_local_runtime` defaults to a REAL `ReqwestNetworkTransport`
     /// (`factory.rs`), so any harness dispatching a bundled WASM capability
     /// that crosses HTTP (e.g. `github.*`) on the `new_with_options` path MUST
@@ -62,12 +72,12 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// (the invented-vendor fixture, overview §8).
     pub(crate) fixture_extension_dirs: Vec<(std::path::PathBuf, String)>,
     /// `first_party` extension factories the harness assembles into the
-    /// composition input (`RebornBuildInput::with_native_extension_factories`
+    /// composition input (`RebornHostBindings::with_native_extension_factories`
     /// — the same seam the binary uses).
     pub(crate) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     /// Channel-adapter bindings for non-`first_party`-runtime channel
-    /// extensions (`RebornBuildInput::with_channel_extension_bindings` — the
+    /// extensions (`RebornHostBindings::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
     pub(crate) channel_extension_bindings:
         Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
@@ -103,9 +113,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Opt-in; every other harness stays byte-identical.
     pub(crate) trigger_active_run_lookup_requested: bool,
     /// Provider-instance readiness map, "config set" + restart arm: when
-    /// `true`, registers a dummy Google OAuth backend on the `RebornBuildInput`
+    /// `true`, registers a dummy Google OAuth backend on the `RebornHostBindings`
     /// via the SAME generic production builder
-    /// (`RebornBuildInput::with_vendor_oauth_client`)
+    /// (`RebornHostBindings::with_vendor_oauth_client`)
     /// that `ironclaw config set google.client_id`/`client_secret` feeds in
     /// production — proving the readiness-map check clears once an operator
     /// configures the instance, with no test-only bypass. `false` (the
@@ -122,8 +132,10 @@ impl HostRuntimeHarnessOptions {
         Self {
             mounts,
             runtime_policy,
+            local_runtime_identity: None,
             seed_extension_credentials: false,
             skill_activation_tenant: None,
+            system_skill_fixtures: Vec::new(),
             outbound_target_facade: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
@@ -151,8 +163,31 @@ impl HostRuntimeHarnessOptions {
         self
     }
 
+    pub(crate) fn with_local_runtime_identity(
+        mut self,
+        tenant_id: TenantId,
+        agent_id: AgentId,
+    ) -> Self {
+        self.local_runtime_identity = Some((tenant_id, agent_id));
+        self
+    }
+
     pub(crate) fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
         self.skill_activation_tenant = Some(tenant);
+        self
+    }
+
+    pub(crate) fn with_system_skill_fixture(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
+        self.system_skill_fixtures.push(SystemSkillFixture {
+            name: name.into(),
+            description: description.into(),
+            prompt: prompt.into(),
+        });
         self
     }
 
@@ -204,7 +239,7 @@ impl HostRuntimeHarnessOptions {
 
     /// Binary-parity channel-adapter binding for channel extensions whose
     /// runtime is NOT `first_party` (extension-runtime P6): mirrors
-    /// `RebornBuildInput::with_channel_extension_bindings` the same way the
+    /// `RebornHostBindings::with_channel_extension_bindings` the same way the
     /// native factories mirror the CLI assembly. Without it, composition
     /// binds the transitional `HostServedChannelBridge`, whose `inbound`
     /// rejects every verified request with `ChannelError::Unsupported`.
@@ -253,6 +288,13 @@ impl HostRuntimeHarnessOptions {
         self.google_oauth_backend_for_test = true;
         self
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct SystemSkillFixture {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) prompt: String,
 }
 
 /// Typed capture of a `HostRuntimeCapabilityHarness::new_with_options(..)` call

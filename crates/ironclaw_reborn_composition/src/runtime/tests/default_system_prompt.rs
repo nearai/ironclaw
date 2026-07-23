@@ -12,7 +12,6 @@ use ironclaw_loop_host::{
 };
 use ironclaw_turns::TurnStatus;
 
-use crate::input::RebornBuildInput;
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::{RebornRuntimeError, build_reborn_runtime};
@@ -187,8 +186,8 @@ fn runtime_input(
     requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
 ) -> RebornRuntimeInput {
     let gateway = Arc::new(RecordingGateway { requests });
-    RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-system-prompt-owner", storage_root)
+    RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-system-prompt-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {

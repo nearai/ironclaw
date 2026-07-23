@@ -48,6 +48,28 @@ fn extension_search_json_without_query_lists_local_dev_packages() {
 }
 
 #[test]
+fn extension_search_json_finds_binary_bundled_first_party_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let json = run_extension_json(&reborn_home, &["search", "github", "--json"]);
+    let extensions = json["payload"]["extensions"]
+        .as_array()
+        .expect("extensions array");
+    let ids = extensions
+        .iter()
+        .filter_map(|extension| extension["package_ref"]["id"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(json["phase"], "installed");
+    assert_eq!(json["payload"]["kind"], "extension_search");
+    assert!(
+        ids.contains(&"github"),
+        "binary-bundled first-party packages must be visible to lifecycle search: {ids:?}"
+    );
+}
+
+#[test]
 fn extension_install_json_uses_reborn_home_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");

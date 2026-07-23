@@ -49,27 +49,6 @@ impl ironclaw_network::NetworkHttpEgress for SlackDmOpenNetworkEgress {
     }
 }
 
-fn runtime_extension_credential_gate(
-    runtime: &super::RebornRuntime,
-    user_id: &UserId,
-) -> crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate
-{
-    let mut scope = runtime.thread_scope.to_resource_scope();
-    scope.user_id = user_id.clone();
-    scope.mission_id = None;
-    scope.thread_id = None;
-    scope.invocation_id = InvocationId::new();
-    crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
-        scope,
-        runtime
-            .services()
-            .product_auth
-            .as_ref()
-            .expect("product auth")
-            .runtime_credential_account_selection_service(),
-    )
-}
-
 #[test]
 fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
     let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
@@ -148,84 +127,11 @@ output_schema_ref = "schemas/write.output.json"
     );
 }
 
-/// W5-WEBUI-API-2 follow-up (henrypark133 review): both `*_for_test`
-/// accessors document `None`/`Ok(None)` without a local-dev runtime;
-/// `RebornServices::disabled()` is the non-local-dev shape (no
-/// `local_runtime`), so this covers that branch without standing up a
-/// full runtime.
-#[test]
-fn local_dev_test_support_interaction_service_accessors_return_none_without_local_dev_runtime() {
-    struct UnusedTurnCoordinator;
-
-    #[async_trait]
-    impl ironclaw_turns::TurnCoordinator for UnusedTurnCoordinator {
-        async fn prepare_turn(
-            &self,
-            _scope: TurnScope,
-        ) -> Result<TurnRunId, ironclaw_turns::TurnError> {
-            unimplemented!("no local-dev runtime: neither accessor should reach the coordinator")
-        }
-
-        async fn submit_turn(
-            &self,
-            _request: SubmitTurnRequest,
-        ) -> Result<SubmitTurnResponse, ironclaw_turns::TurnError> {
-            unimplemented!("no local-dev runtime: neither accessor should reach the coordinator")
-        }
-
-        async fn resume_turn(
-            &self,
-            _request: ironclaw_turns::ResumeTurnRequest,
-        ) -> Result<ironclaw_turns::ResumeTurnResponse, ironclaw_turns::TurnError> {
-            unimplemented!("no local-dev runtime: neither accessor should reach the coordinator")
-        }
-
-        async fn cancel_run(
-            &self,
-            _request: ironclaw_turns::CancelRunRequest,
-        ) -> Result<ironclaw_turns::CancelRunResponse, ironclaw_turns::TurnError> {
-            unimplemented!("no local-dev runtime: neither accessor should reach the coordinator")
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<ironclaw_turns::TurnRunState, ironclaw_turns::TurnError> {
-            unimplemented!("no local-dev runtime: neither accessor should reach the coordinator")
-        }
-
-        async fn retry_turn(
-            &self,
-            _request: ironclaw_turns::RetryTurnRequest,
-        ) -> Result<ironclaw_turns::RetryTurnResponse, ironclaw_turns::TurnError> {
-            unimplemented!("no local-dev runtime: neither accessor should reach the coordinator")
-        }
-    }
-
-    let services = super::RebornServices::disabled();
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(UnusedTurnCoordinator);
-
-    let approval = services
-        .local_dev_approval_interaction_service_for_test(Arc::clone(&turn_coordinator))
-        .expect("no local-dev runtime means no capability-policy/resolver work is attempted");
-    assert!(
-        approval.is_none(),
-        "approval accessor must be None without a local-dev runtime"
-    );
-
-    let auth = services.local_dev_auth_interaction_service_for_test(turn_coordinator);
-    assert!(
-        auth.is_none(),
-        "auth accessor must be None without a local-dev runtime"
-    );
-}
-
 #[tokio::test]
 async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activation() {
     let root = tempfile::tempdir().expect("tempdir");
     let network_egress = Arc::new(SlackDmOpenNetworkEgress::default());
-    let build_input = RebornBuildInput::local_dev(
+    let build_input = crate::deployment::local_dev_build_input(
         "runtime-channel-bind-race-owner",
         root.path().join("local-dev"),
     )
@@ -237,23 +143,17 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         preference_target_codec: None,
     }]);
     let input =
-        RebornRuntimeInput::from_services(build_input).with_identity(RebornRuntimeIdentity {
+        RebornRuntimeInput::from_build_input(build_input).with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-channel-bind-race-tenant".to_string(),
             agent_id: "runtime-channel-bind-race-agent".to_string(),
             source_binding_id: "runtime-channel-bind-race-source".to_string(),
             reply_target_binding_id: "runtime-channel-bind-race-reply".to_string(),
         });
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
-        .services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime services");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
-    let operator = UserId::new("runtime-channel-bind-race-owner").expect("valid lifecycle caller");
+    let extension_management = &runtime.extension_management;
+    let operator = extension_management
+        .tenant_operator_user_id_for_test()
+        .clone();
     let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
         .expect("valid Slack ref");
     extension_management
@@ -261,12 +161,11 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("install Slack before OAuth callback");
 
-    local_runtime
-        .admin_configuration_resolver
-        .as_ref()
-        .expect("administrator configuration resolver")
-        .configure_admin_group_for_test(
-            "extension.slack",
+    let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
+    runtime
+        .channel_config
+        .save(
+            &slack_id,
             vec![
                 ("slack_bot_token".to_string(), "xoxb-test".to_string()),
                 (
@@ -275,16 +174,6 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
                 ),
                 ("slack_team_id".to_string(), "T-RUNTIME".to_string()),
                 ("slack_api_app_id".to_string(), "A-RUNTIME".to_string()),
-                ("slack_installation_id".to_string(), "I-RUNTIME".to_string()),
-                ("slack_bot_user_id".to_string(), "U-BOT-RUNTIME".to_string()),
-                (
-                    "slack_oauth_client_id".to_string(),
-                    "runtime-client-id".to_string(),
-                ),
-                (
-                    "slack_oauth_client_secret".to_string(),
-                    "runtime-client-secret".to_string(),
-                ),
             ],
         )
         .await
@@ -316,10 +205,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .expect("Slack callback maps to the installed channel extension");
     drop(rollback);
 
-    let dm_targets = local_runtime
-        .channel_dm_target_store
-        .as_ref()
-        .expect("channel DM-target store");
+    let dm_targets = &runtime.channel_dm_target_store;
 
     let record = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -339,11 +225,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 
     extension_management
-        .activate_with_prechecked_credentials_for_test(
-            slack_ref,
-            ExtensionActivationMode::Static,
-            &operator,
-        )
+        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
         .await
         .expect("activate Slack and publish the generic host snapshot");
 
@@ -353,7 +235,6 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     tokio::task::yield_now().await;
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 }
-
 /// Wiring guard: the `regex_skill_activation_enabled` flag from
 /// [`RebornRuntimeInput`] must reach
 /// [`SkillActivationSelectorConfig::regex_activation_enabled`]
@@ -619,13 +500,11 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
         .expect("local-dev is exempt from the scheduler wake wiring requirement");
 }
 
-use ironclaw_authorization::CapabilityLeaseStore;
-use ironclaw_events::{EventStreamKey, ReadScope};
+use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
-    Action, ActivityId, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
-    CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal, Resolution,
-    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
+    ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal, Resolution,
+    ResourceScope, TenantId, ThreadId, UserId,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -641,15 +520,14 @@ use ironclaw_loop_host::{
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     CREATE_THREAD_OPERATION, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecyclePublicState, LifecycleReadinessBlocker, ProductCapabilityInput,
-    RESOLVE_GATE_OPERATION, RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSkillListResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    SUBMIT_TURN_OPERATION, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    LifecycleReadinessBlocker, ProductCapabilityInput, RESOLVE_GATE_OPERATION,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, SUBMIT_TURN_OPERATION,
+    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref,
 };
-use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest, MessageKind,
@@ -657,22 +535,21 @@ use ironclaw_threads::{
     ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
-    IdempotencyKey, LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, GetRunStateRequest, IdempotencyKey,
+    LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnId, TurnRunId,
+    TurnScope, TurnStatus,
     run_profile::{
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
-        ModelProfileId, ProviderToolCall, RegisterProviderToolCallRequest,
-        RunProfileResolutionRequest, RunProfileResolver, SkillVisibility, VisibleCapabilityRequest,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ModelProfileId,
+        ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+        RunProfileResolver, SkillVisibility, VisibleCapabilityRequest,
     },
-    runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
 };
 use rust_decimal_macros::dec;
 
 use crate::RebornRuntimeProcessBinding;
 use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
-use crate::input::RebornBuildInput;
+use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -683,10 +560,7 @@ use crate::webui::facade::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
-use super::{
-    RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND, TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS,
-    TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET, build_reborn_runtime,
-};
+use super::{RebornSkillSourceKind, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1152,23 +1026,21 @@ impl HostManagedModelGateway for AuthGateToolCallingGateway {
             .lock()
             .expect("auth-gate gateway requests lock poisoned")
             .push(request);
-        let extension_install_id =
-            CapabilityId::new(ironclaw_product_workflow::EXTENSION_INSTALL_CAPABILITY_ID)
-                .expect("extension install id");
-        let extension_install_tool = capabilities
+        let notion_search_id = CapabilityId::new("notion.notion-search").expect("notion search id");
+        let notion_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == extension_install_id)
-            .expect("extension install capability should be visible");
+            .find(|definition| definition.capability_id == notion_search_id)
+            .expect("activated Notion capability should be visible");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("provider-turn-auth-gate".to_string()),
                 id: "call-auth-gate".to_string(),
-                name: extension_install_tool.name,
-                arguments: serde_json::json!({ "extension_id": "notion" }),
+                name: notion_tool.name,
+                arguments: serde_json::json!({ "query": "project notes" }),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
@@ -1956,9 +1828,12 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     };
     let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-nearai-session-mcp-owner", local_dev_root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-nearai-session-mcp-owner",
+            local_dev_root,
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_resolved_llm(llm)
     .with_identity(RebornRuntimeIdentity {
@@ -1969,24 +1844,17 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     });
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-    let operator = UserId::new("runtime-nearai-session-mcp-owner").expect("valid lifecycle caller");
-    let credential_gate = runtime_extension_credential_gate(&runtime, &operator);
     let projection = extension_management
-        .project(nearai_ref, &operator, Some(&credential_gate))
+        .project(
+            nearai_ref,
+            extension_management.tenant_operator_user_id_for_test(),
+        )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePublicState::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -2013,9 +1881,12 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let local_dev_root = root.path().join("local-dev");
     let session_dir = tempfile::tempdir().expect("session tempdir");
 
-    let services = crate::build_reborn_services(
-        RebornBuildInput::local_dev("runtime-nearai-stored-mcp-owner", local_dev_root.clone())
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let services = crate::factory::build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "runtime-nearai-stored-mcp-owner",
+            local_dev_root.clone(),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .await
     .expect("services build for stored key seed");
@@ -2066,8 +1937,8 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     };
     let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-nearai-stored-mcp-owner", local_dev_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-nearai-stored-mcp-owner", local_dev_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_resolved_llm(llm)
@@ -2079,24 +1950,17 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     });
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-    let operator = UserId::new("runtime-nearai-stored-mcp-owner").expect("valid lifecycle caller");
-    let credential_gate = runtime_extension_credential_gate(&runtime, &operator);
     let projection = extension_management
-        .project(nearai_ref, &operator, Some(&credential_gate))
+        .project(
+            nearai_ref,
+            extension_management.tenant_operator_user_id_for_test(),
+        )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePublicState::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -2115,11 +1979,7 @@ async fn nearai_mcp_runtime_access_secret(
     runtime: &super::RebornRuntime,
     owner_scope: ResourceScope,
 ) -> String {
-    let product_auth = runtime
-        .services()
-        .product_auth
-        .as_ref()
-        .expect("product auth");
+    let product_auth = &runtime.product_auth;
     let auth_scope = ironclaw_auth::AuthProductScope::credential_owner(
         &owner_scope,
         ironclaw_auth::AuthSurface::Api,
@@ -2143,7 +2003,7 @@ async fn nearai_mcp_runtime_access_secret(
     assert_eq!(account.scope.resource.project_id, owner_scope.project_id);
 
     let handle = account.access_secret.expect("NEAR AI access secret");
-    let store = runtime.services().secret_store();
+    let store = runtime.secret_store();
     let lease = store
         .lease_once(&account.scope.resource, &handle)
         .await
@@ -2170,8 +2030,8 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let tenant = "runtime-nearai-prebuild-mcp-tenant";
     let agent = "runtime-nearai-prebuild-mcp-agent";
 
-    let services = crate::build_reborn_services(
-        RebornBuildInput::local_dev(owner, local_dev_root.clone())
+    let services = crate::factory::build_runtime_substrate(
+        crate::deployment::local_dev_build_input(owner, local_dev_root.clone())
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .await
@@ -2223,8 +2083,8 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     };
     let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(owner, local_dev_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(owner, local_dev_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_resolved_llm(llm)
@@ -2609,8 +2469,8 @@ async fn provider_factory_runs_during_production_boot() {
     // No `boot` config is supplied, so the boot-time reload is skipped and the
     // dead endpoint is never contacted; the factory still wraps the swappable
     // at cold-boot construction.
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("provider-factory-boot-owner", local_dev_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("provider-factory-boot-owner", local_dev_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_resolved_llm(llm)
@@ -2664,9 +2524,12 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     let config_home_dir = root.path().join("config-home");
     std::fs::create_dir_all(&config_home_dir).expect("config home dir");
 
-    let services = crate::build_reborn_services(
-        RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root.clone())
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let services = crate::factory::build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "runtime-nearai-stored-key-owner",
+            local_dev_root.clone(),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .await
     .expect("services build for stored key seed");
@@ -2707,8 +2570,8 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
         RebornProfile::LocalDev,
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-nearai-stored-key-owner", local_dev_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_boot_config(boot)
@@ -2736,8 +2599,16 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+/// Runtime-store unification (branch `unify-runtime-store-graph`): every build
+/// now composes the single unified runtime store graph, so the hook framework
+/// is wired for a production libsql build exactly as it is for local-dev — the
+/// old "hooks are not wired for production runtime launch" rejection premise no
+/// longer holds (its `else if hooks_config.is_enabled()` branch in
+/// `build_reborn_runtime` is now unreachable). This locks the new-but-correct
+/// behavior: enabling hooks on a production runtime builds and validates
+/// readiness instead of failing `MalformedConfig`.
 #[tokio::test]
-async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
+async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
         libsql::Builder::new_local(dir.path().join("reborn.db"))
@@ -2746,8 +2617,8 @@ async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             crate::RebornCompositionProfile::Production,
             "runtime-production-hooks-owner",
             db,
@@ -2783,23 +2654,14 @@ async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
     })
     .with_hooks_config(HooksActivationConfig::enabled());
 
-    let err = match build_reborn_runtime(input).await {
-        Ok(runtime) => {
-            runtime.shutdown().await.expect("shutdown");
-            panic!("production runtime must reject enabled hooks without hook wiring");
-        }
-        Err(err) => err,
-    };
-
-    assert!(
-        matches!(
-            err,
-            super::RebornRuntimeError::MalformedConfig { ref reason }
-                if reason.contains("hook framework")
-                    && reason.contains("production runtime launch")
-        ),
-        "expected malformed hook config error, got {err:#}"
+    let runtime = build_reborn_runtime(input)
+        .await
+        .expect("unified production runtime wires the hook framework when hooks are enabled");
+    assert_eq!(
+        runtime.readiness().state,
+        RebornReadinessState::ProductionValidated
     );
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
@@ -2816,8 +2678,8 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             crate::RebornCompositionProfile::Production,
             "runtime-production-cutover-owner",
             db,
@@ -2858,21 +2720,25 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
         .expect("validated production readiness should start runtime");
 
     assert_eq!(
-        runtime.services().readiness.state,
+        runtime.readiness().state,
         RebornReadinessState::ProductionValidated
     );
-    assert!(runtime.services().readiness.diagnostics.is_empty());
-    assert!(runtime.services().readiness.workers.turn_runner);
+    assert!(runtime.readiness().diagnostics.is_empty());
+    assert!(runtime.readiness().workers.turn_runner);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-/// Regression guard for Firat's review: a trajectory observer is only wired
-/// through the local-dev capability path, so supplying one to a production
-/// runtime (no local runtime to observe) must fail fast rather than silently
-/// produce an empty trajectory.
+/// Runtime-store unification (branch `unify-runtime-store-graph`): the
+/// trajectory observer is wired through the (now single, always-present)
+/// capability path, so a production runtime observes turns exactly as local-dev
+/// does. The old rejection guard (Firat's review) existed because a
+/// non-local-dev runtime had no capability hook and would silently produce an
+/// empty trajectory — that premise no longer holds (the `else` reject branch in
+/// `build_reborn_runtime` is now unreachable), so supplying an observer is
+/// accepted and wired rather than rejected.
 #[tokio::test]
-async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
+async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
         libsql::Builder::new_local(dir.path().join("reborn.db"))
@@ -2880,14 +2746,12 @@ async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
             .await
             .expect("libsql db"),
     );
-    let gateway = Arc::new(RecordingGateway {
-        reply: "production".to_string(),
-        requests: Arc::new(StdMutex::new(Vec::new())),
-    });
+    let gateway = Arc::new(ToolCallingGateway::default());
+    let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let observer = Arc::new(RecordingTrajectoryObserver::default());
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             crate::RebornCompositionProfile::Production,
             "runtime-observer-reject-owner",
             db,
@@ -2921,20 +2785,57 @@ async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
         source_binding_id: "runtime-observer-reject-source".to_string(),
         reply_target_binding_id: "runtime-observer-reject-reply".to_string(),
     })
-    .with_raw_trajectory_observer(observer)
-    .with_model_gateway_override(gateway);
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(3),
+    })
+    .with_raw_trajectory_observer(observer.clone())
+    .with_model_gateway_override(gateway_for_runtime);
 
-    let err = match build_reborn_runtime(input).await {
-        Ok(runtime) => {
-            runtime.shutdown().await.expect("shutdown");
-            panic!("production runtime must reject a trajectory observer");
-        }
-        Err(err) => err,
-    };
+    let runtime = build_reborn_runtime(input)
+        .await
+        .expect("unified production runtime accepts and wires a trajectory observer");
+    assert_eq!(
+        runtime.readiness().state,
+        RebornReadinessState::ProductionValidated
+    );
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
+    let reply = tokio::time::timeout(
+        RUNTIME_SEND_TIMEOUT,
+        runtime.send_user_message(&conversation, "use echo tool"),
+    )
+    .await
+    .expect("runtime send should finish")
+    .expect("runtime send should succeed");
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("tool ok"));
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let inputs = observer.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+    let (input_call_id, input_capability, arguments) = &inputs[0];
+    assert!(!input_call_id.is_empty(), "input call_id should be present");
+    assert_eq!(input_capability, "builtin.echo");
+    assert_eq!(
+        arguments,
+        &serde_json::json!({"message": "hello from tool"}),
+        "observer should receive the raw model-emitted tool arguments"
+    );
+
+    let results = observer.results.lock().expect("results lock");
+    assert_eq!(results.len(), 1, "exactly one capability result observed");
+    let (result_call_id, result_capability, output) = &results[0];
+    assert_eq!(result_capability, "builtin.echo");
+    assert_eq!(
+        result_call_id, input_call_id,
+        "result and input callbacks correlate by call_id"
+    );
     assert!(
-        matches!(err, super::RebornRuntimeError::InvalidArgument { ref reason }
-            if reason.contains("trajectory observer") && reason.contains("local-dev")),
-        "expected an InvalidArgument naming the local-dev-only constraint, got {err:#}"
+        output.to_string().contains("hello from tool"),
+        "observer should receive the staged capability output, got {output}"
     );
 }
 
@@ -2961,72 +2862,6 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
 }
 
 #[tokio::test]
-async fn local_dev_yolo_records_trusted_laptop_access_audit_event() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let host_home = root.path().join("host-home");
-    std::fs::create_dir_all(&host_home).expect("host home");
-    let mut policy = local_dev_runtime_policy();
-    policy.requested_profile = RuntimeProfile::LocalYolo;
-    policy.resolved_profile = RuntimeProfile::LocalYolo;
-    policy.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
-    policy.network_mode = NetworkMode::Direct;
-    policy.secret_mode = SecretMode::InheritedEnv;
-
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev_with_profile(
-            crate::RebornCompositionProfile::LocalDevYolo,
-            "runtime-yolo-audit-owner",
-            root.path().join("local-dev"),
-        )
-        .with_runtime_policy(policy)
-        .with_local_dev_confirmed_host_home_root(host_home),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-yolo-audit-tenant".to_string(),
-        agent_id: "runtime-yolo-audit-agent".to_string(),
-        source_binding_id: "runtime-yolo-audit-source".to_string(),
-        reply_target_binding_id: "runtime-yolo-audit-reply".to_string(),
-    });
-
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let stream = EventStreamKey::new(
-        runtime.thread_scope.tenant_id.clone(),
-        runtime.actor_user_id.clone(),
-        Some(runtime.thread_scope.agent_id.clone()),
-    );
-    let replay = runtime
-        .services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime")
-        .audit_log
-        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
-        .await
-        .expect("audit replay");
-
-    let audit = replay
-        .entries
-        .iter()
-        .map(|entry| &entry.record)
-        .find(|record| record.action.kind == TRUSTED_LAPTOP_ACCESS_AUDIT_KIND)
-        .expect("trusted laptop access audit event");
-    assert_eq!(audit.stage, AuditStage::After);
-    assert_eq!(
-        audit.action.target.as_deref(),
-        Some(TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET)
-    );
-    assert_eq!(
-        audit
-            .result
-            .as_ref()
-            .and_then(|result| result.status.as_deref()),
-        Some(TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS)
-    );
-    assert_eq!(audit.decision.kind, "allowed");
-    runtime.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
 async fn local_dev_runtime_readiness_reports_trigger_poller_worker() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
@@ -3034,8 +2869,8 @@ async fn local_dev_runtime_readiness_reports_trigger_poller_worker() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-trigger-readiness-owner",
             root.path().join("local-dev"),
         )
@@ -3054,8 +2889,8 @@ async fn local_dev_runtime_readiness_reports_trigger_poller_worker() {
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
-    assert!(runtime.services().readiness.workers.turn_runner);
-    assert!(runtime.services().readiness.workers.trigger_poller);
+    assert!(runtime.readiness().workers.turn_runner);
+    assert!(runtime.readiness().workers.trigger_poller);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -3068,8 +2903,8 @@ async fn local_dev_runtime_rejects_trigger_poller_without_creator_authorization(
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-trigger-auth-required-owner",
             root.path().join("local-dev"),
         )
@@ -3110,8 +2945,8 @@ async fn local_dev_runtime_accepts_trigger_poller_with_creator_access_checker() 
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-trigger-auth-supplied-owner",
             root.path().join("local-dev"),
         )
@@ -3131,8 +2966,8 @@ async fn local_dev_runtime_accepts_trigger_poller_with_creator_access_checker() 
         .await
         .expect("runtime builds with creator access checker");
 
-    assert!(runtime.services().readiness.workers.turn_runner);
-    assert!(runtime.services().readiness.workers.trigger_poller);
+    assert!(runtime.readiness().workers.turn_runner);
+    assert!(runtime.readiness().workers.trigger_poller);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -3145,8 +2980,8 @@ async fn local_dev_runtime_disables_trigger_poller_worker_by_default() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-trigger-disabled-owner",
             root.path().join("local-dev"),
         )
@@ -3162,8 +2997,8 @@ async fn local_dev_runtime_disables_trigger_poller_worker_by_default() {
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
-    assert!(runtime.services().readiness.workers.turn_runner);
-    assert!(!runtime.services().readiness.workers.trigger_poller);
+    assert!(runtime.readiness().workers.turn_runner);
+    assert!(!runtime.readiness().workers.trigger_poller);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -3182,8 +3017,8 @@ async fn local_dev_runtime_rejects_invalid_trigger_poller_worker_config() {
         )
         .with_tenant_scoped_authorizer_for_test();
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-trigger-invalid-config-owner",
             root.path().join("local-dev"),
         )
@@ -3222,8 +3057,8 @@ async fn local_dev_runtime_shutdown_cancels_trigger_poller_worker() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-trigger-shutdown-owner",
             root.path().join("local-dev"),
         )
@@ -3241,7 +3076,7 @@ async fn local_dev_runtime_shutdown_cancels_trigger_poller_worker() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    assert!(runtime.services().readiness.workers.trigger_poller);
+    assert!(runtime.readiness().workers.trigger_poller);
 
     tokio::time::timeout(std::time::Duration::from_secs(2), runtime.shutdown())
         .await
@@ -3268,8 +3103,8 @@ async fn local_dev_yolo_message_flow_ignores_model_budget_gate() {
         },
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev_with_profile(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input_with_profile(
             crate::RebornCompositionProfile::LocalDevYolo,
             "runtime-yolo-budget-owner",
             root.path().join("local-dev"),
@@ -3321,9 +3156,12 @@ async fn send_user_message_returns_completed_assistant_text_with_recording_gatew
         reply: "recorded runtime reply".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-success-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-success-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-success-tenant".to_string(),
@@ -3338,26 +3176,6 @@ async fn send_user_message_returns_completed_assistant_text_with_recording_gatew
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
-        .services
-        .local_runtime
-        .as_ref()
-        .expect("runtime should use local-dev RebornServices substrate");
-    assert!(
-        Arc::ptr_eq(&runtime.thread_service, &local_runtime.thread_service),
-        "REPL runtime should use the thread service owned by RebornServices"
-    );
-    assert!(
-        Arc::ptr_eq(
-            &runtime.turn_coordinator,
-            runtime
-                .services
-                .turn_coordinator
-                .as_ref()
-                .expect("RebornServices turn coordinator")
-        ),
-        "REPL runtime should drive turns through RebornServices"
-    );
     let conversation = runtime.new_conversation().await.expect("conversation");
     let reply = tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
@@ -3378,9 +3196,12 @@ async fn send_user_message_returns_completed_assistant_text_with_recording_gatew
 async fn send_user_message_preserves_model_unavailable_after_retry_budget() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(ModelOutageGateway::default());
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-model-outage-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-model-outage-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-model-outage-tenant".to_string(),
@@ -3450,8 +3271,8 @@ async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
         reply: "auto capture reply".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(&owner, root.path().join("local-dev"))
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(&owner, root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -3551,8 +3372,8 @@ async fn send_user_message_persists_personal_owner_for_webui() {
         reply: "owner-check reply".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(actor_owner_id, root.path().join("local-dev"))
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(actor_owner_id, root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -3624,9 +3445,12 @@ async fn send_user_message_renders_cli_origin_in_model_request() {
         reply: "webui-origin-check reply".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-origin-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-webui-origin-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-origin-tenant".to_string(),
@@ -3695,8 +3519,8 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
     std::fs::create_dir_all(&host_home).expect("host home");
     let gateway = Arc::new(AuthGateToolCallingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev_with_profile(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "runtime-auth-gate-owner",
             root.path().join("local-dev"),
@@ -3719,6 +3543,36 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
     .with_model_gateway_override(gateway_for_runtime);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let extension_management = &runtime.extension_management;
+    let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+        .expect("valid notion ref");
+    extension_management
+        .install(
+            notion_ref.clone(),
+            extension_management.tenant_operator_user_id_for_test(),
+        )
+        .await
+        .expect("install Notion MCP");
+    // v3 hosted-MCP packages publish no model-visible tools on static
+    // activation; script tools/list discovery so the notion-search tool
+    // the auth-gate gateway calls exists as a model-visible capability.
+    extension_management
+        .activate_with_prechecked_credentials_for_test(
+            notion_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: ResourceScope::local_default(
+                    UserId::new("runtime-auth-gate-owner").expect("valid user"),
+                    InvocationId::new(),
+                )
+                .expect("valid scope"),
+                runtime_http_egress: Arc::new(
+                    crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
+                ),
+            },
+        )
+        .await
+        .expect("activate Notion MCP with scripted discovery");
+
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
         .enable_global_auto_approve_for_test(&conversation)
@@ -3771,9 +3625,12 @@ async fn cancel_run_propagates_to_subagent_children() {
         reply: "unused".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-cancel-child-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-cancel-child-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-cancel-child-tenant".to_string(),
@@ -3937,9 +3794,12 @@ async fn send_user_message_uses_caller_supplied_skill_context_source() {
     let skill_context_source = Arc::new(FailingSkillContextSource::default());
     let skill_context_source_for_input: Arc<dyn HostSkillContextSource> =
         skill_context_source.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-skill-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-skill-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-skill-tenant".to_string(),
@@ -3986,9 +3846,12 @@ async fn local_dev_runtime_exposes_host_runtime_capabilities_to_model_calls() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(ToolCallingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-tools-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-tools-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-tools-tenant".to_string(),
@@ -4127,9 +3990,12 @@ async fn local_dev_runtime_forwards_tool_call_trajectory_to_raw_observer() {
     let gateway = Arc::new(ToolCallingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let observer = Arc::new(RecordingTrajectoryObserver::default());
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-trajectory-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-trajectory-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-trajectory-tenant".to_string(),
@@ -4200,9 +4066,12 @@ async fn local_dev_runtime_safe_preview_observer_receives_bounded_payload() {
     let gateway = Arc::new(LargeEchoToolCallingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let observer = Arc::new(RecordingTrajectoryObserver::default());
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-preview-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-preview-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-preview-tenant".to_string(),
@@ -4276,9 +4145,12 @@ async fn local_dev_runtime_wires_input_skill_context_source_to_model_calls() {
         ),
     ]));
     let skill_context_source: Arc<dyn HostSkillContextSource> = skill_source;
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-skill-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-skill-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-skill-tenant".to_string(),
@@ -4361,8 +4233,8 @@ async fn local_dev_runtime_prefers_configured_skill_context_source_over_filesyst
         ),
     ]));
     let skill_context_source: Arc<dyn HostSkillContextSource> = skill_source;
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-skill-override-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-skill-override-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4463,8 +4335,8 @@ async fn local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls() {
         reply: "filesystem skill context ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-filesystem-skill-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-filesystem-skill-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4528,6 +4400,49 @@ async fn local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls() {
 }
 
 #[tokio::test]
+async fn local_dev_runtime_backfills_legacy_owner_skill_root() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("skills/legacy-helper")).expect("legacy skill dir");
+    std::fs::write(
+        storage_root.join("skills/legacy-helper/SKILL.md"),
+        skill_md(
+            "legacy-helper",
+            "legacy helper description",
+            "LEGACY_HELPER_PROMPT_SENTINEL",
+        ),
+    )
+    .expect("write legacy helper skill");
+
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-legacy-skill-owner",
+            storage_root.clone(),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
+    );
+    let runtime = build_reborn_runtime(input).await.expect("runtime");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+
+    let result = runtime
+        .execute_skill_message(&conversation, "$legacy-helper")
+        .await
+        .expect("execute skill message");
+
+    assert_eq!(result.plan.activations().len(), 1);
+    assert_eq!(result.plan.activations()[0].name, "legacy-helper");
+    assert!(
+        storage_root
+            .join(
+                "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
+            )
+            .exists()
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
 async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
@@ -4558,8 +4473,8 @@ async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
         reply: "asset helper ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-skill-exec-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-skill-exec-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4672,8 +4587,8 @@ async fn local_dev_runtime_fails_closed_for_ambiguous_explicit_skill_before_mode
         reply: "should not reach model".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-ambiguous-skill-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-ambiguous-skill-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4742,8 +4657,8 @@ async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker
         reply: "setup marker ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-setup-marker-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-setup-marker-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4827,8 +4742,8 @@ async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent
         reply: "setup marker absent ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-setup-marker-absent-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-setup-marker-absent-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4890,8 +4805,8 @@ async fn local_dev_runtime_rejects_workspace_overlapping_default_skill_roots() {
         reply: "should not build".to_string(),
         requests,
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-overlap-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-overlap-owner", storage_root)
             .with_local_dev_workspace_root(workspace_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -4944,8 +4859,8 @@ async fn local_dev_runtime_skips_invalid_filesystem_skill_before_model_call() {
         reply: "invalid skill skipped".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-bad-skill-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-bad-skill-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -4996,10 +4911,13 @@ async fn local_dev_runtime_maps_workspace_to_configured_root() {
     .expect("write sentinel");
     let gateway = Arc::new(WorkspaceListingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-workspace-owner", root.path().join("local-dev"))
-            .with_local_dev_workspace_root(workspace_root.path().to_path_buf())
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-workspace-owner",
+            root.path().join("local-dev"),
+        )
+        .with_local_dev_workspace_root(workspace_root.path().to_path_buf())
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-workspace-tenant".to_string(),
@@ -5050,9 +4968,12 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         reply: "webui projection ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-webui-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-tenant".to_string(),
@@ -5156,7 +5077,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         )),
         "webui bundle should expose only projection stream events"
     );
-    assert_eq!(bundle.readiness, runtime.services().readiness);
+    assert_eq!(bundle.readiness, runtime.readiness().clone());
     assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -5168,7 +5089,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
 /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
 /// through the same `ProjectScopedAttachmentReader` production wires
 /// `attachment_read_port` with. The C-ATTACH integration tests exercise the
-/// shared `RebornServices::read_write_workspace_filesystem` recipe via the
+/// shared `RebornRuntimeStores::read_write_workspace_filesystem` recipe via the
 /// `local_dev_attachment_test_support_for_test` seam, but never call through
 /// this `RebornRuntime` wrapper itself; this closes that gap so a future
 /// regression in the wrapper (not just the shared recipe) fails a test
@@ -5181,8 +5102,8 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         reply: "attachment mount ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-attachment-mount-owner",
             root.path().join("local-dev"),
         )
@@ -5204,17 +5125,12 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     let read_write_filesystem = runtime
         .webui_workspace_filesystem()
         .expect("local-dev runtime composes a read-write webui workspace filesystem");
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .expect("local-dev runtime substrate");
-    // Mirrors production's `attachment_read_port` wiring (read-only
-    // `workspace_filesystem`), so the read side is the same authority a
-    // vision-capable model's multimodal part would resolve through.
-    let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-        &local_runtime.workspace_filesystem,
-    ));
+    // The read port reads the same durable bytes the lander writes; production's
+    // `attachment_read_port` uses the read-only workspace view, but the read side
+    // is byte-identical over the read-write view (the reader never writes), so
+    // this test resolves the same authority a vision-capable model would.
+    let read_port =
+        crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
     let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {
@@ -5307,30 +5223,6 @@ async fn submit_webui_extension_setup(
     query_webui_extension_setup(api, caller, package_id).await
 }
 
-async fn install_webui_extension(
-    api: &dyn ironclaw_product_workflow::ProductSurface,
-    caller: WebUiAuthenticatedCaller,
-    package_ref: LifecyclePackageRef,
-) {
-    let resolution = api
-        .invoke(
-            caller,
-            CapabilityId::new(ironclaw_product_workflow::EXTENSION_INSTALL_CAPABILITY_ID)
-                .expect("extension install capability id"),
-            ProductCapabilityInput::json(serde_json::json!({
-                "extension_id": package_ref.id.as_str()
-            })),
-            ActivityId::new(),
-        )
-        .await
-        .expect("install extension through ProductSurface capability");
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
-        Resolution::Blocked(blocked) if blocked.kind() == "auth" => {}
-        other => panic!("extension install did not succeed: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5338,21 +5230,12 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         reply: "webui lifecycle ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-webui-lifecycle-owner",
             root.path().join("local-dev"),
         )
-        .with_runtime_policy(local_dev_runtime_policy())
-        .with_vendor_oauth_client(
-            ironclaw_auth::GOOGLE_PROVIDER_ID,
-            crate::OAuthClientConfig::new(
-                "runtime-webui-google-client.apps.googleusercontent.com",
-                "http://127.0.0.1/oauth/callback/google",
-                None,
-            )
-            .expect("valid test Google OAuth client config"),
-        ),
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-lifecycle-tenant".to_string(),
@@ -5374,14 +5257,11 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         Some(AgentId::new("runtime-webui-lifecycle-agent").unwrap()),
         None,
     );
-    let github_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-        .expect("valid package ref");
-    install_webui_extension(bundle.api.as_ref(), caller.clone(), github_ref.clone()).await;
 
     let setup = query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
-    assert_eq!(setup.phase, LifecyclePublicState::SetupNeeded);
+    assert_eq!(setup.phase, InstallationState::Installed);
     assert!(setup.blockers.is_empty());
     assert_eq!(setup.secrets.len(), 1);
     assert_eq!(setup.secrets[0].name, "github_runtime_token");
@@ -5392,9 +5272,6 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
-    let google_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
-        .expect("valid package ref");
-    install_webui_extension(bundle.api.as_ref(), caller.clone(), google_ref).await;
     let google_setup =
         query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
@@ -5449,8 +5326,8 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         reply: "webui outbound ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-webui-outbound-owner",
             root.path().join("local-dev"),
         )
@@ -5509,9 +5386,9 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
     assert!(cleared_preferences.final_reply_target.is_none());
 
-    let targets_page = tokio::time::timeout(
-        Duration::from_secs(15),
-        bundle.api.query(
+    let targets_page = bundle
+        .api
+        .query(
             caller,
             ironclaw_product_workflow::RebornViewQuery {
                 view_id: ironclaw_product_workflow::OUTBOUND_DELIVERY_TARGETS_VIEW
@@ -5520,24 +5397,14 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
                 params: serde_json::json!({}),
                 cursor: None,
             },
-        ),
-    )
-    .await
-    .expect("outbound target query must not hang")
-    .expect("outbound target listing uses composed facade");
+        )
+        .await
+        .expect("outbound target listing uses composed facade");
     let targets: ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    assert_eq!(targets.targets.len(), 1);
-    assert_eq!(
-        targets.targets[0].target.target_id.as_str(),
-        ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID
-    );
-    assert_eq!(targets.targets[0].target.channel.as_str(), "web_app");
+    assert!(targets.targets.is_empty());
 
-    tokio::time::timeout(Duration::from_secs(15), runtime.shutdown())
-        .await
-        .expect("runtime shutdown must not hang")
-        .expect("runtime shutdown");
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
@@ -5547,9 +5414,12 @@ async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
         reply: "webui skill ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-skill-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-webui-skill-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-skill-tenant".to_string(),
@@ -5630,8 +5500,8 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
         reply: "unused".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-webui-no-agent-owner",
             root.path().join("local-dev"),
         )
@@ -5649,8 +5519,7 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
     })
     .with_model_gateway_override(gateway);
 
-    let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    runtime.services.host_runtime = None;
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let caller_without_agent = WebUiAuthenticatedCaller::new(
         TenantId::new("runtime-webui-no-agent-tenant").unwrap(),
@@ -5693,8 +5562,8 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
         reply: "unused".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-webui-diagnostics-owner",
             root.path().join("local-dev"),
         )
@@ -5773,15 +5642,18 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
 }
 
 #[tokio::test]
-async fn build_webui_services_without_local_runtime_returns_503_on_list_automations() {
+async fn build_webui_services_without_local_runtime_still_lists_automations_from_core_store() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-no-host-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-webui-no-host-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-no-host-tenant".to_string(),
@@ -5795,8 +5667,7 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
     })
     .with_model_gateway_override(gateway);
 
-    let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    runtime.services.local_runtime = None;
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let caller = WebUiAuthenticatedCaller::new(
         TenantId::new("runtime-webui-no-host-tenant").unwrap(),
@@ -5805,7 +5676,7 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
         None,
     );
 
-    let error = bundle
+    let response = bundle
         .api
         .query(
             caller,
@@ -5817,12 +5688,12 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
             },
         )
         .await
-        .expect_err("missing host runtime should leave automation facade unavailable");
+        .expect("automation facade reads the core trigger repository");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
-    assert_eq!(error.status_code, 503);
-    assert!(error.retryable);
+    let automations: ironclaw_product_workflow::RebornListAutomationsResponse =
+        serde_json::from_value(response.payload).expect("automations payload");
+    assert!(automations.automations.is_empty());
+    assert!(!automations.scheduler_enabled);
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
@@ -5833,8 +5704,8 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         reply: "webui lifecycle ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-webui-credential-owner",
             root.path().join("local-dev"),
         )
@@ -5860,9 +5731,6 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
-    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
-    install_webui_extension(bundle.api.as_ref(), caller.clone(), package_ref).await;
-
     let first = submit_webui_extension_setup(
         bundle.api.as_ref(),
         caller.clone(),
@@ -5918,8 +5786,8 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         reply: "unused".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-webui-approval-owner",
             root.path().join("local-dev"),
         )
@@ -5989,9 +5857,12 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         reply: "unused".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-auth-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-webui-auth-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-auth-tenant".to_string(),
@@ -6050,215 +5921,6 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
 }
 
 #[tokio::test]
-async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(RecordingGateway {
-        reply: "unused".to_string(),
-        requests: Arc::new(StdMutex::new(Vec::new())),
-    });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-audit-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-webui-audit-tenant".to_string(),
-        agent_id: "runtime-webui-audit-agent".to_string(),
-        source_binding_id: "runtime-webui-audit-source".to_string(),
-        reply_target_binding_id: "runtime-webui-audit-reply".to_string(),
-    })
-    .with_poll_settings(PollSettings {
-        interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
-    })
-    .with_model_gateway_override(gateway);
-
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    stop_turn_runner_worker_for_manual_state_test(&runtime).await;
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
-    let caller = WebUiAuthenticatedCaller::new(
-        TenantId::new("runtime-webui-audit-tenant").unwrap(),
-        UserId::new("runtime-webui-audit-owner").unwrap(),
-        Some(AgentId::new("runtime-webui-audit-agent").unwrap()),
-        None,
-    );
-    let created = CREATE_THREAD_OPERATION
-        .execute_on(
-            bundle.api.as_ref(),
-            caller.clone(),
-            WebUiCreateThreadRequest {
-                client_action_id: Some("create-webui-audit-thread".to_string()),
-                requested_thread_id: None,
-                project_id: None,
-            },
-        )
-        .await
-        .expect("create thread");
-    let scope = caller.turn_scope(created.thread.thread_id.clone());
-    let actor = caller.actor();
-    let submitted = runtime
-        .turn_coordinator
-        .submit_turn(SubmitTurnRequest {
-            requested_model: None,
-            scope: scope.clone(),
-            actor: actor.clone(),
-            accepted_message_ref: AcceptedMessageRef::new("msg:audit").unwrap(),
-            source_binding_ref: SourceBindingRef::new("src:audit").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:audit").unwrap(),
-            requested_run_profile: None,
-            idempotency_key: IdempotencyKey::new("submit-audit").unwrap(),
-            received_at: chrono::Utc::now(),
-            requested_run_id: None,
-            parent_run_id: None,
-            subagent_depth: 0,
-            spawn_tree_root_run_id: None,
-            product_context: None,
-        })
-        .await
-        .expect("submit turn");
-    let run_id = match submitted {
-        SubmitTurnResponse::Accepted { run_id, .. } => run_id,
-    };
-    let local_runtime = runtime
-        .services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime services");
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    let claimed = local_runtime
-        .turn_state
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter: Some(scope.clone()),
-        })
-        .await
-        .expect("claim run")
-        .expect("claimed run");
-    assert_eq!(claimed.state.run_id, run_id);
-    let request_id = ApprovalRequestId::new();
-    let gate_ref = approval_gate_ref(request_id).expect("approval gate");
-    local_runtime
-        .turn_state
-        .block_run(BlockRunRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            checkpoint_id: TurnCheckpointId::new(),
-            state_ref: LoopCheckpointStateRef::new("checkpoint:audit").unwrap(),
-            reason: BlockedReason::Approval {
-                gate_ref: gate_ref.clone(),
-            },
-        })
-        .await
-        .expect("block approval");
-    let resource_scope = ResourceScope {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: actor.user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-        mission_id: None,
-        thread_id: Some(scope.thread_id.clone()),
-        invocation_id: InvocationId::new(),
-    };
-    let capability = CapabilityId::new("demo.echo").expect("capability");
-    let mut approval = ApprovalRequest {
-        id: request_id,
-        correlation_id: CorrelationId::new(),
-        requested_by: Principal::User(actor.user_id.clone()),
-        action: Box::new(Action::SpawnCapability {
-            capability: capability.clone(),
-            estimated_resources: ResourceEstimate::default(),
-        }),
-        invocation_fingerprint: None,
-        reason: "raw /Users/alice/private token sk-live".to_string(),
-        reusable_scope: None,
-    };
-    approval.invocation_fingerprint = Some(
-        InvocationFingerprint::for_spawn(
-            &resource_scope,
-            &capability,
-            &ResourceEstimate::default(),
-            &serde_json::json!({"secret": "hidden"}),
-        )
-        .expect("fingerprint"),
-    );
-    local_runtime
-        .approval_requests
-        .save_pending(resource_scope.clone(), approval)
-        .await
-        .expect("save approval");
-    let streamed = bundle
-        .api
-        .stream_events(
-            caller.clone(),
-            RebornStreamEventsRequest {
-                thread_id: scope.thread_id.to_string(),
-                after_cursor: None,
-            },
-        )
-        .await
-        .expect("approval gate event stream");
-    assert!(
-        streamed.events.iter().any(|event| {
-            matches!(
-                event.payload(),
-                ProductOutboundPayload::GatePrompt(prompt)
-                    if prompt.turn_run_id == run_id
-                        && prompt.gate_ref == gate_ref.as_str()
-                        && prompt.headline == "Approval required"
-            )
-        }),
-        "blocked approval run should be visible as a gate prompt on the product event stream"
-    );
-
-    RESOLVE_GATE_OPERATION
-        .execute_on(
-            bundle.api.as_ref(),
-            caller,
-            WebUiResolveGateRequest {
-                client_action_id: Some("resolve-webui-audit-gate".to_string()),
-                thread_id: Some(scope.thread_id.to_string()),
-                run_id: Some(run_id.to_string()),
-                gate_ref: Some(gate_ref.as_str().to_string()),
-                resolution: Some("approved".to_string()),
-                always: None,
-                credential_ref: None,
-            },
-        )
-        .await
-        .expect("resolve approval gate");
-
-    let records = runtime.webui_approval_audit_sink().records();
-    assert_eq!(records.len(), 1);
-    let serialized = serde_json::to_string(&records[0]).expect("serialize audit");
-    for forbidden in ["/Users/alice/private", "sk-live", "hidden", "sha256:"] {
-        assert!(
-            !serialized.contains(forbidden),
-            "approval audit leaked {forbidden}: {serialized}"
-        );
-    }
-    let leases = local_runtime
-        .capability_leases
-        .leases_for_scope(&resource_scope)
-        .await;
-    assert_eq!(leases.len(), 1);
-    assert_eq!(
-        leases[0].grant.issued_by,
-        Principal::User(actor.user_id.clone()),
-        "product approval service should stamp the approving user on the resume lease"
-    );
-    assert!(
-        leases[0]
-            .grant
-            .constraints
-            .allowed_effects
-            .contains(&EffectKind::SpawnProcess)
-    );
-    runtime.shutdown().await.expect("runtime shutdown");
-}
-
-#[tokio::test]
 async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
@@ -6283,8 +5945,8 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         reply: "webui skill context ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-webui-skill-owner", storage_root)
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-webui-skill-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -6496,8 +6158,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 .expect("lifecycle facade must be seeded before send_user_message");
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
-            // Install for the exact run user. Operator role never creates a
-            // tenant-wide membership; install auto-reconciles readiness.
+            // #5459 P1: act as the runtime owner (the tenant operator) so
+            // the install is tenant-shared and visible to the run's
+            // surface user — a non-operator install would now be private.
             let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                 tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
                 user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
@@ -6514,6 +6177,15 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 )
                 .await
                 .expect("install github extension");
+            facade_handle
+                .facade
+                .execute(
+                    ctx,
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .expect("activate github extension");
+
             // Register call #2 — after surface change.
             // Post-fix: reuses current port, so both candidates carry the same surface version.
             call1.id = "call-multi-2".to_string();
@@ -6542,8 +6214,8 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     });
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway;
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "runtime-multi-tool-surface-owner",
             root.path().join("local-dev"),
         )
@@ -6564,19 +6236,10 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
     // Seed the lifecycle facade before the model gateway runs.
-    let local_runtime = runtime
-        .services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime substrate");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management")
-        .clone();
-    let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-        local_runtime.skill_management.clone(),
-    )
+    let extension_management = runtime.extension_management.clone();
+    let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+        &runtime.skill_management,
+    ))
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
     facade_slot
@@ -6630,9 +6293,12 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         reply: "busy-drain ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-rejected-busy-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "runtime-rejected-busy-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-rejected-busy-tenant".to_string(),
@@ -6900,9 +6566,12 @@ async fn scheduler_liveness_not_stopped_under_contention() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("scheduler-liveness-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
+            "scheduler-liveness-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "scheduler-liveness-tenant".to_string(),
@@ -7011,8 +6680,8 @@ async fn scheduler_liveness_stopped_after_test_helper_stops_worker() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "scheduler-liveness-helper-owner",
             root.path().join("local-dev"),
         )
@@ -7060,8 +6729,8 @@ async fn scheduler_stopped_rejects_send_user_message() {
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input(
             "scheduler-stopped-reject-owner",
             root.path().join("local-dev"),
         )

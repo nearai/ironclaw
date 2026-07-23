@@ -46,8 +46,8 @@ use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput,
-    RebornProductAuthServices, build_reborn_services,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornProductAuthServices,
+    RebornRuntimeInput, build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -87,6 +87,21 @@ pub(crate) type HarnessCapabilityParts = (
 pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
 pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
+fn write_system_skill_fixture(
+    storage_root: &std::path::Path,
+    name: &str,
+    description: &str,
+    prompt: &str,
+) -> HarnessResult<()> {
+    let dir = storage_root.join("system").join("skills").join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    Ok(())
+}
+
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -119,6 +134,7 @@ impl HarnessCapabilityMode {
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -138,7 +154,10 @@ impl HarnessCapabilityMode {
             }
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
-                    harness.install_durable_capability_io(turn_thread_service);
+                    harness.install_durable_capability_io(
+                        turn_thread_service,
+                        trajectory_observer.clone(),
+                    );
                 }
                 if harness
                     .capability_ids
@@ -152,7 +171,7 @@ impl HarnessCapabilityMode {
                     harness.install_trigger_active_run_lookup_for_test(turn_store)?;
                 }
                 Ok((
-                    harness.capability_factory(milestone_sink),
+                    harness.capability_factory(milestone_sink, trajectory_observer),
                     Arc::new(HostRuntimeHarnessSurfaceResolver),
                     harness.input_resolver(),
                     harness.capability_result_writer(),
@@ -328,7 +347,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// piecewise test-support accessors. `Some` only for `new_with_options`-built
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
-    reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    reborn_services: Option<ironclaw_reborn_composition::RebornRuntime>,
     /// Set from `HostRuntimeHarnessOptions::with_trigger_active_run_lookup_for_test()`
     /// (#5886) at construction; read by `HarnessCapabilityMode::into_parts` to
     /// decide whether to call `install_trigger_active_run_lookup_for_test` once
@@ -622,8 +641,10 @@ impl HostRuntimeCapabilityHarness {
         let HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
+            local_runtime_identity,
             seed_extension_credentials,
             skill_activation_tenant,
+            system_skill_fixtures,
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
@@ -640,6 +661,14 @@ impl HostRuntimeCapabilityHarness {
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        for fixture in &system_skill_fixtures {
+            write_system_skill_fixture(
+                &storage_root,
+                &fixture.name,
+                &fixture.description,
+                &fixture.prompt,
+            )?;
+        }
         let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {
             copy_dir_recursive(
@@ -662,11 +691,15 @@ impl HostRuntimeCapabilityHarness {
             )?
             .with_local_dev_confirmed_host_home_root(host_home_root)
         } else {
-            RebornBuildInput::local_dev(service_label, storage_root)
+            ironclaw_reborn_composition::local_dev_build_input(service_label, storage_root)
         };
+        if let Some((tenant_id, agent_id)) = &local_runtime_identity {
+            input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
+        }
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
         }
+        input = input.with_bundled_first_party_for_test();
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
@@ -698,7 +731,17 @@ impl HostRuntimeCapabilityHarness {
             input =
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
-        let services = build_reborn_services(input).await?;
+        let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        if let Some((tenant_id, agent_id)) = local_runtime_identity {
+            runtime_input =
+                runtime_input.with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: service_label.to_string(),
+                    reply_target_binding_id: service_label.to_string(),
+                });
+        }
+        let services = build_runtime(runtime_input).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
@@ -736,7 +779,7 @@ impl HostRuntimeCapabilityHarness {
         // C-JOURNEY: capture product-auth before `services.host_runtime` is
         // moved out below, so `seed_github_credential_account` can create a
         // real credential account later (auth-gate happy-path resume).
-        let product_auth = services.product_auth.clone();
+        let product_auth = Some(services.product_auth_for_test());
         // E-SKILL: build the local-dev skill context source only when this
         // harness surfaces the synthetic `skill_activate` capability (i.e.
         // `skill_activation_tools`). Built with the caller-supplied tenant
@@ -807,8 +850,7 @@ impl HostRuntimeCapabilityHarness {
         // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
         // not just the pieces already extracted above.
         let runtime = services
-            .host_runtime
-            .clone()
+            .host_runtime_for_test()
             .ok_or("local-dev Reborn services missing host runtime")?;
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
@@ -889,17 +931,19 @@ impl HostRuntimeCapabilityHarness {
     /// gate dispatch instead of the harness's direct-resume test shortcut.
     pub(crate) fn reborn_services_for_test(
         &self,
-    ) -> Option<&ironclaw_reborn_composition::RebornServices> {
+    ) -> Option<&ironclaw_reborn_composition::RebornRuntime> {
         self.reborn_services.as_ref()
     }
 
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            trajectory_observer,
         })
     }
 
@@ -951,11 +995,13 @@ impl HostRuntimeCapabilityHarness {
     fn install_durable_capability_io(
         &self,
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) {
         let (io, result_writer_io) =
-            ironclaw_reborn_composition::test_support::staged_capability_io_for_test(
+            ironclaw_reborn_composition::test_support::staged_capability_io_with_observer_for_test(
                 thread_service.clone(),
                 self.user_id.clone(),
+                trajectory_observer,
             );
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
@@ -1445,16 +1491,7 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        let dir = self
-            .storage_root_for_test()
-            .join("system")
-            .join("skills")
-            .join(name);
-        std::fs::create_dir_all(&dir)?;
-        let body = format!(
-            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
-        );
-        std::fs::write(dir.join("SKILL.md"), body)?;
+        write_system_skill_fixture(&self.storage_root_for_test(), name, description, prompt)?;
         Ok(())
     }
 
@@ -1567,6 +1604,7 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
         // the harness opts in, else the fixed harness user — see
@@ -1822,7 +1860,7 @@ impl HostRuntimeCapabilityHarness {
                 .unwrap_or_else(|| {
                     Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
                 }),
-            trajectory_observer: None,
+            trajectory_observer,
             // Feeds the same active-extension authority (installed +
             // activated extensions like `github`, `gmail`, MCP servers)
             // production's `capability_wiring` folds into every refresh

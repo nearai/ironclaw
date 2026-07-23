@@ -258,13 +258,10 @@ pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRunt
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(
-    services: &ironclaw_reborn_composition::RebornServices,
+    services: &ironclaw_reborn_composition::RebornRuntime,
     user_id: &UserId,
 ) -> HarnessResult<()> {
-    let product_auth = services
-        .product_auth
-        .as_ref()
-        .ok_or("extension lifecycle harness missing product auth")?;
+    let product_auth = services.product_auth_for_test();
     let scope = AuthProductScope::credential_owner(
         &ResourceScope {
             tenant_id: TenantId::new("tenant-e2e")?,

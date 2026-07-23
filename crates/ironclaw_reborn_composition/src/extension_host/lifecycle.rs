@@ -27,7 +27,7 @@ use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAcco
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
-type SkillManagementMountResolver =
+pub(crate) type SkillManagementMountResolver =
     dyn Fn(&ResourceScope) -> Result<MountView, HostApiError> + Send + Sync;
 
 #[derive(Clone)]
@@ -58,6 +58,15 @@ impl RebornLocalSkillManagementPort {
             filesystem,
             skill_management_mount_resolver,
         }
+    }
+
+    /// The scope→mount-view resolver this port was composed with. Reused by the
+    /// WebUI product-capability invoker so skill-management gestures dispatched
+    /// through the product surface resolve the same mounts the agent-loop skill
+    /// tools do — local-dev and production wire different resolvers at build
+    /// time, so this is the single source of truth for which one is live.
+    pub(crate) fn mount_resolver(&self) -> Arc<SkillManagementMountResolver> {
+        Arc::clone(&self.skill_management_mount_resolver)
     }
 
     pub(crate) fn owner_scope(&self) -> Result<ResourceScope, RebornLocalSkillManagementError> {

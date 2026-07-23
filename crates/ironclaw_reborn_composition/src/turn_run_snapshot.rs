@@ -7,16 +7,14 @@
 //!
 //! Exists so a `test-support` caller can substitute the turn-state store a
 //! locator reads from without those locators depending on the specific
-//! concrete `ComposedTurnStateStore` type: `RebornIntegrationGroup`'s
-//! real runs execute against its own `shared.turn_store`
-//! (`FilesystemTurnStateRowStore<HarnessTurnBackend>`, built by
-//! `build_default_planned_runtime`) — a DIFFERENT store than
-//! `RebornServices.local_runtime.turn_state`, which is this crate's own
-//! `build_reborn_services` composition. Production wiring is unaffected:
-//! `build_reborn_runtime` still passes `Arc::clone(&local_runtime.turn_state)`
-//! as the source, which implements this trait via the blanket impl below, so
-//! its snapshot behavior is byte-identical to before this seam existed — this
-//! module only replaces a hardcoded field type with a trait-object one.
+//! concrete `FilesystemTurnStateRowStore<CompositeRootFilesystem>` type:
+//! `RebornIntegrationGroup`'s real runs execute against its own
+//! `shared.turn_store` (`FilesystemTurnStateRowStore<HarnessTurnBackend>`,
+//! built by `build_default_planned_runtime`) — a DIFFERENT store than the one
+//! assembled by `build_runtime_substrate`. This module replaces a hardcoded
+//! concrete field type with a trait-object snapshot source; every real
+//! turn-state implementation remains the same `FilesystemTurnStateRowStore<F>`
+//! over the configured filesystem backend.
 //!
 //! Returns the raw `ironclaw_turns::TurnError`; each consumer maps it into
 //! its own domain error at its own boundary (`ProductWorkflowError` for the
@@ -31,10 +29,38 @@ pub(crate) trait TurnRunSnapshotSource: Send + Sync {
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError>;
 }
 
-// The one production turn-state store. Generic over any `RootFilesystem`
-// backend so both `ComposedTurnStateStore` (production/local-dev, which
-// resolves to `FilesystemTurnStateRowStore<CompositeRootFilesystem>` or
-// `<InMemoryBackend>`) and a caller's own store (e.g.
+/// A late-rebindable snapshot source. The trigger subsystem reads the current
+/// inner source on every snapshot, so a `test-support` caller can repoint it at
+/// its own `FilesystemTurnStateRowStore` after the runtime is built (the
+/// `RebornIntegrationGroup` case the module docstring describes). Production
+/// installs it over the composed runtime's own store and never repoints it, so
+/// behavior is identical to holding the store directly.
+pub(crate) struct RebindableTurnRunSnapshotSource {
+    inner: std::sync::Arc<std::sync::RwLock<std::sync::Arc<dyn TurnRunSnapshotSource>>>,
+}
+
+impl RebindableTurnRunSnapshotSource {
+    pub(crate) fn new(
+        inner: std::sync::Arc<std::sync::RwLock<std::sync::Arc<dyn TurnRunSnapshotSource>>>,
+    ) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl TurnRunSnapshotSource for RebindableTurnRunSnapshotSource {
+    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        let source = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        source.turn_run_snapshot().await
+    }
+}
+
+// The one turn-state store. Generic over any `RootFilesystem` backend, so the
+// composition row store and a caller's own row store (for example
 // `RebornIntegrationGroup`'s `FilesystemTurnStateRowStore<HarnessTurnBackend>`)
 // implement this identically.
 #[async_trait]

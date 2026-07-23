@@ -144,6 +144,11 @@ struct RawToolV3 {
     /// still applies.
     #[serde(default)]
     network_targets: Vec<ironclaw_host_api::NetworkTargetPattern>,
+    /// Optional per-tool egress cap (bytes). `#[serde(default)]` so tools
+    /// without the key parse to `None` (no cap). Threads to the capability's
+    /// `NetworkPolicy.max_egress_bytes` at grant issuance.
+    #[serde(default)]
+    max_egress_bytes: Option<u64>,
     #[serde(default)]
     resource_profile: Option<ironclaw_host_api::ResourceProfile>,
 }
@@ -382,6 +387,7 @@ pub(crate) fn parse_v3(
         let raw_capability = RawCapabilityV2 {
             id: format!("{id}.mcp_server"),
             network_targets: Vec::new(),
+            max_egress_bytes: None,
             implements: Vec::new(),
             description: format!(
                 "Hosted MCP server connection for {} (discovery template; never model-visible)",
@@ -421,13 +427,15 @@ pub(crate) fn parse_v3(
                     || !tool.effects.is_empty()
                     || tool.resource_profile.is_some()
                     || !tool.network_targets.is_empty()
+                    || tool.max_egress_bytes.is_some()
                     || tool.output_schema_ref.is_some()
                 {
                     return Err(ManifestV3Error::Invalid {
                         reason: format!(
                             "static tool `{}` on an [mcp] manifest inherits the server \
                              connection template; remove its credentials, effects, \
-                             network_targets, output_schema_ref, and resource_profile",
+                             network_targets, max_egress_bytes, output_schema_ref, and \
+                             resource_profile",
                             tool.id
                         ),
                     });
@@ -435,6 +443,7 @@ pub(crate) fn parse_v3(
                 RawCapabilityV2 {
                     id: tool.id,
                     network_targets: Vec::new(),
+                    max_egress_bytes: None,
                     implements: Vec::new(),
                     description: tool.description,
                     effects: with_dispatch_effect(mcp.effects.clone()),
@@ -452,6 +461,7 @@ pub(crate) fn parse_v3(
             _ => RawCapabilityV2 {
                 id: tool.id,
                 network_targets: tool.network_targets,
+                max_egress_bytes: tool.max_egress_bytes,
                 implements: Vec::new(),
                 description: tool.description,
                 effects: with_dispatch_effect(tool.effects.clone()),

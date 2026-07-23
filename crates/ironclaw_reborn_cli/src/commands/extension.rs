@@ -1,8 +1,9 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use ironclaw_reborn_composition::{
-    LifecycleProductResponse, RebornExtensionLifecycleCommand, build_reborn_services,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
+    LifecycleProductResponse, RebornExtensionLifecycleCommand, RebornRuntimeInput,
+    build_reborn_runtime, execute_reborn_extension_lifecycle_command,
+    render_reborn_extension_lifecycle_response,
 };
 
 use crate::context::RebornCliContext;
@@ -100,11 +101,18 @@ fn execute_lifecycle_command(
         .build()
         .context("failed to build tokio runtime for extension lifecycle command")?;
     runtime.block_on(async move {
-        let services = build_reborn_services(runtime_services.services_input)
+        let services_input =
+            crate::runtime::with_binary_host_extension_bindings(runtime_services.services_input)?;
+        let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(services_input))
             .await
-            .context("failed to assemble Reborn services for extension lifecycle command")?;
-        execute_reborn_extension_lifecycle_command(&services, command)
+            .context("failed to assemble Reborn runtime for extension lifecycle command")?;
+        let response = execute_reborn_extension_lifecycle_command(&runtime, command)
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from)?;
+        runtime
+            .shutdown()
+            .await
+            .context("failed to shut down Reborn runtime after extension lifecycle command")?;
+        Ok(response)
     })
 }

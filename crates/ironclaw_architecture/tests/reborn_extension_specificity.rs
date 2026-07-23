@@ -1129,16 +1129,19 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/gsuite.rs",
-        "google",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/projection/display_preview.rs",
         "web-access",
     ),
+    // DEL-7: the manifest-egress policy builder's comment names the GSuite
+    // (Google API hosts) and web-access (Exa MCP) egress it no longer
+    // special-cases — the code routes purely on manifest-declared targets.
     (
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
-        "web_access",
+        "google",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "web-access",
     ),
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) still assembled in composition because [mcp].server is patched from llm_admin config; DEFERRED — finish per the handoff (move static data to first_party_extensions::packages::nearai_mcp, inject the URL through the with_channel_extension_bindings-style seam)
     (
@@ -1163,6 +1166,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/input.rs",
+        "nearaimcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/deployment.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/deployment.rs",
         "nearaimcp",
     ),
     (
@@ -1192,22 +1203,17 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
     ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    // lane-4: web-access-mod — the web-access first-party handler assembly module + its registration — extension-specific host wiring pending a generic first-party-handler seam keyed by manifest service
+    // DEL-7: the `google_oauth_configured` build-time signal on the neutral
+    // first-party registrar context (a field name, not an extension branch —
+    // the concrete GSuite handler lives in the binary). `nearaimcp` is the
+    // deferred nearai-slice concern above, folded forward in factory wiring.
+    (
+        "crates/ironclaw_reborn_composition/src/extension_host/first_party.rs",
+        "google",
+    ),
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
-        "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/lib.rs",
-        "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/web_access.rs",
-        "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/web_access.rs",
-        "webaccess",
+        "nearaimcp",
     ),
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),

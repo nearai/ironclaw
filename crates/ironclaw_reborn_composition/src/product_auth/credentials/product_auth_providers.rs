@@ -48,8 +48,8 @@ pub(crate) enum ClientCredentialValue {
     Static(SecretString),
 }
 
-/// Deferred handle source over administrator configuration: the reader is
-/// built after the auth
+/// Deferred handle source over administrator configuration
+/// (`[admin_configuration]`): the resolver is built after the auth
 /// engine (its durable stores land later in factory assembly), so the
 /// engine holds this slot and resolves handles through it at request time.
 /// Unfilled (startup window, or a composition path without the configure
@@ -82,7 +82,7 @@ impl fmt::Debug for AdminConfigurationCredentialSlot {
 /// Handle-keyed deployment client-credential data. Recipes name their
 /// `client_credentials` handles; composition registers values for those
 /// handles (env config) — data, never a vendor code path. Handles without a
-/// registered value falls back to administrator configuration, so
+/// registered value fall back to the operator channel configuration, so
 /// recipe client material saved through the generic configure surface
 /// resolves with no per-vendor wiring.
 #[derive(Clone, Default)]
@@ -177,12 +177,15 @@ pub(crate) fn compose_provider_client(
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
     admin_configuration_credentials: AdminConfigurationCredentialSlot,
+    first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
-        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes()
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
-            })?,
+        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes(
+            first_party_bundles,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+        })?,
     ));
 
     let mut client_credentials = CompositionClientCredentials::default();

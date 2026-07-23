@@ -502,6 +502,7 @@ fn first_party_capability_manifest(
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile,
         origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
     })

@@ -38,8 +38,8 @@ pub(crate) mod extension_lifecycle_capabilities;
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
 pub(crate) mod extension_removal_cleanup;
+pub(crate) mod first_party;
 pub(crate) mod generic_host;
-pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
 #[cfg(test)]
 mod host_remediation_contract_tests;

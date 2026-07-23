@@ -221,7 +221,13 @@ impl ProductAuthRuntimeCredentialAccountSelector {
     }
 }
 
-pub(crate) trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
+/// Decides whether a resolved credential account is visible to a given
+/// requester extension. Injected on [`crate::RebornProductAuthServices`] so the
+/// assembling binary can supply an extension-family-aware policy (e.g. the
+/// GSuite Google-account policy) without composition naming a concrete
+/// extension crate; absent an injection, the strictly-more-restrictive
+/// [`DefaultRuntimeCredentialAccountVisibilityPolicy`] applies.
+pub trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
     fn account_visible_to_requester(
         &self,
         account: &CredentialAccount,
@@ -229,10 +235,12 @@ pub(crate) trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
     ) -> bool;
 }
 
-#[cfg(test)]
-struct DefaultRuntimeCredentialAccountVisibilityPolicy;
+/// The safe default: an account is visible only when it is authorized for the
+/// requester extension. Strictly more restrictive than any extension-family
+/// policy an injected [`RuntimeCredentialAccountVisibilityPolicy`] may widen to,
+/// so a build that injects no policy fails closed.
+pub(crate) struct DefaultRuntimeCredentialAccountVisibilityPolicy;
 
-#[cfg(test)]
 impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccountVisibilityPolicy {
     fn account_visible_to_requester(
         &self,

@@ -5,7 +5,6 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
-use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
     CapabilityId, CapabilitySurfaceKind, ChannelConnectionDescriptor, ChannelConnectionStrategy,
     ExtensionId, HostPortCatalog, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
@@ -122,6 +121,17 @@ pub(crate) struct AvailableExtensionPackage {
     /// as each package migrates, its copy moves here and its match arm is
     /// deleted. See overview §3 (package self-containment).
     pub(crate) onboarding_override: Option<LifecycleExtensionOnboarding>,
+    /// Bespoke OAuth-setup credential requirement carried down from a migrated
+    /// inventory bundle, replacing the manifest-derived requirement. `None` for
+    /// packages whose derived requirement is correct. Used by a package whose
+    /// connect flow authorizes a shared account with setup scopes distinct from
+    /// its per-tool runtime scopes.
+    pub(crate) oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
+    /// Extra catalog search aliases carried down from an injected first-party
+    /// bundle (e.g. the GSuite family's "google"/"workspace" terms). Empty for
+    /// filesystem/imported packages. Folds the former per-id special-case in
+    /// `package_search_terms` into injected data so search names no concrete id.
+    pub(crate) search_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +321,16 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
+    // A migrated package may carry a bespoke OAuth-setup connect requirement
+    // (a personal-OAuth connect whose setup scopes differ from the per-tool
+    // runtime scopes) that replaces the manifest-derived one. Composition never
+    // names the package — the override rides down from its inventory bundle.
+    if package.package_ref.kind == LifecyclePackageKind::Extension
+        && let Some(oauth_setup) = &package.oauth_setup_override
+    {
+        return vec![oauth_setup.clone()];
+    }
+
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
@@ -378,28 +398,52 @@ fn credential_requirement_name(
 #[derive(Debug, Default)]
 pub(crate) struct AvailableExtensionCatalog {
     packages: Vec<Arc<AvailableExtensionPackage>>,
+    /// The injected first-party bundle id set (extension-runtime DEL-7) this
+    /// catalog reserves against filesystem/uploaded shadowing. Carried so the
+    /// import path (`imported_extension_package`) can reject reserved ids
+    /// without re-deriving the first-party inventory. Set on the composed
+    /// runtime catalog; empty on standalone/filesystem-only catalogs.
+    reserved_bundled_ids: Vec<String>,
 }
 
 impl AvailableExtensionCatalog {
     pub(crate) fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
         Self {
             packages: packages.into_iter().map(Arc::new).collect(),
+            reserved_bundled_ids: Vec::new(),
         }
+    }
+
+    /// Record the injected first-party bundle id set this catalog reserves. Set
+    /// once on the composed runtime catalog (after the filesystem + first-party
+    /// merge) so the import path can consult it.
+    pub(crate) fn with_reserved_bundled_ids(mut self, reserved_bundled_ids: Vec<String>) -> Self {
+        self.reserved_bundled_ids = reserved_bundled_ids;
+        self
+    }
+
+    /// The injected first-party bundle id set reserved by this catalog.
+    pub(crate) fn reserved_bundled_ids(&self) -> &[String] {
+        &self.reserved_bundled_ids
     }
 
     #[cfg(test)]
     pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
-        Self::from_first_party_assets_with_nearai_mcp_config(None)
+        Self::from_first_party_assets_with_nearai_mcp_config(
+            None,
+            &crate::extension_host::first_party::first_party_bundles_from_inventory(),
+        )
     }
 
+    /// Build the first-party catalog from the binary-injected neutral bundle set
+    /// (extension-runtime DEL-7). Composition never names a concrete first-party
+    /// package; the bundles arrive as opaque data on the build input.
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
+        first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
     ) -> Result<Self, ProductWorkflowError> {
         let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
-        // Packages migrated to the self-contained inventory
-        // (`ironclaw_first_party_extensions::packages`) are consumed here as
-        // opaque bundles — composition never names them (overview §3).
-        for bundle in ironclaw_first_party_extensions::packages::bundled_packages() {
+        for bundle in first_party_bundles {
             packages.push(package_from_bundle(bundle)?);
         }
         Ok(Self::from_packages(packages))
@@ -409,9 +453,11 @@ impl AvailableExtensionCatalog {
     /// the recipe catalog behind the auth engine (fallback for extensions not
     /// yet active). Shared vendors unify per overview §3.2 (union scope
     /// ceiling; incompatible recipes are a startup error).
-    pub(crate) fn bundled_vendor_recipes()
-    -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductWorkflowError> {
-        let catalog = Self::from_first_party_assets_with_nearai_mcp_config(None)?;
+    pub(crate) fn bundled_vendor_recipes(
+        first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
+    ) -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductWorkflowError> {
+        let catalog =
+            Self::from_first_party_assets_with_nearai_mcp_config(None, first_party_bundles)?;
         let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("host port catalog unavailable for recipe resolution: {error}"),
@@ -463,31 +509,34 @@ impl AvailableExtensionCatalog {
     pub(crate) async fn from_filesystem_root<F>(
         fs: &F,
         root: &VirtualPath,
+        reserved_bundled_ids: &[String],
     ) -> Result<Self, ProductWorkflowError>
     where
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root, ManifestSource::InstalledLocal).await?,
+            load_filesystem_packages(
+                fs,
+                root,
+                ManifestSource::InstalledLocal,
+                reserved_bundled_ids,
+            )
+            .await?,
         ))
     }
 
-    /// Test-support only: discover filesystem packages with the
-    /// `HostBundled` stamp, so integration fixtures that model host-bundled
-    /// extensions (the invented-vendor fixture, overview §8) may assert
-    /// first-party trust. Production discovery always stamps
-    /// `InstalledLocal` (#5459: a restart must never launder an uploaded
-    /// bundle into first-party trust).
-    #[cfg(feature = "test-support")]
-    pub(crate) async fn from_filesystem_root_trusting_fixtures_for_test<F>(
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn from_trusted_fixture_filesystem_root<F>(
         fs: &F,
         root: &VirtualPath,
+        reserved_bundled_ids: &[String],
     ) -> Result<Self, ProductWorkflowError>
     where
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root, ManifestSource::HostBundled).await?,
+            load_filesystem_packages(fs, root, ManifestSource::HostBundled, reserved_bundled_ids)
+                .await?,
         ))
     }
 
@@ -596,16 +645,8 @@ fn package_search_terms(package: &AvailableExtensionPackage) -> Vec<String> {
             }
         }
     }
-    if is_gsuite_extension_id(&package.package.manifest.id) {
-        for alias in [
-            "google",
-            "gsuite",
-            "g suite",
-            "workspace",
-            "google workspace",
-        ] {
-            push_search_term(&mut terms, alias);
-        }
+    for alias in &package.search_aliases {
+        push_search_term(&mut terms, alias);
     }
     terms
 }
@@ -665,32 +706,26 @@ fn nearai_mcp_manifest_toml_for_endpoint(
     })
 }
 
-/// Build an [`AvailableExtensionPackage`] from an opaque first-party
-/// [`ironclaw_first_party_extensions::packages::PackageBundle`]. The bundle
-/// carries only data (id, display copy, manifest, assets); all manifest
-/// resolution / surface projection stays here (it needs product_workflow +
-/// host_runtime types the inventory crate sits below).
+/// Build an [`AvailableExtensionPackage`] from a neutral injected
+/// [`crate::extension_host::first_party::FirstPartyPackageBundle`]. The bundle
+/// carries only data (id, display copy, manifest, assets, search aliases); all
+/// manifest resolution / surface projection stays here (it needs
+/// product_workflow + host_runtime types the injecting binary sits below).
 fn package_from_bundle(
-    bundle: ironclaw_first_party_extensions::packages::PackageBundle,
+    bundle: &crate::extension_host::first_party::FirstPartyPackageBundle,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    use ironclaw_first_party_extensions::packages::PackageAssetContent;
     let assets = bundle
         .assets
-        .into_iter()
-        .map(|asset| {
-            let content = match asset.content {
-                PackageAssetContent::Bytes(bytes) => AvailableExtensionAssetContent::Bytes(bytes),
-            };
-            Ok(AvailableExtensionAsset {
-                path: asset.path,
-                content,
-            })
+        .iter()
+        .map(|asset| AvailableExtensionAsset {
+            path: asset.path.clone(),
+            content: AvailableExtensionAssetContent::Bytes(asset.bytes.clone()),
         })
-        .collect::<Result<Vec<_>, ProductWorkflowError>>()?;
+        .collect::<Vec<_>>();
     // The bundle carries its onboarding copy as plain data; map it to the host
-    // lifecycle type here (the inventory crate sits below product_workflow and
+    // lifecycle type here (the injecting binary sits below product_workflow and
     // cannot name `LifecycleExtensionOnboarding`).
-    let onboarding_override = bundle.onboarding.map(|copy| {
+    let onboarding_override = bundle.onboarding.as_ref().map(|copy| {
         onboarding_message(
             &copy.instructions,
             copy.credential_instructions.as_deref(),
@@ -698,13 +733,30 @@ fn package_from_bundle(
             &copy.credential_next_step,
         )
     });
+    // A bespoke OAuth-setup credential requirement (a personal-OAuth connect)
+    // replaces the manifest-derived one; map the plain bundle data to the host
+    // lifecycle type here.
+    let oauth_setup_override =
+        bundle
+            .oauth_setup
+            .as_ref()
+            .map(|setup| LifecycleExtensionCredentialRequirement {
+                name: setup.requirement_name.clone(),
+                provider: setup.provider.clone(),
+                required: true,
+                setup: LifecycleExtensionCredentialSetup::OAuth {
+                    scopes: setup.scopes.clone(),
+                },
+            });
     let mut package = bundled_extension_package(
-        bundle.id,
-        bundle.display_name,
+        &bundle.id,
+        &bundle.display_name,
         &bundle.manifest_toml,
         assets,
     )?;
     package.onboarding_override = onboarding_override;
+    package.oauth_setup_override = oauth_setup_override;
+    package.search_aliases = bundle.search_aliases.clone();
     Ok(package)
 }
 
@@ -762,6 +814,8 @@ fn bundled_extension_package(
         channel_presentation,
         assets,
         onboarding_override: None,
+        oauth_setup_override: None,
+        search_aliases: Vec::new(),
     })
 }
 
@@ -936,6 +990,7 @@ async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
     stamp: ManifestSource,
+    reserved_bundled_ids: &[String],
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -972,7 +1027,7 @@ where
         let Ok(extension_id) = ExtensionId::new(entry.name.clone()) else {
             continue;
         };
-        if reserved_host_bundled_extension_id(&extension_id) {
+        if reserved_host_bundled_extension_id(&extension_id, reserved_bundled_ids) {
             continue;
         }
         match load_filesystem_package(fs, entry, &host_ports, &contracts, stamp).await {
@@ -1076,18 +1131,25 @@ where
         channel_presentation,
         assets,
         onboarding_override: None,
+        oauth_setup_override: None,
+        search_aliases: Vec::new(),
     }))
 }
 
-pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
-    // Packages migrated to the self-contained inventory are reserved by their
-    // ids (cheap — no embed materialization); the rest stay listed here until
-    // they migrate. A filesystem extension must never shadow a bundled one.
-    ironclaw_first_party_extensions::packages::bundled_package_ids()
+/// Whether `extension_id` is reserved for a host-bundled extension — a
+/// filesystem/uploaded extension must never shadow it. `reserved_bundled_ids`
+/// is the injected first-party bundle id set (extension-runtime DEL-7); the NEAR
+/// AI host-managed id is reserved separately (it is not part of the injected
+/// inventory). All GSuite family ids are already in the injected bundle ids, so
+/// no separate `is_gsuite_extension_id` check is needed.
+pub(crate) fn reserved_host_bundled_extension_id(
+    extension_id: &ExtensionId,
+    reserved_bundled_ids: &[String],
+) -> bool {
+    reserved_bundled_ids
         .iter()
-        .any(|id| *id == extension_id.as_str())
+        .any(|id| id == extension_id.as_str())
         || extension_id.as_str() == NEARAI_EXTENSION_ID
-        || is_gsuite_extension_id(extension_id)
 }
 
 pub(crate) fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
@@ -2546,6 +2608,7 @@ handle = "web_token"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .unwrap();
@@ -2576,6 +2639,7 @@ handle = "web_token"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .unwrap();
@@ -2586,22 +2650,13 @@ handle = "web_token"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
-            b"not parsed because gmail is host-bundled",
-        )
-        .await
-        .unwrap();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
-            b"not parsed because slack is host-bundled",
-        )
-        .await
-        .unwrap();
+        write_valid_filesystem_extension(&fs, "gmail").await;
+        write_valid_filesystem_extension(&fs, "slack").await;
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &["gmail".to_string(), "slack".to_string()],
         )
         .await
         .unwrap();
@@ -2665,6 +2720,7 @@ credential_handle = "channel_ext_token"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .unwrap();
@@ -2750,6 +2806,50 @@ credential_handle = "channel_ext_token"
         test_extension_package_with_wasm_bytes(b"wasm")
     }
 
+    async fn write_valid_filesystem_extension(fs: &InMemoryBackend, id: &str) {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "shadowing fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.search"
+description = "Search"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+        );
+        fs.write_file(
+            &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
+            manifest.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new(format!("/system/extensions/{id}/wasm/{id}.wasm")).unwrap(),
+            b"wasm",
+        )
+        .await
+        .unwrap();
+    }
+
     fn test_extension_package_with_wasm_bytes(wasm_bytes: &[u8]) -> AvailableExtensionPackage {
         static MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
@@ -2833,6 +2933,8 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
             onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
         }
     }
 }

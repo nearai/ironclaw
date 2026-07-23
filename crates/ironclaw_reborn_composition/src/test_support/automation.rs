@@ -14,9 +14,9 @@ use ironclaw_outbound::{
 };
 use ironclaw_product_workflow::{AutomationProductFacade, RebornOutboundDeliveryTargetId};
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
-use ironclaw_turns::{FilesystemTurnStateRowStore, ReplyTargetBindingRef, TurnStateStore};
+use ironclaw_turns::{FilesystemTurnStateRowStore, ReplyTargetBindingRef};
 
-use crate::RebornServices;
+use crate::RebornRuntime;
 use crate::automation::trigger_poller::SnapshotActiveRunLookup;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
@@ -70,21 +70,17 @@ where
 /// same objects the composed [`RebornServices`] owns.
 #[cfg(feature = "test-support")]
 pub fn set_local_dev_trigger_source_turn_state_for_test<F>(
-    services: &RebornServices,
+    services: &RebornRuntime,
     turn_state: Arc<FilesystemTurnStateRowStore<F>>,
 ) -> Result<(), String>
 where
     F: RootFilesystem + Send + Sync + 'static,
 {
-    let runtime = services
-        .local_runtime
-        .as_ref()
-        .ok_or_else(|| "local runtime unavailable".to_string())?;
-    let mut source = runtime
+    let mut source = services
         .trigger_source_turn_state
         .write()
         .map_err(|error| format!("trigger source turn-state lock unavailable: {error}"))?;
-    *source = turn_state as Arc<dyn TurnStateStore>;
+    *source = turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>;
     Ok(())
 }
 
@@ -122,15 +118,15 @@ impl OutboundDeliveryTargetProvider for StaticSourceDeliveryTargetProvider {
 /// production implementations.
 #[cfg(feature = "test-support")]
 pub fn register_static_source_delivery_target_for_test(
-    services: &RebornServices,
+    services: &RebornRuntime,
     provider_key: impl Into<String>,
     target_id: RebornOutboundDeliveryTargetId,
     reply_target_binding_ref: ReplyTargetBindingRef,
 ) -> Result<(), String> {
-    let runtime = services
-        .local_runtime
+    let registry = services
+        .outbound_delivery_target_registry
         .as_ref()
-        .ok_or_else(|| "local runtime unavailable".to_string())?;
+        .ok_or_else(|| "outbound delivery target registry unavailable".to_string())?;
     let summary = OutboundDeliveryTargetSummary::new(
         target_id,
         "test-channel",
@@ -138,8 +134,7 @@ pub fn register_static_source_delivery_target_for_test(
         Some("Hermetic source conversation target".to_string()),
     )
     .map_err(|error| format!("invalid test delivery target: {error}"))?;
-    runtime
-        .outbound_delivery_targets
+    registry
         .register_provider(
             provider_key,
             Arc::new(StaticSourceDeliveryTargetProvider {

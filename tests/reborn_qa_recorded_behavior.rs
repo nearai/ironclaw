@@ -841,9 +841,7 @@ async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
     );
     gateway.assert_exhausted();
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(qa_trace_tenant_id()).expect("tenant id");
     let triggers = repo
         .list_triggers(tenant_id)
@@ -905,9 +903,7 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         reply.status
     );
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(qa_trace_tenant_id()).expect("tenant id");
     let triggers = repo
         .list_triggers(tenant_id.clone())

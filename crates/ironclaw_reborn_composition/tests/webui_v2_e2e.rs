@@ -42,8 +42,8 @@ use ironclaw_loop_host::{
     HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime, build_webui_services,
 };
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -111,7 +111,7 @@ impl WebuiAuthenticator for TwoUserTokens {
 fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
     // Mirrors the policy the in-mod runtime tests use. Avoids the
     // public `local_dev_runtime_policy()` helper because that returns a
-    // `ResolvedRuntimePolicy` shape; `RebornBuildInput::with_runtime_policy`
+    // `ResolvedRuntimePolicy` shape; `RebornHostBindings::with_runtime_policy`
     // takes the `EffectiveRuntimePolicy` shape and the two are not
     // interchangeable in this direction yet.
     EffectiveRuntimePolicy {
@@ -614,9 +614,9 @@ async fn build_harness_at(
 /// Harness with NO Google OAuth backend configured at composition time, so
 /// the provider-instance readiness map's `google` entry stays populated (see
 /// `provider_instance_readiness_map`) and a google-family extension
-/// install reconciliation fails closed with the sanitized 400 before it reaches the
+/// activation fails closed with the sanitized 400 before it ever reaches the
 /// per-account credential gate. Backs
-/// `webui_v2_extension_install_returns_400_when_provider_instance_not_configured`.
+/// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`.
 async fn build_harness_without_google_oauth_backend() -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
@@ -653,12 +653,12 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     authenticated_user_id: &str,
 ) -> Harness {
     // This shared harness backs WebUI e2e tests that exercise Gmail/GSuite
-    // setup reconciliation over the real v2 router, not the provider-instance
+    // setup+activation over the real v2 router, not the provider-instance
     // readiness map — without a configured Google OAuth backend,
     // `webui_v2_gmail_oauth_setup_complete_allows_activation` and any other
-    // google-family install test here fails closed with the
+    // google-family activation test here fails closed with the
     // readiness-map's 400 before it ever reaches the per-account gate under
-    // test. `webui_v2_extension_install_returns_400_when_provider_instance_not_configured`
+    // test. `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`
     // is the dedicated test for that 400 path and uses
     // `build_harness_without_google_oauth_backend` instead.
     build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
@@ -676,10 +676,10 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
 /// Harness variant with composition-time Google OAuth configuration under the
 /// caller's control. `google_oauth_backend: None` leaves the provider-instance
 /// readiness map's `google` entry populated, so a google-family extension
-/// install reconciliation fails closed with the sanitized 400 before it reaches the
+/// activation fails closed with the sanitized 400 before it ever reaches the
 /// per-account credential gate — the shape
-/// `webui_v2_extension_install_returns_400_when_provider_instance_not_configured`
-/// needs to drive the real HTTP install route through that path.
+/// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`
+/// needs to drive the real HTTP activate route through that path.
 async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     storage_root: PathBuf,
     root: Option<tempfile::TempDir>,
@@ -690,12 +690,14 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     google_oauth_backend: Option<OAuthClientConfig>,
 ) -> Harness {
     let mut build_input =
-        RebornBuildInput::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy);
+        ironclaw_reborn_composition::local_dev_build_input(runtime_owner_id, storage_root)
+            .with_runtime_policy(policy)
+            .with_bundled_first_party_for_test();
     if let Some(google_oauth_backend) = google_oauth_backend {
         build_input = build_input
             .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
     }
-    let input = RebornRuntimeInput::from_services(build_input)
+    let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -714,7 +716,6 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     // scripted tool calls complete instead of parking on the per-tool approval
     // gate (which would otherwise leave the turn without an assistant reply).
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -759,8 +760,10 @@ async fn build_two_user_harness(
 ) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_dev_build_input(USER, storage_root)
+            .with_runtime_policy(policy)
+            .with_bundled_first_party_for_test(),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -776,7 +779,6 @@ async fn build_two_user_harness(
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -1538,14 +1540,9 @@ async fn webui_v2_sse_streams_first_assistant_text_update_before_model_completio
 }
 
 #[tokio::test]
-async fn webui_v2_gmail_oauth_ready_install_is_immediately_active() {
+async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     let harness = build_harness().await;
-    let product_auth = harness
-        .runtime
-        .services()
-        .product_auth
-        .as_ref()
-        .expect("local-dev runtime wires product auth");
+    let product_auth = harness.runtime.product_auth_for_test();
     product_auth
         .credential_account_service()
         .create_account(NewCredentialAccount {
@@ -1581,15 +1578,16 @@ async fn webui_v2_gmail_oauth_ready_install_is_immediately_active() {
         ))
         .await
         .expect("install Gmail oneshot");
-    assert_eq!(install.status(), StatusCode::OK);
+    let install_status = install.status();
     let install_body = read_json(install).await;
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install body: {install_body}"
+    );
     assert_eq!(
         install_body["success"], true,
         "install body: {install_body}"
-    );
-    assert!(
-        install_body.get("activated").is_none(),
-        "install response must not expose the retired activation projection: {install_body}"
     );
 
     let setup = harness
@@ -1602,8 +1600,27 @@ async fn webui_v2_gmail_oauth_ready_install_is_immediately_active() {
     let setup_body = read_json(setup).await;
     assert_eq!(
         setup_body["secrets"][0]["provided"], true,
-        "setup should see the completed Google OAuth account: {setup_body}"
+        "setup should see the completed Google OAuth account so the UI can offer Activate: {setup_body}"
     );
+
+    let activate = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/gmail/activate",
+            json!({}),
+        ))
+        .await
+        .expect("activate Gmail oneshot");
+    let activate_status = activate.status();
+    let activate_body = read_json(activate).await;
+    assert_eq!(
+        activate_status,
+        StatusCode::OK,
+        "activation should succeed after setup completion: {activate_body}"
+    );
+    assert_eq!(activate_body["success"], true);
+    assert_eq!(activate_body["activated"], true);
 }
 
 /// The provider-instance readiness map's 400 path
@@ -1612,13 +1629,13 @@ async fn webui_v2_gmail_oauth_ready_install_is_immediately_active() {
 /// (`google_family_activation_fails_closed_when_provider_instance_not_configured`
 /// in `extension_lifecycle.rs`) and for the WebUI mapping function
 /// (`lifecycle_setup::provider_instance_not_configured_maps_to_sanitized_400`),
-/// but nothing drove the real HTTP install route end-to-end. This proves the
+/// but nothing drove the real HTTP activate route end-to-end. This proves the
 /// whole chain: a composition build with NO Google OAuth backend configured
 /// -> the readiness map's `google` entry -> `activation_credential_requirements`
-/// failing closed -> the real install handler returning 400 with
+/// failing closed -> the real `POST .../activate` handler returning 400 with
 /// the sanitized wire body (no remediation text, no `reason` field at all).
 #[tokio::test]
-async fn webui_v2_extension_install_returns_400_when_provider_instance_not_configured() {
+async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_configured() {
     let harness = build_harness_without_google_oauth_backend().await;
 
     let package_ref = json!({"kind": "extension", "id": "gmail"});
@@ -1631,25 +1648,47 @@ async fn webui_v2_extension_install_returns_400_when_provider_instance_not_confi
         ))
         .await
         .expect("install Gmail oneshot");
-    assert_eq!(
-        install.status(),
-        StatusCode::BAD_REQUEST,
-        "install must fail closed before any per-account credential gate when the \
-         operator never configured this instance's Google OAuth backend at all"
-    );
+    let install_status = install.status();
     let install_body = read_json(install).await;
-    assert_eq!(install_body["error"], "invalid_request");
-    assert_eq!(install_body["kind"], "validation");
-    assert_eq!(install_body["retryable"], false);
+    assert_eq!(
+        install_status,
+        StatusCode::OK,
+        "install body: {install_body}"
+    );
+    assert_eq!(
+        install_body["success"], true,
+        "install body: {install_body}"
+    );
+
+    let activate = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/gmail/activate",
+            json!({}),
+        ))
+        .await
+        .expect("activate Gmail oneshot");
+    let activate_status = activate.status();
+    let activate_body = read_json(activate).await;
+    assert_eq!(
+        activate_status,
+        StatusCode::BAD_REQUEST,
+        "activation must fail closed before any per-account credential gate when the \
+         operator never configured this instance's Google OAuth backend at all: {activate_body}"
+    );
+    assert_eq!(activate_body["error"], "invalid_request");
+    assert_eq!(activate_body["kind"], "validation");
+    assert_eq!(activate_body["retryable"], false);
     assert!(
-        install_body.get("field").is_none(),
-        "sanitized 400 body must carry no field hint: {install_body}"
+        activate_body.get("field").is_none(),
+        "sanitized 400 body must carry no field hint: {activate_body}"
     );
     assert!(
-        install_body.get("validation_code").is_none(),
-        "sanitized 400 body must carry no validation code: {install_body}"
+        activate_body.get("validation_code").is_none(),
+        "sanitized 400 body must carry no validation code: {activate_body}"
     );
-    let body_text = install_body.to_string().to_ascii_lowercase();
+    let body_text = activate_body.to_string().to_ascii_lowercase();
     for leaked in [
         "config set",
         "client_secret",
@@ -1658,7 +1697,7 @@ async fn webui_v2_extension_install_returns_400_when_provider_instance_not_confi
     ] {
         assert!(
             !body_text.contains(leaked),
-            "sanitized 400 body must not leak remediation text: {install_body}"
+            "sanitized 400 body must not leak remediation text: {activate_body}"
         );
     }
 
@@ -1682,9 +1721,10 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "google-docs");
-    // Setup uses the same three-state public vocabulary as every other
-    // extension surface; host staging checkpoints never cross the wire.
-    assert_eq!(setup_body["phase"], "uninstalled");
+    // Option A retired the "discovered" wire phase: a catalog package that
+    // is not yet installed projects the neutral "installed"-vocabulary
+    // installation_state ("installed" here), never a transient phase string.
+    assert_eq!(setup_body["phase"], "installed");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1743,7 +1783,10 @@ async fn webui_v2_github_api_key_setup_projects_manual_token_secret() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "github");
-    assert_eq!(setup_body["phase"], "uninstalled");
+    // Option A retired the "discovered" wire phase: a catalog package that
+    // is not yet installed projects the neutral "installed"-vocabulary
+    // installation_state ("installed" here), never a transient phase string.
+    assert_eq!(setup_body["phase"], "installed");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1948,9 +1991,10 @@ mod operator_llm_config {
         let boot = RebornBootConfig::new(home, RebornProfile::LocalDev);
 
         let gateway = Arc::new(ToolCallingGateway::default());
-        let input = RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev(USER, storage_root)
-                .with_runtime_policy(local_dev_effective_policy()),
+        let input = RebornRuntimeInput::from_build_input(
+            ironclaw_reborn_composition::local_dev_build_input(USER, storage_root)
+                .with_runtime_policy(local_dev_effective_policy())
+                .with_bundled_first_party_for_test(),
         )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
