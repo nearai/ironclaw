@@ -99,3 +99,43 @@ async fn signed_session_mount_exposes_logout_and_revokes_the_bearer() {
         "logout must revoke the signed session"
     );
 }
+
+#[tokio::test]
+async fn logout_keeps_a_reusable_auth_token_valid_for_the_next_login() {
+    let tenant = TenantId::new("auth-token-tenant").expect("tenant");
+    let store = signed_session_store(
+        &SecretString::from("auth-token-secret".to_string()),
+        &tenant,
+    );
+    let token = store
+        .create_reusable_auth_token(
+            tenant,
+            UserId::new("returning-user").expect("user"),
+            chrono::Duration::hours(1),
+        )
+        .await
+        .expect("auth token");
+    let mount = signed_session_webui_v2_auth_mount(store.clone());
+
+    let logout = mount
+        .router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/auth/logout")
+                .header("authorization", format!("Bearer {}", token.expose_secret()))
+                .body(Body::empty())
+                .expect("logout request"),
+        )
+        .await
+        .expect("logout oneshot");
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert!(
+        store
+            .lookup(token.expose_secret())
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the reusable auth token must work again after logout"
+    );
+}

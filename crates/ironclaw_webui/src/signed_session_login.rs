@@ -13,11 +13,11 @@
 //!   carries the tenant/user/expiry, HMAC-SHA256-signed with a key
 //!   derived from the operator secret. Validation needs no persistence,
 //!   so tokens survive a restart as long as the operator secret is
-//!   stable. Revocation IS honored within a process via an in-memory
-//!   denylist, so `POST /auth/logout` truly invalidates the presented
-//!   bearer rather than returning `204` while the token stays live. The
-//!   denylist is process-local and clears on restart, after which a
-//!   not-yet-expired revoked token would validate again.
+//!   stable. Ordinary sessions honor process-local revocation via an
+//!   in-memory denylist. Explicit reusable authentication credentials carry a
+//!   signed purpose claim and deliberately survive logout so they can be used
+//!   for the next login. The denylist clears on restart, after which a
+//!   not-yet-expired revoked session would validate again.
 //! - The `user_directory` (host-supplied via `SignedSessionLoginConfig`)
 //!   maps each authenticated OAuth profile to a `UserId`. A multi-user
 //!   host injects a DB-backed directory (a distinct user per identity);
@@ -143,8 +143,8 @@ pub struct SignedTokenSessionStore {
 /// operator secret + tenant. The store is stateless and deterministic in the
 /// signing key, so an instance built here mints tokens that validate under any
 /// other instance sharing the same operator secret + tenant (e.g. the SSO login
-/// surface's own store). User sessions are issued only by authenticated
-/// login/claim flows; administrator user creation does not use this store.
+/// surface's own store). Authenticated login/claim flows mint revocable
+/// sessions; explicit administrator issuance mints reusable user credentials.
 pub fn signed_session_store(
     operator_secret: &SecretString,
     tenant_id: &TenantId,
@@ -210,6 +210,43 @@ impl SignedTokenSessionStore {
         lifetime: ChronoDuration,
         operator: bool,
     ) -> Result<SecretString, SessionStoreError> {
+        self.create_token(
+            tenant_id,
+            user_id,
+            lifetime,
+            operator,
+            TokenPurpose::Session,
+        )
+        .await
+    }
+
+    /// Mint a reusable user authentication credential. Unlike a temporary
+    /// session, ordinary logout does not invalidate this bearer; the client
+    /// may present it again to log back in.
+    pub async fn create_reusable_auth_token(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        lifetime: ChronoDuration,
+    ) -> Result<SecretString, SessionStoreError> {
+        self.create_token(
+            tenant_id,
+            user_id,
+            lifetime,
+            false,
+            TokenPurpose::ReusableAuth,
+        )
+        .await
+    }
+
+    async fn create_token(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        lifetime: ChronoDuration,
+        operator: bool,
+        purpose: TokenPurpose,
+    ) -> Result<SecretString, SessionStoreError> {
         // A non-positive lifetime would mint a token whose `exp <= iat`;
         // `lookup` then rejects it immediately, so the caller would get
         // `Ok(token)` for an already-dead session. Fail loud instead.
@@ -229,6 +266,7 @@ impl SignedTokenSessionStore {
             iat: now.timestamp(),
             exp: expires_at.timestamp(),
             op: operator,
+            purpose,
         };
         let payload_json = serde_json::to_vec(&payload)
             .map_err(|err| SessionStoreError::Backend(format!("encode token payload: {err}")))?;
@@ -288,6 +326,9 @@ impl SignedTokenSessionStore {
         // id worth denying; a garbage or already-expired bearer has nothing
         // to revoke, so logout is a silent success.
         if let Some(payload) = self.verify(candidate) {
+            if payload.purpose == TokenPurpose::ReusableAuth {
+                return;
+            }
             let now = Utc::now().timestamp();
             if payload.exp <= now {
                 return;
@@ -329,6 +370,18 @@ struct TokenPayload {
     /// retroactively escalating.
     #[serde(default)]
     op: bool,
+    /// Credential purpose. Missing means an ordinary revocable session so
+    /// tokens issued before this field existed preserve their logout behavior.
+    #[serde(default, rename = "p")]
+    purpose: TokenPurpose,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TokenPurpose {
+    #[default]
+    Session,
+    ReusableAuth,
 }
 
 /// `WebuiAuthenticator` that accepts a bearer recognized by EITHER the
@@ -498,6 +551,7 @@ mod tests {
                 iat: now - 100,
                 exp: now - 10,
                 op: false,
+                purpose: TokenPurpose::Session,
             },
         );
         assert!(store.lookup(&token).await.expect("lookup").is_none());
@@ -524,6 +578,49 @@ mod tests {
         assert!(
             store.lookup(&raw).await.expect("lookup").is_none(),
             "a revoked token must no longer authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_does_not_invalidate_a_reusable_auth_token() {
+        let store = signed_store("operator-secret");
+        let token = store
+            .create_reusable_auth_token(
+                tenant(),
+                UserId::new("reusable-user").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let raw = token.expose_secret();
+
+        store.revoke(raw).await;
+        assert!(
+            store.lookup(raw).await.expect("lookup").is_some(),
+            "ordinary logout must leave the reusable authentication credential valid"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_without_a_purpose_claim_remains_a_revocable_session() {
+        let store = signed_store("operator-secret");
+        let now = Utc::now().timestamp();
+        let payload = serde_json::json!({
+            "sid": "legacy-session",
+            "tenant": tenant().as_str(),
+            "user": "legacy-user",
+            "iat": now,
+            "exp": now + 3600,
+            "op": false
+        });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("payload"));
+        let token = format!("{payload_b64}.{}", store.sign(&payload_b64));
+
+        assert!(store.lookup(&token).await.expect("lookup").is_some());
+        store.revoke(&token).await;
+        assert!(
+            store.lookup(&token).await.expect("lookup").is_none(),
+            "pre-purpose tokens must retain ordinary session logout semantics"
         );
     }
 
@@ -591,6 +688,7 @@ mod tests {
                     iat: base,
                     exp,
                     op: false,
+                    purpose: TokenPurpose::Session,
                 },
             )
         };
@@ -684,6 +782,7 @@ mod tests {
                 iat: now,
                 exp: now + 3600,
                 op: false,
+                purpose: TokenPurpose::Session,
             },
         );
         let err = store
@@ -710,6 +809,7 @@ mod tests {
                 iat: now,
                 exp: now + 3600,
                 op: false,
+                purpose: TokenPurpose::Session,
             },
         );
         let err = store

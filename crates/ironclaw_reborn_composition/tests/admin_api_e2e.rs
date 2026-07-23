@@ -56,12 +56,7 @@ struct TestLoginTokenMinter {
 impl AdminLoginTokenMinter for TestLoginTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         self.store
-            .create_session(
-                tenant.clone(),
-                user_id.clone(),
-                chrono::Duration::hours(1),
-                false,
-            )
+            .create_reusable_auth_token(tenant.clone(), user_id.clone(), chrono::Duration::hours(1))
             .await
             .map_err(|error| error.to_string())
     }
@@ -421,8 +416,8 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
     let (status, _) = operator.as_bearer(login_token).list_users().await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
-        "revocation invalidates it"
+        StatusCode::FORBIDDEN,
+        "logout leaves the reusable auth token valid as the same non-admin user"
     );
 
     // Managed-agent creation is a separate workflow but still returns an

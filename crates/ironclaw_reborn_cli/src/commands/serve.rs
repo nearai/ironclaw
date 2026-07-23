@@ -41,11 +41,10 @@ struct SignedSessionLoginTokenMinter {
 impl ironclaw_reborn_composition::AdminLoginTokenMinter for SignedSessionLoginTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         self.session_store
-            .create_session(
+            .create_reusable_auth_token(
                 tenant.clone(),
                 user_id.clone(),
                 chrono::Duration::days(ADMIN_LOGIN_TOKEN_LIFETIME_DAYS),
-                false,
             )
             .await
             .map_err(|error| error.to_string())

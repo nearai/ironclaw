@@ -56,7 +56,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
-| `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |
+| `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup. Ordinary sessions use a bounded process-local logout denylist; explicitly issued reusable auth tokens survive logout. |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
@@ -215,7 +215,9 @@ Routes mounted by `webui_v2_auth_router`:
   and return `{ token }`.
 - `POST /auth/logout` — bearer-protected; calls
   `SignedTokenSessionStore::revoke` and returns `204` with or without
-  a bearer, so the SPA's local clear stays unconditional.
+  a bearer, so the SPA's local clear stays unconditional. This revokes an
+  ordinary browser/SSO session; a reusable auth token remains valid for a
+  later login.
 
 ### Provider trait
 
