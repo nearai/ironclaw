@@ -191,6 +191,10 @@ Cross-provider ordering is retained, fresh Docs and
 Sheets IDs are bound from earlier real tool results, redacted provider IDs are
 mapped to deterministic seeded resources, and assertions target capability
 success plus provider readback rather than recorded final-answer wording.
+`ProviderOperationCase` adds typed provider service, capability, argument,
+baseline, and readback cases for operations not yet present in harvested
+journeys. These cases reuse the same Reborn process and reset only their mutable
+provider world.
 Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
 loopback IP socket targets after the original destination has passed the normal
 network policy and DNS checks. Release binaries fail startup if that test-only

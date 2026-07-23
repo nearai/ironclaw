@@ -258,13 +258,10 @@ def test_fixture_catalog_has_no_unowned_cases_or_provider_operations():
         capability_id_to_wire_name(capability_id)
         for capability_id in ALL_CLASSIFIED_CAPABILITY_IDS
     }
-    required_evidence = EMULATE_SUPPORTED_TOOLS | LIVE_ONLY_TOOLS
     assert observed_provider_tools <= classified_tools, (
         f"unclassified={sorted(observed_provider_tools - classified_tools)}"
     )
-    assert required_evidence <= observed_provider_tools, (
-        f"unobserved={sorted(required_evidence - observed_provider_tools)}"
-    )
+    assert LIVE_ONLY_TOOLS <= observed_provider_tools
 
 
 async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(

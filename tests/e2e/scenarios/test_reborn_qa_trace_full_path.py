@@ -19,7 +19,11 @@ import pytest
 
 from emulate_provider import google_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
-from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
+from provider_capability_inventory import (
+    EMULATE_SUPPORTED_TOOLS,
+    capability_id_to_wire_name,
+)
+from provider_operation_cases import PROVIDER_OPERATION_CASES, ProviderOperationCase
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,
@@ -236,6 +240,21 @@ async def reborn_qa_emulate_provider_server(
             )
         if reset_services:
             await resettable_emulate_provider_world.reset(reset_services)
+
+
+@pytest.fixture
+async def reborn_provider_operation_server(
+    reborn_qa_emulate_runtime,
+    resettable_emulate_provider_world,
+    operation_case,
+):
+    """Reuse Reborn but restore the case's provider after execution."""
+    try:
+        yield reborn_qa_emulate_runtime
+    finally:
+        await resettable_emulate_provider_world.reset(
+            {operation_case.provider_service}
+        )
 
 
 async def _seed_google_account(
@@ -735,6 +754,64 @@ async def _load_trace(
     return trace
 
 
+async def _install_inline_trace(
+    mock_llm_server: str,
+    source: str,
+    trace: dict,
+) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/llm_trace",
+            json={"source": source, "trace": trace},
+            timeout=15,
+        )
+    response.raise_for_status()
+
+
+def _provider_operation_trace(case: ProviderOperationCase) -> dict:
+    wire_name = capability_id_to_wire_name(case.capability_id)
+    return {
+        "steps": [
+            {
+                "response": {
+                    "type": "user_input",
+                    "content": f"Execute provider contract {case.case_id}",
+                }
+            },
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": f"disclose_{case.case_id}",
+                            "name": "capability_info",
+                            "arguments": {"name": case.capability_id},
+                        }
+                    ],
+                }
+            },
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": f"execute_{case.case_id}",
+                            "name": wire_name,
+                            "arguments": case.arguments,
+                        }
+                    ],
+                }
+            },
+            {
+                "response": {
+                    "type": "text",
+                    "content": "Provider operation completed.",
+                }
+            },
+        ]
+    }
+
+
 async def _wait_for_trace_replay(mock_llm_server: str, timeout: float = 30) -> dict:
     state = {}
     async with httpx.AsyncClient() as client:
@@ -1101,6 +1178,58 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         "source": trace_path.name,
         "next_response": len(trace["steps"]) - 1,
         "response_count": len(trace["steps"]) - 1,
+        "complete": True,
+        "error": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "operation_case",
+    PROVIDER_OPERATION_CASES,
+    ids=lambda case: case.case_id,
+)
+async def test_provider_operation_case_executes_with_provider_readback(
+    reborn_provider_operation_server,
+    mock_llm_server,
+    operation_case,
+):
+    """Typed operation cases cross Reborn and prove provider-observable results."""
+    server = reborn_provider_operation_server["base_url"]
+    emulate_url = reborn_provider_operation_server[
+        f"emulate_{operation_case.provider_service}_url"
+    ]
+    source = f"provider-operation-{operation_case.case_id}.json"
+    trace = _provider_operation_trace(operation_case)
+    await operation_case.assert_baseline(emulate_url)
+    await _install_inline_trace(mock_llm_server, source, trace)
+
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, server)
+        await send_message(
+            client,
+            server,
+            thread_id,
+            trace["steps"][0]["response"]["content"],
+        )
+        replay = await _wait_for_trace_replay(mock_llm_server, timeout=120)
+        await wait_for_assistant_message(client, server, thread_id, timeout=120)
+        timeline = await _fetch_all_timeline_pages_with_retry(
+            client, server, thread_id
+        )
+
+    matches = [
+        preview
+        for message in timeline.get("messages", [])
+        if (preview := capability_preview_payload(message)) is not None
+        and preview["capability_id"] == operation_case.capability_id
+    ]
+    assert len(matches) == 1, matches
+    assert matches[0]["status"] == "completed", matches[0]
+    await operation_case.assert_outcome(emulate_url, matches[0])
+    assert replay == {
+        "source": source,
+        "next_response": 3,
+        "response_count": 3,
         "complete": True,
         "error": None,
     }

@@ -1,22 +1,26 @@
 schema_version = 1
 
-# A capability is "tested" only when a harvested journey executes the real
-# first-party extension boundary against Emulate and observes the provider.
+# A capability is "tested" only when a harvested journey or typed operation
+# case executes the real extension boundary and observes Emulate.
 [classifications]
 tested = [
   "github.get_authenticated_user",
   "github.get_repo",
   "github.list_releases",
+  "gmail.create_draft",
   "gmail.get_message",
   "gmail.list_messages",
   "gmail.send_message",
+  "gmail.trash_message",
   "google-calendar.list_calendars",
   "google-calendar.list_events",
   "google-docs.create_document",
   "google-docs.insert_text",
   "google-docs.read_content",
   "google-drive.download_file",
+  "google-drive.get_file",
   "google-drive.list_files",
+  "google-drive.update_file",
   "google-sheets.append_values",
   "google-sheets.create_spreadsheet",
   "google-sheets.get_spreadsheet",
@@ -88,9 +92,7 @@ capabilities = [
   "github.unresolve_review_thread",
   "github.update_issue",
   "github.update_pull_request",
-  "gmail.create_draft",
   "gmail.reply_to_message",
-  "gmail.trash_message",
   "google-calendar.add_attendees",
   "google-calendar.create_event",
   "google-calendar.delete_event",
@@ -108,13 +110,11 @@ capabilities = [
   "google-docs.replace_text",
   "google-drive.create_folder",
   "google-drive.delete_file",
-  "google-drive.get_file",
   "google-drive.list_permissions",
   "google-drive.list_shared_drives",
   "google-drive.remove_permission",
   "google-drive.share_file",
   "google-drive.trash_file",
-  "google-drive.update_file",
   "google-drive.upload_file",
   "google-sheets.add_sheet",
   "google-sheets.batch_read_values",
