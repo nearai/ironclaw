@@ -54,6 +54,7 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, InvocationId, InvocationOrigin, MountView,
@@ -72,8 +73,8 @@ use ironclaw_product::{
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ProductSurface,
-    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -362,7 +363,7 @@ impl VendorIngress {
         harness: &RebornIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
     ) -> Self {
-        let surface = harness.product_workflow_for_test() as Arc<dyn ProductSurface>;
+        let surface = harness.product_workflow_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
@@ -1084,6 +1085,13 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 #[case::postgres(StorageMode::Postgres)]
 #[tokio::test]
 async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage: StorageMode) {
+    Box::pin(telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(
+        storage,
+    ))
+    .await;
+}
+
+async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: StorageMode) {
     let group = RebornIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()

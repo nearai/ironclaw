@@ -101,6 +101,7 @@ use ironclaw_product::{
     TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
     UpsertLlmProviderRequest, product_attachment_capabilities,
 };
+use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -1749,19 +1750,10 @@ pub async fn get_outbound_preferences(
     Ok(Json(response))
 }
 
-#[derive(Deserialize)]
-pub struct SetOutboundPreferencesBody {
-    #[serde(default)]
-    pub client_action_id: Option<String>,
-    #[serde(flatten)]
-    pub request: RebornSetOutboundPreferencesRequest,
-}
-
 /// `POST /api/webchat/v2/outbound/preferences`
 ///
 /// Body shape: [`RebornSetOutboundPreferencesRequest`]. Sending
 /// `{"final_reply_target_id": null}` clears the configured final-reply target.
-/// `client_action_id` scopes HTTP retry replay without becoming capability input.
 pub async fn set_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
@@ -1772,7 +1764,7 @@ pub async fn set_outbound_preferences(
         state.services(),
         caller.clone(),
         OUTBOUND_PREFERENCES_SET_CAPABILITY,
-        body.request,
+        body,
         activity_id,
     )
     .await?;
@@ -2136,20 +2128,11 @@ pub async fn install_extension(
     Json(body): Json<InstallExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
-    let client_action_id =
-        parse_webui_client_action_id(body.client_action_id).map_err(RebornServicesError::from)?;
-    let activity_id = extension_lifecycle_activity_id(
-        &caller,
-        EXTENSION_INSTALL_CAPABILITY,
-        &package_ref,
-        &client_action_id,
-    )?;
-    let resolution = invoke_product_capability_with_activity_id(
+    let resolution = invoke_product_capability(
         state.services(),
         caller,
         EXTENSION_INSTALL_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2185,26 +2168,16 @@ pub async fn activate_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-    Json(body): Json<ExtensionLifecycleActionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let client_action_id =
-        parse_webui_client_action_id(body.client_action_id).map_err(RebornServicesError::from)?;
-    let activity_id = extension_lifecycle_activity_id(
-        &caller,
-        EXTENSION_ACTIVATE_CAPABILITY,
-        &package_ref,
-        &client_action_id,
-    )?;
-    let resolution = invoke_product_capability_with_activity_id(
+    let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
         EXTENSION_ACTIVATE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-        activity_id,
     )
     .await?;
     let response =
@@ -2217,26 +2190,16 @@ pub async fn remove_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-    Json(body): Json<ExtensionLifecycleActionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let client_action_id =
-        parse_webui_client_action_id(body.client_action_id).map_err(RebornServicesError::from)?;
-    let activity_id = extension_lifecycle_activity_id(
-        &caller,
-        EXTENSION_REMOVE_CAPABILITY,
-        &package_ref,
-        &client_action_id,
-    )?;
-    let resolution = invoke_product_capability_with_activity_id(
+    let resolution = invoke_product_capability(
         state.services(),
         caller,
         EXTENSION_REMOVE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2431,6 +2394,7 @@ pub async fn setup_extension(
     let input_object = input
         .as_object_mut()
         .ok_or_else(|| ProductSurfaceError::internal_from("setup request did not encode object"))?;
+    input_object.remove("client_action_id");
     input_object.insert(
         "extension_id".to_string(),
         serde_json::Value::String(package_ref.id.as_str().to_string()),
@@ -2683,41 +2647,23 @@ fn llm_provider_upsert_activity_id(
             .map(|id| id.as_str())
             .unwrap_or(""),
         capability_id.as_str(),
-        client_action_id.as_str(),
+        request.id.as_str(),
+        request.name.as_deref().unwrap_or(""),
+        request.adapter.as_str(),
+        request.base_url.as_deref().unwrap_or(""),
+        request.default_model.as_deref().unwrap_or(""),
+        if request.set_active { "active" } else { "" },
+        request.model.as_deref().unwrap_or(""),
     ] {
         seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
         seed.extend_from_slice(segment.as_bytes());
     }
-    Ok(ActivityId::from_uuid(Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        &seed,
-    )))
-}
-
-fn extension_lifecycle_activity_id(
-    caller: &WebUiAuthenticatedCaller,
-    capability: ProductCapabilityDescriptor,
-    package_ref: &LifecyclePackageRef,
-    client_action_id: &IdempotencyKey,
-) -> Result<ActivityId, RebornServicesError> {
-    let capability_id = capability.capability_id()?;
-    let mut seed = Vec::new();
-    for segment in [
-        "webui-extension-lifecycle",
-        caller.tenant_id.as_str(),
-        caller.user_id.as_str(),
-        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
-        caller
-            .project_id
-            .as_ref()
-            .map(|id| id.as_str())
-            .unwrap_or(""),
-        capability_id.as_str(),
-        package_ref.id.as_str(),
-        client_action_id.as_str(),
-    ] {
-        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
-        seed.extend_from_slice(segment.as_bytes());
+    if let Some(api_key) = request.api_key.as_ref() {
+        let secret = api_key.expose_secret().as_bytes();
+        seed.extend_from_slice(&(secret.len() as u64).to_be_bytes());
+        seed.extend_from_slice(secret);
+    } else {
+        seed.extend_from_slice(&0_u64.to_be_bytes());
     }
     Ok(ActivityId::from_uuid(Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
@@ -2726,31 +2672,12 @@ fn extension_lifecycle_activity_id(
 }
 
 fn outbound_preferences_activity_id(
-    caller: &WebUiAuthenticatedCaller,
-    client_action_id: &IdempotencyKey,
-) -> Result<ActivityId, RebornServicesError> {
+    caller: &ProductSurfaceCaller,
+    request: &RebornSetOutboundPreferencesRequest,
+) -> Result<ActivityId, ProductSurfaceError> {
     let capability_id = OUTBOUND_PREFERENCES_SET_CAPABILITY.capability_id()?;
-    let mut seed = Vec::new();
-    for segment in [
-        "webui-outbound-preferences",
-        caller.tenant_id.as_str(),
-        caller.user_id.as_str(),
-        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
-        caller
-            .project_id
-            .as_ref()
-            .map(|id| id.as_str())
-            .unwrap_or(""),
-        capability_id.as_str(),
-        client_action_id.as_str(),
-    ] {
-        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
-        seed.extend_from_slice(segment.as_bytes());
-    }
-    Ok(ActivityId::from_uuid(Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        &seed,
-    )))
+    let input = serde_json::to_value(request).map_err(ProductSurfaceError::internal_from)?;
+    product_surface_activity_id(caller, capability_id.as_str(), &input)
 }
 
 async fn query_product_view<T>(
@@ -3656,14 +3583,6 @@ pub struct ExtensionPackagePath {
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
-    #[serde(default)]
-    pub client_action_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ExtensionLifecycleActionBody {
-    #[serde(default)]
-    pub client_action_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3968,84 +3887,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extension_lifecycle_activity_id_uses_validated_client_action_id() {
-        let caller = test_caller();
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access".to_string())
-                .expect("valid package ref");
-        let first = parse_webui_client_action_id(Some("setup-action-a".to_string()))
-            .expect("valid action id");
-        let same = parse_webui_client_action_id(Some("setup-action-a".to_string()))
-            .expect("valid action id");
-        let second = parse_webui_client_action_id(Some("setup-action-b".to_string()))
-            .expect("valid action id");
-
-        let first_activity = extension_lifecycle_activity_id(
-            &caller,
-            EXTENSION_SETUP_SUBMIT_CAPABILITY,
-            &package_ref,
-            &first,
-        )
-        .expect("activity id");
-        let same_activity = extension_lifecycle_activity_id(
-            &caller,
-            EXTENSION_SETUP_SUBMIT_CAPABILITY,
-            &package_ref,
-            &same,
-        )
-        .expect("activity id");
-        let second_activity = extension_lifecycle_activity_id(
-            &caller,
-            EXTENSION_SETUP_SUBMIT_CAPABILITY,
-            &package_ref,
-            &second,
-        )
-        .expect("activity id");
-
-        assert_eq!(first_activity, same_activity);
-        assert_ne!(first_activity, second_activity);
-    }
-
-    #[test]
-    fn llm_provider_upsert_activity_id_uses_opaque_client_action_id() {
-        let caller = test_caller();
-        let first = parse_webui_client_action_id(Some("provider-save-a".to_string()))
-            .expect("valid action id");
-        let same = parse_webui_client_action_id(Some("provider-save-a".to_string()))
-            .expect("valid action id");
-        let second = parse_webui_client_action_id(Some("provider-save-b".to_string()))
-            .expect("valid action id");
-
-        let first_activity = llm_provider_upsert_activity_id(&caller, &first).expect("activity id");
-        let same_activity = llm_provider_upsert_activity_id(&caller, &same).expect("activity id");
-        let second_activity =
-            llm_provider_upsert_activity_id(&caller, &second).expect("activity id");
-
-        assert_eq!(first_activity, same_activity);
-        assert_ne!(first_activity, second_activity);
-    }
-
-    #[test]
-    fn outbound_preferences_activity_id_uses_opaque_client_action_id() {
-        let caller = test_caller();
-        let first = parse_webui_client_action_id(Some("outbound-save-a".to_string()))
-            .expect("valid action id");
-        let same = parse_webui_client_action_id(Some("outbound-save-a".to_string()))
-            .expect("valid action id");
-        let second = parse_webui_client_action_id(Some("outbound-save-b".to_string()))
-            .expect("valid action id");
-
-        let first_activity =
-            outbound_preferences_activity_id(&caller, &first).expect("activity id");
-        let same_activity = outbound_preferences_activity_id(&caller, &same).expect("activity id");
-        let second_activity =
-            outbound_preferences_activity_id(&caller, &second).expect("activity id");
-
-        assert_eq!(first_activity, same_activity);
-        assert_ne!(first_activity, second_activity);
-    }
-
-    #[test]
     fn sse_poll_interval_backs_off_only_after_repeated_idle_drains() {
         assert_eq!(sse_poll_interval_for_idle_polls(0), SSE_POLL_INTERVAL);
         assert_eq!(sse_poll_interval_for_idle_polls(1), SSE_POLL_INTERVAL);
@@ -4138,14 +3979,5 @@ mod tests {
             project_fs_list_path(Some("/workspace/sub".to_string())),
             "/workspace/sub"
         );
-    }
-
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
-            ironclaw_host_api::TenantId::new("tenant-webui-test").expect("valid tenant"),
-            ironclaw_host_api::UserId::new("user-webui-test").expect("valid user"),
-            Some(ironclaw_host_api::AgentId::new("agent-webui-test").expect("valid agent")),
-            Some(ironclaw_host_api::ProjectId::new("project-webui-test").expect("valid project")),
-        )
     }
 }

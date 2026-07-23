@@ -56,6 +56,13 @@ pub struct ChannelAdapterConformance {
     pub expects_unsupported_free_target_listing: bool,
 }
 
+fn conformance_value<T, E: std::fmt::Debug>(result: Result<T, E>, message: &'static str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!("{message}: {error:?}"),
+    }
+}
+
 /// Scripted vendor server over the restricted-egress seam: records every
 /// request and answers from the fixture's script.
 pub struct ScriptedVendorServer {
@@ -121,22 +128,20 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             body: &message_inbound.body,
             headers: &message_inbound.headers,
         })
-        .expect("conformance: the vendor-valid message fixture must parse");
+        .expect("conformance: the vendor-valid message fixture must parse"); // safety: test-support conformance failure should fail the caller's test.
     let InboundOutcome::Messages(messages) = outcome else {
-        panic!("conformance: the message fixture must normalize to Messages");
+        panic!("conformance: the message fixture must normalize to Messages"); // safety: test-support conformance failure should fail the caller's test.
     };
-    assert!(
-        !messages.is_empty(),
-        "conformance: the message fixture must yield at least one message"
-    );
+    if messages.is_empty() {
+        panic!("conformance: the message fixture must yield at least one message");
+    }
     for message in &messages {
         message
             .validate()
-            .expect("conformance: normalized messages must satisfy host bounds");
-        assert!(
-            !message.text.is_empty(),
-            "conformance: the message fixture's text must survive normalization"
-        );
+            .expect("conformance: normalized messages must satisfy host bounds"); // safety: test-support conformance failure should fail the caller's test.
+        if message.text.is_empty() {
+            panic!("conformance: the message fixture's text must survive normalization");
+        }
     }
 
     // ── Inbound: malformed and truncated bodies fail cleanly, never panic.
@@ -155,10 +160,11 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         }) {
             Ok(InboundOutcome::Respond(response)) => response
                 .validate()
-                .expect("conformance: immediate responses must stay within host bounds"),
+                .expect("conformance: immediate responses must stay within host bounds"), // safety: test-support conformance failure should fail the caller's test.
             Ok(InboundOutcome::Messages(messages)) => {
                 for message in &messages {
-                    message.validate().expect(
+                    conformance_value(
+                        message.validate(),
                         "conformance: messages normalized from odd input must satisfy bounds",
                     );
                 }
@@ -177,13 +183,13 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
                 body: &challenge.body,
                 headers: &challenge.headers,
             })
-            .expect("conformance: the challenge fixture must parse");
+            .expect("conformance: the challenge fixture must parse"); // safety: test-support conformance failure should fail the caller's test.
         let InboundOutcome::Respond(response) = outcome else {
-            panic!("conformance: the challenge fixture must produce an immediate response");
+            panic!("conformance: the challenge fixture must produce an immediate response"); // safety: test-support conformance failure should fail the caller's test.
         };
         response
             .validate()
-            .expect("conformance: the challenge response must stay within host bounds");
+            .expect("conformance: the challenge response must stay within host bounds"); // safety: test-support conformance failure should fail the caller's test.
     }
 
     // ── Outbound: the envelope is fully delivered with structured per-part
@@ -196,20 +202,19 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
     let report = adapter
         .deliver(outbound_envelope, &server)
         .await
-        .expect("conformance: deliver must drive the scripted vendor server");
-    assert!(
-        !report.parts.is_empty(),
-        "conformance: a delivery report must describe at least one part"
-    );
-    assert!(
-        report.parts.len() >= text_parts,
-        "conformance: every envelope part must be accounted for in the report"
-    );
+        .expect("conformance: deliver must drive the scripted vendor server"); // safety: test-support conformance failure should fail the caller's test.
+    if report.parts.is_empty() {
+        panic!("conformance: a delivery report must describe at least one part");
+    }
+    if report.parts.len() < text_parts {
+        panic!("conformance: every envelope part must be accounted for in the report");
+    }
     for part in &report.parts {
-        assert!(
-            matches!(part, PartDeliveryOutcome::Sent { .. }),
-            "conformance: against the fixture's happy-path vendor script every part must be Sent, got {part:?}"
-        );
+        if !matches!(part, PartDeliveryOutcome::Sent { .. }) {
+            panic!(
+                "conformance: against the fixture's happy-path vendor script every part must be Sent, got {part:?}"
+            );
+        }
     }
 
     // ── Lifecycle hooks: activate and cleanup are idempotent against the
@@ -222,19 +227,19 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
     adapter
         .activate(&context, &server)
         .await
-        .expect("conformance: activation must succeed against the scripted vendor server");
+        .expect("conformance: activation must succeed against the scripted vendor server"); // safety: test-support conformance failure should fail the caller's test.
     adapter
         .activate(&context, &server)
         .await
-        .expect("conformance: activation must be idempotent (second run failed)");
+        .expect("conformance: activation must be idempotent (second run failed)"); // safety: test-support conformance failure should fail the caller's test.
     adapter
         .cleanup(&context, &server)
         .await
-        .expect("conformance: cleanup must succeed against the scripted vendor server");
+        .expect("conformance: cleanup must succeed against the scripted vendor server"); // safety: test-support conformance failure should fail the caller's test.
     adapter
         .cleanup(&context, &server)
         .await
-        .expect("conformance: cleanup must be idempotent (second run failed)");
+        .expect("conformance: cleanup must be idempotent (second run failed)"); // safety: test-support conformance failure should fail the caller's test.
 
     // ── Unsupported surfaces fail cleanly (no panic, typed error).
     if expects_unsupported_free_target_listing {
@@ -250,9 +255,10 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             )
             .await
             .expect_err("conformance: unsupported free target listing must error cleanly");
-        assert!(
-            matches!(error, ChannelError::Unsupported),
-            "conformance: unsupported listing must be ChannelError::Unsupported, got {error:?}"
-        );
+        if !matches!(error, ChannelError::Unsupported) {
+            panic!(
+                "conformance: unsupported listing must be ChannelError::Unsupported, got {error:?}"
+            );
+        }
     }
 }

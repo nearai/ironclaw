@@ -20,7 +20,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     ActivityId, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
-    MountView, Resolution, TenantId, UserId, VirtualPath,
+    MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId, UserId,
+    VirtualPath,
 };
 use ironclaw_product::{
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
@@ -749,12 +750,14 @@ fn caller(user_id: &str) -> ProductSurfaceCaller {
 
 async fn invoke_lifecycle_product_capability(
     bundle: &RebornWebuiBundle,
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductSurfaceCaller,
     capability: ProductCapabilityDescriptor,
     input: serde_json::Value,
-) -> Result<Resolution, RebornServicesError> {
+) -> Result<Resolution, ProductSurfaceError> {
+    let surface =
+        ironclaw_host_api::BoundProductSurface::new(Arc::clone(&bundle.product_surface), caller);
     capability
-        .invoke_on(bundle.api.as_ref(), caller, input, ActivityId::new())
+        .invoke_on(&surface, input, ActivityId::new())
         .await
 }
 

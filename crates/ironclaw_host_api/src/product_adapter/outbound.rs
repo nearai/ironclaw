@@ -1,4 +1,5 @@
 //! Outbound envelope, projection-derived payloads, and projection cursor.
+// arch-exempt: large_file, product activity view compatibility before DTO split, plan #6543
 
 use crate::{
     CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProcessId, RuntimeKind, ThreadId,
@@ -432,6 +433,10 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
             provider: Option<ExtensionId>,
+            #[serde(
+                default,
+                deserialize_with = "crate::deserialize_trusted_optional_runtime_kind"
+            )]
             runtime: Option<RuntimeKind>,
             process_id: Option<ProcessId>,
             output_bytes: Option<u64>,

@@ -183,7 +183,7 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
         (
             "extension_install",
             LifecycleProductAction::ExtensionInstall {
-                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                package_ref: ironclaw_product::LifecyclePackageRef::new(
                     LifecyclePackageKind::Extension,
                     "github",
                 )
@@ -193,7 +193,7 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
         (
             "extension_activate",
             LifecycleProductAction::ExtensionActivate {
-                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                package_ref: ironclaw_product::LifecyclePackageRef::new(
                     LifecyclePackageKind::Extension,
                     "github",
                 )
@@ -203,7 +203,7 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
         (
             "extension_remove",
             LifecycleProductAction::ExtensionRemove {
-                package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                package_ref: ironclaw_product::LifecyclePackageRef::new(
                     LifecyclePackageKind::Extension,
                     "github",
                 )

@@ -10,14 +10,15 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_host_api::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
 use ironclaw_product::{
-    OutboundPreferencesProductFacade, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, RebornOutboundDeliveryModality,
+    OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
     RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
 };
 
 /// Bundled behind ONE mutex (not two) so a reader never observes `set_calls`
@@ -77,7 +78,7 @@ impl FakeOutboundPreferencesFacade {
 impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let last_accepted = self
             .state
@@ -97,7 +98,7 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
 
     async fn set_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let Some(target_id) = request.final_reply_target_id else {
@@ -123,7 +124,7 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
 
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Ok(RebornOutboundDeliveryTargetListResponse {
             targets: self.targets.clone(),

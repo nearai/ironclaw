@@ -5171,9 +5171,9 @@ async fn skill_content_and_mutations_use_product_surface() {
             ),
         ]
     );
-    assert_ne!(
+    assert_eq!(
         invoke_calls[0].2, invoke_calls[1].2,
-        "generic ProductSurface requests without client action ids must not reuse durable replay keys"
+        "identical ProductSurface requests should reuse the same durable replay key"
     );
     assert_ne!(
         invoke_calls[0].2, invoke_calls[2].2,

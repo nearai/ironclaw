@@ -5821,6 +5821,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         caller.clone(),
         "github",
         ProductSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(serde_json::json!({
                 "secrets": {
@@ -5843,6 +5844,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         caller,
         "github",
         ProductSetupExtensionRequest {
+            client_action_id: None,
             action: Some("submit".to_string()),
             payload: Some(serde_json::json!({
                 "secrets": {

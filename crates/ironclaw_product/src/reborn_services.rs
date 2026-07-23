@@ -2279,26 +2279,6 @@ impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
     }
 }
 
-fn api_capability_success_resolution(
-    activity_id: ActivityId,
-    summary: &'static str,
-) -> Result<Resolution, RebornServicesError> {
-    Ok(Resolution::Done(Outcome {
-        refs: OutcomeRefs {
-            result: ResultRef::from_uuid(activity_id.as_uuid()),
-            byte_len: 0,
-            preview: None,
-            preview_meta: ResultPreviewMeta::default(),
-            origin: None,
-            output_digest: None,
-        },
-        verdict: ToolVerdict::Success,
-        summary: SafeSummary::new(summary).map_err(RebornServicesError::internal_from)?,
-        progress: ResultProgress::MadeProgress,
-        terminate_hint: TerminateHint::Continue,
-    }))
-}
-
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices<
@@ -3006,15 +2986,8 @@ where
             product_capability_handlers::ProductCapabilityHandler::parse(&capability)
         {
             let summary = operation.success_summary();
-            let invoker = self.product_capability_invoker.clone();
-            return invoker
-                .invoke_product_operation(
-                    caller.clone(),
-                    activity_id,
-                    summary,
-                    operation.invoke(self, caller, input),
-                )
-                .await;
+            operation.invoke(self, caller, input).await?;
+            return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)

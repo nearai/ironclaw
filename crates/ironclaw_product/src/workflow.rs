@@ -239,7 +239,7 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
             Ok(envelope) => envelope,
             Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
         };
-        match self.submit_inbound(envelope.clone()).await {
+        match Box::pin(self.submit_inbound(envelope.clone())).await {
             Ok(ack) => {
                 ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
                     envelope,

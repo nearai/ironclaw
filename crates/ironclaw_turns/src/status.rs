@@ -490,6 +490,7 @@ impl TurnError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ModelInvalidOutputDetailReason;
 
     #[test]
     fn blocked_external_tool_status_is_non_terminal_and_keeps_lock() {

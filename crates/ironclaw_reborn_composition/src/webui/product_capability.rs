@@ -478,7 +478,6 @@ impl ProductResultFilesystem {
             }
         }
     }
-
 }
 
 async fn persist_product_result<F>(
@@ -798,5 +797,4 @@ mod tests {
             .expect("product results mount view"),
         )
     }
-
 }

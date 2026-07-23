@@ -338,6 +338,7 @@ mod tests {
             &extension_id,
             &[manual_requirement()],
             parse_submit_payload(ProductSetupExtensionRequest {
+                client_action_id: None,
                 action: Some("submit".to_string()),
                 payload: Some(serde_json::json!({ "secrets": {} })),
             })
