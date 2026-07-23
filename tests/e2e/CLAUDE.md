@@ -39,7 +39,7 @@ pip install -e .
 playwright install chromium
 ```
 
-Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `7f0175ad65a884ad86b3897c527cc40336e1391b`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
+Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `c85da1ed9b4e1c9cbdcd9b9ec7af2aac93f5ea9e`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
 
 ## Running Tests
 
@@ -165,14 +165,17 @@ The function-scoped `page` fixture means **each test gets a clean browser contex
 ### Emulate provider coverage
 
 Use Emulate for provider APIs that map directly to Reborn features already in
-this repo: Google Gmail/Calendar/Drive/Docs/Sheets, Slack delivery/search/reactions/user lookup,
-and GitHub repository, issue, pull request, search, branch, release, fork, Git
-object, and Actions route workflows. The current provider contract covers
+this repo: Google Gmail/Calendar/Drive/Docs/Sheets/Slides, Slack
+delivery/search/reactions/user lookup, and GitHub repository, issue, pull
+request, review thread, contents, search, branch, release, fork, Git object,
+and Actions workflows. The current provider contract covers
 seeded reads plus stateful writes for Gmail send, Calendar event create/delete,
 Drive upload/readback, Slack channel/thread/DM delivery/reactions, GitHub repo
 create/list, release create/list/latest, issue create/read/comment/search, PR
 create/read/list/files/review/comment/merge, branch/ref creation, Git
-blob/tree/commit read/write, fork create/list, and empty Actions route readback.
+blob/tree/commit read/write, contents create/read/delete, fork create/list,
+review-thread resolution, Actions dispatch/readback/reruns, and Slides
+presentation/slide/text/shape/image mutation.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
 recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
@@ -208,16 +211,16 @@ gates, and read provider state back from Emulate. This is the contract tier to
 use when the behavior being protected is extension install/auth, model-to-tool
 routing, tool execution, and provider mutation together.
 
-The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive, and
-Sheets operations and Slack `search.messages` used by the provider contract
-catalog. Google Slides remains outside the provider fixture because Emulate has
-no Slides routes. Manual QA rows that mention Telegram, Twitter/X, or HN/web
-search are likewise model-replay-only unless paired with a separate
-fake/provider fixture. GitHub `/contents` file create/update/delete, GraphQL
-review threads, and workflow dispatch remain outside direct Emulate coverage:
-the emulator exposes Git data APIs but no `/contents` or GraphQL routes, and it
-exposes Actions routes but does not let fixture seeds define workflows to
-dispatch.
+The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
+Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
+GraphQL review threads, and seeded Actions workflows used by the provider
+contract catalog. Of 123 shipped static provider capabilities, 119 now have
+full-path Emulate-backed evidence. The remaining four are intentionally outside
+this runner: `github.handle_webhook` is local ingress normalization, while
+`nearai.web_search`, `web-access.get_content`, and `web-access.search` need a
+separate hermetic web-search/content double. Manual QA rows that mention
+Telegram or Twitter/X also remain model-replay-only unless paired with their own
+provider fixture.
 
 ### Environment passed to ironclaw in tests
 

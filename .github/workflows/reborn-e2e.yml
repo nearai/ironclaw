@@ -150,7 +150,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: serrrfirat/emulate
-          ref: 7f0175ad65a884ad86b3897c527cc40336e1391b
+          ref: c85da1ed9b4e1c9cbdcd9b9ec7af2aac93f5ea9e
           path: .emulate
           persist-credentials: false
 

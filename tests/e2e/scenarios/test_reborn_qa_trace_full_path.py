@@ -48,6 +48,7 @@ GOOGLE_EXTENSIONS = (
     "google-drive",
     "google-docs",
     "google-sheets",
+    "google-slides",
 )
 GOOGLE_EXTENSION_SCOPES = {
     "gmail": (
@@ -71,6 +72,10 @@ GOOGLE_EXTENSION_SCOPES = {
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/spreadsheets.readonly",
     ),
+    "google-slides": (
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/presentations.readonly",
+    ),
 }
 GOOGLE_CUMULATIVE_SCOPES = tuple(
     dict.fromkeys(
@@ -85,6 +90,7 @@ GOOGLE_TOOL_PREFIXES = (
     "google-docs__",
     "google-drive__",
     "google-sheets__",
+    "google-slides__",
 )
 PROVIDER_TOOL_NAMES = EMULATE_SUPPORTED_TOOLS
 ALL_EXTENSIONS = (*GOOGLE_EXTENSIONS, "github", "slack")
@@ -174,6 +180,8 @@ async def reborn_qa_emulate_runtime(
             f"docs.googleapis.com={emulate_google_address.hostname}:"
             f"{emulate_google_address.port}",
             f"sheets.googleapis.com={emulate_google_address.hostname}:"
+            f"{emulate_google_address.port}",
+            f"slides.googleapis.com={emulate_google_address.hostname}:"
             f"{emulate_google_address.port}",
             f"api.github.com={emulate_github_address.hostname}:"
             f"{emulate_github_address.port}",
@@ -769,7 +777,9 @@ async def _install_inline_trace(
     response.raise_for_status()
 
 
-def _provider_operation_trace(case: ProviderOperationCase) -> dict:
+def _provider_operation_trace(
+    case: ProviderOperationCase, arguments: dict
+) -> dict:
     wire_name = capability_id_to_wire_name(case.capability_id)
     return {
         "steps": [
@@ -798,7 +808,7 @@ def _provider_operation_trace(case: ProviderOperationCase) -> dict:
                         {
                             "id": f"execute_{case.case_id}",
                             "name": wire_name,
-                            "arguments": case.arguments,
+                            "arguments": arguments,
                         }
                     ],
                 }
@@ -1296,8 +1306,9 @@ async def test_provider_operation_case_executes_with_provider_readback(
         f"emulate_{operation_case.provider_service}_url"
     ]
     source = f"provider-operation-{operation_case.case_id}.json"
-    trace = _provider_operation_trace(operation_case)
     await operation_case.assert_baseline(emulate_url)
+    arguments = await operation_case.resolve_arguments(emulate_url)
+    trace = _provider_operation_trace(operation_case, arguments)
     await _install_inline_trace(mock_llm_server, source, trace)
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:

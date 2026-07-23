@@ -121,10 +121,12 @@ async def _workflow_runs_outcome(emulate_url: str, preview: dict) -> None:
     result = await github_request(
         emulate_url, "GET", f"{REPO_PATH}/actions/runs"
     )
-    assert result == {"total_count": 0, "workflow_runs": []}, result
-    rendered = json.dumps(preview)
-    assert "workflow_runs" in rendered, preview
-    assert "total_count" in rendered, preview
+    assert isinstance(result, dict)
+    assert result["total_count"] == 1, result
+    assert result["workflow_runs"][0]["id"] == 1001, result
+    output = json.loads(preview["output_preview"])
+    assert output["workflow_runs"][0]["name"] == "CI", output
+    assert output["workflow_runs"][0]["conclusion"] == "failure", output
 
 
 GITHUB_REPO_PROVIDER_OPERATION_CASES = (
