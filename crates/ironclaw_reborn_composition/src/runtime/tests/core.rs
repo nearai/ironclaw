@@ -2747,10 +2747,8 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             .await
             .expect("libsql db"),
     );
-    let gateway = Arc::new(RecordingGateway {
-        reply: "production".to_string(),
-        requests: Arc::new(StdMutex::new(Vec::new())),
-    });
+    let gateway = Arc::new(ToolCallingGateway::default());
+    let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let observer = Arc::new(RecordingTrajectoryObserver::default());
 
     let input = RebornRuntimeInput::from_build_input(
@@ -2788,8 +2786,12 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
         source_binding_id: "runtime-observer-reject-source".to_string(),
         reply_target_binding_id: "runtime-observer-reject-reply".to_string(),
     })
-    .with_raw_trajectory_observer(observer)
-    .with_model_gateway_override(gateway);
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(3),
+    })
+    .with_raw_trajectory_observer(observer.clone())
+    .with_model_gateway_override(gateway_for_runtime);
 
     let runtime = build_reborn_runtime(input)
         .await
@@ -2798,7 +2800,44 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
         runtime.readiness().state,
         RebornReadinessState::ProductionValidated
     );
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
+    let reply = tokio::time::timeout(
+        RUNTIME_SEND_TIMEOUT,
+        runtime.send_user_message(&conversation, "use echo tool"),
+    )
+    .await
+    .expect("runtime send should finish")
+    .expect("runtime send should succeed");
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("tool ok"));
     runtime.shutdown().await.expect("runtime shutdown");
+
+    let inputs = observer.inputs.lock().expect("inputs lock");
+    assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+    let (input_call_id, input_capability, arguments) = &inputs[0];
+    assert!(!input_call_id.is_empty(), "input call_id should be present");
+    assert_eq!(input_capability, "builtin.echo");
+    assert_eq!(
+        arguments,
+        &serde_json::json!({"message": "hello from tool"}),
+        "observer should receive the raw model-emitted tool arguments"
+    );
+
+    let results = observer.results.lock().expect("results lock");
+    assert_eq!(results.len(), 1, "exactly one capability result observed");
+    let (result_call_id, result_capability, output) = &results[0];
+    assert_eq!(result_capability, "builtin.echo");
+    assert_eq!(
+        result_call_id, input_call_id,
+        "result and input callbacks correlate by call_id"
+    );
+    assert!(
+        output.to_string().contains("hello from tool"),
+        "observer should receive the staged capability output, got {output}"
+    );
 }
 
 #[derive(Debug)]

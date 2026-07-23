@@ -49,8 +49,9 @@ async fn runtime_composition_test_guard() -> tokio::sync::MutexGuard<'static, ()
 
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
-    let input =
-        RebornRuntimeInput::from_build_input(RebornHostBindings::disabled("runtime-disabled-owner"));
+    let input = RebornRuntimeInput::from_build_input(RebornHostBindings::disabled(
+        "runtime-disabled-owner",
+    ));
 
     let error = match build_reborn_runtime(input).await {
         Ok(_) => panic!("disabled profile is not a runnable REPL runtime"),
@@ -102,10 +103,11 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
 #[tokio::test]
 async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_build_input(ironclaw_reborn_composition::local_dev_build_input(
-        "runtime-policy-owner",
-        root.path().join("local-dev"),
-    ));
+    let input =
+        RebornRuntimeInput::from_build_input(ironclaw_reborn_composition::local_dev_build_input(
+            "runtime-policy-owner",
+            root.path().join("local-dev"),
+        ));
 
     let error = match build_reborn_runtime(input).await {
         Ok(_) => panic!("local-dev runtime should require a resolved runtime policy"),
@@ -157,8 +159,11 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("runtime-test-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "runtime-test-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-test-tenant".to_string(),
@@ -242,6 +247,86 @@ impl HostManagedModelGateway for AlwaysReplyGateway {
     }
 }
 
+#[derive(Default)]
+struct HookDeniedEchoGateway {
+    call_count: std::sync::Mutex<usize>,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for HookDeniedEchoGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "HookDeniedEchoGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("hook gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+        if call_index > 0 {
+            assert!(
+                request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("hook_predicate_denied")),
+                "post-hook model request should include the hook-denied tool result: {:?}",
+                request.messages
+            );
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "hook denied echo".to_string(),
+            ));
+        }
+
+        let echo_id = CapabilityId::new("builtin.echo").expect("echo capability id");
+        let echo_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == echo_id)
+            .expect("builtin.echo must be visible in local-dev capability surface");
+        let call = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "runtime-hook-provider".to_string(),
+                provider_model_id: "runtime-hook-model".to_string(),
+                turn_id: Some("runtime-hook-turn".to_string()),
+                id: "runtime-hook-echo".to_string(),
+                name: echo_tool.name,
+                arguments: json!({"message": "hook should deny this"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call(echo) failed: {err}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(vec![call], ""))
+    }
+}
+
 /// #6263 Step 4/5b — production wiring at the composition seam.
 /// `build_reborn_runtime` composes the durable turn-state ROW store
 /// (`factory.rs`) unconditionally, replacing the former in-memory authority +
@@ -265,8 +350,11 @@ async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("wb-durable-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "wb-durable-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "wb-durable-tenant".to_string(),
@@ -314,8 +402,11 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("runtime-cancel-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "runtime-cancel-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-cancel-tenant".to_string(),
@@ -366,8 +457,11 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     .unwrap();
     std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("runtime-skill-execution-owner", storage_root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "runtime-skill-execution-owner",
+            storage_root,
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-skill-execution-tenant".to_string(),
@@ -449,7 +543,10 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
 /// call here uses the default disabled `HooksActivationConfig`. A regression in
 /// the wiring (dropped `hooks_config`, wrong `extension_filesystem`, mis-threaded
 /// tenant) would surface here as a build/start failure rather than going
-/// uncovered.
+/// uncovered. The turn invokes `builtin.echo` and must observe the projected
+/// hook denial in the model-visible tool-result replay; if runtime composition
+/// drops `hook_dispatcher_builder_factory`, the echo capability succeeds and
+/// this test fails.
 #[tokio::test]
 async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     let _guard = runtime_composition_test_guard().await;
@@ -458,16 +555,18 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
 
     // Plant a discoverable third-party extension carrying a `[[hooks]]` block at
     // the per-owner `/system/extensions` discovery root that local-dev mounts.
-    // The third-party projection path must read this manifest; with the wiring
-    // broken (e.g. `extension_filesystem` not threaded), the runtime would not
-    // build/start cleanly through `build_default_planned_runtime`.
-    let extension_dir = storage_root.join("system/extensions/example-hook-ext");
+    // The hook is scoped to its own provider and targets `builtin.echo`; naming
+    // the discovered extension `builtin` lets this hook exercise the same
+    // provider-scoped path the built-in first-party capability uses without
+    // adding a test-only first-party hook catalog.
+    let extension_dir = storage_root.join("system/extensions/builtin");
     std::fs::create_dir_all(&extension_dir).unwrap();
     std::fs::write(
         extension_dir.join("manifest.toml"),
-        third_party_hook_manifest("example-hook-ext"),
+        third_party_hook_manifest("builtin", "builtin.echo"),
     )
     .unwrap();
+    let gateway = Arc::new(HookDeniedEchoGateway::default());
 
     let input = RebornRuntimeInput::from_build_input(
         ironclaw_reborn_composition::local_dev_build_input("runtime-hooks-owner", storage_root)
@@ -480,35 +579,29 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
         reply_target_binding_id: "runtime-hooks-reply".to_string(),
     })
     .with_hooks_config(HooksActivationConfig::enabled().with_third_party_enabled(true))
+    .with_model_gateway_override(gateway)
     .with_runner_settings(
         TurnRunnerSettings::default()
             .set_heartbeat_interval(Duration::from_millis(25))
-            .set_poll_interval(Duration::from_secs(60)),
+            .set_poll_interval(Duration::from_millis(10)),
     );
 
-    // Build succeeds: the third-party discovery + projection + dispatcher factory
-    // composed into the planned runtime without error.
     let runtime = build_reborn_runtime(input).await.unwrap();
     assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
 
-    // Runtime starts: a conversation turn runs through the composed dispatcher
-    // and reaches a terminal state without hanging.
     let conversation = runtime.new_conversation().await.unwrap();
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
     let reply = tokio::time::timeout(
         SEND_USER_MESSAGE_TIMEOUT,
-        runtime.send_user_message(&conversation, "hello"),
+        runtime.send_user_message(&conversation, "use echo"),
     )
     .await
     .unwrap()
     .unwrap();
-    // TODO(coverage gap, inherited from the removed test): the stub local-dev
-    // gateway terminates the turn before any capability call dispatches, so this
-    // asserts terminal progress rather than observing the projected `deny-run`
-    // hook actually firing on `example-hook-ext.run`. The wiring (discovery +
-    // projection + tenant threading) is exercised at build/start; end-to-end
-    // hook *enforcement* through `build_reborn_runtime` still needs a harness
-    // that drives a real capability call to completion.
-    assert!(reply.status.is_terminal(), "got {:?}", reply.status);
+    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
+    assert_eq!(reply.text.as_deref(), Some("hook denied echo"));
 
     runtime.shutdown().await.unwrap();
 }
@@ -516,7 +609,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
 /// A discoverable v2 installed-extension manifest carrying a single
 /// `before_capability` hook over its own capability. Mirrors the canonical
 /// shape in `tests/third_party_hook_projection.rs`.
-fn third_party_hook_manifest(id: &str) -> String {
+fn third_party_hook_manifest(id: &str, deny_target: &str) -> String {
     format!(
         r#"schema_version = "reborn.extension_manifest.v2"
 id = "{id}"
@@ -550,7 +643,7 @@ required_host_ports = ["host.runtime.http_egress"]
 id = "deny-run"
 kind = "before_capability"
 scope = "own_capabilities"
-body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked", when = {{ type = "name_equals", name = "{id}.run" }} }} }}
+body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked", when = {{ type = "name_equals", name = "{deny_target}" }} }} }}
 "#
     )
 }
@@ -591,8 +684,11 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
 
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("cap-wiring-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "cap-wiring-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "cap-wiring-tenant".to_string(),
@@ -665,8 +761,11 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
 
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input("multi-worker-guard-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            "multi-worker-guard-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "multi-worker-guard-tenant".to_string(),
@@ -917,8 +1016,11 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
     let root = tempfile::tempdir().unwrap();
     let tag = "coordinator-spy";
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input(format!("{tag}-owner"), root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_dev_build_input(
+            format!("{tag}-owner"),
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tag}-tenant"),

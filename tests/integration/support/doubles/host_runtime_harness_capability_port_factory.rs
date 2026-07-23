@@ -12,6 +12,8 @@ use super::super::harness::HostRuntimeCapabilityHarness;
 pub(crate) struct HostRuntimeHarnessCapabilityPortFactory {
     pub(crate) harness: Arc<HostRuntimeCapabilityHarness>,
     pub(crate) milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    pub(crate) trajectory_observer:
+        Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
 }
 
 #[async_trait]
@@ -21,7 +23,11 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         self.harness
-            .create_recording_capability_port(run_context, &self.milestone_sink)
+            .create_recording_capability_port(
+                run_context,
+                &self.milestone_sink,
+                self.trajectory_observer.clone(),
+            )
             .await
     }
 }

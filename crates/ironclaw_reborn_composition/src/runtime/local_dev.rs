@@ -574,6 +574,28 @@ pub(super) fn staged_capability_io_for_test(
     (input_resolver, result_writer)
 }
 
+#[cfg(feature = "test-support")]
+pub(super) fn staged_capability_io_with_observer_for_test(
+    thread_service: Arc<dyn SessionThreadService>,
+    fallback_user_id: UserId,
+    observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+) -> (
+    Arc<dyn LoopCapabilityInputResolver>,
+    Arc<dyn LoopCapabilityResultWriter>,
+) {
+    let io = Arc::new(
+        StagedCapabilityIo::new_with_durable_previews(
+            Arc::new(CapabilityDisplayPreviewStore::default()),
+            thread_service,
+            fallback_user_id,
+        )
+        .with_observer(observer),
+    );
+    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
+    let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
+    (input_resolver, result_writer)
+}
+
 #[derive(Default)]
 struct StagedValueStore {
     values: HashMap<String, StagedValue>,

@@ -1052,6 +1052,22 @@ pub(crate) fn staged_capability_io_for_test(
     local_dev::staged_capability_io_for_test(thread_service, fallback_user_id)
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) fn staged_capability_io_with_observer_for_test(
+    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+    observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
+) -> (
+    std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
+) {
+    local_dev::staged_capability_io_with_observer_for_test(
+        thread_service,
+        fallback_user_id,
+        observer,
+    )
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for ApprovalRequestGateEvidence {
     async fn pending_approval_gate(

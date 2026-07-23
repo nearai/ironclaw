@@ -46,8 +46,8 @@ use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts,
-    RebornProductAuthServices, RebornRuntimeInput, build_runtime,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornProductAuthServices,
+    RebornRuntimeInput, build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -119,6 +119,7 @@ impl HarnessCapabilityMode {
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -138,13 +139,16 @@ impl HarnessCapabilityMode {
             }
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
-                    harness.install_durable_capability_io(turn_thread_service);
+                    harness.install_durable_capability_io(
+                        turn_thread_service,
+                        trajectory_observer.clone(),
+                    );
                 }
                 if harness.trigger_active_run_lookup_requested {
                     harness.install_trigger_active_run_lookup_for_test(turn_store)?;
                 }
                 Ok((
-                    harness.capability_factory(milestone_sink),
+                    harness.capability_factory(milestone_sink, trajectory_observer),
                     Arc::new(HostRuntimeHarnessSurfaceResolver),
                     harness.input_resolver(),
                     harness.capability_result_writer(),
@@ -892,10 +896,12 @@ impl HostRuntimeCapabilityHarness {
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            trajectory_observer,
         })
     }
 
@@ -947,11 +953,13 @@ impl HostRuntimeCapabilityHarness {
     fn install_durable_capability_io(
         &self,
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) {
         let (io, result_writer_io) =
-            ironclaw_reborn_composition::test_support::staged_capability_io_for_test(
+            ironclaw_reborn_composition::test_support::staged_capability_io_with_observer_for_test(
                 thread_service.clone(),
                 self.user_id.clone(),
+                trajectory_observer,
             );
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
@@ -1544,6 +1552,7 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
         // the harness opts in, else the fixed harness user — see
@@ -1788,7 +1797,7 @@ impl HostRuntimeCapabilityHarness {
                 .unwrap_or_else(|| {
                     Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
                 }),
-            trajectory_observer: None,
+            trajectory_observer,
             // Feeds the same active-extension authority (installed +
             // activated extensions like `github`, `gmail`, MCP servers)
             // production's `capability_wiring` folds into every refresh
