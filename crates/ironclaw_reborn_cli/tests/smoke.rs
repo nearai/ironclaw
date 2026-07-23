@@ -1246,7 +1246,7 @@ fn skills_list_reports_reborn_skill_data() {
     assert!(stdout.contains("IronClaw skills"), "stdout: {stdout}");
     assert!(stdout.contains("configured:"), "stdout: {stdout}");
     assert!(
-        stdout.contains("source: ironclaw-local"),
+        stdout.contains("source: reborn-local-dev"),
         "stdout: {stdout}"
     );
     assert!(
@@ -1292,6 +1292,7 @@ fn skills_list_verbose_reports_reborn_skill_details() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
     assert!(stdout.contains("ironclaw_home:"), "stdout: {stdout}");
     assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
     assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
@@ -1333,11 +1334,16 @@ fn skills_list_json_reports_reborn_skill_data() {
         json["configured"].as_u64().expect("configured count") > 1,
         "json: {json}"
     );
-    assert_eq!(json["source"], "ironclaw-local");
+    assert_eq!(json["source"], "reborn-local-dev");
+    assert_eq!(json["product"], "ironclaw");
     assert_skill_source(&json, "code-review", "system");
     assert_skill_source(&json, "json-helper", "user");
     assert_eq!(json["details"]["profile"], "local-dev");
     assert_eq!(json["details"]["owner_id"], "reborn-cli");
+    assert_eq!(
+        json["details"]["reborn_home"], json["details"]["ironclaw_home"],
+        "legacy and canonical home metadata must remain aligned"
+    );
     assert!(json.get("limit").is_none(), "json: {json}");
     assert!(json.get("truncated").is_none(), "json: {json}");
     assert!(json.get("status").is_none(), "json: {json}");
@@ -3066,6 +3072,10 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("IronClaw doctor"), "stdout: {stdout}");
     assert!(
+        stdout.contains("ironclaw_home"),
+        "human-readable doctor output should use the canonical label: {stdout}"
+    );
+    assert!(
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
@@ -3812,6 +3822,14 @@ fn doctor_json_reports_checks_and_summary() {
         assert!(check.get("outcome").is_some(), "check must have outcome");
         assert!(check.get("detail").is_some(), "check must have detail");
     }
+    assert!(
+        checks.iter().any(|check| check["name"] == "reborn_home"),
+        "legacy doctor check ID must remain stable: {json}"
+    );
+    assert!(
+        checks.iter().all(|check| check["name"] != "ironclaw_home"),
+        "product display labels must not replace machine-readable check IDs: {json}"
+    );
 
     let summary = &json["summary"];
     assert!(summary["pass"].is_u64(), "summary.pass must be numeric");

@@ -256,7 +256,8 @@ async fn health_route_is_public_for_platform_probes() {
     let body = to_bytes(response.into_body(), 1024).await.expect("body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("health json");
     assert_eq!(json["status"], "healthy");
-    assert_eq!(json["channel"], "ironclaw");
+    assert_eq!(json["channel"], "reborn");
+    assert_eq!(json["product"], "ironclaw");
 }
 
 mod openai_compat_mount_tests {
