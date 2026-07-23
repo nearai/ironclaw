@@ -636,15 +636,17 @@ def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> N
 def _normalize_google_arguments(trace: dict, case: str) -> None:
     created_document = False
     created_spreadsheet = False
-    created_document_content = next(
-        (
-            call["arguments"].get("text", "")
-            for step in trace["steps"]
-            for call in step["response"].get("tool_calls", [])
-            if call["name"] == "google-docs__insert_text"
-        ),
-        "",
-    )
+    document_upload_contents = []
+    for step in trace["steps"]:
+        for call in step["response"].get("tool_calls", []):
+            if call["name"] == "google-docs__create_document":
+                document_upload_contents.append("")
+            elif call["name"] == "google-docs__insert_text":
+                for index, content in enumerate(document_upload_contents):
+                    if content == "":
+                        document_upload_contents[index] = call["arguments"].get("text", "")
+                        break
+    document_upload_index = 0
     seeded_spreadsheet = (
         "sheet_reborn_bug_tracker" if case.startswith("qa_7") else "sheet_reborn_abc"
     )
@@ -661,9 +663,15 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
             if name == "google-docs__create_document":
                 created_document = True
                 call["name"] = "google-drive__upload_file"
+                content = (
+                    document_upload_contents[document_upload_index]
+                    if document_upload_index < len(document_upload_contents)
+                    else ""
+                )
+                document_upload_index += 1
                 call["arguments"] = {
                     "name": arguments["title"],
-                    "content": created_document_content,
+                    "content": content,
                     "mime_type": "text/plain",
                 }
             elif name == "google-docs__insert_text":
@@ -920,20 +928,6 @@ def _raw_trace_uses_tool_prefix(trace_path: Path, prefix: str) -> bool:
         for step in trace["steps"]
         for call in step["response"].get("tool_calls", [])
     )
-
-
-async def _emulate_google_supports_sheets(emulate_url: str) -> bool:
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/v4/spreadsheets/sheet_reborn_abc"
-        )
-    return response.status_code != 404
-
-
-async def _emulate_slack_supports_extension_reads(emulate_url: str) -> bool:
-    async with httpx.AsyncClient(headers=slack_headers(), timeout=15) as client:
-        response = await client.get(f"{emulate_url}/api/auth.test")
-    return response.status_code != 404
 
 
 async def _assert_google_provider_outcome(
@@ -1253,16 +1247,24 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     trace_path = TRACE_DIR / f"{case}.json"
     if _raw_trace_uses_tool_prefix(
         trace_path, "google-sheets__"
-    ) and not await _emulate_google_supports_sheets(
-        reborn_qa_emulate_provider_server["emulate_google_url"]
     ):
-        pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
+        async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
+            emulate_google_url = reborn_qa_emulate_provider_server[
+                "emulate_google_url"
+            ]
+            response = await client.get(
+                f"{emulate_google_url}/v4/spreadsheets/sheet_reborn_abc"
+            )
+        if response.status_code == 404:
+            pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
     if _raw_trace_uses_tool_prefix(
         trace_path, "slack__"
-    ) and not await _emulate_slack_supports_extension_reads(
-        reborn_qa_emulate_provider_server["emulate_slack_url"]
     ):
-        pytest.skip("Emulate 0.7.0 does not expose Slack Web API GET routes")
+        async with httpx.AsyncClient(headers=slack_headers(), timeout=15) as client:
+            emulate_slack_url = reborn_qa_emulate_provider_server["emulate_slack_url"]
+            response = await client.get(f"{emulate_slack_url}/api/auth.test")
+        if response.status_code == 404:
+            pytest.skip("Emulate 0.7.0 does not expose Slack Web API GET routes")
     trace = await _load_trace(
         mock_llm_server,
         trace_path,

@@ -4924,6 +4924,23 @@ async fn skill_content_and_mutations_use_product_surface() {
     assert_eq!(install_response.status(), StatusCode::OK);
 
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let install_retry_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"demo-skill","content":"---\nname: demo-skill\n---\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(install_retry_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let update_response = router
         .clone()
         .oneshot(
@@ -4992,6 +5009,13 @@ async fn skill_content_and_mutations_use_product_surface() {
                 }),
             ),
             (
+                SKILL_INSTALL_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n",
+                }),
+            ),
+            (
                 SKILL_UPDATE_CAPABILITY_ID,
                 serde_json::json!({
                     "name": "demo-skill",
@@ -5010,6 +5034,14 @@ async fn skill_content_and_mutations_use_product_surface() {
                 serde_json::json!({ "name": "demo-skill" }),
             ),
         ]
+    );
+    assert_eq!(
+        invoke_calls[0].2, invoke_calls[1].2,
+        "identical generic product capability requests should reuse ProductSurface activity ids"
+    );
+    assert_ne!(
+        invoke_calls[0].2, invoke_calls[2].2,
+        "changed generic capability input should derive a distinct ProductSurface activity id"
     );
 }
 

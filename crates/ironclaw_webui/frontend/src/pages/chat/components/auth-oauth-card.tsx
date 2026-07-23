@@ -44,7 +44,7 @@ const CLOSED_NOTICE_GRACE_MS = 1500;
 // in this small allowlist.
 const PROVIDER_DISPLAY_NAMES = Object.freeze({
   nearai: "NEAR AI",
-  [["git", "hub"].join("")]: ["Git", "Hub"].join(""),
+  git_hub: ["Git", "Hub"].join(""),
 });
 
 function providerDisplayName(providerId) {

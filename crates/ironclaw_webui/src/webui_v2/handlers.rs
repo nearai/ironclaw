@@ -106,9 +106,10 @@ use ironclaw_product_workflow::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, Resolution, SecretHandle, ThreadId, UserId,
+    ActivityId, Blocked, CapabilityId, FailureKind, Resolution, SecretHandle, ThreadId, UserId,
 };
 use uuid::Uuid;
 
@@ -2736,14 +2737,10 @@ where
     T: Serialize,
 {
     let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
-    invoke_product_capability_with_activity_id(
-        services,
-        caller,
-        capability,
-        input,
-        ActivityId::new(),
-    )
-    .await
+    let capability_id = capability.capability_id()?;
+    let activity_id = generic_product_capability_activity_id(&caller, &capability_id, &input)?;
+    invoke_product_capability_with_activity_id(services, caller, capability, input, activity_id)
+        .await
 }
 
 async fn invoke_product_capability_with_activity_id<T>(
@@ -2759,6 +2756,37 @@ where
     capability
         .invoke_on(services.as_ref(), caller, input, activity_id)
         .await
+}
+
+fn generic_product_capability_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    capability_id: &CapabilityId,
+    input: &serde_json::Value,
+) -> Result<ActivityId, RebornServicesError> {
+    let input_bytes = serde_json::to_vec(input).map_err(RebornServicesError::internal_from)?;
+    let input_digest = Sha256::digest(&input_bytes);
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-generic-product-capability",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    seed.extend_from_slice(&(input_digest.len() as u64).to_be_bytes());
+    seed.extend_from_slice(&input_digest);
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
 }
 
 fn llm_provider_upsert_activity_id(
