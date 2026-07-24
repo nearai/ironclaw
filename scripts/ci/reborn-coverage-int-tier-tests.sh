@@ -36,19 +36,30 @@ cd "${repo_root}"
 
 # Plain string + while-read (no `mapfile`): macOS dev machines ship bash 3.2,
 # and the guardrail must be runnable where it is written, not only on CI.
+#
+# The awk buffers each [[test]] stanza's `name`/`path` and emits at the
+# stanza boundary (next table header or EOF) — Cargo treats TOML key order
+# as irrelevant, so `path` before `name` must select exactly like the
+# conventional order (pinned by harness case D6's reversed-order stanza).
 names="$(
   awk '
-    /^\[\[test\]\]/ { in_test = 1; name = ""; next }
-    /^\[/           { in_test = 0 }
+    function flush_stanza() {
+      if (in_test && name != "" && path_matches) {
+        print name
+      }
+      in_test = 0
+      name = ""
+      path_matches = 0
+    }
+    /^\[\[test\]\]/ { flush_stanza(); in_test = 1; next }
+    /^\[/           { flush_stanza() }
     in_test && /^name = "/ {
       name = $0
       sub(/^name = "/, "", name)
       sub(/"$/, "", name)
     }
-    in_test && /^path = "tests\/integration\// && name != "" {
-      print name
-      name = ""
-    }
+    in_test && /^path = "tests\/integration\// { path_matches = 1 }
+    END { flush_stanza() }
   ' Cargo.toml | LC_ALL=C sort -u
 )"
 

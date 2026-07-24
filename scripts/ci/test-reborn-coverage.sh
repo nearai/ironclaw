@@ -924,21 +924,29 @@ assert_eq "D5: support/ dir is not discovered as a suite" \
 # with no [[test]] entry (auth/common.rs) is not. Pins the #6520-audit blind
 # spot: the retired `find -maxdepth 1` walk could not see domain-folder bins,
 # so the six tests/integration/auth/ suites ran in no PR coverage lane.
+# The third stanza writes `path` BEFORE `name`: Cargo treats TOML key order
+# as irrelevant, so the selector must too — an order-dependent parser would
+# silently skip the stanza and recreate the blind spot this case pins.
 d6="${tmp_root}/d6"
 setup_int_tier_case "${d6}" reborn_integration_flat
 : > "${d6}/tests/integration/flat.rs"
 mkdir -p "${d6}/tests/integration/auth"
 : > "${d6}/tests/integration/auth/oauth_connect.rs"
 : > "${d6}/tests/integration/auth/common.rs"
+: > "${d6}/tests/integration/auth/pathfirst_probe.rs"
 cat >>"${d6}/Cargo.toml" <<'EOF'
 [[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/auth/oauth_connect.rs"
+
+[[test]]
+path = "tests/integration/auth/pathfirst_probe.rs"
+name = "reborn_integration_pathfirst_probe"
 EOF
 capture "${d6}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D6: domain-folder bin exits 0" 0 "${CAP_RC}"
-assert_eq "D6: registered domain-folder bin is selected; unregistered sibling is not" \
-  "$(printf -- '--test\nreborn_integration_flat\n--test\nreborn_integration_oauth_connect')" \
+assert_eq "D6: registered domain-folder bins (either key order) are selected; unregistered sibling is not" \
+  "$(printf -- '--test\nreborn_integration_flat\n--test\nreborn_integration_oauth_connect\n--test\nreborn_integration_pathfirst_probe')" \
   "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
