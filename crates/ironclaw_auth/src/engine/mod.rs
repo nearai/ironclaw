@@ -34,7 +34,7 @@ use ironclaw_host_api::{
     OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
     VendorAuthRecipe,
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use url::Url;
 
@@ -175,7 +175,7 @@ pub struct AuthEngineDeps {
     pub recipes: Arc<dyn AuthRecipeResolver>,
     pub client_credentials: Arc<dyn EngineClientCredentialsSource>,
     pub egress: Arc<dyn RuntimeHttpEgress>,
-    pub secret_store: Arc<dyn SecretStore>,
+    pub secret_store: Arc<dyn SecretStorePort>,
     pub callback_base: EngineCallbackBase,
     /// `client_name` sent with RFC 7591 dynamic client registration.
     pub dcr_client_name: String,
@@ -222,7 +222,7 @@ pub struct AuthEngine {
     recipes: Arc<dyn AuthRecipeResolver>,
     client_credentials: Arc<dyn EngineClientCredentialsSource>,
     egress: Arc<dyn RuntimeHttpEgress>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     callback_base: EngineCallbackBase,
     dcr_client_name: String,
     /// Serializes dynamic client registration so concurrent flows for one

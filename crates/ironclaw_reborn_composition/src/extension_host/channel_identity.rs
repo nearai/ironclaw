@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
 use ironclaw_product::AdapterInstallationId;
 
@@ -130,7 +130,7 @@ pub struct ChannelIdentityBindingConfig {
     pub(crate) tenant_id: TenantId,
     /// Generic discovery + scoping-value source. `None` when the composed
     /// runtime has no durable installation store — only overrides bind then.
-    pub(crate) installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+    pub(crate) installation_store: Option<Arc<dyn ExtensionInstallationStorePort>>,
     /// Effective manifest-driven administrator configuration. `None` means
     /// no deployment values are available and scoping fails closed.
     pub(crate) admin_configuration_resolver:
@@ -153,7 +153,7 @@ impl ChannelIdentityBindingConfig {
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(
         tenant_id: TenantId,
-        installation_store: Arc<dyn ExtensionInstallationStore>,
+        installation_store: Arc<dyn ExtensionInstallationStorePort>,
         binding_store: Arc<dyn RebornUserIdentityBindingStore>,
         rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     ) -> Self {
@@ -175,17 +175,15 @@ impl ChannelIdentityBindingConfig {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn for_test_with_admin_configuration(
         tenant_id: TenantId,
-        installation_store: Arc<dyn ExtensionInstallationStore>,
+        installation_store: Arc<dyn ExtensionInstallationStorePort>,
         binding_store: Arc<dyn RebornUserIdentityBindingStore>,
         rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         values: Vec<(String, String)>,
     ) -> Result<Self, String> {
-        use ironclaw_extension_host::{
-            AdminConfigurationService, FilesystemAdminConfigurationStore,
-        };
+        use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
         use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
         use ironclaw_host_api::{InvocationId, ResourceScope};
-        use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
+        use ironclaw_secrets::{SecretStore, SecretStorePort};
 
         let manifests = installation_store
             .list_manifests()
@@ -199,10 +197,10 @@ impl ChannelIdentityBindingConfig {
             .flat_map(|manifest| manifest.admin_configuration.clone())
             .collect::<Vec<_>>();
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let admin = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
                     filesystem,
                     crate::invocation_mount_view,
                 ))),
@@ -272,7 +270,7 @@ struct ChannelIdentityTarget {
 /// installation record supplies the adapter installation id; non-secret
 /// manifest fields whose handles carry a claim suffix supply expected claims.
 struct AdminConfigurationConnectionScopeSource {
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
     admin_configuration_resolver: Option<Arc<ComposedExtensionAdminConfigurationResolver>>,
 }
@@ -350,7 +348,7 @@ fn handle_declares_claim(handle: &str, claim: &str) -> bool {
 /// store — also used by the generic connection facade so the connect-report
 /// prefix and the bind prefix can never diverge.
 pub(crate) fn admin_configuration_connection_scope_source(
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
     admin_configuration_resolver: Option<Arc<ComposedExtensionAdminConfigurationResolver>>,
 ) -> Arc<dyn ChannelConnectionScopeSource> {
@@ -375,7 +373,7 @@ pub(crate) struct DiscoveredChannelExtension {
 /// none but must still be discoverable by the generic connection facade so
 /// removal can revoke their pairing-owned state.
 pub(crate) async fn discover_channel_extensions(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     overridden: &BTreeSet<String>,
 ) -> Result<Vec<DiscoveredChannelExtension>, String> {
     let manifests = installation_store
@@ -667,14 +665,14 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use ironclaw_extension_host::{AdminConfigurationService, FilesystemAdminConfigurationStore};
+    use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
     use ironclaw_extensions::{
-        ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, FilesystemExtensionInstallationStore, ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, ResourceScope};
-    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
@@ -761,7 +759,7 @@ app_id = "/app_id"
 
     const FIXTURE_INSTALLATION_ID: &str = "acmechat-install-1";
 
-    async fn installed_fixture_store() -> Arc<FilesystemExtensionInstallationStore> {
+    async fn installed_fixture_store() -> Arc<ExtensionInstallationStore> {
         let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             CHANNEL_AUTH_FIXTURE_MANIFEST,
@@ -848,10 +846,10 @@ app_id = "/app_id"
         )
         .expect("resource scope");
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let admin = Arc::new(
             AdminConfigurationService::new(
-                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
                     filesystem,
                     crate::invocation_mount_view,
                 ))),
@@ -867,7 +865,7 @@ app_id = "/app_id"
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
             installation_store: Some(
-                Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>
+                Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>
             ),
             admin_configuration_resolver: Some(Arc::clone(&admin_configuration_resolver)),
             binding_store: identity_store.clone(),

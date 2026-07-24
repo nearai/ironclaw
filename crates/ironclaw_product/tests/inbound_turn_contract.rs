@@ -45,8 +45,7 @@ use ironclaw_runner::runtime::{
     RuntimeTurnStateStore, build_product_live_planned_runtime,
 };
 use ironclaw_runner::subagent::await_edge::{
-    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-    store::FilesystemAwaitEdgeStore,
+    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
 };
 use ironclaw_runner::subagent::goal_store::in_memory_backed_subagent_goal_store;
 use ironclaw_threads::{
@@ -55,11 +54,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
-    FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
-    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
+    IdempotencyKey, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
+    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -426,7 +425,7 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
 }
 
 fn turn_state_store_dyn(
-    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: &Arc<TurnStateRowStore<InMemoryBackend>>,
 ) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
@@ -438,7 +437,7 @@ fn turn_state_store_dyn(
 /// purposes.
 #[allow(clippy::type_complexity)]
 fn test_await_edge_trio(
-    turn_store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    turn_store: &Arc<TurnStateRowStore<InMemoryBackend>>,
     capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     thread_service: Arc<InMemorySessionThreadService>,
 ) -> (
@@ -453,7 +452,7 @@ fn test_await_edge_trio(
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+    let store = Arc::new(AwaitEdgeStore::new(Arc::new(
         ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
     )));
     let goal_store = Arc::new(in_memory_backed_subagent_goal_store());

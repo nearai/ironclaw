@@ -137,7 +137,7 @@ fn reborn_product_auth_ports_from_shared_with_provider_uses_separate_provider_cl
     let ports = RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
     let services = ports.into_services(
         Arc::new(NoopAuthContinuationDispatcher),
-        Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+        Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
     );
 
     assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
@@ -431,8 +431,8 @@ impl SecretCleanupService for ReportingCleanupService {
 async fn lifecycle_cleanup_drops_canceled_flows_durable_pkce_verifier() {
     use ironclaw_host_api::ExtensionId;
 
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
-        Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStorePort> =
+        Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     let scope = test_auth_product_scope();
     let flow_id = AuthFlowId::new();
     let double = Arc::new(SharedAuthTestDouble);

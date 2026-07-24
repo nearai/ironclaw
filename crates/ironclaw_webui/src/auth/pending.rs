@@ -23,7 +23,7 @@
 //! in-flight login, which then fails closed as `invalid_state` / a dead
 //! ticket — never an auth bypass. Note the composition product-auth setup
 //! path has since solved this same shape by moving its raw PKCE verifiers
-//! into the injected durable `SecretStore` (`product-auth-setup-pkce-…`,
+//! into the injected durable `SecretStorePort` (`product-auth-setup-pkce-…`,
 //! TTL-bounded, one-shot `lease_once`/`consume`) — and its CLAUDE.md now
 //! forbids reintroducing a process-local verifier cache there. Porting that
 //! pattern here additionally needs a decision about the storage scope for

@@ -24,8 +24,8 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{RunStateStore, RunStatus};
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::{Value, json};
 
@@ -107,7 +107,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
     });
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let network = RecordingNetworkHttpEgress::default();
     let network_recorder = network.requests.clone();
     let runtime = HostRuntimeServices::new(
@@ -223,7 +223,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
 
     for (error, expected_kind) in cases {
         let handle = SecretHandle::new("api-token").unwrap();
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let secret_store = Arc::new(SecretStore::ephemeral());
         let runtime = http_first_party_services(&handle)
             .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(FailingRuntimeHttpEgress { error }))
@@ -248,7 +248,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     }
 
     let handle = SecretHandle::new("api-token").unwrap();
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let runtime = http_first_party_services(&handle)
         .with_secret_store(Arc::clone(&secret_store))
         .with_trust_policy(Arc::new(first_party_trust_policy()))
@@ -269,7 +269,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     assert_eq!(failure.kind, RuntimeFailureKind::Network);
 
     let handle = SecretHandle::new("api-token").unwrap();
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let runtime = http_first_party_services(&handle)
         .with_secret_store(Arc::clone(&secret_store))
         .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
@@ -290,7 +290,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
 async fn first_party_handler_rejects_non_string_url_input() {
     for input in [json!({"url": 123}), json!({"url": true})] {
         let handle = SecretHandle::new("api-token").unwrap();
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let secret_store = Arc::new(SecretStore::ephemeral());
         let runtime = http_first_party_services(&handle)
             .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
@@ -773,8 +773,8 @@ fn http_first_party_services(
 ) -> HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
-    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     let handler = Arc::new(HttpFirstPartyHandler {
         handle: handle.clone(),
@@ -896,7 +896,7 @@ fn test_network_policy() -> NetworkPolicy {
 }
 
 async fn stage_http_secret(
-    secret_store: &FilesystemSecretStore<InMemoryBackend>,
+    secret_store: &SecretStore<InMemoryBackend>,
     scope: &ResourceScope,
     handle: &SecretHandle,
 ) {

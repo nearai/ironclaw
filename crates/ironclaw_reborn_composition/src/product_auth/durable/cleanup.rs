@@ -130,7 +130,7 @@ where
                 report.removed_grants.push(current.id);
             }
             // Capture handles to purge before mutating the record so we can
-            // delete from SecretStore after the account write.
+            // delete from SecretStorePort after the account write.
             let (purge_access, purge_refresh) = if owns_extension_account || provider_selected {
                 match request.action {
                     SecretCleanupAction::Deactivate => {

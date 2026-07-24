@@ -7,12 +7,12 @@ use chrono::{Duration, TimeZone, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    FilesystemTurnStateRowStore, GateRef, IdempotencyKey, InMemoryRunProfileResolver,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnLeaseToken,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest, GateRef,
+    IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunProfileRequest, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnError, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope,
+    TurnStateRowStore, TurnStateStore, TurnStatus,
     run_profile::LoopCheckpointStateRef,
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -21,7 +21,7 @@ use ironclaw_turns::{
 };
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 
-type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+type TurnStore = TurnStateRowStore<InMemoryBackend>;
 
 const MAX_CRASH_RECOVERY_RECLAIMS: u64 = 5;
 
@@ -887,7 +887,7 @@ async fn unsupported_turn_state_operations_do_not_mutate_projection() {
 }
 
 fn turn_store_with_shared_fs(fs: Arc<ScopedFilesystem<InMemoryBackend>>) -> TurnStore {
-    FilesystemTurnStateRowStore::new(fs)
+    TurnStateRowStore::new(fs)
 }
 
 #[derive(Debug, Clone)]

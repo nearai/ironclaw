@@ -29,7 +29,7 @@ pub(super) fn wrap_synthetic_capabilities(
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
     if capabilities.is_empty() {
         return Ok(inner);
@@ -185,7 +185,7 @@ struct SyntheticCapabilityPort {
     /// own approval gate reconstitutes {input} from here on resume, keyed by the
     /// invocation id in the resume token (§5.3 Stage 2a-i), instead of reading raw
     /// tool args off the loop-facing resume DTO.
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 struct SyntheticProviderToolCallRegistration {
@@ -206,7 +206,7 @@ impl SyntheticCapabilityPort {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     ) -> Result<Self, AgentLoopHostError> {
         let mut capabilities_by_id = HashMap::new();
         let mut capability_ids_by_provider_tool_name = HashMap::new();
@@ -778,7 +778,7 @@ mod tests {
             }),
             result_writer,
             None,
-            Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+            Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
                 crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
             )),
         )

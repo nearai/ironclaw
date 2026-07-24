@@ -36,7 +36,7 @@ use ironclaw_extension_host::{
     RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 use ironclaw_extensions::{
-    ExtensionHealthStatus, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,
+    ExtensionHealthStatus, ExtensionInstallationStorePort, ExtensionManifest, ExtensionPackage,
     ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
@@ -63,7 +63,7 @@ pub(crate) struct GenericExtensionHostParams {
     pub(crate) binder: ExtensionLaneToolBinder,
     pub(crate) native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
     pub(crate) channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
-    pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
+    pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub(crate) admin_configuration_resolver: Option<
         Arc<
             crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
@@ -248,7 +248,7 @@ struct CompositionExtensionLoader {
     /// adapter lands.
     channel_adapters: HashMap<String, Arc<dyn ChannelAdapter>>,
     governor: Arc<dyn ResourceGovernor>,
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
 
 #[async_trait]
@@ -515,9 +515,9 @@ mod tests {
     use ironclaw_extension_host::test_support::{FakeEntrypoint, FakeToolAdapter};
     use ironclaw_extensions::{
         ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus,
-        ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, ExtensionRegistry, FilesystemExtensionInstallationStore,
-        MANIFEST_SCHEMA_VERSION, ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, MANIFEST_SCHEMA_VERSION,
+        ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::ids::ExtensionId;
@@ -617,12 +617,12 @@ input_schema_ref = "schemas/template.input.json"
         }
     }
 
-    async fn seed_installation(store: &FilesystemExtensionInstallationStore, id: &str) {
+    async fn seed_installation(store: &ExtensionInstallationStore, id: &str) {
         seed_installation_with_manifest(store, id, fixture_manifest_toml(id)).await;
     }
 
     async fn seed_installation_with_manifest(
-        store: &FilesystemExtensionInstallationStore,
+        store: &ExtensionInstallationStore,
         id: &str,
         manifest_toml: String,
     ) {
@@ -680,7 +680,7 @@ input_schema_ref = "schemas/template.input.json"
             binder: test_binder(),
             native_factories: vec![Arc::new(FixtureNativeFactory)],
             channel_adapters: Vec::new(),
-            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
             admin_configuration_resolver: None,
             governor: Arc::new(InMemoryResourceGovernor::new()),
             reserved_capability_ids: BTreeSet::new(),
@@ -721,7 +721,7 @@ input_schema_ref = "schemas/template.input.json"
             binder: test_binder(),
             native_factories: Vec::new(),
             channel_adapters: Vec::new(),
-            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
             admin_configuration_resolver: None,
             governor: Arc::new(InMemoryResourceGovernor::new()),
             reserved_capability_ids: BTreeSet::new(),
@@ -773,7 +773,7 @@ input_schema_ref = "schemas/template.input.json"
             binder: test_binder(),
             native_factories: vec![Arc::new(FixtureNativeFactory)],
             channel_adapters: Vec::new(),
-            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
             admin_configuration_resolver: None,
             governor: Arc::new(InMemoryResourceGovernor::new()),
             reserved_capability_ids: BTreeSet::new(),

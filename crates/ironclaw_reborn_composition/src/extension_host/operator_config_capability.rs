@@ -5,10 +5,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    AutoApproveSettingInput, AutoApproveSettingStore, PersistentApprovalAction,
+    AutoApproveSettingInput, AutoApproveSettingStorePort, PersistentApprovalAction,
     PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
-    PersistentApprovalPolicyStore, ToolPermissionOverride, ToolPermissionOverrideInput,
-    ToolPermissionOverrideKey, ToolPermissionOverrideStore, ToolPermissionState,
+    PersistentApprovalPolicyStorePort, ToolPermissionOverride, ToolPermissionOverrideInput,
+    ToolPermissionOverrideKey, ToolPermissionOverrideStorePort, ToolPermissionState,
 };
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
@@ -41,9 +41,9 @@ pub(crate) fn extend_builtin_first_party_package(
 
 pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
-    auto_approve: Arc<dyn AutoApproveSettingStore>,
-    overrides: Arc<dyn ToolPermissionOverrideStore>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
+    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
@@ -119,7 +119,7 @@ fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
 }
 
 struct SetAutoApproveHandler {
-    auto_approve: Arc<dyn AutoApproveSettingStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
 }
 
 #[async_trait]
@@ -158,8 +158,8 @@ impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
 }
 
 struct SetToolPermissionHandler {
-    overrides: Arc<dyn ToolPermissionOverrideStore>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 }
 
@@ -342,8 +342,8 @@ async fn find_operator_tool(
 }
 
 async fn apply_tool_permission_state(
-    overrides: &dyn ToolPermissionOverrideStore,
-    persistent_policies: &dyn PersistentApprovalPolicyStore,
+    overrides: &dyn ToolPermissionOverrideStorePort,
+    persistent_policies: &dyn PersistentApprovalPolicyStorePort,
     scope: &ResourceScope,
     actor: &UserId,
     tool: &RebornOperatorToolInfo,
@@ -431,7 +431,7 @@ async fn apply_tool_permission_state(
 }
 
 async fn revoke_persistent_policy(
-    persistent_policies: &dyn PersistentApprovalPolicyStore,
+    persistent_policies: &dyn PersistentApprovalPolicyStorePort,
     operator_scope: &ResourceScope,
     tool: &RebornOperatorToolInfo,
     started: Instant,
@@ -502,8 +502,8 @@ fn resource_usage(started: Instant) -> ResourceUsage {
 #[cfg(test)]
 mod tests {
     use ironclaw_approvals::{
-        CapabilityPermissionOverrideStore, FilesystemAutoApproveSettingStore,
-        FilesystemPersistentApprovalPolicyStore, FilesystemToolPermissionOverrideStore,
+        AutoApproveSettingStore, CapabilityPermissionOverrideStorePort,
+        PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ExtensionId, InvocationId, ResourceScope, TenantId};
@@ -554,13 +554,9 @@ mod tests {
     #[tokio::test]
     async fn tool_permission_handler_writes_persistent_policy_and_override() {
         let scoped = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
-        let overrides = Arc::new(FilesystemToolPermissionOverrideStore::new(Arc::clone(
-            &scoped,
-        )));
-        let persistent_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
-            Arc::clone(&scoped),
-        ));
-        let auto_approve = Arc::new(FilesystemAutoApproveSettingStore::new(scoped));
+        let overrides = Arc::new(ToolPermissionOverrideStore::new(Arc::clone(&scoped)));
+        let persistent_policies = Arc::new(PersistentApprovalPolicyStore::new(Arc::clone(&scoped)));
+        let auto_approve = Arc::new(AutoApproveSettingStore::new(scoped));
         let capability_id = CapabilityId::new("ext.search").expect("capability id");
         let provider = ExtensionId::new("ext").expect("provider id");
         let tool_catalog: Arc<dyn RebornOperatorToolCatalog> =

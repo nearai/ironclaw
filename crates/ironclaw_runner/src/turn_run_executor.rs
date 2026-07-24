@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
 use ironclaw_observability::live_latency_started_at;
-use ironclaw_run_state::GateRecordStore;
+use ironclaw_run_state::GateRecordStorePort;
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
     LoopBlockedKind, LoopExit, TurnStatus,
@@ -141,7 +141,7 @@ pub struct RebornTurnRunExecutor {
     /// filesystem (they never raise a durable auth gate to render); every
     /// production composition wires the SAME `Arc` it wired into the capability
     /// port's `with_gate_record_store`, so an unwired production path is a bug.
-    gate_record_store: Option<Arc<dyn GateRecordStore>>,
+    gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
     /// After-turn interaction recorder (mem0 `add` seam). Optional; production
     /// wires `None` pending #5013 — only compositions that resolve a memory
     /// document-store provider attach it, and a `Completed` run finishes cleanly
@@ -156,7 +156,7 @@ impl RebornTurnRunExecutor {
         loop_exit_applier: Arc<LoopExitApplier>,
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
-        gate_record_store: Option<Arc<dyn GateRecordStore>>,
+        gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
     ) -> Self {
         Self {
             loop_exit_applier,
@@ -1789,7 +1789,7 @@ mod tests {
     #[tokio::test]
     async fn auth_block_with_unsourceable_requirements_fails_the_exit() {
         use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
-        use ironclaw_run_state::{GateRecordStore, RunStateError};
+        use ironclaw_run_state::{GateRecordStorePort, RunStateError};
         use ironclaw_turns::{
             LoopBlocked, LoopBlockedKind, LoopCheckpointStateRef, LoopGateRef, TurnCheckpointId,
         };
@@ -1797,7 +1797,7 @@ mod tests {
         // A gate-record store that never yields the auth record (`Ok(None)`).
         struct MissingAuthGateRecordStore;
         #[async_trait]
-        impl GateRecordStore for MissingAuthGateRecordStore {
+        impl GateRecordStorePort for MissingAuthGateRecordStore {
             async fn save(
                 &self,
                 _scope: ResourceScope,

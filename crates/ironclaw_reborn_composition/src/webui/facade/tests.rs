@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
     ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifest,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    FilesystemExtensionInstallationStore, ManifestSource,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionInstallationStorePort,
+    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
+    ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
@@ -142,7 +142,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             .await
             .expect("upsert manifest + installation");
     }
-    let installation_store: Arc<dyn ExtensionInstallationStore> = store.clone();
+    let installation_store: Arc<dyn ExtensionInstallationStorePort> = store.clone();
 
     // Registry the catalog reads: both extensions' capabilities are
     // published, plus one anomalous capability with NO installation row.
@@ -234,7 +234,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
 /// injects the owner-read failure the settings catalog must fail closed
 /// on (#5525 review).
 struct OwnerReadFailingStore {
-    inner: FilesystemExtensionInstallationStore,
+    inner: ExtensionInstallationStore,
     fail_list_installations: std::sync::atomic::AtomicBool,
 }
 
@@ -247,8 +247,8 @@ impl OwnerReadFailingStore {
     }
 }
 
-async fn filesystem_installation_store() -> FilesystemExtensionInstallationStore {
-    FilesystemExtensionInstallationStore::load_at(
+async fn filesystem_installation_store() -> ExtensionInstallationStore {
+    ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
         HostPortCatalog::empty(),
@@ -259,7 +259,7 @@ async fn filesystem_installation_store() -> FilesystemExtensionInstallationStore
 }
 
 #[async_trait]
-impl ExtensionInstallationStore for OwnerReadFailingStore {
+impl ExtensionInstallationStorePort for OwnerReadFailingStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {

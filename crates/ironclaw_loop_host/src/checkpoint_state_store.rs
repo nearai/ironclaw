@@ -1,4 +1,4 @@
-//! Filesystem-backed [`CheckpointStateStore`] implementation.
+//! Filesystem-backed [`CheckpointStateStorePort`] implementation.
 //!
 //! Persists host-owned loop checkpoint payloads under the `/checkpoint-state`
 //! mount alias. The [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem)
@@ -27,11 +27,11 @@ use ironclaw_host_api::ScopedPath;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_turns::{
-    CheckpointSchemaId, CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
-    GetCheckpointStateRequest, LoopCheckpointKind, LoopCheckpointStateRef,
-    PutCheckpointStateRequest, RedactedCheckpointPayload, RunProfileVersion, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnTimestamp, checkpoint_state_metadata_matches_request,
-    new_checkpoint_state_ref,
+    CheckpointSchemaId, CheckpointStateMatchMetadata, CheckpointStateRecord,
+    CheckpointStateStorePort, GetCheckpointStateRequest, LoopCheckpointKind,
+    LoopCheckpointStateRef, PutCheckpointStateRequest, RedactedCheckpointPayload,
+    RunProfileVersion, TurnError, TurnId, TurnRunId, TurnScope, TurnTimestamp,
+    checkpoint_state_metadata_matches_request, new_checkpoint_state_ref,
 };
 
 const CHECKPOINT_STATE_PREFIX: &str = "/checkpoint-state";
@@ -41,14 +41,14 @@ const CHECKPOINT_STATE_PREFIX: &str = "/checkpoint-state";
 /// Construct with a [`ScopedFilesystem`] whose mount view exposes
 /// `/checkpoint-state`. Payloads are stored as redacted host-owned records; the
 /// public checkpoint metadata stores only the returned [`LoopCheckpointStateRef`].
-pub struct FilesystemCheckpointStateStore<F>
+pub struct CheckpointStateStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemCheckpointStateStore<F>
+impl<F> CheckpointStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -65,7 +65,7 @@ where
 }
 
 #[async_trait]
-impl<F> CheckpointStateStore for FilesystemCheckpointStateStore<F>
+impl<F> CheckpointStateStorePort for CheckpointStateStore<F>
 where
     F: RootFilesystem + Send + Sync + 'static,
 {

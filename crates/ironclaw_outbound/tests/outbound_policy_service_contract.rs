@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)] // test helper constructs FilesystemOutboundStateStore directly (arch-simplification §4.3)
+#![allow(clippy::disallowed_methods)] // test helper constructs OutboundStateStore directly (arch-simplification §4.3)
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -11,8 +11,8 @@ use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, Vir
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
-fn in_memory_outbound_store() -> FilesystemOutboundStateStore<InMemoryBackend> {
-    // §4.3: the deleted `FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>` is replaced by the one
+fn in_memory_outbound_store() -> OutboundStateStore<InMemoryBackend> {
+    // §4.3: the deleted `OutboundStateStore<ironclaw_filesystem::InMemoryBackend>` is replaced by the one
     // production store over a volatile in-memory backend (mirrors the merged
     // budget-gate/run-state consolidations). A local helper because this crate's
     // own integration tests cannot enable its `test-support` feature.
@@ -26,7 +26,7 @@ fn in_memory_outbound_store() -> FilesystemOutboundStateStore<InMemoryBackend> {
         std::sync::Arc::new(InMemoryBackend::new()),
         mounts,
     ));
-    FilesystemOutboundStateStore::new(scoped)
+    OutboundStateStore::new(scoped)
 }
 
 #[tokio::test]

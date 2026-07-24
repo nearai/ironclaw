@@ -17,10 +17,10 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
     PersistentApprovalScope,
 };
-use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationResult,
     CapabilityObligationHandler, CapabilitySpawnRequest, CapabilitySpawnResult,
@@ -38,13 +38,14 @@ use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
 use ironclaw_processes::{
-    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessStart, ProcessStatus, ProcessStore,
+    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStorePort,
+    ProcessStart, ProcessStatus, ProcessStorePort,
 };
 use ironclaw_run_state::{
-    ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
+    ApprovalRequestStorePort, RunStateApprovalStorePort, RunStateError, RunStateStorePort,
+    RunStatus,
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 
@@ -111,17 +112,22 @@ pub struct DefaultHostRuntime {
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
-    run_state: Option<Arc<dyn RunStateStore>>,
-    approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
-    run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
-    capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
-    // arch-exempt: optional_arc, minimal/test compositions intentionally disable
-    // persistent approval replay until the product revoke control plane is split out,
-    // plan #4539
-    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
+    run_state: Option<Arc<dyn RunStateStorePort>>,
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
+    approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
+    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
+    run_state_approval_store: Option<Arc<dyn RunStateApprovalStorePort>>,
+    // arch-exempt: optional_arc, capability leases are absent in minimal/test runtime graphs, plan #4539
+    capability_leases: Option<Arc<dyn CapabilityLeaseStorePort>>,
+    // arch-exempt: optional_arc, minimal/test compositions intentionally disable persistent approval replay, plan #4539
+    // Until the product revoke control plane is split out.
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
-    process_store: Option<Arc<dyn ProcessStore>>,
-    process_result_store: Option<Arc<dyn ProcessResultStore>>,
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
+    process_store: Option<Arc<dyn ProcessStorePort>>,
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
+    process_result_store: Option<Arc<dyn ProcessResultStorePort>>,
     process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
@@ -136,9 +142,9 @@ pub struct DefaultHostRuntime {
     ///
     /// When absent the pre-flight is skipped; the dispatch-time obligation check
     /// remains the enforcement backstop regardless.
-    // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
-    // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
-    credential_preflight_store: Option<Arc<dyn SecretStore>>,
+    // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test graphs, plan #4539
+    // Those host-runtime graphs do not wire a secret store.
+    credential_preflight_store: Option<Arc<dyn SecretStorePort>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -155,7 +161,7 @@ impl DefaultHostRuntime {
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
     /// Callers must additionally attach either a combined
-    /// [`RunStateApprovalStore`] via
+    /// [`RunStateApprovalStorePort`] via
     /// [`with_run_state_approval_store`](Self::with_run_state_approval_store),
     /// or separate stores via [`with_run_state`](Self::with_run_state) and
     /// [`with_approval_requests`](Self::with_approval_requests), before
@@ -239,16 +245,18 @@ impl DefaultHostRuntime {
     }
 
     /// Attaches the run-state store used to record invocation lifecycle.
-    pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStore>) -> Self {
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
+    pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStorePort>) -> Self {
         self.run_state = Some(run_state);
         self.run_state_approval_store = None;
         self
     }
 
     /// Attaches the approval-request store used to persist approval prompts.
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
     pub fn with_approval_requests(
         mut self,
-        approval_requests: Arc<dyn ApprovalRequestStore>,
+        approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
         self.run_state_approval_store = None;
@@ -257,7 +265,11 @@ impl DefaultHostRuntime {
 
     /// Attaches a combined durable run-state/approval-request store with an
     /// atomic approval-block transition.
-    pub fn with_run_state_approval_store(mut self, store: Arc<dyn RunStateApprovalStore>) -> Self {
+    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
+    pub fn with_run_state_approval_store(
+        mut self,
+        store: Arc<dyn RunStateApprovalStorePort>,
+    ) -> Self {
         self.run_state = Some(store.clone());
         self.approval_requests = Some(store.clone());
         self.run_state_approval_store = Some(store);
@@ -265,9 +277,10 @@ impl DefaultHostRuntime {
     }
 
     /// Attaches the capability-lease store used by approval resume paths.
+    // arch-exempt: optional_arc, capability leases are absent in minimal/test runtime graphs, plan #4539
     pub fn with_capability_leases(
         mut self,
-        capability_leases: Arc<dyn CapabilityLeaseStore>,
+        capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
         self
@@ -275,9 +288,10 @@ impl DefaultHostRuntime {
 
     /// Attaches reusable approval policy overrides used to inject scoped,
     /// manifest-bounded grants before ordinary authorization.
+    // arch-exempt: optional_arc, approval policy overrides are absent in minimal/test runtime graphs, plan #4539
     pub fn with_persistent_approval_policies(
         mut self,
-        policies: Arc<dyn PersistentApprovalPolicyStore>,
+        policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     ) -> Self {
         self.persistent_approval_policies = Some(policies);
         self
@@ -290,15 +304,17 @@ impl DefaultHostRuntime {
     }
 
     /// Attaches the process store used for status and cancellation fanout.
-    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStore>) -> Self {
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
+    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStorePort>) -> Self {
         self.process_store = Some(process_store);
         self
     }
 
     /// Attaches the process result store used to persist cancellation results.
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
     pub fn with_process_result_store(
         mut self,
-        process_result_store: Arc<dyn ProcessResultStore>,
+        process_result_store: Arc<dyn ProcessResultStorePort>,
     ) -> Self {
         self.process_result_store = Some(process_result_store);
         self
@@ -376,7 +392,7 @@ impl DefaultHostRuntime {
     // plan #4539 (Fix B)
     pub(crate) fn with_credential_preflight_store(
         mut self,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
     ) -> Self {
         self.credential_preflight_store = Some(secret_store);
         self

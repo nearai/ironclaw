@@ -33,7 +33,7 @@ use ironclaw_host_api::{
     AgentId, ExtensionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStorePort,
 };
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
@@ -122,7 +122,7 @@ pub struct ChannelHostIdentity {
 /// then ingress-only (turns run; no channel lifecycle output is delivered).
 pub(crate) struct ChannelHostDeliveryDeps {
     pub(crate) coordinator: Arc<DeliveryCoordinator>,
-    pub(crate) outbound_store: Arc<dyn OutboundStateStore>,
+    pub(crate) outbound_store: Arc<dyn OutboundStateStorePort>,
     pub(crate) route_store: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) current_delivery_targets: Arc<dyn ironclaw_product::CurrentDeliveryTargetResolver>,

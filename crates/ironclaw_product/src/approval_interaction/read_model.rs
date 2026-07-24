@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ResourceScope;
-use ironclaw_run_state::{ApprovalRequestStore, RunStateError};
+use ironclaw_run_state::{ApprovalRequestStorePort, RunStateError};
 use ironclaw_turns::{GateRef, TurnRunId};
 
 use super::gate_ref::{approval_gate_ref, approval_request_id_from_gate_ref};
@@ -61,13 +61,13 @@ pub trait ApprovalInteractionReadModel: Send + Sync {
 
 /// Read-model backed by canonical approval records and parked turn state.
 pub struct RunStateApprovalInteractionReadModel {
-    approval_requests: Arc<dyn ApprovalRequestStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
     turn_runs: Arc<dyn ApprovalTurnRunLocator>,
 }
 
 impl RunStateApprovalInteractionReadModel {
     pub fn new(
-        approval_requests: Arc<dyn ApprovalRequestStore>,
+        approval_requests: Arc<dyn ApprovalRequestStorePort>,
         turn_runs: Arc<dyn ApprovalTurnRunLocator>,
     ) -> Self {
         Self {

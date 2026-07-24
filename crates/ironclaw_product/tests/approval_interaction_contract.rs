@@ -5,17 +5,17 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, PersistentApprovalAction,
+    CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
     test_support::{
         in_memory_backed_capability_permission_override_store,
         in_memory_backed_persistent_approval_policy_store,
     },
 };
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, in_memory_backed_capability_lease_store,
+    CapabilityLeaseStatus, CapabilityLeaseStorePort, in_memory_backed_capability_lease_store,
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
@@ -32,7 +32,7 @@ use ironclaw_product::{
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     RunStateApprovalInteractionReadModel, approval_gate_ref,
 };
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
+use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
@@ -388,7 +388,7 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
 struct FailingPersistentApprovalPolicyStore;
 
 #[async_trait]
-impl PersistentApprovalPolicyStore for FailingPersistentApprovalPolicyStore {
+impl PersistentApprovalPolicyStorePort for FailingPersistentApprovalPolicyStore {
     async fn allow(
         &self,
         _input: PersistentApprovalPolicyInput,
@@ -754,8 +754,10 @@ fn approval_request_by(reason: &str, requested_by: Principal) -> ApprovalRequest
 /// The two persistent-approval store backends every caller-level test exercises.
 /// Filesystem scope paths are part of the fix, so both must pass. `prefix`
 /// distinguishes the per-backend idempotency keys.
-fn caller_level_store_pair(prefix: &str) -> [(Arc<dyn PersistentApprovalPolicyStore>, String); 2] {
-    // Both entries are the one production `FilesystemPersistentApprovalPolicyStore`
+fn caller_level_store_pair(
+    prefix: &str,
+) -> [(Arc<dyn PersistentApprovalPolicyStorePort>, String); 2] {
+    // Both entries are the one production `PersistentApprovalPolicyStore`
     // over the in-memory backend; they differ only in mount configuration — the
     // helper's default `/approvals` mount vs. the tenant/user-scoped mount that
     // the settings-scope fix exercises.
@@ -765,12 +767,9 @@ fn caller_level_store_pair(prefix: &str) -> [(Arc<dyn PersistentApprovalPolicySt
             format!("{prefix}-default-mount"),
         ),
         (
-            Arc::new(
-                ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
-                    "tenant-alpha",
-                    "user-alpha",
-                )),
-            ),
+            Arc::new(ironclaw_approvals::PersistentApprovalPolicyStore::new(
+                scoped_fs("tenant-alpha", "user-alpha"),
+            )),
             format!("{prefix}-scoped-mount"),
         ),
     ]
@@ -915,7 +914,7 @@ async fn always_allow_resolves_gate_and_persists_reusable_policy() {
     );
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request(request);
     let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
     let service = service.with_persistent_policy_store(policy_store);
 
     let response = service
@@ -971,8 +970,8 @@ async fn always_allow_clears_existing_ask_each_time_override() {
         })
         .await
         .expect("override set");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
-    let override_store: Arc<dyn ToolPermissionOverrideStore> = overrides.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
+    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_tool_permission_override_store(override_store);
@@ -1027,8 +1026,8 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         })
         .await
         .expect("override set");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
-    let override_store: Arc<dyn ToolPermissionOverrideStore> = overrides.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
+    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {
@@ -1074,7 +1073,7 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
 /// matches). Asserts the resolution approved and resumed. The persisted policy
 /// scope is `gate_scope` and the grantee is `request.requested_by`.
 async fn drive_always_allow(
-    store: Arc<dyn PersistentApprovalPolicyStore>,
+    store: Arc<dyn PersistentApprovalPolicyStorePort>,
     request: ApprovalRequest,
     gate_scope: ResourceScope,
     idempotency: &str,
@@ -1114,7 +1113,7 @@ async fn drive_always_allow(
 }
 
 async fn drive_spawn_always_allow(
-    store: Arc<dyn PersistentApprovalPolicyStore>,
+    store: Arc<dyn PersistentApprovalPolicyStorePort>,
     request: ApprovalRequest,
     gate_scope: ResourceScope,
     idempotency: &str,
@@ -1349,7 +1348,7 @@ async fn always_allow_without_policy_store_rejects_before_approval_side_effects(
 #[tokio::test]
 async fn always_allow_policy_write_failure_still_returns_approved_after_resume() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("send the email");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> =
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> =
         Arc::new(FailingPersistentApprovalPolicyStore);
     let service = service.with_persistent_policy_store(policy_store);
 
@@ -1405,7 +1404,7 @@ async fn always_allow_disallowed_by_policy_rejects_without_persisting_or_approvi
         gate_ref.clone(),
     ));
     let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
     let service = DefaultApprovalInteractionService::new(
         Arc::new(FakeReadModel::with_gate(gate)),
         Arc::new(RejectingPersistentLeaseTermsProvider),
@@ -1474,7 +1473,7 @@ async fn always_allow_does_not_persist_policy_when_resolution_fails() {
         gate_ref.clone(),
     ));
     let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
     let service = DefaultApprovalInteractionService::new(
         Arc::new(FakeReadModel::with_gate(gate)),
         Arc::new(FixedLeaseTermsProvider),
@@ -1561,7 +1560,7 @@ async fn always_allow_resolution_failure_preserves_existing_policy() {
         })
         .await
         .expect("seed existing policy");
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
     let service = DefaultApprovalInteractionService::new(
         Arc::new(FakeReadModel::with_gate(gate)),
         Arc::new(FixedLeaseTermsProvider),
@@ -1743,7 +1742,7 @@ async fn already_approved_always_allow_replay_rejects_without_persisting_policy(
         service_fixture_for_request_status(request, ApprovalStatus::Approved);
     coordinator.set_status(TurnStatus::Queued);
     let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
     let service = service.with_persistent_policy_store(policy_store);
 
     let err = service

@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolutionError, ApprovalResolver, DenyApproval, LeaseApproval};
-use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
+use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{Action, ApprovalRequestId, CapabilityId, ResourceScope};
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
+use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus, RunStateError};
 
 use super::{ApprovalGateRecord, ApprovalInteractionRejectionKind, approval_rejected};
 use crate::error::ProductWorkflowError;
@@ -66,15 +66,15 @@ pub trait ApprovalResolutionPort: Send + Sync {
 }
 
 pub struct ApprovalResolverPort {
-    approvals: Arc<dyn ApprovalRequestStore>,
-    leases: Arc<dyn CapabilityLeaseStore>,
+    approvals: Arc<dyn ApprovalRequestStorePort>,
+    leases: Arc<dyn CapabilityLeaseStorePort>,
     audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl ApprovalResolverPort {
     pub fn new(
-        approvals: Arc<dyn ApprovalRequestStore>,
-        leases: Arc<dyn CapabilityLeaseStore>,
+        approvals: Arc<dyn ApprovalRequestStorePort>,
+        leases: Arc<dyn CapabilityLeaseStorePort>,
     ) -> Self {
         Self {
             approvals,
@@ -88,7 +88,9 @@ impl ApprovalResolverPort {
         self
     }
 
-    fn resolver(&self) -> ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore> {
+    fn resolver(
+        &self,
+    ) -> ApprovalResolver<'_, dyn ApprovalRequestStorePort, dyn CapabilityLeaseStorePort> {
         let mut resolver = ApprovalResolver::new(self.approvals.as_ref(), self.leases.as_ref());
         if let Some(audit_sink) = &self.audit_sink {
             resolver = resolver.with_audit_sink(audit_sink.as_ref());
@@ -267,7 +269,7 @@ mod tests {
         Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
         ResourceEstimate, UserId,
     };
-    use ironclaw_run_state::ApprovalRequestStore;
+    use ironclaw_run_state::ApprovalRequestStorePort;
 
     use super::*;
 

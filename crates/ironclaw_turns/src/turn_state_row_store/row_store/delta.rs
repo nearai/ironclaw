@@ -14,7 +14,7 @@ use crate::{
     TurnRunRecord, TurnRunState, TurnScope, TurnStateStoreLimits, runner::ClaimedTurnRun,
 };
 
-use crate::filesystem_store::turn_state_engine::TurnStateEngine;
+use crate::turn_state_row_store::turn_state_engine::TurnStateEngine;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub(super) struct RowStoreMeta {

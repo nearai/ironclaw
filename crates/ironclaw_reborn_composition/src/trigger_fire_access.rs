@@ -541,9 +541,8 @@ mod tests {
                 UserId as HostUserId, VirtualPath,
             };
             use ironclaw_reborn_identity::{
-                ExternalSubjectId, FilesystemRebornIdentityStore, ProviderKind,
-                RebornIdentityResolver, RebornUserDirectory, RebornUserStatus,
-                ResolveExternalIdentity, SurfaceKind,
+                ExternalSubjectId, ProviderKind, RebornIdentityResolver, RebornIdentityStore,
+                RebornUserDirectory, RebornUserStatus, ResolveExternalIdentity, SurfaceKind,
             };
 
             let tenant = TenantId::new("real-tenant").expect("tenant");
@@ -557,7 +556,7 @@ mod tests {
             let filesystem = Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
                 root, view,
             ));
-            let store = Arc::new(FilesystemRebornIdentityStore::new(
+            let store = Arc::new(RebornIdentityStore::new(
                 filesystem,
                 tenant.clone(),
                 HostUserId::new("runtime-owner").expect("owner"),

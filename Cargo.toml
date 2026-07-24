@@ -132,7 +132,7 @@ ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0"
 # `test-support` enables the in-memory-backed capability-lease store constructor
 # for the integration-test harness (cfg(test) does not propagate into deps).
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0", features = ["test-support"] }
-# Integration harness builds a fresh in-memory `FilesystemReplayPayloadStore`
+# Integration harness builds a fresh in-memory `ReplayPayloadStore`
 # fallback for harnesses without shared approval parts (§5.3 Stage 2a-i).
 ironclaw_capabilities = { path = "crates/ironclaw_capabilities", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
@@ -180,7 +180,7 @@ ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat",
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks `ironclaw_turns::test_support::in_memory_turn_state_store`
-# — the shared `FilesystemTurnStateRowStore<InMemoryBackend>` double that replaced
+# — the shared `TurnStateRowStore<InMemoryBackend>` double that replaced
 # the deleted public `InMemoryTurnStateStore` (refactor #6263). cfg(test) does not
 # propagate from an integration-test binary into its deps, so the feature is
 # explicit here.
@@ -198,7 +198,7 @@ ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # `ironclaw_outbound/test-support` provides the in-memory-backed
-# `FilesystemOutboundStateStore` the triggered-delivery outcome-seam int-tier
+# `OutboundStateStore` the triggered-delivery outcome-seam int-tier
 # proof injects (asserting a real `TriggeredRunDeliveryDriver`'s recorded
 # outcome via the same public store trait the composition factory accepts).
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.

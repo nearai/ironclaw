@@ -34,8 +34,8 @@ use ironclaw_host_api::{
     ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
-    EventCursor, FilesystemTurnStateRowStore, TurnEventKind, TurnEventProjectionSource,
-    TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    EventCursor, TurnEventKind, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId,
+    TurnScope, TurnStateRowStore, TurnStatus,
 };
 
 const EVENTS_DIR: &str = "/turns/rows/v1/events";
@@ -216,7 +216,7 @@ where
 async fn durable_event_log_replay_pages_by_global_cursor_on_libsql() {
     let (_dir, scoped) = build_libsql_scoped().await;
     seed(&scoped, 2, 3).await;
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
 
     let first = store
         .read_turn_event_log_after(None, 2)
@@ -254,7 +254,7 @@ async fn durable_event_log_replay_pages_by_global_cursor_on_postgres() {
         return;
     };
     seed(&scoped, 2, 3).await;
-    let store = FilesystemTurnStateRowStore::new(scoped);
+    let store = TurnStateRowStore::new(scoped);
 
     let first = store
         .read_turn_event_log_after(None, 2)
@@ -296,7 +296,7 @@ async fn events_query_vs_scan_perf() {
     let total = seed(&scoped, threads, events_per_thread).await;
     let seed_elapsed = seed_started.elapsed();
 
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
     let read_scope = thread_scope(0);
 
     // First read triggers ensure_index + the one-time backfill of all seeded

@@ -1,4 +1,4 @@
-//! [`RebornUserDirectory`] implementation for [`FilesystemRebornIdentityStore`].
+//! [`RebornUserDirectory`] implementation for [`RebornIdentityStore`].
 //!
 //! Admin CRUD over the canonical `users/` records. Enumeration lists the
 //! (non-tenant-partitioned) users directory and filters by the record's own
@@ -25,7 +25,7 @@ use super::record::{
     StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
     StoredVerifiedEmailIndex,
 };
-use super::{FilesystemRebornIdentityStore, backend, to_user_id};
+use super::{RebornIdentityStore, backend, to_user_id};
 use crate::RebornIdentityError;
 use crate::user_directory::{
     RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,
@@ -119,7 +119,7 @@ fn map_cas_error(error: CasUpdateError<RebornIdentityError>) -> RebornIdentityEr
     }
 }
 
-impl<F> FilesystemRebornIdentityStore<F>
+impl<F> RebornIdentityStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -241,7 +241,7 @@ where
 }
 
 #[async_trait]
-impl<F> RebornUserDirectory for FilesystemRebornIdentityStore<F>
+impl<F> RebornUserDirectory for RebornIdentityStore<F>
 where
     F: RootFilesystem + 'static,
 {

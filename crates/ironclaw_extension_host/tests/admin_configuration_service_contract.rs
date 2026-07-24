@@ -6,7 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use ironclaw_extension_host::{
     AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationServiceError,
-    AdminConfigurationSubmittedValue, FilesystemAdminConfigurationStore,
+    AdminConfigurationStore, AdminConfigurationSubmittedValue,
 };
 use ironclaw_extensions::{
     AdminConfigurationField, AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor,
@@ -17,8 +17,8 @@ use ironclaw_host_api::{
     TenantId, Timestamp, UserId, VirtualPath,
 };
 use ironclaw_secrets::{
-    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
+    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
+    SecretStorePort,
 };
 
 #[tokio::test]
@@ -70,9 +70,8 @@ async fn save_before_install_stages_secrets_and_returns_a_redacted_group_view() 
 
 #[tokio::test]
 async fn catalog_folds_equal_groups_and_rejects_descriptor_drift() {
-    let store =
-        FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
-    let secrets = Arc::new(FilesystemSecretStore::ephemeral());
+    let store = AdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
+    let secrets = Arc::new(SecretStore::ephemeral());
     let service = AdminConfigurationService::new(
         store,
         Arc::clone(&secrets),
@@ -88,11 +87,10 @@ async fn catalog_folds_equal_groups_and_rejects_descriptor_drift() {
 
     let mut conflicting = descriptor();
     conflicting.display_name = "Drifted provider".to_string();
-    let store =
-        FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
+    let store = AdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
     let result = AdminConfigurationService::new(
         store,
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         vec![descriptor(), conflicting],
     );
     let Err(error) = result else {
@@ -517,10 +515,9 @@ async fn failed_reconcile_cannot_roll_back_a_later_concurrent_writer() {
 
 #[tokio::test]
 async fn ambiguous_secret_put_is_cleaned_when_the_write_landed() {
-    let store =
-        FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
+    let store = AdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
     let secrets = Arc::new(WriteThenFailSecretStore {
-        inner: FilesystemSecretStore::ephemeral(),
+        inner: SecretStore::ephemeral(),
     });
     let service =
         AdminConfigurationService::new(store, Arc::clone(&secrets), vec![descriptor()]).unwrap();
@@ -620,12 +617,11 @@ async fn unknown_duplicate_missing_and_oversized_values_fail_closed() {
 }
 
 fn service() -> (
-    AdminConfigurationService<InMemoryBackend, FilesystemSecretStore<InMemoryBackend>>,
-    Arc<FilesystemSecretStore<InMemoryBackend>>,
+    AdminConfigurationService<InMemoryBackend, SecretStore<InMemoryBackend>>,
+    Arc<SecretStore<InMemoryBackend>>,
 ) {
-    let store =
-        FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
-    let secrets = Arc::new(FilesystemSecretStore::ephemeral());
+    let store = AdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())));
+    let secrets = Arc::new(SecretStore::ephemeral());
     let service = AdminConfigurationService::new(store, Arc::clone(&secrets), vec![descriptor()])
         .expect("descriptor catalog");
     (service, secrets)
@@ -701,11 +697,11 @@ fn idempotency_key(value: &str) -> AdminConfigurationIdempotencyKey {
 }
 
 struct WriteThenFailSecretStore {
-    inner: FilesystemSecretStore<InMemoryBackend>,
+    inner: SecretStore<InMemoryBackend>,
 }
 
 #[async_trait]
-impl SecretStore for WriteThenFailSecretStore {
+impl SecretStorePort for WriteThenFailSecretStore {
     async fn put(
         &self,
         scope: ResourceScope,

@@ -49,7 +49,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, DeliveryDefaultScope,
-    DeliveryFailureKind, OutboundDeliveryStatus, OutboundStateStore, RunFinalReplyDestination,
+    DeliveryFailureKind, OutboundDeliveryStatus, OutboundStateStorePort, RunFinalReplyDestination,
     RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, TriggerCommunicationContext,
     TriggerFireSlot, TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore, WriteCommunicationPreferenceRequest,
@@ -219,7 +219,7 @@ impl ChannelKind {
 struct MatrixOutboundFacade {
     target: RebornOutboundDeliveryTargetOption,
     reply_target_binding_ref: ReplyTargetBindingRef,
-    run_targets: Arc<dyn OutboundStateStore>,
+    run_targets: Arc<dyn OutboundStateStorePort>,
 }
 
 impl MatrixOutboundFacade {
@@ -227,7 +227,7 @@ impl MatrixOutboundFacade {
         target_id: &str,
         channel: &str,
         reply_target_binding_ref: ReplyTargetBindingRef,
-        run_targets: Arc<dyn OutboundStateStore>,
+        run_targets: Arc<dyn OutboundStateStorePort>,
     ) -> Arc<Self> {
         Arc::new(Self {
             target: RebornOutboundDeliveryTargetOption {
@@ -601,9 +601,8 @@ struct TriggeredWireFixture {
     driver: TriggeredRunDeliveryDriver,
     event_router: Arc<RunDeliveryEventRouter>,
     egress: Arc<RecordingBotEgress>,
-    outbound_store: Arc<dyn OutboundStateStore>,
-    outcome_store:
-        Arc<ironclaw_outbound::FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    outbound_store: Arc<dyn OutboundStateStorePort>,
+    outcome_store: Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     target_resolver: Arc<MatrixTargetResolver>,
 }
 

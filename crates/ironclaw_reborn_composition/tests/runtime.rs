@@ -328,7 +328,7 @@ impl HostManagedModelGateway for HookDeniedEchoGateway {
 /// block-persistence snapshot. This drives a real turn end to end over that
 /// store (submit → claim → terminal, through the production runtime), then
 /// gracefully `shutdown()`s — which routes through `RebornRuntime::shutdown →
-/// FilesystemTurnStateRowStore::drain`, exercising the write-behind durable
+/// TurnStateRowStore::drain`, exercising the write-behind durable
 /// tail drain for real: the test locks that composing the store, serving a
 /// real turn over it, and draining on shutdown all succeed without
 /// error/hang/panic.
@@ -385,7 +385,7 @@ async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
     );
 
     // Graceful shutdown drains the WriteBehind tail through
-    // `FilesystemTurnStateRowStore::drain`; a broken drain wiring surfaces here.
+    // `TurnStateRowStore::drain`; a broken drain wiring surfaces here.
     runtime
         .shutdown()
         .await
@@ -653,7 +653,7 @@ fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
 /// `TurnRunnerSettings::max_concurrent_runs_per_user` into the turn-state store.
 ///
 /// Exercises the full `build_reborn_runtime` →
-/// `FilesystemTurnStateRowStore::with_limits` wiring path so that a mis-wired or
+/// `TurnStateRowStore::with_limits` wiring path so that a mis-wired or
 /// accidentally-dropped limit is caught at the composition boundary, not just in
 /// unit tests that hand-construct the store.
 ///

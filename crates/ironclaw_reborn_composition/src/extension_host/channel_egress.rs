@@ -22,7 +22,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_secrets::SecretMaterial;
 #[cfg(test)]
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 
 /// Fixed capability id channel vendor calls are attributed to in egress
 /// events/audit (mirrors the retiring per-vendor egress capability ids).
@@ -54,13 +54,13 @@ pub(crate) enum ChannelEgressCredentialError {
 /// Generic credentials port over the scoped secret store.
 #[cfg(test)]
 pub(crate) struct SecretStoreChannelEgressCredentials {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn SecretStorePort>,
     scope_template: ResourceScope,
 }
 
 #[cfg(test)]
 impl SecretStoreChannelEgressCredentials {
-    pub(crate) fn new(store: Arc<dyn SecretStore>, scope_template: ResourceScope) -> Self {
+    pub(crate) fn new(store: Arc<dyn SecretStorePort>, scope_template: ResourceScope) -> Self {
         Self {
             store,
             scope_template,
@@ -380,7 +380,7 @@ mod tests {
     };
     use ironclaw_processes::in_memory_backed_process_services;
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
     use secrecy::SecretString;
 
     use super::*;
@@ -429,8 +429,8 @@ mod tests {
     fn test_host_runtime_services() -> HostRuntimeServices<
         DiskFilesystem,
         InMemoryResourceGovernor,
-        ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
-        ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+        ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+        ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
@@ -450,7 +450,7 @@ mod tests {
     ) {
         let requests = network.requests();
         let services = test_host_runtime_services()
-            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+            .with_secret_store(Arc::new(SecretStore::ephemeral()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire");
         let port = services
@@ -472,7 +472,7 @@ mod tests {
         handle: &SecretHandle,
         value: &str,
     ) -> Arc<dyn ChannelEgressCredentialsPort> {
-        let store = Arc::new(FilesystemSecretStore::ephemeral());
+        let store = Arc::new(SecretStore::ephemeral());
         store
             .put(
                 scope.clone(),
@@ -483,7 +483,7 @@ mod tests {
             .await
             .expect("seed channel secret");
         Arc::new(SecretStoreChannelEgressCredentials::new(
-            store as Arc<dyn SecretStore>,
+            store as Arc<dyn SecretStorePort>,
             scope.clone(),
         ))
     }
@@ -624,7 +624,7 @@ mod tests {
         // Credentials port over an EMPTY store: no material seeded.
         let credentials: Arc<dyn ChannelEgressCredentialsPort> =
             Arc::new(SecretStoreChannelEgressCredentials::new(
-                Arc::new(FilesystemSecretStore::ephemeral()) as Arc<dyn SecretStore>,
+                Arc::new(SecretStore::ephemeral()) as Arc<dyn SecretStorePort>,
                 scope.clone(),
             ));
         let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());

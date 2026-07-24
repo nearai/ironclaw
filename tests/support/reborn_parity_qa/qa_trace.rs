@@ -591,7 +591,7 @@ async fn seed_live_credentials_for_fixture(
 async fn preflight_seeded_qa_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let Some(access_secret) = account.access_secret.as_ref() else {
@@ -650,7 +650,7 @@ async fn preflight_seeded_qa_credential(
 async fn preflight_seeded_google_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let required_extension_scopes = match fixture_name {
@@ -1281,7 +1281,7 @@ fn env_or_config_identity(name: &str, config_value: Option<&str>, default: &str)
 
 async fn consume_source_secret(
     source: &RebornQaCredentialSource,
-    store: &dyn ironclaw_secrets::SecretStore,
+    store: &dyn ironclaw_secrets::SecretStorePort,
     scope: &ResourceScope,
     handle: &SecretHandle,
     kind: &str,

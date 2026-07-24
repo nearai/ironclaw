@@ -461,14 +461,14 @@ mod tests {
     }
 
     struct FakeSecretStoreOpener {
-        store: Arc<dyn ironclaw_secrets::SecretStore>,
+        store: Arc<dyn ironclaw_secrets::SecretStorePort>,
         opened_paths: Mutex<Vec<std::path::PathBuf>>,
     }
 
     impl FakeSecretStoreOpener {
         fn new() -> Self {
             Self {
-                store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+                store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
                 opened_paths: Mutex::new(Vec::new()),
             }
         }

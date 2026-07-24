@@ -10,7 +10,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 
-/// The production `FilesystemApprovalRequestStore` over a [`FaultInjecting`]
+/// The production `ApprovalRequestStore` over a [`FaultInjecting`]
 /// backend armed to fail the approval-status write. On the `/approvals` mount,
 /// `save_pending` is the 1st `WriteFile` and `approve` is the 2nd, so failing the
 /// 2nd lets the pending record persist and then faults the status transition.
@@ -19,8 +19,7 @@ use ironclaw_run_state::*;
 /// `FilesystemError -> RunStateError::Filesystem` mapping under the injected
 /// backend fault, so the test exercises the production store path instead of a
 /// hand-rolled stand-in that reimplemented the trait.
-fn approval_store_failing_status_write()
--> FilesystemApprovalRequestStore<FaultInjecting<InMemoryBackend>> {
+fn approval_store_failing_status_write() -> ApprovalRequestStore<FaultInjecting<InMemoryBackend>> {
     let backend = Arc::new(
         FaultInjecting::new(InMemoryBackend::new()).with_fault(
             Fault::on(FilesystemOperation::WriteFile)
@@ -35,20 +34,17 @@ fn approval_store_failing_status_write()
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    FilesystemApprovalRequestStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
-        backend, mounts,
-    )))
+    ApprovalRequestStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
-/// The production `FilesystemCapabilityLeaseStore` over a [`FaultInjecting`]
+/// The production `CapabilityLeaseStore` over a [`FaultInjecting`]
 /// backend armed to fail every write on the `/authorization` mount, so
 /// `issue(...)` fails at its first backend write. Replaces the former
 /// whole-trait `FailingIssueLeaseStore` fake: the real store now runs its
 /// genuine lease serialization and `FilesystemError -> CapabilityLeaseError`
 /// mapping (`Backend -> Persistence`) under the injected fault, proving the
 /// mapping the fake short-circuited.
-fn lease_store_failing_issue_write()
--> FilesystemCapabilityLeaseStore<FaultInjecting<InMemoryBackend>> {
+fn lease_store_failing_issue_write() -> CapabilityLeaseStore<FaultInjecting<InMemoryBackend>> {
     let backend = Arc::new(
         FaultInjecting::new(InMemoryBackend::new()).with_fault(
             Fault::on(FilesystemOperation::WriteFile)
@@ -62,9 +58,7 @@ fn lease_store_failing_issue_write()
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    FilesystemCapabilityLeaseStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
-        backend, mounts,
-    )))
+    CapabilityLeaseStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
 #[tokio::test]
@@ -835,7 +829,7 @@ struct AlreadyResolvedOnApproveStore {
 }
 
 #[async_trait]
-impl ApprovalRequestStore for AlreadyResolvedOnApproveStore {
+impl ApprovalRequestStorePort for AlreadyResolvedOnApproveStore {
     async fn save_pending(
         &self,
         _scope: ResourceScope,

@@ -542,7 +542,7 @@ fn vendor_test_engine(
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
             client_credentials: Arc::new(StaticVendorClientCredentials),
             egress: Arc::new(PanicVendorEgress),
-            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )
@@ -2086,7 +2086,7 @@ async fn product_auth_google_oauth_callback_missing_code_is_rejected_without_exc
     assert_eq!(status_response.status(), StatusCode::OK);
     let status_body = read_body_string(status_response).await;
     let status_json: serde_json::Value = serde_json::from_str(&status_body).expect("status json");
-    assert_eq!(status_json["status"], "pending");
+    assert_eq!(status_json["status"], "awaiting_user");
     assert!(!status_body.contains(&state));
 }
 

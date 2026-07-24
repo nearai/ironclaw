@@ -108,8 +108,8 @@ pub trait CapabilityLeaseStore: Send + Sync {
 
 There is one production lease store, backend-injected (arch-simplification §4.3 — "in-memory" is a filesystem backend, not a bespoke store):
 
-- `FilesystemCapabilityLeaseStore<F>` for durable virtual-path persistence under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`. Production wires it over the libSQL/Postgres-backed root filesystem.
-- Tests and ephemeral composition use the same store over `InMemoryBackend` (`FilesystemCapabilityLeaseStore<InMemoryBackend>`), constructed via the `test-support` `in_memory_backed_capability_lease_store()` helper. The former hand-written `InMemoryCapabilityLeaseStore` was deleted.
+- `CapabilityLeaseStore<F>` for durable virtual-path persistence under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`. Production wires it over the libSQL/Postgres-backed root filesystem.
+- Tests and ephemeral composition use the same store over `InMemoryBackend` (`CapabilityLeaseStore<InMemoryBackend>`), constructed via the `test-support` `in_memory_backed_capability_lease_store()` helper. The former hand-written `InMemoryCapabilityLeaseStore` was deleted.
 
 The filesystem store persists issue, claim, consume, and revoke transitions with awaited filesystem operations; it must not use nested `block_on` inside async approval/resume paths. Reads are fail-closed for authorization: unreadable or missing lease records do not become ambient grants.
 

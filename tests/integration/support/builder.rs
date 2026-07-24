@@ -46,10 +46,10 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore, GateRef,
-    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition, GetRunStateRequest,
+    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
+    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
 };
 
 use super::capability_backend::{
@@ -656,7 +656,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -956,9 +956,7 @@ impl RebornIntegrationHarness {
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the
     /// capability harness's disjoint bootstrap store.
-    pub(crate) fn turn_state_store_for_test(
-        &self,
-    ) -> Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> {
+    pub(crate) fn turn_state_store_for_test(&self) -> Arc<TurnStateRowStore<HarnessTurnBackend>> {
         Arc::clone(&self._shared.turn_store)
     }
 
@@ -1150,7 +1148,7 @@ impl RebornIntegrationHarness {
             // The live store exposes its hot snapshot before a critical append's
             // caller receives the durable ack. Rebuild this fresh row-store view
             // on every attempt so an early Running read is not cached indefinitely.
-            let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
+            let fresh_turn_store = TurnStateRowStore::new(scoped_turns_fs_composite(
                 Arc::clone(&fresh_composite),
                 &self._shared.canonical_binding,
             )?);
@@ -1189,7 +1187,7 @@ impl RebornIntegrationHarness {
     }
 
     /// E-DURABLE: assert an installed extension survives an independent reopen
-    /// of the capability composite. Opens a FRESH `ExtensionInstallationStore`
+    /// of the capability composite. Opens a FRESH `ExtensionInstallationStorePort`
     /// at the capability harness's on-disk `storage_root` (a handle independent
     /// of the live `Arc`) and asserts `extension_id` is present — proving the
     /// install persisted to disk, not just to in-memory state. Parallels
@@ -1848,7 +1846,7 @@ impl RebornIntegrationHarness {
     }
 
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
-    /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
+    /// capability scope via the real CAS-persisted `AutoApproveSettingStorePort` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability
     /// completes without a gate, and the flip persists across threads in the
     /// group because the store is shared).

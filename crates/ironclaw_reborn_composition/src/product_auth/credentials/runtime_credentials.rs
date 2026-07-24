@@ -253,13 +253,13 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
 
 pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
     refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
-    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
     pub(crate) fn new(
         refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
-        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     ) -> Self {
         Self {
             refresh_accounts,

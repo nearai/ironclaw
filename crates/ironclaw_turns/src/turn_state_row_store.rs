@@ -1,7 +1,7 @@
 //! Filesystem-backed turn-state persistence under the `/turns` mount alias.
 //!
 //! The one production turn-state store is
-//! [`FilesystemTurnStateRowStore`](row_store::FilesystemTurnStateRowStore): it
+//! [`TurnStateRowStore`](row_store::TurnStateRowStore): it
 //! persists an append-only delta journal materialized into per-record row blobs
 //! under the `/turns` mount alias, backed by a bounded in-memory hot cache.
 //! High-churn runner-lease heartbeats are memory-backed and overlaid onto the
@@ -39,7 +39,7 @@ pub(crate) mod turn_state_engine;
 
 use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 
-pub use row_store::FilesystemTurnStateRowStore;
+pub use row_store::TurnStateRowStore;
 pub use turn_state_engine::TurnStateStoreLimits;
 
 /// Legacy filesystem-backed durable sink for a full [`TurnPersistenceSnapshot`].

@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError};
+use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStoreError, ReplayPayloadStorePort};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
@@ -16,7 +16,7 @@ use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
     RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeFailureKind,
 };
-use ironclaw_run_state::{GateRecordStore, RunStateError};
+use ironclaw_run_state::{GateRecordStorePort, RunStateError};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
@@ -595,8 +595,8 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
-    gate_record_store: Arc<dyn GateRecordStore>,
-    replay_payload_store: Arc<dyn ReplayPayloadStore>,
+    gate_record_store: Arc<dyn GateRecordStorePort>,
+    replay_payload_store: Arc<dyn ReplayPayloadStorePort>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -630,20 +630,20 @@ impl HostRuntimeLoopCapabilityPortFactory {
         }
     }
 
-    /// Wire the durable [`GateRecordStore`] every port built by this factory
+    /// Wire the durable [`GateRecordStorePort`] every port built by this factory
     /// persists pending-gate records into (§5.2.9). Production composition always
     /// calls this; the fail-closed default only guards an unwired factory.
-    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
+    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStorePort>) -> Self {
         self.gate_record_store = store;
         self
     }
 
-    /// Wire the durable host-private [`ReplayPayloadStore`] every port built by
+    /// Wire the durable host-private [`ReplayPayloadStorePort`] every port built by
     /// this factory persists gate/auth replay payloads into and reconstitutes
     /// them from on resume (arch-simplification §5.3 Stage 2a-i). Production
     /// composition always calls this; the fail-closed default only guards an
     /// unwired factory.
-    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStore>) -> Self {
+    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStorePort>) -> Self {
         self.replay_payload_store = store;
         self
     }
@@ -1073,14 +1073,14 @@ pub struct HostRuntimeLoopCapabilityPort {
     /// Durable store for the model-visible [`GateRecord`] a pending gate renders
     /// from on a later resume turn (§5.2.9). Written at the capability seam when a
     /// gate/suspension outcome is produced; see `persist_gate_record_for_mapped`.
-    gate_record_store: Arc<dyn GateRecordStore>,
+    gate_record_store: Arc<dyn GateRecordStorePort>,
     /// Host-private store for the raw replay payload (tool `input` + `estimate`)
     /// a gate/auth resume re-dispatches from (arch-simplification §5.3 Stage
     /// 2a-i). Written at a FRESH gate raise keyed by `InvocationId`
     /// (`persist_replay_payload_for_fresh_gate`); loaded on resume by the
     /// invocation id recovered from the resume token
     /// (`replay_payload_for_resume`). Never model-visible.
-    replay_payload_store: Arc<dyn ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ReplayPayloadStorePort>,
     /// Per-idempotency-key reservation for a gate outcome's persisted
     /// [`Resolution`]. The mapping mints a fresh random `GateRef` per call for
     /// the approval/resource/dependent/external channels, so a replayed
@@ -1164,19 +1164,19 @@ impl HostRuntimeLoopCapabilityPort {
         }
     }
 
-    /// Wire the durable [`GateRecordStore`] this port persists pending-gate
+    /// Wire the durable [`GateRecordStorePort`] this port persists pending-gate
     /// records into (§5.2.9). Defaults to the transitional
     /// [`NoopGateRecordStore`] when unset.
-    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
+    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStorePort>) -> Self {
         self.gate_record_store = store;
         self
     }
 
-    /// Wire the durable host-private [`ReplayPayloadStore`] this port persists
+    /// Wire the durable host-private [`ReplayPayloadStorePort`] this port persists
     /// gate/auth replay payloads into and reconstitutes them from on resume
     /// (arch-simplification §5.3 Stage 2a-i). Defaults to the transitional
     /// fail-closed [`NoopReplayPayloadStore`] when unset.
-    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStore>) -> Self {
+    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStorePort>) -> Self {
         self.replay_payload_store = store;
         self
     }
@@ -2863,7 +2863,7 @@ fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
     )
 }
 
-/// Transitional default [`GateRecordStore`] used until composition wires a
+/// Transitional default [`GateRecordStorePort`] used until composition wires a
 /// durable store into the capability-port factory via
 /// [`HostRuntimeLoopCapabilityPortFactory::with_gate_record_store`].
 ///
@@ -2879,7 +2879,7 @@ fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
 struct NoopGateRecordStore;
 
 #[async_trait]
-impl GateRecordStore for NoopGateRecordStore {
+impl GateRecordStorePort for NoopGateRecordStore {
     async fn save(
         &self,
         _scope: ResourceScope,
@@ -2915,7 +2915,7 @@ fn replay_payload_store_error(error: ReplayPayloadStoreError) -> AgentLoopHostEr
     )
 }
 
-/// Transitional fail-closed default [`ReplayPayloadStore`] used until composition
+/// Transitional fail-closed default [`ReplayPayloadStorePort`] used until composition
 /// wires a durable store into the capability-port factory via
 /// [`HostRuntimeLoopCapabilityPortFactory::with_replay_payload_store`].
 ///
@@ -2929,7 +2929,7 @@ fn replay_payload_store_error(error: ReplayPayloadStoreError) -> AgentLoopHostEr
 struct NoopReplayPayloadStore;
 
 #[async_trait]
-impl ReplayPayloadStore for NoopReplayPayloadStore {
+impl ReplayPayloadStorePort for NoopReplayPayloadStore {
     async fn save(
         &self,
         _scope: ResourceScope,
@@ -9731,12 +9731,12 @@ mod tests {
         Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default())
     }
 
-    /// Deterministic in-memory [`GateRecordStore`] fake for seam tests: records
+    /// Deterministic in-memory [`GateRecordStorePort`] fake for seam tests: records
     /// every write and answers `load` by the exact `(scope, gate_ref)` a gate
     /// outcome was persisted under. Keyed by `GateRef` (a freshly-minted uuid,
     /// globally unique) with the scope carried in the value for the wrong-scope
     /// isolation check the durable store applies. The durable
-    /// `FilesystemGateRecordStore` round-trip itself is covered by
+    /// `GateRecordStore` round-trip itself is covered by
     /// `ironclaw_run_state`'s `gate_record_store_contract`; this fake pins that
     /// the loop_host seam calls `save` with the right record and gate ref.
     #[derive(Debug, Default)]
@@ -9751,7 +9751,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl GateRecordStore for RecordingGateRecordStore {
+    impl GateRecordStorePort for RecordingGateRecordStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9789,7 +9789,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl GateRecordStore for FailOnceGateRecordStore {
+    impl GateRecordStorePort for FailOnceGateRecordStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9847,7 +9847,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl GateRecordStore for BlockingGateRecordStore {
+    impl GateRecordStorePort for BlockingGateRecordStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9945,12 +9945,12 @@ mod tests {
         );
     }
 
-    /// Deterministic in-memory [`ReplayPayloadStore`] fake for seam tests: the
+    /// Deterministic in-memory [`ReplayPayloadStorePort`] fake for seam tests: the
     /// port `save`s the raw replay payload at a fresh gate raise and `load`s it on
     /// resume. Keyed by `InvocationId` (globally unique per invocation); the scope
     /// is recorded for assertions but `load` is scope-insensitive because these
     /// crate-tier tests pin the write/read WIRING, not scope isolation — the
-    /// durable `FilesystemReplayPayloadStore`'s wrong-scope-looks-unknown check is
+    /// durable `ReplayPayloadStore`'s wrong-scope-looks-unknown check is
     /// covered by `ironclaw_capabilities`' own contract test and the full-infra
     /// cross-tenant integration scenario.
     #[derive(Debug, Default)]
@@ -9978,7 +9978,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ReplayPayloadStore for RecordingReplayPayloadStore {
+    impl ReplayPayloadStorePort for RecordingReplayPayloadStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -10043,7 +10043,7 @@ mod tests {
     }
 
     /// Like [`runtime_capability_port`] but wires an explicit
-    /// [`GateRecordStore`], so seam tests can observe the durable gate record the
+    /// [`GateRecordStorePort`], so seam tests can observe the durable gate record the
     /// port persists at the capability seam.
     async fn runtime_capability_port_with_gate_store(
         capability_id: &CapabilityId,
@@ -10051,7 +10051,7 @@ mod tests {
         runtime: Arc<dyn HostRuntime>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        gate_record_store: Arc<dyn GateRecordStore>,
+        gate_record_store: Arc<dyn GateRecordStorePort>,
         thread_id: &str,
     ) -> HostRuntimeLoopCapabilityPort {
         let mut context = execution_context(thread_id);
@@ -10077,7 +10077,7 @@ mod tests {
     }
 
     /// Like [`runtime_capability_port`] but wires an explicit
-    /// [`ReplayPayloadStore`], so resume seam tests can round-trip the raw replay
+    /// [`ReplayPayloadStorePort`], so resume seam tests can round-trip the raw replay
     /// payload the host persists at a gate raise and reconstitutes on resume.
     async fn runtime_capability_port_with_replay_store(
         capability_id: &CapabilityId,
@@ -10085,7 +10085,7 @@ mod tests {
         runtime: Arc<dyn HostRuntime>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        replay_payload_store: Arc<dyn ReplayPayloadStore>,
+        replay_payload_store: Arc<dyn ReplayPayloadStorePort>,
         thread_id: &str,
     ) -> HostRuntimeLoopCapabilityPort {
         let mut context = execution_context(thread_id);
@@ -10116,7 +10116,7 @@ mod tests {
     /// while the loop still receives the unchanged `CapabilityOutcome` (its resume
     /// token intact). Drives the production caller (`invoke_capability`) and
     /// asserts at the store seam that the record round-trips. The durable
-    /// `FilesystemGateRecordStore` round-trip is covered separately by
+    /// `GateRecordStore` round-trip is covered separately by
     /// `ironclaw_run_state`'s `gate_record_store_contract`.
     #[tokio::test]
     async fn approval_gate_outcome_persists_gate_record_at_the_seam() {

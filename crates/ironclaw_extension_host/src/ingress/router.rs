@@ -103,7 +103,7 @@ pub struct ReplyContextKey {
 /// Host-side `reply_context` storage. Stored before admission commits;
 /// the delivery coordinator (P5) reads it back for source-route replies.
 #[async_trait]
-pub trait ReplyContextStore: Send + Sync {
+pub trait ReplyContextStorePort: Send + Sync {
     async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError>;
     async fn get(&self, key: &ReplyContextKey) -> Result<Option<Vec<u8>>, IngressPortError>;
 }
@@ -185,7 +185,7 @@ impl IngressResponse {
 pub struct ExtensionIngressRouterDeps {
     pub secrets: Arc<dyn IngressSecretsPort>,
     pub sink: Arc<dyn InboundSink>,
-    pub reply_context: Arc<dyn ReplyContextStore>,
+    pub reply_context: Arc<dyn ReplyContextStorePort>,
 }
 
 /// The generic ingress router. One instance serves every active extension's

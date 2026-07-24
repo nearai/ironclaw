@@ -201,12 +201,13 @@ pub(crate) fn build_webui_services_with_channel_connection(
         let tool_permission_overrides = &runtime.tool_permission_overrides;
         let auto_approve_settings = &runtime.auto_approve_settings;
         let persistent_approval_policies = &runtime.persistent_approval_policies;
-        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            tool_permission_overrides.clone();
-        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        let tool_permission_overrides: Arc<
+            dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+        > = tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
             auto_approve_settings.clone();
         let persistent_approval_policies: Arc<
-            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+            dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
         > = persistent_approval_policies.clone();
         let tool_registry = runtime.shared_extension_registry.clone();
         let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {

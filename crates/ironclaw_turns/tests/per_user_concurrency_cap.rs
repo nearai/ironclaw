@@ -23,7 +23,7 @@ use ironclaw_turns::{
         RelinquishRunRequest, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
-use ironclaw_turns::{FilesystemTurnStateRowStore, TurnStateStoreLimits};
+use ironclaw_turns::{TurnStateRowStore, TurnStateStoreLimits};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,10 +89,10 @@ fn gate_ref_val(s: &str) -> GateRef {
     GateRef::new(s).unwrap()
 }
 
-/// The in-memory turn-state store double: a `FilesystemTurnStateRowStore` over
+/// The in-memory turn-state store double: a `TurnStateRowStore` over
 /// a volatile `InMemoryBackend` at the synchronous WriteThrough default, which
 /// is behaviorally identical to the former in-memory authority for these tests.
-type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+type TurnStore = TurnStateRowStore<InMemoryBackend>;
 
 fn make_store() -> TurnStore {
     // A high, effectively-unlimited per-user cap. Unlike the former live
@@ -578,12 +578,12 @@ async fn snapshot_rebuild_restores_running_counter() {
             .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(1024).expect("nonzero cap"))
     };
     let scoped = in_memory_turns_filesystem();
-    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(cap());
+    let store = TurnStateRowStore::new(scoped.clone()).with_limits(cap());
     let scope = owned_scope("cap-snapshot", &user_u());
     let run_id = submit(&store, scope.clone(), "cap-snapshot").await;
 
     // Reopen BEFORE claiming (run is still Queued).
-    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(cap());
+    let restored = TurnStateRowStore::new(scoped.clone()).with_limits(cap());
 
     // Counter is 0 before claim.
     assert_eq!(
@@ -1061,7 +1061,7 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
 #[tokio::test]
 async fn snapshot_rebuild_restores_nonzero_running_counter() {
     let scoped = in_memory_turns_filesystem();
-    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let store = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default()
             .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     );
@@ -1083,7 +1083,7 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
 
     // Reopen WHILE the run is Running, with a cap enabled so the rebuild loop
     // executes — counter must already be 1 without claiming again.
-    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let restored = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default()
             .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     );
@@ -1124,7 +1124,7 @@ async fn snapshot_rebuild_skips_counter_when_caps_disabled() {
     // Capped `store` (so its counter is populated → 1); a second store reopened
     // over the same backend with ALL caps None exercises the rebuild-skip.
     let scoped = in_memory_turns_filesystem();
-    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let store = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default().set_max_concurrent_runs_per_user(
             std::num::NonZeroU32::new(1024).expect("nonzero cap"),
         ),
@@ -1144,7 +1144,7 @@ async fn snapshot_rebuild_skips_counter_when_caps_disabled() {
 
     // Reopen WHILE the run is Running with ALL caps None — the per-read rebuild
     // must be skipped, so the uncapped counter reads 0.
-    let restored = FilesystemTurnStateRowStore::new(scoped.clone());
+    let restored = TurnStateRowStore::new(scoped.clone());
     assert_eq!(
         restored
             .running_count_for_user(&tenant(), &user_u())

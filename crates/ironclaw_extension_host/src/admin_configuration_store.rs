@@ -238,14 +238,14 @@ impl StoredAdminConfigurationRecord {
 /// `/extension-admin-configuration` alias; tests may use a fixed view. The
 /// record still carries `tenant_id` as defense in depth, and a mismatch reads
 /// as absent rather than disclosing another tenant's state.
-pub struct FilesystemAdminConfigurationStore<F>
+pub struct AdminConfigurationStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemAdminConfigurationStore<F>
+impl<F> AdminConfigurationStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -1119,14 +1119,14 @@ mod tests {
         )])
     }
 
-    fn test_store() -> FilesystemAdminConfigurationStore<InMemoryBackend> {
+    fn test_store() -> AdminConfigurationStore<InMemoryBackend> {
         let view = MountView::new(vec![MountGrant::new(
             MountAlias::new("/extension-admin-configuration").unwrap(),
             VirtualPath::new("/tenants/test/shared/admin-configuration").unwrap(),
             MountPermissions::read_write_list_delete(),
         )])
         .unwrap();
-        FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+        AdminConfigurationStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::new(InMemoryBackend::new()),
             view,
         )))

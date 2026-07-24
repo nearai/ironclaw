@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
+// arch-exempt: large_file, mechanical lease-store test repoint to CapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 // Contract tests for `CapabilityHost::auth_resume_json`.
 //
 // Covers: lease survival across auth-gate re-dispatch, concurrent-claim race
@@ -1238,7 +1238,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    // A lease store that delegates everything to an inner FilesystemCapabilityLeaseStore<InMemoryBackend>
+    // A lease store that delegates everything to an inner CapabilityLeaseStore<InMemoryBackend>
     // except `claim()`, which returns InactiveLease { status: Claimed } once the
     // `fail_next_claim` flag is set — simulating the loser of a concurrent claim race.
     // domain-state fake, not an I/O fault — cannot move to
@@ -1246,7 +1246,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     // `CapabilityLeaseError::InactiveLease{Claimed}` (the concurrent winner already
     // claimed) that no backend fault (which only yields `Persistence`) can produce.
     struct ClaimFailingLeaseStore {
-        inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
+        inner: CapabilityLeaseStore<InMemoryBackend>,
         fail_next_claim: AtomicBool,
     }
 
@@ -1264,7 +1264,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     }
 
     #[async_trait]
-    impl CapabilityLeaseStore for ClaimFailingLeaseStore {
+    impl CapabilityLeaseStorePort for ClaimFailingLeaseStore {
         async fn issue(
             &self,
             lease: CapabilityLease,
@@ -1680,7 +1680,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     use tokio::sync::{Barrier, Notify};
 
     // ── Barrier lease store ──────────────────────────────────────────────────
-    // Wraps FilesystemCapabilityLeaseStore<InMemoryBackend> and inserts a Barrier(2) inside
+    // Wraps CapabilityLeaseStore<InMemoryBackend> and inserts a Barrier(2) inside
     // `leases_for_scope`.  Both concurrent callers block at the barrier
     // inside the helper scan, then both are released together.  This
     // guarantees both see the Claimed lease before either calls
@@ -1692,7 +1692,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     // ops but is explicitly NOT a read/write-interleaving barrier (see
     // ironclaw_filesystem/CLAUDE.md). The Barrier(2) interleave is the whole test.
     struct BarrierLeaseStore {
-        inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
+        inner: CapabilityLeaseStore<InMemoryBackend>,
         /// Both concurrent auth_resume_json callers rendezvous here after
         /// `leases_for_scope` returns so they race on `begin_dispatch_claimed`.
         scan_barrier: StdArc<Barrier>,
@@ -1718,7 +1718,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     }
 
     #[async_trait]
-    impl CapabilityLeaseStore for BarrierLeaseStore {
+    impl CapabilityLeaseStorePort for BarrierLeaseStore {
         async fn issue(
             &self,
             lease: CapabilityLease,
@@ -2470,11 +2470,11 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
 /// Helper: seed a run record in BlockedAuth and build a host wired with all
 /// necessary stores for the approval-validation path.
 async fn setup_blocked_auth_run_with_stores(
-    run_state: &ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
-    approval_requests: &ironclaw_run_state::FilesystemApprovalRequestStore<
+    run_state: &ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    approval_requests: &ironclaw_run_state::ApprovalRequestStore<
         ironclaw_filesystem::InMemoryBackend,
     >,
-    leases: &FilesystemCapabilityLeaseStore<InMemoryBackend>,
+    leases: &CapabilityLeaseStore<InMemoryBackend>,
     context: &ExecutionContext,
 ) {
     let scope = &context.resource_scope;
@@ -2808,7 +2808,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     // mid-`claim` to force an interleaving; FaultInjecting only injects errors +
     // records ops and is explicitly not a synchronization barrier.
     struct GatedLeaseStore {
-        inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
+        inner: CapabilityLeaseStore<InMemoryBackend>,
         claim_entered: StdArc<Notify>,
         claim_release: StdArc<Notify>,
         armed: std::sync::atomic::AtomicBool,
@@ -2830,7 +2830,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     }
 
     #[async_trait]
-    impl CapabilityLeaseStore for GatedLeaseStore {
+    impl CapabilityLeaseStorePort for GatedLeaseStore {
         async fn issue(
             &self,
             lease: CapabilityLease,

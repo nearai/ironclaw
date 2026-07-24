@@ -21,7 +21,7 @@ use ironclaw_product::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
-use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, RunStateError};
+use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStorePort, RunStateError};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
@@ -182,7 +182,7 @@ struct RebaseTurnEventSource {
 struct FailingApprovalRequestStore;
 
 #[async_trait]
-impl ApprovalRequestStore for FailingApprovalRequestStore {
+impl ApprovalRequestStorePort for FailingApprovalRequestStore {
     async fn save_pending(
         &self,
         _scope: ResourceScope,

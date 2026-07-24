@@ -1,6 +1,6 @@
 // arch-exempt: large_file, self-contained crash-consistency chaos suite (fault backend + generator + oracle + regressions), plan #6263
 //! Phase-0 crash-consistency property / chaos-monkey suite for the turn-state
-//! row store (`FilesystemTurnStateRowStore`).
+//! row store (`TurnStateRowStore`).
 //!
 //! ## Why this file exists (issue #6263, Step 3 prerequisite)
 //!
@@ -27,11 +27,11 @@
 //!   can reconstruct an independent byte-identical copy of the durable state
 //!   at a chosen moment ("crash at moment T").
 //! * **Crash primitive** — dropping the store instance and reopening a fresh
-//!   `FilesystemTurnStateRowStore` over the *same* durable backend bytes drops
+//!   `TurnStateRowStore` over the *same* durable backend bytes drops
 //!   the in-memory snapshot cache and the in-flight journal, forcing recovery
 //!   through `load_snapshot_from_rows` (the exact pattern the sibling contract
 //!   suite uses via `strict_row_store`).
-//! * **Reference model** — a second, never-crashed `FilesystemTurnStateRowStore` (the row
+//! * **Reference model** — a second, never-crashed `TurnStateRowStore` (the row
 //!   store's own engine) driven with the *same* requests. Every op the row
 //!   store acked (`Ok`) is applied to the model; ops it rejected (domain error
 //!   or injected fault) are not. After every crash+recovery, the recovered
@@ -63,13 +63,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnError, TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnPersistenceSnapshot,
-    TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
+    CheckpointSchemaId, GateRef, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, LoopCheckpointStore, PutLoopCheckpointRequest,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError,
+    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
     TurnStateStoreLimits, TurnStatus, is_recoverability_critical,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
@@ -429,10 +429,8 @@ fn limits() -> TurnStateStoreLimits {
 
 /// Open a fresh row store. Reopening over the same `scoped` (same durable
 /// bytes) after dropping the previous instance is the crash primitive.
-fn open_row_store(
-    scoped: Arc<ScopedFilesystem<FaultBackend>>,
-) -> FilesystemTurnStateRowStore<FaultBackend> {
-    FilesystemTurnStateRowStore::new(scoped).with_limits(limits())
+fn open_row_store(scoped: Arc<ScopedFilesystem<FaultBackend>>) -> TurnStateRowStore<FaultBackend> {
+    TurnStateRowStore::new(scoped).with_limits(limits())
 }
 
 /// The never-crashed ground-truth reference model: a fresh, fault-free
@@ -440,7 +438,7 @@ fn open_row_store(
 /// store under test and is never fault-injected, so its durable projection is
 /// the canonical expected state. (Replaces the former direct in-memory engine
 /// reference, now private to the crate — #6263.)
-fn model_store() -> FilesystemTurnStateRowStore<FaultBackend> {
+fn model_store() -> TurnStateRowStore<FaultBackend> {
     open_row_store(fault_scoped(Arc::new(FaultBackend::new(
         InMemoryBackend::new(),
     ))))
@@ -1097,8 +1095,8 @@ impl Harness {
 ///
 /// Also asserts internal invariants + `assert_recoverability_critical_survives`.
 async fn assert_recovered_matches_model(
-    recovered: &FilesystemTurnStateRowStore<FaultBackend>,
-    model: &FilesystemTurnStateRowStore<FaultBackend>,
+    recovered: &TurnStateRowStore<FaultBackend>,
+    model: &TurnStateRowStore<FaultBackend>,
     seed: u64,
     log: &[String],
 ) {
@@ -1422,7 +1420,7 @@ async fn run_chaos(seed: u64, ops: usize, crash_every: usize, inject_faults: boo
 /// update the tracked run handles.
 async fn apply_to_model_and_bookkeep(
     h: &mut Harness,
-    model: &FilesystemTurnStateRowStore<FaultBackend>,
+    model: &TurnStateRowStore<FaultBackend>,
     plan: &Plan,
     rs_result: &Result<Effect, TurnError>,
 ) {
@@ -1528,7 +1526,7 @@ async fn row_store_crash_consistency_property_with_faults() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn submit_one(
-    store: &FilesystemTurnStateRowStore<FaultBackend>,
+    store: &TurnStateRowStore<FaultBackend>,
     scope: &TurnScope,
     idem: &str,
 ) -> TurnRunId {
@@ -2185,8 +2183,7 @@ async fn lease_expiry_crash_retry_bound_fails_with_crash_retry_exhausted() {
     // Bound of 1: the first claim (claim_count = 1) already reaches the bound, so
     // the next lease expiry terminal-fails instead of re-queuing.
     let open = |scoped: Arc<ScopedFilesystem<FaultBackend>>| {
-        FilesystemTurnStateRowStore::new(scoped)
-            .with_limits(limits().set_max_crash_recovery_reclaims(1))
+        TurnStateRowStore::new(scoped).with_limits(limits().set_max_crash_recovery_reclaims(1))
     };
 
     let run_id = {
@@ -2434,7 +2431,7 @@ async fn fail_before_durable_leaves_run_redrivable() {
 ///
 /// The fix makes an empty durable delta a true no-op that does not advance the
 /// reservation sequence (`apply` / `apply_with_targeted_delta` in
-/// `crates/ironclaw_turns/src/filesystem_store/row_store`). The assertion below
+/// `crates/ironclaw_turns/src/turn_state_row_store/row_store`). The assertion below
 /// holds after the fix.
 #[tokio::test]
 async fn noop_claim_does_not_leak_active_lock_across_crash() {
@@ -2610,7 +2607,7 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
 /// barrier. Under write-behind a batch of non-critical transitions (claim =
 /// Queued -> Running; new-run creation is critical since #6263 Step 5b, so
 /// `submit_turn` is not eligible for this tail) returns `Ok` before flushing;
-/// calling [`FilesystemTurnStateRowStore::drain`] awaits the whole
+/// calling [`TurnStateRowStore::drain`] awaits the whole
 /// enqueued-but-un-acked async tail, so a crash (drop + reopen) immediately
 /// after the drain recovers every non-critical claim — with NO terminal op
 /// forcing a barrier. This is exactly what the runtime's graceful `shutdown()`
@@ -2997,7 +2994,7 @@ async fn write_behind_backpressure_bounds_the_unacked_window() {
     {
         // Cap the write-behind window at 1: each claim awaits the prior claim's
         // ack before returning, so backpressure flushes the tail as it goes.
-        let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
+        let store = TurnStateRowStore::new(Arc::clone(&scoped))
             .with_limits(limits().set_max_pending_write_behind_deltas(1));
         for (i, run_id) in run_ids.iter().enumerate() {
             store
@@ -3207,12 +3204,12 @@ async fn write_behind_get_run_state_finds_evicted_terminal_via_durable_fallback(
     let scoped = fault_scoped(Arc::clone(&backend));
     // Cap terminals at 1: completing a SECOND run evicts the first from the hot
     // cache while its durable row remains.
-    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
+    let store = TurnStateRowStore::new(Arc::clone(&scoped))
         .with_limits(limits().set_max_terminal_records(1));
 
     // Drive a run to a terminal (Completed) — a critical transition, so durable.
     async fn complete_a_run(
-        store: &FilesystemTurnStateRowStore<FaultBackend>,
+        store: &TurnStateRowStore<FaultBackend>,
         scope: &TurnScope,
         idem: &str,
     ) -> TurnRunId {
@@ -3390,7 +3387,7 @@ async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
     };
 
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
+        TurnStateRowStore::new(Arc::clone(&scoped))
             .with_limits(limits().set_max_pending_write_behind_deltas(2)),
     );
 

@@ -198,7 +198,7 @@ naming production callers + the test accessor. Behavior-preserving. **On-branch.
   growing `harness.rs`** — it is already 3822 lines (> architecture.md §5
   threshold). `scoped_turns_fs` keeps living in `harness.rs` but gets *shorter*
   (its match body moves to the shared helper). The integration turn store becomes
-  `FilesystemTurnStateStore::new(scoped_turns_fs_composite(composite, &binding)?)`
+  `TurnStateRowStore::new(scoped_turns_fs_composite(composite, &binding)?)`
   (no `BlockingTurnStatePutFilesystem` wrapper — the integration tier does not
   exercise the blocking primitive; that primitive is binary-tier-only and operates
   below the composite, so it legitimately does not unify — DEPTH verdict).

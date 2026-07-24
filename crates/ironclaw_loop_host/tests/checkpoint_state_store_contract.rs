@@ -1,4 +1,4 @@
-//! Contract tests for [`FilesystemCheckpointStateStore`] against a
+//! Contract tests for [`CheckpointStateStore`] against a
 //! [`ScopedFilesystem`] over [`DiskFilesystem`].
 
 use std::sync::Arc;
@@ -13,9 +13,9 @@ use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
     ThreadId, VirtualPath,
 };
-use ironclaw_loop_host::FilesystemCheckpointStateStore;
+use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_turns::{
-    CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
+    CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStorePort, GetCheckpointStateRequest,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, RunProfileVersion, TurnError,
     TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
     run_profile::LoopCheckpointStateRef,
@@ -147,10 +147,10 @@ impl RootFilesystem for DiskFullFilesystem {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_persists_and_reopens() {
+async fn checkpoint_state_store_persists_and_reopens() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_checkpoint_state_fs(Arc::clone(&backend));
-    let store = FilesystemCheckpointStateStore::new(Arc::clone(&scoped));
+    let store = CheckpointStateStore::new(Arc::clone(&scoped));
     let scope = turn_scope("tenant1", "thread-checkpoint-state-persist");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -166,7 +166,7 @@ async fn filesystem_checkpoint_state_store_persists_and_reopens() {
     assert!(!record.state_ref.as_str().contains(&run_id.to_string()));
     assert_eq!(record.payload.as_bytes(), payload.as_slice());
 
-    let reopened = FilesystemCheckpointStateStore::new(scoped);
+    let reopened = CheckpointStateStore::new(scoped);
     let loaded = reopened
         .get_checkpoint_state(get_request(&record, scope, turn_id, run_id))
         .await
@@ -177,9 +177,9 @@ async fn filesystem_checkpoint_state_store_persists_and_reopens() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_maps_disk_full_write_failure_to_unavailable() {
+async fn checkpoint_state_store_maps_disk_full_write_failure_to_unavailable() {
     let backend = Arc::new(DiskFullFilesystem::default());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-checkpoint-state-disk-full");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -200,12 +200,12 @@ async fn filesystem_checkpoint_state_store_maps_disk_full_write_failure_to_unava
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_hides_other_tenant_mounts() {
+async fn checkpoint_state_store_hides_other_tenant_mounts() {
     let backend = Arc::new(engine_filesystem());
     let scoped_a = scoped_checkpoint_state_fs_at(Arc::clone(&backend), "tenant-a", "system");
     let scoped_b = scoped_checkpoint_state_fs_at(Arc::clone(&backend), "tenant-b", "system");
-    let store_a = FilesystemCheckpointStateStore::new(scoped_a);
-    let store_b = FilesystemCheckpointStateStore::new(scoped_b);
+    let store_a = CheckpointStateStore::new(scoped_a);
+    let store_b = CheckpointStateStore::new(scoped_b);
     let scope_a = turn_scope("tenant-a", "thread-cross-tenant");
     let scope_b = turn_scope("tenant-b", "thread-cross-tenant");
     let turn_id = TurnId::new();
@@ -231,9 +231,9 @@ async fn filesystem_checkpoint_state_store_hides_other_tenant_mounts() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_rejects_cross_run_ref() {
+async fn checkpoint_state_store_rejects_cross_run_ref() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-cross-run");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -257,9 +257,9 @@ async fn filesystem_checkpoint_state_store_rejects_cross_run_ref() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_rejects_cross_turn_id_ref() {
+async fn checkpoint_state_store_rejects_cross_turn_id_ref() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-cross-turn");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -297,9 +297,9 @@ async fn filesystem_checkpoint_state_store_rejects_cross_turn_id_ref() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_rejects_same_tenant_cross_thread_scope() {
+async fn checkpoint_state_store_rejects_same_tenant_cross_thread_scope() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-scope-a");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -324,9 +324,9 @@ async fn filesystem_checkpoint_state_store_rejects_same_tenant_cross_thread_scop
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_rejects_schema_or_kind_mismatch() {
+async fn checkpoint_state_store_rejects_schema_or_kind_mismatch() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-schema-mismatch");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -372,9 +372,9 @@ async fn filesystem_checkpoint_state_store_rejects_schema_or_kind_mismatch() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_round_trips_empty_payload() {
+async fn checkpoint_state_store_round_trips_empty_payload() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-empty-payload");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -394,9 +394,9 @@ async fn filesystem_checkpoint_state_store_round_trips_empty_payload() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_accepts_exact_max_size_payload() {
+async fn checkpoint_state_store_accepts_exact_max_size_payload() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-max-size");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -417,9 +417,9 @@ async fn filesystem_checkpoint_state_store_accepts_exact_max_size_payload() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_multiple_puts_produce_distinct_refs() {
+async fn checkpoint_state_store_multiple_puts_produce_distinct_refs() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-distinct-refs");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -453,9 +453,9 @@ async fn filesystem_checkpoint_state_store_multiple_puts_produce_distinct_refs()
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_returns_none_for_unknown_state_ref() {
+async fn checkpoint_state_store_returns_none_for_unknown_state_ref() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = turn_scope("tenant1", "thread-missing-state-ref");
 
     let missing = GetCheckpointStateRequest {
@@ -472,9 +472,9 @@ async fn filesystem_checkpoint_state_store_returns_none_for_unknown_state_ref() 
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_round_trips_minimal_scope() {
+async fn checkpoint_state_store_round_trips_minimal_scope() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let scope = minimal_scope("tenant1", "thread-minimal-scope");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -495,9 +495,9 @@ async fn filesystem_checkpoint_state_store_round_trips_minimal_scope() {
 }
 
 #[tokio::test]
-async fn filesystem_checkpoint_state_store_rejects_oversized_payload() {
+async fn checkpoint_state_store_rejects_oversized_payload() {
     let backend = Arc::new(engine_filesystem());
-    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let store = CheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
     let error = store
         .put_checkpoint_state(put_request(
             turn_scope("tenant1", "thread-oversized"),

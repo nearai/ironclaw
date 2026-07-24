@@ -191,7 +191,7 @@ where
                     scope: account.scope.clone(),
                     ..request
                 };
-                // Capture the old handle so we can delete it from SecretStore after a
+                // Capture the old handle so we can delete it from SecretStorePort after a
                 // successful rotation write.  The new handle is stored first so that
                 // a write failure still leaves the old material reachable.
                 let previous_access_secret = account.access_secret.clone();
@@ -209,7 +209,7 @@ where
                     return Err(error);
                 }
                 // Write succeeded — the new handle is now canonical.  Delete the
-                // previous handle if it differs so we don’t orphan it in SecretStore.
+                // previous handle if it differs so we don’t orphan it in SecretStorePort.
                 if previous_access_secret.as_ref() != account.access_secret.as_ref() {
                     self.cleanup_manual_secret(&account.scope.resource, &previous_access_secret)
                         .await;
@@ -298,7 +298,7 @@ where
         // Best-effort: called on error paths where the account write failed, or
         // after successful secret rotation.  The secret is already unreachable
         // via the account record; a delete failure leaves orphaned material in
-        // SecretStore but does not affect auth-flow correctness.
+        // SecretStorePort but does not affect auth-flow correctness.
         if let Some(access_secret) = access_secret {
             self.purge_secret_handle(scope, access_secret).await;
         }

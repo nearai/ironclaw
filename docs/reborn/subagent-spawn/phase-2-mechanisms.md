@@ -410,7 +410,7 @@ pub struct SubagentSpawnLimits {
 pub struct SubagentSpawnDeps {
     pub coordinator:      Arc<dyn TurnCoordinator>,
     pub thread_service:   Arc<dyn SessionThreadService>,
-    pub goal_store:       Arc<dyn SubagentGoalStore>,            // from ironclaw_runner
+    pub goal_store:       Arc<dyn SubagentGoalStorePort>,            // from ironclaw_runner
     pub gate_store:       Arc<dyn SubagentGateResolutionStore>,  // from ironclaw_runner
     pub flavor_resolver:  Arc<dyn SubagentFlavorResolver>,       // from ironclaw_runner
     pub child_profiles:   Arc<dyn SubagentRunProfileBinding>,    // flavor -> RunProfileRequest
@@ -988,7 +988,7 @@ const HANDOFF_DELIM: &str = "## Context from parent";
 /// Builds the subagent's inline system + (framing) user messages.
 /// Injected with the durable goal store + the static direction table.
 pub struct SubagentPromptComposer {
-    goal_store: Arc<dyn SubagentGoalStore>,
+    goal_store: Arc<dyn SubagentGoalStorePort>,
     flavor_resolver: Arc<dyn SubagentFlavorResolver>,
 }
 
@@ -1038,7 +1038,7 @@ impl SubagentPromptComposer {
 /// The FULL goal materialisation — used by P2.A when seeding the child thread
 /// (see §2.3 option B). Reads the durable goal store; a MISS fails loud.
 pub async fn materialize_goal_message(
-    goal_store: &dyn SubagentGoalStore,
+    goal_store: &dyn SubagentGoalStorePort,
     child_run_id: TurnRunId,
 ) -> Result<String, AgentLoopHostError> {
     let goal = goal_store.get_goal(child_run_id).await

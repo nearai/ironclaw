@@ -72,22 +72,21 @@ use ironclaw_runner::runtime::{
     build_default_planned_runtime,
 };
 use ironclaw_runner::subagent::await_edge::{
-    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-    store::FilesystemAwaitEdgeStore,
+    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
 };
 use ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver;
-use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
+use ironclaw_runner::subagent::goal_store::SubagentGoalStore;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore,
-    GetRunStateRequest, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
-    RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStoreLimits, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
+    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore, TurnStateRowStore,
+    TurnStateStoreLimits, TurnStatus,
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
@@ -135,7 +134,7 @@ use crate::outbound::{
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -221,13 +220,13 @@ struct RuntimeStoreParts {
     scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     turn_state_store: Arc<dyn RuntimeTurnStateStore>,
     turn_state_flush: Arc<dyn TurnStateFlush>,
-    checkpoint_state_store: Arc<dyn ironclaw_turns::CheckpointStateStore>,
+    checkpoint_state_store: Arc<dyn ironclaw_turns::CheckpointStateStorePort>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     thread_service: Arc<dyn SessionThreadService>,
     event_log: Arc<dyn DurableEventLog>,
     audit_log: Arc<dyn DurableAuditLog>,
     resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
-    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
     broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
     /// §3 replacement for `subagent_gate_store`: built here (not later, once
@@ -257,7 +256,7 @@ trait TurnStateFlush: Send + Sync {
 }
 
 #[async_trait::async_trait]
-impl<F> TurnStateFlush for FilesystemTurnStateRowStore<F>
+impl<F> TurnStateFlush for TurnStateRowStore<F>
 where
     F: RootFilesystem + Send + Sync + 'static,
 {
@@ -280,14 +279,11 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
     let admin_secret_provisioner = Arc::clone(&services.admin_secret_provisioner);
     let project_service = Arc::clone(&services.project_service);
 
-    let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
-        &scoped_filesystem,
-    ))) as Arc<dyn RuntimeSubagentGoalStore>;
+    let subagent_goal_store = Arc::new(SubagentGoalStore::new(Arc::clone(&scoped_filesystem)))
+        as Arc<dyn RuntimeSubagentGoalStore>;
 
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
-            &scoped_filesystem,
-        )));
+        let store = Arc::new(AwaitEdgeStore::new(Arc::clone(&scoped_filesystem)));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
             Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
@@ -554,7 +550,7 @@ pub struct RebornRuntime {
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Arc<SkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
-    pub(crate) secret_store: Arc<dyn SecretStore>,
+    pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ironclaw_product::ProjectService>,
@@ -583,7 +579,7 @@ pub struct RebornRuntime {
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStore>,
+    pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     #[cfg(any(test, feature = "test-support"))]
@@ -597,9 +593,9 @@ pub struct RebornRuntime {
     pub(crate) current_delivery_targets:
         Arc<crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver>,
     pub(crate) channel_identity_store:
-        Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>,
+        Arc<crate::extension_host::channel_identity_store::ChannelIdentityStore>,
     pub(crate) channel_dm_target_store:
-        Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
+        Arc<crate::extension_host::channel_dm_targets::ChannelDmTargetStore>,
     pub(crate) extension_ingress:
         Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1049,7 +1045,7 @@ impl SnapshotApprovalTurnRunLocator {
 }
 
 struct ApprovalRequestGateEvidence {
-    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
 }
 
 /// Test-only constructor for [`ApprovalRequestGateEvidence`].
@@ -1062,7 +1058,7 @@ struct ApprovalRequestGateEvidence {
 /// in production binaries.
 #[cfg(feature = "test-support")]
 pub(crate) fn build_approval_gate_evidence_for_test(
-    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
 ) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     std::sync::Arc::new(ApprovalRequestGateEvidence { approval_requests })
 }
@@ -1290,12 +1286,12 @@ impl RebornRuntime {
         self.extension_ingress.clone()
     }
 
-    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
+    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn secret_store_for_test(&self) -> Arc<dyn SecretStore> {
+    pub fn secret_store_for_test(&self) -> Arc<dyn SecretStorePort> {
         self.secret_store()
     }
 
@@ -1317,15 +1313,15 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_auto_approve_settings_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>> {
         Some(self.auto_approve_settings.clone()
-            as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>)
+            as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn extension_installation_store_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStore>> {
+    ) -> Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>> {
         Some(self.extension_management.installation_store_for_test())
     }
 
@@ -1337,27 +1333,25 @@ impl RebornRuntime {
     /// instance over the same root reads/writes the exact durable rows the
     /// runtime's turns produce (the same reopen-over-same-root equivalence
     /// `outbound_store_durability` relies on). This mirrors what production
-    /// composition builds at `factory.rs` (`FilesystemApprovalRequestStore` /
-    /// `FilesystemCapabilityLeaseStore` over `scoped_filesystem`). Test-support
+    /// composition builds at `factory.rs` (`ApprovalRequestStore` /
+    /// `CapabilityLeaseStore` over `scoped_filesystem`). Test-support
     /// only; zero bytes in production builds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_approval_test_parts(&self) -> Option<crate::RebornApprovalTestParts> {
         let capability_store_filesystem =
             crate::wrap_scoped(Arc::clone(&self.extension_filesystem));
-        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
-            Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(
+        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> = Arc::new(
+            ironclaw_run_state::ApprovalRequestStore::new(Arc::clone(&capability_store_filesystem)),
+        );
+        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
+            Arc::new(ironclaw_authorization::CapabilityLeaseStore::new(
                 Arc::clone(&capability_store_filesystem),
             ));
-        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-            Arc::new(ironclaw_authorization::FilesystemCapabilityLeaseStore::new(
-                Arc::clone(&capability_store_filesystem),
-            ));
-        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
-            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                Arc::clone(&capability_store_filesystem),
-            ));
-        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
-            ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
+            ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+        );
+        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = Arc::new(
+            ironclaw_capabilities::ReplayPayloadStore::new(capability_store_filesystem),
         );
         Some(crate::RebornApprovalTestParts {
             approval_requests,
@@ -1400,7 +1394,7 @@ impl RebornRuntime {
     pub fn outbound_delivery_stores_for_test(
         &self,
     ) -> Option<(
-        Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
     )> {
@@ -1511,7 +1505,7 @@ impl RebornRuntime {
         actor: (&str, &str, Option<&str>, &str),
         turn_world: (
             Arc<dyn ironclaw_turns::TurnCoordinator>,
-            Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+            Arc<ironclaw_turns::TurnStateRowStore<F>>,
             ironclaw_host_api::TenantId,
         ),
     ) -> Result<Option<ironclaw_host_api::UserId>, String>
@@ -1632,17 +1626,17 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
         Some(self.tool_permission_overrides.clone()
-            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>)
+            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_persistent_approval_policies_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>> {
         Some(self.persistent_approval_policies.clone()
-            as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>)
+            as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1899,7 +1893,7 @@ impl RebornRuntime {
 
     /// Open the admin user-directory surface over the host-owned identity
     /// substrate. Same store [`open_reborn_identity_resolver`] uses
-    /// (`FilesystemRebornIdentityStore` implements both traits), so admin CRUD
+    /// (`RebornIdentityStore` implements both traits), so admin CRUD
     /// enumerates exactly the users SSO login persists. Synchronous and fold-free
     /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
     /// directory reads), so `build_webui_services` can call it directly.
@@ -2229,7 +2223,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn enable_global_auto_approve_for_test(&self, conversation: &ConversationId) {
         let store = Arc::clone(&self.auto_approve_settings)
-            as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>;
+            as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>;
         let scope = self.turn_scope_for(&conversation.0).to_resource_scope();
         store
             .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -3580,14 +3574,14 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         thread_scope.clone(),
     )
     .with_checkpoint_state_store(
-        Arc::clone(&checkpoint_state_store) as Arc<dyn ironclaw_turns::CheckpointStateStore>
+        Arc::clone(&checkpoint_state_store) as Arc<dyn ironclaw_turns::CheckpointStateStorePort>
     );
     if let Some(local_runtime) = local_runtime {
         let approval_requests = &local_runtime.approval_requests;
         loop_exit_evidence =
             loop_exit_evidence.with_approval_gate_evidence(Arc::new(ApprovalRequestGateEvidence {
                 approval_requests: Arc::clone(approval_requests)
-                    as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+                    as Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
             }));
         loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(
             crate::observability::budget_evidence::budget_gate_evidence(Arc::clone(
@@ -3617,9 +3611,8 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     if let Some(local_runtime) = local_runtime {
         let approval_requests = &local_runtime.approval_requests;
         projection_services = projection_services
-            .with_approval_requests(
-                Arc::clone(approval_requests) as Arc<dyn ironclaw_run_state::ApprovalRequestStore>
-            );
+            .with_approval_requests(Arc::clone(approval_requests)
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>);
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
@@ -3923,7 +3916,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
-        // §5.2.9 render-from-record: a `FilesystemGateRecordStore` over the SAME
+        // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the local-dev
         // capability port persists `GateRecord::Auth` into (see
         // `runtime/local_dev.rs`'s `wire_local_dev_capability_port`, which builds
@@ -3932,12 +3925,13 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         // reads back exactly the record the capability port saved under the
         // matching owner scope. The two constructions MUST stay over the same
         // filesystem/scope.
-        gate_record_store: Some(Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+        gate_record_store: Some(Arc::new(ironclaw_run_state::GateRecordStore::new(
             crate::wrap_scoped(Arc::clone(&services.extension_filesystem)),
-        )) as Arc<dyn ironclaw_run_state::GateRecordStore>),
+        ))
+            as Arc<dyn ironclaw_run_state::GateRecordStorePort>),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
-            as Arc<dyn ironclaw_turns::CheckpointStateStore>,
+            as Arc<dyn ironclaw_turns::CheckpointStateStorePort>,
         loop_checkpoint_store: Arc::clone(&loop_checkpoint_store)
             as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         milestone_sink,
@@ -4162,7 +4156,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         let approval_context = Some(Arc::new(
             crate::extension_host::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
                 Arc::clone(&services.approval_requests)
-                    as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+                    as Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
             ),
         )
             as Arc<dyn ironclaw_product::ApprovalPromptContextSource>);
@@ -4610,7 +4604,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 /// `turn_state_store` as the turn-run snapshot source.
 fn build_webui_auth_interaction_service(
     product_auth: &RebornProductAuthServices,
-    turn_state_store: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
+    turn_state_store: Arc<TurnStateRowStore<CompositeRootFilesystem>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
     build_webui_auth_interaction_service_with_turn_run_source(

@@ -70,7 +70,7 @@ use crate::{
     CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
     DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStore,
+    OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStorePort,
     ProjectionSubscriptionId, ProjectionSubscriptionRecord, RunDeliveryCleanupRecord,
     RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
     RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
@@ -142,14 +142,14 @@ struct RunDeliveryCleanupSnapshot {
 /// HSM-decorated, …) — the store doesn't care which. Tenant isolation is
 /// enforced by the [`MountView`](ironclaw_host_api::MountView) the
 /// composition layer hands the scoped filesystem at construction time.
-pub struct FilesystemOutboundStateStore<F>
+pub struct OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemOutboundStateStore<F>
+impl<F> OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -208,7 +208,7 @@ where
     /// metadata-stripped opaque write + `CasExpectation::Any` for backends
     /// that reject record-shape entries or non-`Any` CAS (e.g.
     /// `DiskFilesystem`). Mirrors
-    /// [`ironclaw_processes::filesystem_store::put_with_byte_fallback`] so
+    /// [`ironclaw_processes::outbound_state_store::put_with_byte_fallback`] so
     /// every byte-only mount in the workspace stays writeable through the
     /// new filesystem stores.
     async fn put_with_byte_fallback(
@@ -483,7 +483,7 @@ where
 }
 
 #[async_trait]
-impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
+impl<F> CommunicationPreferenceRepository for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -541,7 +541,7 @@ where
 }
 
 #[async_trait]
-impl<F> OutboundStateStore for FilesystemOutboundStateStore<F>
+impl<F> OutboundStateStorePort for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -1424,7 +1424,7 @@ fn delivered_gate_route_conv_idx_path(
     .map_err(|_| OutboundError::Backend)
 }
 
-/// Outcome of a [`FilesystemOutboundStateStore::retry_conv_idx`] merge
+/// Outcome of a [`OutboundStateStore::retry_conv_idx`] merge
 /// callback: either write back an updated route list or delete the now-empty
 /// index file.
 enum ConvIdxUpdate {
@@ -1588,7 +1588,7 @@ fn delivery_scope_index_key() -> IndexKey {
 }
 
 #[async_trait]
-impl<F> TriggeredRunDeliveryStore for FilesystemOutboundStateStore<F>
+impl<F> TriggeredRunDeliveryStore for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -1637,7 +1637,7 @@ where
 }
 
 #[async_trait]
-impl<F> DeliveredGateRouteStore for FilesystemOutboundStateStore<F>
+impl<F> DeliveredGateRouteStore for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -1847,7 +1847,7 @@ where
                     Ok(p) => p,
                     Err(_) => {
                         tracing::debug!(
-                            target = "ironclaw::outbound::filesystem_store",
+                            target = "ironclaw::outbound::outbound_state_store",
                             name = %entry.name,
                             "delivered gate route sweep: skipping entry with invalid scoped path"
                         );
@@ -1860,7 +1860,7 @@ where
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::debug!(
-                        target = "ironclaw::outbound::filesystem_store",
+                        target = "ironclaw::outbound::outbound_state_store",
                         name = %entry.name,
                         error = %e,
                         "delivered gate route sweep: skipping unreadable file"
@@ -1874,7 +1874,7 @@ where
                     Ok(r) => r,
                     Err(e) => {
                         tracing::debug!(
-                            target = "ironclaw::outbound::filesystem_store",
+                            target = "ironclaw::outbound::outbound_state_store",
                             name = %entry.name,
                             error = %e,
                             "delivered gate route sweep: skipping undeserializable file"
@@ -1893,7 +1893,7 @@ where
                 // silent-ok: stale index entries are filtered by the membership
                 // check and re-swept next pass.
                 tracing::debug!(
-                    target = "ironclaw::outbound::filesystem_store",
+                    target = "ironclaw::outbound::outbound_state_store",
                     name = %entry.name,
                     error = %e,
                     "delivered gate route sweep: failed to delete conversation indexes (best-effort)"
@@ -1910,7 +1910,7 @@ where
                     // silent-ok: the record will be re-visited on the next sweep
                     // and filtered out at lookup time (is_expired check).
                     tracing::debug!(
-                        target = "ironclaw::outbound::filesystem_store",
+                        target = "ironclaw::outbound::outbound_state_store",
                         name = %entry.name,
                         error = %e,
                         "delivered gate route sweep: failed to delete expired file (best-effort)"
@@ -2003,7 +2003,7 @@ mod tests {
     use ironclaw_turns::{TurnRunId, TurnScope};
 
     use super::{
-        DeliveredGateRouteConversationIndexFile, FilesystemOutboundStateStore, SCOPE_NONE_SENTINEL,
+        DeliveredGateRouteConversationIndexFile, OutboundStateStore, SCOPE_NONE_SENTINEL,
         thread_scope_key,
     };
     use crate::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
@@ -2031,16 +2031,14 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
-    /// Build a `FilesystemOutboundStateStore` backed by an `InMemoryBackend`
+    /// Build a `OutboundStateStore` backed by an `InMemoryBackend`
     /// for testing the `DeliveredGateRouteStore` implementation.
     fn build_gate_route_store(
         tenant_id: &TenantId,
         user_id: &UserId,
-    ) -> FilesystemOutboundStateStore<InMemoryBackend> {
+    ) -> OutboundStateStore<InMemoryBackend> {
         let backend = Arc::new(InMemoryBackend::new());
-        FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
-            backend, tenant_id, user_id,
-        ))
+        OutboundStateStore::new(build_scoped_fs_for_gate_routes(backend, tenant_id, user_id))
     }
 
     /// Build a minimal `DeliveredGateRouteRecord` for the given identities.
@@ -2719,25 +2717,24 @@ mod tests {
         assert_eq!(routes[0].gate_ref, "gate:v1-compat-ref");
     }
 
-    /// Build two `FilesystemOutboundStateStore` instances sharing the same
+    /// Build two `OutboundStateStore` instances sharing the same
     /// `InMemoryBackend`, allowing a second writer to simulate a concurrent
     /// mid-flight mutation of the same index files.
     fn build_shared_backend_stores(
         tenant_id: &TenantId,
         user_id: &UserId,
     ) -> (
-        FilesystemOutboundStateStore<InMemoryBackend>,
-        FilesystemOutboundStateStore<InMemoryBackend>,
+        OutboundStateStore<InMemoryBackend>,
+        OutboundStateStore<InMemoryBackend>,
     ) {
         let backend = Arc::new(InMemoryBackend::new());
-        let store_a = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_a = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend.clone(),
             tenant_id,
             user_id,
         ));
-        let store_b = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
-            backend, tenant_id, user_id,
-        ));
+        let store_b =
+            OutboundStateStore::new(build_scoped_fs_for_gate_routes(backend, tenant_id, user_id));
         (store_a, store_b)
     }
 
@@ -3007,12 +3004,12 @@ mod tests {
 
         // Each store is scoped to its own user, but shares the same backend.
         let backend = Arc::new(InMemoryBackend::new());
-        let store_a = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_a = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend.clone(),
             &tenant_id,
             &user_a,
         ));
-        let store_b = FilesystemOutboundStateStore::new(build_scoped_fs_for_gate_routes(
+        let store_b = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
             backend, &tenant_id, &user_b,
         ));
 

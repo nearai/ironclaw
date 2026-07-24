@@ -246,7 +246,7 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
             .is_none()
     );
     // Cross-user *store visibility* isolation is now structural: the production
-    // `FilesystemCapabilityLeaseStore` scopes each user to a distinct subtree via
+    // `CapabilityLeaseStore` scopes each user to a distinct subtree via
     // its per-invocation `MountView`, proven by
     // `ironclaw_authorization`'s `filesystem_capability_lease_store_isolates_two_tenants_*`
     // contract test. This integration fixture shares one non-per-user in-memory
@@ -446,10 +446,10 @@ fn runtime_dispatcher_stack(
 }
 
 async fn approve_dispatch(
-    approval_requests: &ironclaw_run_state::FilesystemApprovalRequestStore<
+    approval_requests: &ironclaw_run_state::ApprovalRequestStore<
         ironclaw_filesystem::InMemoryBackend,
     >,
-    leases: &FilesystemCapabilityLeaseStore<InMemoryBackend>,
+    leases: &CapabilityLeaseStore<InMemoryBackend>,
     scope: &ResourceScope,
     approval_id: ApprovalRequestId,
     expires_at: Option<Timestamp>,
