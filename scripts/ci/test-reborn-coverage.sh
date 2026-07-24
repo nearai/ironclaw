@@ -828,11 +828,13 @@ fi
 #
 # The script derives its repo root from its own path and `cd`s there, so
 # each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/integration/ subtree alongside it, then invokes the copy. It also
-# filters candidates against a `[[test]] name = "..."` entry in Cargo.toml
-# (see that script's header comment), so every case seeds a fake Cargo.toml
-# with one `[[test]]` block per fixture suite the case constructs — mirrors
-# the real repo root always having a `[[test]]` entry per suite.
+# tests/integration/ subtree alongside it, then invokes the copy. Discovery
+# is registration-driven (see that script's header comment): every `[[test]]`
+# entry in Cargo.toml whose `path` sits under tests/integration/ is selected,
+# so each case seeds a fake Cargo.toml with one `[[test]]` block per fixture
+# suite it constructs — mirrors the real repo root always having a `[[test]]`
+# entry per suite. The on-disk fixture files are kept for tree realism; an
+# unregistered file must never be selected (D6).
 
 setup_int_tier_case() {
   local case_dir="$1"
@@ -916,6 +918,28 @@ capture "${d5}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D5: support/ dir alongside flat suites exits 0" 0 "${CAP_RC}"
 assert_eq "D5: support/ dir is not discovered as a suite" \
   "$(printf -- '--test\nreborn_integration_only')" "${CAP_OUT}"
+
+# D6: domain-folder bins (tests/integration/auth/oauth_connect.rs) are
+# selected via their [[test]] registration, while a #[path]-mounted sibling
+# with no [[test]] entry (auth/common.rs) is not. Pins the #6520-audit blind
+# spot: the retired `find -maxdepth 1` walk could not see domain-folder bins,
+# so the six tests/integration/auth/ suites ran in no PR coverage lane.
+d6="${tmp_root}/d6"
+setup_int_tier_case "${d6}" reborn_integration_flat
+: > "${d6}/tests/integration/flat.rs"
+mkdir -p "${d6}/tests/integration/auth"
+: > "${d6}/tests/integration/auth/oauth_connect.rs"
+: > "${d6}/tests/integration/auth/common.rs"
+cat >>"${d6}/Cargo.toml" <<'EOF'
+[[test]]
+name = "reborn_integration_oauth_connect"
+path = "tests/integration/auth/oauth_connect.rs"
+EOF
+capture "${d6}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+assert_exit_code "D6: domain-folder bin exits 0" 0 "${CAP_RC}"
+assert_eq "D6: registered domain-folder bin is selected; unregistered sibling is not" \
+  "$(printf -- '--test\nreborn_integration_flat\n--test\nreborn_integration_oauth_connect')" \
+  "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)
