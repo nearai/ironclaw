@@ -33,12 +33,12 @@ pub(crate) trait PromptSource {
     /// selected entry's canonical provider id.
     ///
     /// Gated on `libsql`, the same cfg as
-    /// `ironclaw_reborn_composition::ProviderMenuEntry` itself, matching
+    /// `ironclaw_operator::ProviderMenuEntry` itself, matching
     /// `provision_llm_credentials`'s own cfg split (see that function's
     /// feature-off stub, which never calls this method).
     fn provider_menu(
         &mut self,
-        entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        entries: &[ironclaw_operator::ProviderMenuEntry],
     ) -> Result<String, LlmCredentialPromptError>;
 
     /// Prompt for `provider`'s API key with input masked (not echoed).
@@ -99,7 +99,7 @@ impl PromptSource for StdinPromptSource {
 
     fn provider_menu(
         &mut self,
-        entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        entries: &[ironclaw_operator::ProviderMenuEntry],
     ) -> Result<String, LlmCredentialPromptError> {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
@@ -211,7 +211,7 @@ impl PromptSource for StdinPromptSource {
 /// forms. Returns the selected entry's canonical provider id, or `None` when
 /// nothing matches.
 fn resolve_menu_selection(
-    entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+    entries: &[ironclaw_operator::ProviderMenuEntry],
     input: &str,
 ) -> Option<String> {
     if let Ok(number) = input.parse::<usize>() {
@@ -239,7 +239,7 @@ fn resolve_menu_selection(
 /// - `nearai`'s `api_key_required` is `true` here (menu-level override) even
 ///   though the raw catalog marks it optional — no session-token auth wired,
 ///   so it's required-key like every other entry and gets no special note.
-fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -> &'static str {
+fn menu_entry_key_note(entry: &ironclaw_operator::ProviderMenuEntry) -> &'static str {
     if entry.api_key_required {
         ""
     } else {
@@ -260,7 +260,7 @@ fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -
 /// dropped (e.g. typing "openai" must not land "penai"). Only the first
 /// attempt is seeded — later re-prompts (on invalid input) read a plain line.
 fn provider_menu_typed(
-    entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+    entries: &[ironclaw_operator::ProviderMenuEntry],
     seed: Option<char>,
 ) -> Result<String, LlmCredentialPromptError> {
     println!("Select an LLM provider:");
@@ -420,7 +420,7 @@ enum ArrowMenuOutcome {
 /// treats the same as [`terminal_supports_arrow_menu`] returning `false`
 /// up front: fall back to [`provider_menu_typed`].
 fn run_arrow_menu(
-    entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+    entries: &[ironclaw_operator::ProviderMenuEntry],
 ) -> std::io::Result<ArrowMenuOutcome> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use crossterm::{cursor, execute, style::Print};
@@ -484,7 +484,7 @@ fn run_arrow_menu(
 ///   rather than scrolling.
 fn render_menu(
     stdout: &mut std::io::Stdout,
-    entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+    entries: &[ironclaw_operator::ProviderMenuEntry],
     highlighted: usize,
     redraw: bool,
 ) -> std::io::Result<()> {
@@ -590,7 +590,7 @@ fn drain_pending_events() {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_reborn_composition::ProviderMenuEntry;
+    use ironclaw_operator::ProviderMenuEntry;
 
     use super::*;
 

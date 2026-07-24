@@ -19,7 +19,10 @@ pub fn build_product_event_stream_for_test(
     turn_coordinator: Arc<dyn TurnCoordinator>,
     reply_target_binding_ref: ReplyTargetBindingRef,
 ) -> Arc<dyn ProjectionStream> {
-    crate::projection::build_reborn_projection_services(event_log, reply_target_binding_ref)
-        .with_turn_events(turn_event_source, turn_coordinator)
-        .product_event_stream()
+    ironclaw_product::projection::build_reborn_projection_services(
+        event_log,
+        reply_target_binding_ref,
+    )
+    .with_turn_events(turn_event_source, turn_coordinator)
+    .product_event_stream()
 }

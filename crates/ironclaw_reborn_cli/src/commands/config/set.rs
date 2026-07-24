@@ -208,8 +208,7 @@ fn write_llm_api_key(
     value: &str,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
-    let admin =
-        ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+    let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
     let canonical_provider_id = admin
         .resolve_provider_id(provider_id)
         .map_err(anyhow::Error::from)?;
@@ -373,7 +372,7 @@ trait SecretStoreOpener {
     fn open_llm_key_store(
         &self,
         home_path: &Path,
-    ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
+    ) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
 
     fn open_google_oauth_secret_store(
         &self,
@@ -387,7 +386,7 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
     fn open_llm_key_store(
         &self,
         home_path: &Path,
-    ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+    ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
         // `config set` is a write command: create the reborn home directory
         // (if missing) before opening the store, mirroring
         // `onboard::llm_credentials::open_llm_key_store` — a never-onboarded
@@ -401,7 +400,7 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::LlmKeyStore::new(store))
+            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
         })
     }
 
@@ -478,14 +477,12 @@ mod tests {
         fn open_llm_key_store(
             &self,
             home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+        ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
             self.opened_paths
                 .lock()
                 .expect("opened paths lock")
                 .push(home_path.to_path_buf());
-            Ok(ironclaw_reborn_composition::LlmKeyStore::new(
-                self.store.clone(),
-            ))
+            Ok(ironclaw_operator::LlmKeyStore::new(self.store.clone()))
         }
 
         fn open_google_oauth_secret_store(
@@ -519,7 +516,7 @@ mod tests {
         fn open_llm_key_store(
             &self,
             _home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+        ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
             anyhow::bail!("store opener should not be called")
         }
 
@@ -852,7 +849,7 @@ mod tests {
         );
         let store = opener.store.clone();
         let stored = crate::runtime::block_on_cli(async move {
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
         })

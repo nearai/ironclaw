@@ -1,28 +1,28 @@
 use std::{cmp::Ordering, collections::HashSet};
 
+use crate::{ProductAdapterError, ProductOutboundPayload};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, ProjectionReplay, ProjectionSnapshot,
     RunStatusProjection,
 };
 use ironclaw_events::EventCursor;
 use ironclaw_host_api::InvocationId;
-use ironclaw_product::{ProductAdapterError, ProductOutboundPayload};
 
 use super::PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS;
 
-pub(crate) enum RuntimePayloadCandidate {
+pub enum RuntimePayloadCandidate {
     State { runs: Vec<RunStatusProjection> },
     CapabilityActivity(CapabilityActivityProjection),
     CapabilityDisplayPreview(CapabilityActivityProjection),
 }
 
-pub(crate) enum RuntimePayloadResolution {
+pub enum RuntimePayloadResolution {
     Payload(Box<ProductOutboundPayload>),
     Pending,
     Empty,
 }
 
-pub(crate) struct RuntimePayloads {
+pub struct RuntimePayloads {
     slots: Vec<RuntimePayloadSlot>,
 }
 
@@ -32,7 +32,7 @@ enum RuntimePayloadSlot {
 }
 
 impl RuntimePayloads {
-    pub(crate) fn from_resolutions(
+    pub fn from_resolutions(
         resolutions: Vec<Result<RuntimePayloadResolution, ProductAdapterError>>,
     ) -> Result<Self, ProductAdapterError> {
         let mut slots = Vec::new();
@@ -51,15 +51,15 @@ impl RuntimePayloads {
         Ok(Self { slots })
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
-    pub(crate) fn total(&self) -> usize {
+    pub fn total(&self) -> usize {
         self.slots.len()
     }
 
-    pub(crate) fn deliver_after(
+    pub fn deliver_after(
         self,
         already_delivered: usize,
         capacity: usize,
@@ -81,14 +81,12 @@ impl RuntimePayloads {
 }
 
 #[derive(Debug)]
-pub(crate) struct DeliveredRuntimePayload {
-    pub(crate) delivered: usize,
-    pub(crate) payload: ProductOutboundPayload,
+pub struct DeliveredRuntimePayload {
+    pub delivered: usize,
+    pub payload: ProductOutboundPayload,
 }
 
-pub(crate) fn snapshot_payload_candidates(
-    snapshot: ProjectionSnapshot,
-) -> Vec<RuntimePayloadCandidate> {
+pub fn snapshot_payload_candidates(snapshot: ProjectionSnapshot) -> Vec<RuntimePayloadCandidate> {
     runtime_payload_candidates(
         snapshot.runs,
         snapshot.capability_activities,
@@ -96,7 +94,7 @@ pub(crate) fn snapshot_payload_candidates(
     )
 }
 
-pub(crate) fn replay_payload_candidates(replay: &ProjectionReplay) -> Vec<RuntimePayloadCandidate> {
+pub fn replay_payload_candidates(replay: &ProjectionReplay) -> Vec<RuntimePayloadCandidate> {
     let state_payloads = usize::from(!replay.runs.is_empty());
     let activity_payloads = PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(state_payloads);
     let mut candidates = Vec::with_capacity(replay_candidate_capacity(

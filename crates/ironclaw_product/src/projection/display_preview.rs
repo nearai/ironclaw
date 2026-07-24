@@ -3,15 +3,15 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use crate::{
+    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
+};
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
     truncate_capability_display_text,
-};
-use ironclaw_product::{
-    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
-    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };
 use ironclaw_safety::{
     sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,
@@ -22,7 +22,7 @@ use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
 
 use super::capability_activity_status_wire;
 
-pub(crate) const SANITIZE_JSON_MAX_DEPTH: usize = 32;
+pub const SANITIZE_JSON_MAX_DEPTH: usize = 32;
 const COMPLETED_PREVIEW_PENDING_TIMEOUT_SECONDS: i64 = 10;
 
 #[async_trait]
@@ -79,7 +79,7 @@ impl CapabilityDisplayPreviewSource for NoopCapabilityDisplayPreviewSource {
 }
 
 #[derive(Default)]
-pub(crate) struct CapabilityDisplayPreviewStore {
+pub struct CapabilityDisplayPreviewStore {
     pending: Mutex<CapabilityDisplayPendingInputs>,
     completed: Mutex<CapabilityDisplayCompletedPreviews>,
 }
@@ -117,27 +117,27 @@ struct CapabilityDisplayInputPreview {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CapabilityDisplayPreviewRecord {
-    pub(crate) timeline_message_id: Option<ThreadMessageId>,
-    pub(crate) title: String,
-    pub(crate) subtitle: Option<String>,
-    pub(crate) input_summary: Option<String>,
-    pub(crate) output_summary: Option<String>,
-    pub(crate) output_preview: Option<String>,
-    pub(crate) output_kind: Option<String>,
-    pub(crate) output_bytes: Option<u64>,
-    pub(crate) result_ref: Option<String>,
-    pub(crate) truncated: bool,
+pub struct CapabilityDisplayPreviewRecord {
+    pub timeline_message_id: Option<ThreadMessageId>,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub input_summary: Option<String>,
+    pub output_summary: Option<String>,
+    pub output_preview: Option<String>,
+    pub output_kind: Option<String>,
+    pub output_bytes: Option<u64>,
+    pub result_ref: Option<String>,
+    pub truncated: bool,
 }
 
-pub(crate) struct CapabilityDisplayPreviewResult<'a> {
-    pub(crate) run_id: &'a str,
-    pub(crate) input_ref: &'a CapabilityInputRef,
-    pub(crate) invocation_id: InvocationId,
-    pub(crate) capability_id: &'a CapabilityId,
-    pub(crate) result_ref: &'a str,
-    pub(crate) output: &'a serde_json::Value,
-    pub(crate) output_bytes: u64,
+pub struct CapabilityDisplayPreviewResult<'a> {
+    pub run_id: &'a str,
+    pub input_ref: &'a CapabilityInputRef,
+    pub invocation_id: InvocationId,
+    pub capability_id: &'a CapabilityId,
+    pub result_ref: &'a str,
+    pub output: &'a serde_json::Value,
+    pub output_bytes: u64,
 }
 
 impl CapabilityDisplayPreviewStore {
@@ -174,7 +174,7 @@ impl CapabilityDisplayPreviewStore {
             })
     }
 
-    pub(crate) fn record_input(
+    pub fn record_input(
         &self,
         run_id: &str,
         input_ref: &CapabilityInputRef,
@@ -202,7 +202,7 @@ impl CapabilityDisplayPreviewStore {
 
     /// Link a now-running invocation to the ref its input was recorded under,
     /// so the running activity frame can surface that input before completion.
-    pub(crate) fn record_running_invocation(
+    pub fn record_running_invocation(
         &self,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
@@ -214,11 +214,11 @@ impl CapabilityDisplayPreviewStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
+    pub fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
         self.record_result_with_preview(result, None);
     }
 
-    pub(crate) fn record_result_with_preview(
+    pub fn record_result_with_preview(
         &self,
         result: CapabilityDisplayPreviewResult<'_>,
         display_preview: Option<&CapabilityDisplayOutputPreview>,
@@ -278,7 +278,7 @@ impl CapabilityDisplayPreviewStore {
     /// pending input recorded at registration, mirroring the success path in
     /// `record_result_with_preview`. No result ref is staged: the model-visible
     /// result is written separately through the transcript port.
-    pub(crate) fn record_failure_preview(
+    pub fn record_failure_preview(
         &self,
         run_id: &str,
         invocation_id: InvocationId,
@@ -328,7 +328,7 @@ impl CapabilityDisplayPreviewStore {
             .push(invocation_id);
     }
 
-    pub(crate) fn prune_run(&self, run_id: &str) {
+    pub fn prune_run(&self, run_id: &str) {
         let mut pending = self.lock_pending_inputs();
         if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
             let pruned: std::collections::HashSet<String> = input_refs.into_iter().collect();
@@ -349,7 +349,7 @@ impl CapabilityDisplayPreviewStore {
         }
     }
 
-    pub(crate) fn record_for_invocation(
+    pub fn record_for_invocation(
         &self,
         invocation_id: InvocationId,
     ) -> Option<CapabilityDisplayPreviewRecord> {
@@ -359,7 +359,7 @@ impl CapabilityDisplayPreviewStore {
             .cloned()
     }
 
-    pub(crate) fn attach_timeline_message_id(
+    pub fn attach_timeline_message_id(
         &self,
         invocation_id: InvocationId,
         timeline_message_id: ThreadMessageId,
@@ -976,7 +976,7 @@ struct SanitizedJson {
 }
 
 #[cfg(test)]
-pub(crate) fn sanitize_json_value(value: &serde_json::Value) -> serde_json::Value {
+pub fn sanitize_json_value(value: &serde_json::Value) -> serde_json::Value {
     sanitize_json_value_with_truncation(value).value
 }
 
@@ -1070,7 +1070,7 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
     truncate_capability_display_text(text, max_bytes)
 }
 
-pub(crate) fn sanitize_text(text: &str) -> String {
+pub fn sanitize_text(text: &str) -> String {
     safety_sanitize_text(text)
 }
 

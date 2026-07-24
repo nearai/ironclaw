@@ -15,7 +15,7 @@ This crate owns the standalone `ironclaw` command surface. Keep it small, explic
 - Keep commands side-effect free unless the command name and issue explicitly require mutation.
 - Use `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`; do not write current v1 state.
 - no v1 runtime imports: do not depend on root `ironclaw_legacy`, `src/agent`, channels, worker, DB, setup, service, sandbox, or `ironclaw_engine`.
-- Do not add workspace dependencies beyond `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, and `ironclaw_webui` (host-owned WebUI serve lifecycle) without an architecture test update and explicit PR rationale. Provider registry/auth/model UX should enter through the Reborn composition provider-admin facade, not a separate CLI-only path.
+- Do not add workspace dependencies beyond `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, `ironclaw_webui` (host-owned WebUI serve lifecycle), `ironclaw_operator` (operator/admin implementation), and `ironclaw_host_api` (neutral provider DTO contracts) without an architecture test update and explicit PR rationale. Provider registry/auth/model UX should enter through the operator/admin facade, not a separate CLI-only path.
 
 ## Adding a command
 

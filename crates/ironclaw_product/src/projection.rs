@@ -4,6 +4,14 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
+    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
+    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionSubscriptionRequest, RedactedString,
+};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_event_projections::{
@@ -21,18 +29,13 @@ use ironclaw_event_streams::{
     SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
-use ironclaw_host_api::UserId;
-use ironclaw_outbound::OutboundStateStore;
-use ironclaw_product::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
-    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
-    ProjectionSubscriptionRequest, RedactedString,
+use ironclaw_host_api::{
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, UserId,
+    VirtualPath,
 };
+use ironclaw_outbound::OutboundStateStore;
 use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
@@ -42,34 +45,37 @@ use ironclaw_turns::{
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-mod display_preview;
-mod live_progress;
-mod runtime_replay;
-mod turn_events;
+pub mod display_preview;
+pub mod live_progress;
+pub mod runtime_replay;
+pub mod turn_events;
+use crate::AuthChallengeProvider;
 use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
 };
-use ironclaw_product::AuthChallengeProvider;
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
 // Crate-visible so the skill-learning sink can name the publisher type.
-pub(crate) use live_progress::LiveProjectionPublisher;
+pub use live_progress::LiveProjectionPublisher;
 use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
 // Only the Slack delivery path (feature-gated) consumes this re-export.
-pub(crate) use turn_events::approval_prompt_context_view;
+pub use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
     TurnEventPayload, turn_status_wire,
 };
 
-pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
+pub use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 #[cfg(test)]
-pub(crate) use display_preview::{SANITIZE_JSON_MAX_DEPTH, sanitize_json_value, sanitize_text};
+pub use display_preview::{SANITIZE_JSON_MAX_DEPTH, sanitize_json_value, sanitize_text};
+
+#[cfg(test)]
+mod tests;
 
 const PRODUCT_PROJECTION_PAGE_LIMIT: usize = 256;
 const PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS: usize = PRODUCT_PROJECTION_PAGE_LIMIT + 1;
@@ -79,7 +85,7 @@ const TURN_EVENT_WAKE_BUFFER: usize = 256;
 const PRODUCT_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
-pub(crate) struct RebornProjectionServices {
+pub struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
     live_sequence: Arc<AtomicU64>,
@@ -94,7 +100,7 @@ pub(crate) struct RebornProjectionServices {
 }
 
 impl RebornProjectionServices {
-    pub(crate) fn with_turn_events(
+    pub fn with_turn_events(
         mut self,
         turn_event_source: Arc<dyn TurnEventProjectionSource>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -107,7 +113,7 @@ impl RebornProjectionServices {
         self
     }
 
-    pub(crate) fn with_approval_requests(
+    pub fn with_approval_requests(
         mut self,
         approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
@@ -118,7 +124,7 @@ impl RebornProjectionServices {
         self
     }
 
-    pub(crate) fn with_failure_explainer(
+    pub fn with_failure_explainer(
         mut self,
         explainer: Arc<dyn FailureExplanationProvider>,
     ) -> Self {
@@ -126,7 +132,7 @@ impl RebornProjectionServices {
         self
     }
 
-    pub(crate) fn with_model_failure_explainer_factory(
+    pub fn with_model_failure_explainer_factory(
         self,
         system_inference: Arc<
             dyn Fn() -> Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> + Send + Sync,
@@ -141,12 +147,12 @@ impl RebornProjectionServices {
     /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
     /// Optional: when absent the `AuthPromptView` omits those fields (backward
     /// compatible — legacy consumers deserialise them as `None`).
-    pub(crate) fn with_auth_challenges(mut self, provider: Arc<dyn AuthChallengeProvider>) -> Self {
+    pub fn with_auth_challenges(mut self, provider: Arc<dyn AuthChallengeProvider>) -> Self {
         self.auth_challenges = Some(provider);
         self
     }
 
-    pub(crate) fn with_display_previews(
+    pub fn with_display_previews(
         mut self,
         display_previews: Arc<CapabilityDisplayPreviewStore>,
     ) -> Self {
@@ -154,7 +160,7 @@ impl RebornProjectionServices {
         self
     }
 
-    pub(crate) fn product_event_stream(&self) -> Arc<dyn ProjectionStream> {
+    pub fn product_event_stream(&self) -> Arc<dyn ProjectionStream> {
         Arc::new(ProductRuntimeProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
@@ -166,7 +172,7 @@ impl RebornProjectionServices {
         })
     }
 
-    pub(crate) fn with_live_progress_milestone_sink_for_publisher(
+    pub fn with_live_progress_milestone_sink_for_publisher(
         &self,
         inner: Arc<dyn LoopHostMilestoneSink>,
         publisher: Arc<LiveProjectionPublisher>,
@@ -174,10 +180,7 @@ impl RebornProjectionServices {
         Arc::new(LiveProgressMilestoneSink::new(inner, publisher))
     }
 
-    pub(crate) fn live_projection_publisher(
-        &self,
-        actor_user_id: UserId,
-    ) -> Arc<LiveProjectionPublisher> {
+    pub fn live_projection_publisher(&self, actor_user_id: UserId) -> Arc<LiveProjectionPublisher> {
         Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
@@ -185,21 +188,21 @@ impl RebornProjectionServices {
         ))
     }
 
-    pub(crate) fn skill_activation_observer(
+    pub fn skill_activation_observer(
         &self,
         publisher: Arc<LiveProjectionPublisher>,
     ) -> Arc<dyn SkillActivationObserver> {
         Arc::new(LiveSkillActivationObserver::new(publisher))
     }
 
-    pub(crate) fn turn_event_wake_sink(&self) -> Arc<dyn TurnEventSink> {
+    pub fn turn_event_wake_sink(&self) -> Arc<dyn TurnEventSink> {
         Arc::new(TurnEventWakeSink {
             source: Arc::clone(&self.turn_event_wake_source),
         })
     }
 }
 
-pub(crate) fn build_reborn_projection_services(
+pub fn build_reborn_projection_services(
     event_log: Arc<dyn DurableEventLog>,
     product_reply_target_binding_ref: ReplyTargetBindingRef,
 ) -> RebornProjectionServices {
@@ -220,12 +223,12 @@ pub(crate) fn build_reborn_projection_services(
         // §4.3: the local-dev projection bundle's EventStreamManager keeps its
         // own ephemeral, volatile outbound-delivery bookkeeping — the drop-in
         // for the deleted throwaway `InMemoryOutboundStateStore::default()`.
-        // `wrap_scoped` over a fresh `InMemoryBackend` mounts `/outbound`; the
-        // durable outbound store is composed separately in the factory.
-        // composition-owned construction site.
+        // A tenant/user-scoped view over a fresh `InMemoryBackend` mounts
+        // `/outbound`; the durable outbound store is composed separately in the
+        // factory.
         {
             #[allow(clippy::disallowed_methods)]
-            Arc::new(OutboundStateStore::new(crate::wrap_scoped(Arc::new(
+            Arc::new(OutboundStateStore::new(outbound_scoped(Arc::new(
                 InMemoryBackend::new(),
             ))))
         },
@@ -241,6 +244,33 @@ pub(crate) fn build_reborn_projection_services(
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         product_reply_target_binding_ref,
         auth_challenges: None,
+    }
+}
+
+fn outbound_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(root, outbound_mount_view))
+}
+
+fn outbound_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant_id = outbound_scope_path_segment(scope.tenant_id.as_str());
+    let user_id = outbound_scope_path_segment(scope.user_id.as_str());
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound")?,
+        VirtualPath::new(format!(
+            "/engine/tenants/{tenant_id}/users/{user_id}/outbound"
+        ))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
+fn outbound_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
     }
 }
 
@@ -1789,6 +1819,3 @@ fn internal_projection_error(detail: &'static str) -> ProductAdapterError {
         detail: RedactedString::new(detail),
     }
 }
-
-#[cfg(test)]
-mod tests;

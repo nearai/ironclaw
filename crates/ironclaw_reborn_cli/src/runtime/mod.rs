@@ -5,14 +5,16 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+use ironclaw_operator::OperatorLogLayer;
+use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
 use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    FirstPartyPackageBundle, KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer,
-    PollSettings, RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+    FirstPartyPackageBundle, KeepaliveSweepSettings, OAuthClientConfig, PollSettings,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -482,16 +484,18 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
-) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
-    let error = match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file) {
+) -> anyhow::Result<Option<ironclaw_operator::ResolvedRebornLlm>> {
+    let error = match ironclaw_operator::resolve_reborn_runtime_llm(config, config_file) {
         Ok(resolved) => return Ok(resolved),
         Err(error) => error,
     };
     if caller != RuntimeInputCaller::Serve {
         return Err(error.into());
     }
-    let ironclaw_reborn_composition::RebornLlmCatalogError::ApiKeyEnvUnset { ref provider, .. } =
-        error
+    let ironclaw_operator::llm_admin::llm_catalog::RebornLlmCatalogError::ApiKeyEnvUnset {
+        ref provider,
+        ..
+    } = error
     else {
         return Err(error.into());
     };
@@ -513,7 +517,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
             .await
             .map_err(anyhow::Error::from)?;
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        ironclaw_operator::LlmKeyStore::new(store)
             .exists(&provider_id)
             .await
             .map_err(anyhow::Error::from)
@@ -521,11 +525,11 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     if !has_stored_key {
         return Err(error.into());
     }
-    ironclaw_reborn_composition::resolve_llm_selection_allow_missing_key(
+    ironclaw_operator::llm_admin::llm_catalog::resolve_llm_selection_allow_missing_key(
         selection,
         Some(config.home().providers_file_path().as_path()),
     )
-    .map(ironclaw_reborn_composition::ResolvedRebornLlm::from_llm_config)
+    .map(ironclaw_operator::ResolvedRebornLlm::from_llm_config)
     .map(Some)
     .map_err(Into::into)
 }

@@ -7,6 +7,12 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
+    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
@@ -20,12 +26,6 @@ use ironclaw_event_streams::{
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
-use ironclaw_product::{
-    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
-    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
-    ProductWorkSummaryPhase,
-};
 use ironclaw_turns::{
     TurnRunId, TurnScope,
     run_profile::{
@@ -53,7 +53,7 @@ pub(super) struct LiveSkillActivationObserver {
     publisher: Arc<LiveProjectionPublisher>,
 }
 
-pub(crate) struct LiveProjectionPublisher {
+pub struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
     // Shared by publishers from the same projection services so live cursors
@@ -181,7 +181,7 @@ impl LiveProjectionPublisher {
     /// the in-run [`SkillActivationObserver`] only fires at prompt-build for
     /// skill *selection*, so a learned-skill notification has no producer
     /// otherwise. Best-effort — drops silently if names/feedback sanitize empty.
-    pub(crate) fn publish_skill_learned(
+    pub fn publish_skill_learned(
         &self,
         owner: Option<&UserId>,
         scope: &TurnScope,

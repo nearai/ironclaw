@@ -57,6 +57,7 @@ ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_operator = { path = "../ironclaw_operator" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }

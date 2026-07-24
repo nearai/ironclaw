@@ -4,17 +4,17 @@ use async_trait::async_trait;
 use ironclaw_reborn_config::{RebornBootConfig, RebornConfigFile};
 
 use crate::LlmKeyStore;
+use crate::llm_admin::ResolvedRebornLlm;
 use crate::llm_admin::llm_catalog::{
     RebornLlmCatalogError, apply_stored_api_key, resolve_llm_selection_allow_missing_key,
     resolve_reborn_runtime_llm,
 };
 use crate::llm_admin::llm_config_service::LlmReloadTrigger;
-use crate::runtime_input::ResolvedRebornLlm;
 
 /// Live-reload adapter wired by the runtime. Re-resolves the LLM config from
 /// `config.toml` + `providers.json` + the stored key, then hot-swaps the
 /// running provider's inner backend via the `ironclaw_llm` reload handle.
-pub(crate) struct RebornLlmReloadAdapter {
+pub struct RebornLlmReloadAdapter {
     boot: RebornBootConfig,
     reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     session: Arc<ironclaw_llm::SessionManager>,
@@ -22,7 +22,7 @@ pub(crate) struct RebornLlmReloadAdapter {
 }
 
 impl RebornLlmReloadAdapter {
-    pub(crate) fn new(
+    pub fn new(
         boot: RebornBootConfig,
         reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
         session: Arc<ironclaw_llm::SessionManager>,
@@ -93,7 +93,7 @@ impl LlmReloadTrigger for RebornLlmReloadAdapter {
             return Ok(());
         };
         let provider_id = resolved.provider_id().to_string();
-        let mut config = resolved.config;
+        let mut config = resolved.into_config();
         let key_applied = match self
             .keys
             .read(&provider_id)

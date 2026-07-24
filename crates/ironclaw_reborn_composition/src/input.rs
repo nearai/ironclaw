@@ -753,7 +753,7 @@ impl RebornHostBindings {
 
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
-        config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
+        config: ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
         self.deployment.nearai_mcp_bootstrap_config = Some(config);
         self
@@ -761,7 +761,7 @@ impl RebornHostBindings {
 
     pub fn with_optional_nearai_mcp_bootstrap_config(
         mut self,
-        config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+        config: Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
         self.deployment.nearai_mcp_bootstrap_config = config;
         self

@@ -99,7 +99,7 @@ fn plist_path() -> Result<PathBuf> {
 /// The three states `launchctl list` can report for a given label, read
 /// from its three whitespace-separated columns (PID, last-exit-status,
 /// label). Mirrors `launchd_status_from_line` in
-/// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
+/// `ironclaw_operator::operator_service_lifecycle`
 /// (copied shape, not imported — that module is a different crate and
 /// this one intentionally does not depend on it for a few lines of
 /// parsing).

@@ -83,7 +83,7 @@ impl LlmCredentialProvisionOutcome {
 /// supply a store whose `put` fails, proving the store-before-config write
 /// ordering without touching the real local-dev libsql-backed store.
 pub(crate) trait LlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
+    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
 }
 
 /// Production [`LlmKeyStoreOpener`]: opens the real local-dev encrypted
@@ -93,13 +93,13 @@ pub(crate) trait LlmKeyStoreOpener {
 pub(crate) struct EncryptedLlmKeyStoreOpener;
 
 impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::LlmKeyStore::new(store))
+            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
         })
     }
 }
@@ -109,16 +109,16 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
 /// endpoint, ok-with-a-model-list, …) without a live LLM endpoint.
 /// - Unlike [`LlmKeyStoreOpener`] (opens a durable resource), this performs
 ///   the side-effecting network call itself, so its method takes the
-///   already-built [`ironclaw_reborn_composition::RebornProviderAdmin`]
+///   already-built [`ironclaw_operator::RebornProviderAdmin`]
 ///   rather than raw construction ingredients.
 pub(crate) trait LlmProbe {
     fn probe(
         &self,
-        admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+        admin: &ironclaw_operator::RebornProviderAdmin,
         provider_id: &str,
         api_key: Option<&str>,
         model: Option<&str>,
-    ) -> anyhow::Result<ironclaw_reborn_composition::ProviderProbeOutcome>;
+    ) -> anyhow::Result<ironclaw_operator::ProviderProbeOutcome>;
 }
 
 /// Production [`LlmProbe`]: calls `RebornProviderAdmin::probe_candidate`,
@@ -130,11 +130,11 @@ pub(crate) struct LiveLlmProbe;
 impl LlmProbe for LiveLlmProbe {
     fn probe(
         &self,
-        admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+        admin: &ironclaw_operator::RebornProviderAdmin,
         provider_id: &str,
         api_key: Option<&str>,
         model: Option<&str>,
-    ) -> anyhow::Result<ironclaw_reborn_composition::ProviderProbeOutcome> {
+    ) -> anyhow::Result<ironclaw_operator::ProviderProbeOutcome> {
         let admin = admin.clone();
         let provider_id = provider_id.to_string();
         let api_key = api_key.map(|key| secrecy::SecretString::from(key.to_string()));
@@ -195,7 +195,7 @@ pub(crate) fn provision_llm_credentials(
     probe: &dyn LlmProbe,
     force: bool,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
-    let admin = ironclaw_reborn_composition::RebornProviderAdmin::new(boot.clone());
+    let admin = ironclaw_operator::RebornProviderAdmin::new(boot.clone());
     // Secret-store root MUST match what `serve` opens at boot
     // (`local_runtime_storage_root`, i.e. `<home>/<profile-subdir>`), NOT the
     // bare home — a key written to the bare-root db is invisible to the
@@ -246,7 +246,7 @@ pub(crate) fn provision_llm_credentials(
 fn provision_headless_from_env(
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
-    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    admin: &ironclaw_operator::RebornProviderAdmin,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     match admin.detect_env_llm() {
         Ok(Some(detected)) => {
@@ -279,7 +279,7 @@ fn provision_headless_from_env(
 fn persist_env_detected_key(
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
-    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    admin: &ironclaw_operator::RebornProviderAdmin,
     provider_id: &str,
 ) -> Result<(), LlmCredentialPromptError> {
     let Some(key) = admin
@@ -307,7 +307,7 @@ fn persist_env_detected_key(
 fn open_llm_key_store(
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
-) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
     std::fs::create_dir_all(store_root).map_err(|error| {
         anyhow::anyhow!("create secret-store root {}: {error}", store_root.display())
     })?;
@@ -319,7 +319,7 @@ fn open_llm_key_store(
 /// [`provision_llm_credentials`]'s doc for the store-then-config write ordering.
 fn provision_via_menu(
     store_root: &Path,
-    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    admin: &ironclaw_operator::RebornProviderAdmin,
     prompts: &mut dyn PromptSource,
     store_opener: &dyn LlmKeyStoreOpener,
     probe: &dyn LlmProbe,
@@ -426,7 +426,7 @@ fn provision_via_menu(
 fn probe_and_confirm_key(
     prompts: &mut dyn PromptSource,
     probe: &dyn LlmProbe,
-    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    admin: &ironclaw_operator::RebornProviderAdmin,
     provider_id: &str,
     effective_model: &str,
     mut candidate_key: String,
@@ -498,7 +498,7 @@ fn probe_and_confirm_key(
 ///   config the operator needs to fix by hand). Matches
 ///   [`provider_api_key_required`]'s registry-lookup-failure precedent.
 fn already_configured_outcome(
-    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    admin: &ironclaw_operator::RebornProviderAdmin,
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
 ) -> Result<Option<LlmCredentialProvisionOutcome>, LlmCredentialPromptError> {
@@ -564,7 +564,7 @@ fn already_configured_outcome(
 ///   every time).
 /// - `Ok(None)`: genuinely "can't tell" — `provider_id` isn't in the registry.
 fn provider_api_key_required(
-    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    admin: &ironclaw_operator::RebornProviderAdmin,
     provider_id: &str,
 ) -> Result<Option<bool>, LlmCredentialPromptError> {
     admin
@@ -596,7 +596,7 @@ mod tests {
 
         fn provider_menu(
             &mut self,
-            entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+            entries: &[ironclaw_operator::ProviderMenuEntry],
         ) -> Result<String, LlmCredentialPromptError> {
             entries
                 .iter()
@@ -640,7 +640,7 @@ mod tests {
 
         fn provider_menu(
             &mut self,
-            _entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+            _entries: &[ironclaw_operator::ProviderMenuEntry],
         ) -> Result<String, LlmCredentialPromptError> {
             unreachable!("provider_menu() must not be called once is_interactive() is false")
         }
@@ -677,7 +677,7 @@ mod tests {
 
         fn provider_menu(
             &mut self,
-            _entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+            _entries: &[ironclaw_operator::ProviderMenuEntry],
         ) -> Result<String, LlmCredentialPromptError> {
             panic!("provider_menu() must not be called on an idempotent, already-configured rerun")
         }
@@ -708,12 +708,12 @@ mod tests {
     impl LlmProbe for StubOkProbe {
         fn probe(
             &self,
-            _admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+            _admin: &ironclaw_operator::RebornProviderAdmin,
             _provider_id: &str,
             _api_key: Option<&str>,
             _model: Option<&str>,
-        ) -> anyhow::Result<ironclaw_reborn_composition::ProviderProbeOutcome> {
-            Ok(ironclaw_reborn_composition::ProviderProbeOutcome {
+        ) -> anyhow::Result<ironclaw_operator::ProviderProbeOutcome> {
+            Ok(ironclaw_operator::ProviderProbeOutcome {
                 ok: true,
                 models: Vec::new(),
                 message: String::new(),
@@ -731,11 +731,11 @@ mod tests {
     impl LlmProbe for PanickingProbe {
         fn probe(
             &self,
-            _admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+            _admin: &ironclaw_operator::RebornProviderAdmin,
             _provider_id: &str,
             _api_key: Option<&str>,
             _model: Option<&str>,
-        ) -> anyhow::Result<ironclaw_reborn_composition::ProviderProbeOutcome> {
+        ) -> anyhow::Result<ironclaw_operator::ProviderProbeOutcome> {
             panic!(
                 "probe() must not be called: idempotent reruns, headless runs, env-seeded \
                  selections, and a rejected blank key must never reach the live key/model \
@@ -760,14 +760,13 @@ mod tests {
     }
 
     struct ScriptedProbe {
-        outcomes: std::cell::RefCell<
-            std::collections::VecDeque<ironclaw_reborn_composition::ProviderProbeOutcome>,
-        >,
+        outcomes:
+            std::cell::RefCell<std::collections::VecDeque<ironclaw_operator::ProviderProbeOutcome>>,
         calls: std::cell::RefCell<Vec<RecordedProbeCall>>,
     }
 
     impl ScriptedProbe {
-        fn new(outcomes: Vec<ironclaw_reborn_composition::ProviderProbeOutcome>) -> Self {
+        fn new(outcomes: Vec<ironclaw_operator::ProviderProbeOutcome>) -> Self {
             Self {
                 outcomes: std::cell::RefCell::new(outcomes.into()),
                 calls: std::cell::RefCell::new(Vec::new()),
@@ -782,11 +781,11 @@ mod tests {
     impl LlmProbe for ScriptedProbe {
         fn probe(
             &self,
-            _admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+            _admin: &ironclaw_operator::RebornProviderAdmin,
             provider_id: &str,
             api_key: Option<&str>,
             model: Option<&str>,
-        ) -> anyhow::Result<ironclaw_reborn_composition::ProviderProbeOutcome> {
+        ) -> anyhow::Result<ironclaw_operator::ProviderProbeOutcome> {
             self.calls.borrow_mut().push(RecordedProbeCall {
                 provider_id: provider_id.to_string(),
                 api_key: api_key.map(str::to_string),
@@ -817,7 +816,7 @@ mod tests {
 
         fn provider_menu(
             &mut self,
-            entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+            entries: &[ironclaw_operator::ProviderMenuEntry],
         ) -> Result<String, LlmCredentialPromptError> {
             entries
                 .iter()
@@ -869,10 +868,7 @@ mod tests {
     struct FailingLlmKeyStoreOpener;
 
     impl LlmKeyStoreOpener for FailingLlmKeyStoreOpener {
-        fn open(
-            &self,
-            _home_path: &Path,
-        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+        fn open(&self, _home_path: &Path) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
             let backend = Arc::new(
                 ironclaw_filesystem::FaultInjecting::new(
                     ironclaw_filesystem::InMemoryBackend::new(),
@@ -886,7 +882,7 @@ mod tests {
                 ),
             );
             let store = Arc::new(ironclaw_secrets::SecretStore::ephemeral_over(backend));
-            Ok(ironclaw_reborn_composition::LlmKeyStore::new(store))
+            Ok(ironclaw_operator::LlmKeyStore::new(store))
         }
     }
 
@@ -950,7 +946,7 @@ mod tests {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
                 .map_err(anyhow::Error::from)
@@ -1035,7 +1031,7 @@ mod tests {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("nearai")
                 .await
                 .map_err(anyhow::Error::from)
@@ -1081,8 +1077,7 @@ mod tests {
         std::fs::create_dir_all(home.path()).expect("create reborn home");
         seed_cached_master_key(home);
 
-        let admin =
-            ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+        let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
         admin
             .set_provider("nearai", None)
             .expect("seed a bare nearai slot directly, bypassing onboard's key prompt/store");
@@ -1341,7 +1336,7 @@ mod tests {
 
         fn provider_menu(
             &mut self,
-            entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+            entries: &[ironclaw_operator::ProviderMenuEntry],
         ) -> Result<String, LlmCredentialPromptError> {
             entries
                 .iter()
@@ -1387,7 +1382,7 @@ mod tests {
 
         fn provider_menu(
             &mut self,
-            _entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+            _entries: &[ironclaw_operator::ProviderMenuEntry],
         ) -> Result<String, LlmCredentialPromptError> {
             unreachable!("provider_menu() must not be called once is_interactive() is false")
         }
@@ -1470,7 +1465,7 @@ mod tests {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
                 .map_err(anyhow::Error::from)
@@ -1585,7 +1580,7 @@ mod tests {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
                 .map_err(anyhow::Error::from)
@@ -1694,8 +1689,8 @@ mod tests {
         ok: bool,
         models: Vec<&str>,
         message: &str,
-    ) -> ironclaw_reborn_composition::ProviderProbeOutcome {
-        ironclaw_reborn_composition::ProviderProbeOutcome {
+    ) -> ironclaw_operator::ProviderProbeOutcome {
+        ironclaw_operator::ProviderProbeOutcome {
             ok,
             models: models.into_iter().map(str::to_string).collect(),
             message: message.to_string(),
@@ -1749,7 +1744,7 @@ mod tests {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
                 .map_err(anyhow::Error::from)
@@ -1876,7 +1871,7 @@ mod tests {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_reborn_composition::LlmKeyStore::new(store)
+            ironclaw_operator::LlmKeyStore::new(store)
                 .read("openai")
                 .await
                 .map_err(anyhow::Error::from)

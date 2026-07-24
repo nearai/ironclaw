@@ -236,7 +236,7 @@ fn read_command_stdout(
 
 /// Platform-backed local service lifecycle manager.
 #[derive(Clone)]
-pub(crate) struct OperatorServiceLifecycle {
+pub struct OperatorServiceLifecycle {
     platform: ServicePlatform,
     home_dir: Option<PathBuf>,
     executable: Result<PathBuf, String>,
@@ -274,7 +274,7 @@ impl std::fmt::Debug for OperatorServiceLifecycle {
 }
 
 impl OperatorServiceLifecycle {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             platform: ServicePlatform::current(),
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
@@ -287,7 +287,7 @@ impl OperatorServiceLifecycle {
         }
     }
 
-    pub(crate) fn new_for_operator_with_boot_config(
+    pub fn new_for_operator_with_boot_config(
         operator_tenant_id: TenantId,
         operator_user_id: UserId,
         boot: Option<&ironclaw_reborn_config::RebornBootConfig>,

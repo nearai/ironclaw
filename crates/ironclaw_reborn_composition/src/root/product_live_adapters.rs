@@ -41,7 +41,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
+use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 #[derive(Debug, Error)]
 pub enum ProductLivePlannedRuntimeAdapterError {

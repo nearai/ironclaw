@@ -2988,7 +2988,8 @@ struct RebornProductionBuildContext {
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
     scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
     account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
-    nearai_mcp_bootstrap_config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    nearai_mcp_bootstrap_config:
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     native_extension_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
     /// Binary-injected neutral first-party bundle set (extension-runtime DEL-7):

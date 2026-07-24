@@ -1,6 +1,68 @@
 use super::*;
 
+use crate::{
+    AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind,
+    ChannelConnectionRequirement, ChannelPairingCode, ChannelPairingIssue,
+    PairingAuthChallengeView, RebornChannelConnectStrategy,
+};
+use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
+use ironclaw_host_api::{
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+
+struct FakeAuthChallengeProvider {
+    expected_owner_user_id: UserId,
+    expected_run_id: TurnRunId,
+    expected_gate_ref: String,
+}
+
+struct FailingAuthChallengeProvider;
+
 struct FakePairingAuthChallengeProvider;
+
+#[async_trait]
+impl AuthChallengeProvider for FakeAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        _scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+        _credential_requirements: &[RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
+        if owner_user_id != &self.expected_owner_user_id
+            || run_id != self.expected_run_id
+            || gate_ref != self.expected_gate_ref
+        {
+            return Ok(None);
+        }
+        Ok(Some(AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: AuthProviderId::new("github".to_string()).unwrap(),
+            account_label: None,
+            authorization_url: Some(
+                OAuthAuthorizationUrl::new("https://github.com/login/oauth/authorize".to_string())
+                    .unwrap(),
+            ),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+            pairing: None,
+        }))
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for FailingAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        _scope: &TurnScope,
+        _owner_user_id: &UserId,
+        _run_id: TurnRunId,
+        _gate_ref: &str,
+        _credential_requirements: &[RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
+        Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+    }
+}
 
 #[async_trait]
 impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
@@ -18,16 +80,16 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
             account_label: None,
             authorization_url: None,
             expires_at: None,
-            pairing: Some(ironclaw_product::PairingAuthChallengeView {
-                issue: ironclaw_product::ChannelPairingIssue {
-                    code: ironclaw_product::ChannelPairingCode::new("ABCDEFGH").unwrap(),
+            pairing: Some(PairingAuthChallengeView {
+                issue: ChannelPairingIssue {
+                    code: ChannelPairingCode::new("ABCDEFGH").unwrap(),
                     deep_link: Some("https://t.me/ironclaw_bot?start=ABCDEFGH".to_string()),
                     expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
                 },
-                connection: ironclaw_product::ChannelConnectionRequirement {
+                connection: ChannelConnectionRequirement {
                     channel: "telegram".to_string(),
                     display_name: "Telegram".to_string(),
-                    strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
+                    strategy: RebornChannelConnectStrategy::WebGeneratedCode,
                     instructions: "Send the generated code to the Telegram bot.".to_string(),
                     input_placeholder: String::new(),
                     submit_label: "Open pairing".to_string(),
@@ -350,10 +412,6 @@ async fn product_event_stream_uses_credential_requirement_for_manual_token_auth_
 
 #[tokio::test]
 async fn product_event_stream_keeps_retired_channel_pairing_requirement_generic() {
-    // Legacy persisted channel-pairing setup records now deserialize as
-    // `Retired`. They still produce a generic auth prompt so the blocked state
-    // remains visible, but they must not advertise the removed pairing-code
-    // challenge or channel-connection UI.
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -580,188 +638,4 @@ async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
         error,
         ProductAdapterError::WorkflowTransient { .. }
     ));
-}
-
-#[tokio::test]
-async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
-    use crate::product_auth::api::auth::{
-        RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    };
-    use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
-    use async_trait::async_trait;
-    use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
-    use ironclaw_secrets::SecretStore;
-
-    #[derive(Debug)]
-    struct NoopDispatcher;
-
-    #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
-            &self,
-            _event: AuthContinuationEvent,
-        ) -> Result<(), ironclaw_auth::AuthProductError> {
-            Ok(())
-        }
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
-        ) -> Result<(), ironclaw_auth::AuthProductError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct StaticTestCredentials;
-
-    #[async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
-        async fn resolve(
-            &self,
-            _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
-        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError>
-        {
-            Ok(ironclaw_auth::EngineOAuthClientMaterial {
-                client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
-                client_secret: None,
-            })
-        }
-    }
-
-    #[derive(Debug)]
-    struct PanicEgress;
-
-    #[async_trait]
-    impl RuntimeHttpEgress for PanicEgress {
-        async fn execute(
-            &self,
-            _request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
-            panic!("gate challenge preparation must not reach the vendor");
-        }
-    }
-
-    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-    let user_id = UserId::new("webui-events-user").unwrap();
-    let agent_id = AgentId::new("webui-events-agent").unwrap();
-    let thread_id = ThreadId::new("webui-events-vendor-auth-thread").unwrap();
-    let turn_run = TurnRunId::new();
-    let gate_ref = "gate:auth-required";
-    let scope = TurnScope::new(
-        tenant_id.clone(),
-        Some(agent_id.clone()),
-        None,
-        thread_id.clone(),
-    );
-    let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: VendorId::new("vendorco").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
-            scopes: vec!["items:read".to_string()],
-        },
-        requester_extension: ExtensionId::new("vendorco-tools").unwrap(),
-        provider_scopes: vec!["items:read".to_string()],
-    }];
-
-    let shared = Arc::new(InMemoryAuthProductServices::new());
-    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
-        "method": "oauth2_code",
-        "display_name": "Vendor account",
-        "authorization_endpoint": "https://auth.vendorco.example/authorize",
-        "token_endpoint": "https://auth.vendorco.example/token",
-        "scopes": ["items:read"],
-        "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
-        "token_response": { "access_token": "/access_token" },
-    }))
-    .unwrap();
-    let engine = Arc::new(ironclaw_auth::AuthEngine::new(
-        ironclaw_auth::AuthEngineDeps {
-            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
-                ironclaw_auth::ResolvedVendorAuthRecipe {
-                    vendor: "vendorco".to_string(),
-                    recipe,
-                    token_exchange_resource: None,
-                },
-            ])),
-            client_credentials: Arc::new(StaticTestCredentials),
-            egress: Arc::new(PanicEgress),
-            secret_store: Arc::new(SecretStore::ephemeral()),
-            callback_base: ironclaw_auth::EngineCallbackBase::new(
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
-            )
-            .unwrap(),
-            dcr_client_name: "Ironclaw".to_string(),
-        },
-    ));
-    let gate_driver = Arc::new(OAuthGateFlowDriver::new(
-        engine,
-        Arc::new(SecretStore::ephemeral()),
-    ));
-    let product_auth = Arc::new(
-        RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
-            .with_flow_record_source(shared)
-            .with_oauth_gate_driver(gate_driver),
-    );
-
-    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-    let services = build_reborn_projection_services(
-        event_log_dyn,
-        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
-    )
-    .with_turn_events(
-        Arc::new(FakeTurnEventSource {
-            events: vec![TurnLifecycleEvent {
-                cursor: TurnEventCursor(1),
-                scope: scope.clone(),
-                occurred_at: Some(chrono::Utc::now()),
-                owner_user_id: Some(user_id.clone()),
-                run_id: turn_run,
-                status: TurnStatus::BlockedAuth,
-                kind: TurnEventKind::Blocked,
-                blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
-                    gate_kind: TurnBlockedGateKind::Auth,
-                    activity_id: None,
-                    credential_requirements: credential_requirements.clone(),
-                }),
-                sanitized_reason: Some("Vendor authentication required".to_string()),
-                detail: None,
-                retryable: None,
-            }],
-        }),
-        Arc::new(FakeTurnCoordinator {
-            state: TurnRunState {
-                credential_requirements,
-                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
-            },
-        }),
-    )
-    .with_auth_challenges(product_auth);
-
-    let events = services
-        .product_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(user_id),
-            scope,
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    assert!(
-        events.iter().any(|event| matches!(
-            event.payload(),
-            ProductOutboundPayload::AuthPrompt(prompt)
-                if prompt.turn_run_id == turn_run
-                    && prompt.auth_request_ref == gate_ref
-                    && prompt.challenge_kind == Some(AuthPromptChallengeKind::OAuthUrl)
-                    && prompt.provider.as_deref() == Some("vendorco")
-                    && prompt.authorization_url.as_deref().is_some_and(|url|
-                        url.starts_with("https://auth.vendorco.example/authorize")
-                            && url.contains("items%3Aread")
-                    )
-                    && prompt.account_label.is_none()
-        )),
-        "events: {events:#?}"
-    );
 }

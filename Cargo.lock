@@ -3299,6 +3299,8 @@ dependencies = [
  "ironclaw_extension_host",
  "ironclaw_filesystem",
  "ironclaw_first_party_extensions",
+ "ironclaw_host_api",
+ "ironclaw_operator",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
@@ -3994,6 +3996,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_operator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "fs4",
+ "ironclaw_common",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_llm",
+ "ironclaw_product",
+ "ironclaw_reborn_config",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "libc",
+ "nix",
+ "rust_decimal",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_outbound"
 version = "0.1.0"
 dependencies = [
@@ -4066,9 +4101,11 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
+ "ironclaw_event_streams",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
+ "ironclaw_first_party_extension_ports",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_loop_host",
@@ -4078,6 +4115,7 @@ dependencies = [
  "ironclaw_reborn_traces",
  "ironclaw_run_state",
  "ironclaw_runner",
+ "ironclaw_safety",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
@@ -4164,6 +4202,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_observability",
+ "ironclaw_operator",
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product",

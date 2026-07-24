@@ -38,7 +38,7 @@ use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::llm_admin::llm_catalog::{apply_stored_api_key, resolve_against_registry};
-use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
+use crate::llm_admin::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
 
 const NEARAI_LOGIN_STATE_TTL: Duration = Duration::from_secs(15 * 60);
 const CODEX_LOGIN_ATTEMPT_TTL: Duration = Duration::from_secs(15 * 60);
@@ -51,16 +51,16 @@ const MAX_NEARAI_LOGIN_STATES: usize = 1024;
 /// issues a state token, and the public callback must consume it before any
 /// operator-wide credential write happens.
 #[derive(Debug, Default)]
-pub(crate) struct NearAiLoginStateStore {
+pub struct NearAiLoginStateStore {
     states: tokio::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl NearAiLoginStateStore {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) async fn issue(&self) -> String {
+    pub async fn issue(&self) -> String {
         let state = uuid::Uuid::new_v4().to_string();
         let mut states = self.states.lock().await;
         prune_expired(&mut states, Instant::now());
@@ -232,7 +232,7 @@ impl RebornLlmConfigService {
 
     /// Attach the runtime's NEAR AI login-state store. The start endpoint and
     /// public callback must share the same store.
-    pub(crate) fn with_nearai_login_states(mut self, states: Arc<NearAiLoginStateStore>) -> Self {
+    pub fn with_nearai_login_states(mut self, states: Arc<NearAiLoginStateStore>) -> Self {
         self.nearai_login_states = states;
         self
     }
@@ -979,8 +979,7 @@ pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
 /// The public callback path NEAR AI redirects to (token in the query). The
 /// `{state}` segment must match an authenticated start request before the
 /// callback can write the operator-wide session.
-pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
-    "/api/webchat/v2/llm/nearai/{state}/auth/callback";
+pub const NEARAI_LOGIN_CALLBACK_PATH: &str = "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
 /// Reduce a browser-supplied origin to a bare `scheme://host[:port]`, rejecting
 /// anything with userinfo, a path, a query, or a fragment, plus non-http(s)
@@ -1014,7 +1013,7 @@ fn sanitize_origin(raw: &str) -> Option<String> {
 /// Apply a completed NEAR AI login: store the session token on the live
 /// session, make NEAR AI the active provider, and hot-swap the running
 /// provider. Shared by the public callback route. Errors are log-only strings.
-pub(crate) async fn apply_nearai_login(
+pub async fn apply_nearai_login(
     session: &ironclaw_llm::SessionManager,
     boot: &RebornBootConfig,
     reload: &dyn LlmReloadTrigger,
@@ -1331,8 +1330,14 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_filesystem::{
+        Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
+        ScopedFilesystem,
+    };
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
+        VirtualPath,
+    };
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{SecretMaterial, SecretStore};
@@ -1349,6 +1354,21 @@ mod tests {
 
     fn key_store() -> LlmKeyStore {
         LlmKeyStore::new(Arc::new(SecretStore::ephemeral()))
+    }
+
+    fn secret_store_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
+    where
+        F: RootFilesystem,
+    {
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            root,
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/secrets").expect("valid secrets alias"),
+                VirtualPath::new("/engine/secrets").expect("valid secrets target"),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("valid secrets mount"),
+        ))
     }
 
     /// The real `SecretStore` over a plain recording [`FaultInjecting`]
@@ -2241,7 +2261,7 @@ mod tests {
         let boot = boot_for_home(&reborn_home);
 
         let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
-        let scoped = crate::wrap_scoped(backend);
+        let scoped = secret_store_scoped(backend);
         let crypto = Arc::new(
             SecretsCrypto::new(SecretMaterial::from(
                 "0123456789abcdef0123456789abcdef".to_string(),

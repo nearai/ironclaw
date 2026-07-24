@@ -35,7 +35,7 @@ use ironclaw_reborn_config::{
     LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
 };
 
-use crate::runtime_input::ResolvedRebornLlm;
+use crate::llm_admin::ResolvedRebornLlm;
 
 /// Errors surfaced when resolving an `LlmSlotSelection` against the
 /// merged provider catalog.
@@ -309,10 +309,7 @@ pub fn resolve_against_registry(
 /// Custom providers that rely on a stored key must be written into the overlay
 /// with `api_key_required = false`, otherwise resolution fails closed on the
 /// missing env var before this injection runs.
-pub(crate) fn apply_stored_api_key(
-    config: &mut ironclaw_llm::LlmConfig,
-    key: secrecy::SecretString,
-) {
+pub fn apply_stored_api_key(config: &mut ironclaw_llm::LlmConfig, key: secrecy::SecretString) {
     if let Some(provider) = config.provider.as_mut() {
         provider.api_key = Some(key);
     } else if config.backend == "nearai" {
