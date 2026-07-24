@@ -81,6 +81,7 @@ function renderChat({
   runEffects = false,
   threadStateUpdates = [],
   toastCalls = [],
+  consoleErrors = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
 }) {
@@ -120,6 +121,9 @@ function renderChat({
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: (threadId) =>
       threadStateUpdates.push({ threadId, state: null }),
+    console: {
+      error: (...args) => consoleErrors.push(args),
+    },
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
@@ -184,8 +188,11 @@ test("Chat cancel button routes through active thread run cancellation", async (
 
 test("Chat shows a localized error toast when run cancellation fails", async () => {
   const toastCalls = [];
+  const consoleErrors = [];
+  const cancellationError = new Error("cancel failed");
   const { tree, components } = renderChat({
     toastCalls,
+    consoleErrors,
     hookState: {
       messages: [{ id: "message-1" }],
       isProcessing: true,
@@ -199,7 +206,7 @@ test("Chat shows a localized error toast when run cancellation fails", async () 
       activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
       send: async () => ({}),
       cancelRun: async () => {
-        throw new Error("cancel failed");
+        throw cancellationError;
       },
       retryMessage: () => {},
       approve: () => {},
@@ -219,6 +226,9 @@ test("Chat shows a localized error toast when run cancellation fails", async () 
       message: "chat.cancelFailed",
       options: { tone: "error" },
     },
+  ]);
+  assert.deepEqual(consoleErrors, [
+    ["Failed to cancel active run:", cancellationError],
   ]);
 });
 

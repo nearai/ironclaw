@@ -229,7 +229,8 @@ export function Chat({
     async () => {
       try {
         await cancelRun("user_requested");
-      } catch (_) {
+      } catch (error) {
+        console.error("Failed to cancel active run:", error);
         toast(t("chat.cancelFailed"), { tone: "error" });
       }
     },

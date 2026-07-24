@@ -39,13 +39,14 @@ function findComponent(node, component) {
   return null;
 }
 
+// HTML attribute names may contain hyphens (for example, data-testid).
+const HTML_ATTRIBUTE_PATTERN = /([A-Za-z][A-Za-z0-9-]*)=\s*$/;
+
 function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(
-      /([A-Za-z][A-Za-z0-9-]*)=\s*$/,
-    )?.[1];
+    const name = node.strings[index]?.match(HTML_ATTRIBUTE_PATTERN)?.[1];
     if (name) props[name] = node.values[index];
   }
   return props;
@@ -54,9 +55,7 @@ function componentProps(node, component) {
 function templateProps(node) {
   const props = {};
   for (let index = 0; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(
-      /([A-Za-z][A-Za-z0-9-]*)=\s*$/,
-    )?.[1];
+    const name = node.strings[index]?.match(HTML_ATTRIBUTE_PATTERN)?.[1];
     if (name) props[name] = node.values[index];
   }
   return props;
