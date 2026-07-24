@@ -6,6 +6,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from journey_cases import (
     ALL_JOURNEY_CASES,
     PROVIDER_JOURNEY_CASES,
@@ -19,6 +21,7 @@ from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 ROOT = Path(__file__).resolve().parents[3]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
+_DISABLING_PYTEST_MARKS = {"skip", "skipif", "xfail"}
 
 
 def _manifest_provider_journeys() -> set[str]:
@@ -49,20 +52,67 @@ def _cargo_targets(manifest_path: Path) -> dict[str, str]:
     }
 
 
+def _disabling_pytest_marks(node: ast.AST) -> set[str]:
+    return {
+        candidate.attr
+        for candidate in ast.walk(node)
+        if isinstance(candidate, ast.Attribute)
+        and candidate.attr in _DISABLING_PYTEST_MARKS
+    }
+
+
+def _assert_python_test_declaration(
+    source: str,
+    test_name: str,
+    source_label: str,
+) -> None:
+    tree = ast.parse(source)
+    module_disabling_marks = set()
+    for statement in tree.body:
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            targets = (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+            if statement.value is not None and any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in targets
+            ):
+                module_disabling_marks.update(_disabling_pytest_marks(statement.value))
+    assert not module_disabling_marks, (
+        f"pytest evidence {test_name!r} is disabled by module-level marks "
+        f"{sorted(module_disabling_marks)} in {source_label}"
+    )
+
+    tests = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    }
+    assert test_name in tests, (
+        f"pytest evidence {test_name!r} is missing from {source_label}"
+    )
+    disabling_marks = {
+        mark
+        for decorator in tests[test_name].decorator_list
+        for mark in _disabling_pytest_marks(decorator)
+    }
+    assert not disabling_marks, (
+        f"pytest evidence {test_name!r} is disabled by test-level marks "
+        f"{sorted(disabling_marks)} in {source_label}"
+    )
+
+
 def _assert_python_evidence(case: JourneyCase) -> None:
     evidence = case.evidence
     source_path = ROOT / evidence.source
     assert source_path.is_file(), f"{case.case_id}: missing {evidence.source}"
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    tests = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    }
-    assert evidence.test in tests, (
-        f"{case.case_id}: pytest evidence {evidence.test!r} is missing from "
-        f"{evidence.source}"
+    _assert_python_test_declaration(
+        source_path.read_text(encoding="utf-8"),
+        evidence.test,
+        evidence.source,
     )
 
 
@@ -165,3 +215,33 @@ def test_surface_gate_reports_a_new_uncovered_surface():
         ALL_JOURNEY_CASES,
         lambda case: case.ingress,
     ) == {"future-ingress"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "@pytest.mark.skip(reason='disabled')\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
+        (
+            "pytestmark = pytest.mark.skip(reason='disabled')\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
+        (
+            "@pytest.mark.xfail(run=False, reason='disabled')\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
+    ],
+)
+def test_python_evidence_rejects_disabled_tests(source: str):
+    """A named Python test cannot satisfy the gate while disabled."""
+    with pytest.raises(AssertionError, match="disabled by .* marks"):
+        _assert_python_test_declaration(
+            source,
+            "test_required_journey",
+            "synthetic.py",
+        )
