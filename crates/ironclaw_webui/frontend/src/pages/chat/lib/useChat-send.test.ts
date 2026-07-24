@@ -138,12 +138,15 @@ function createReactStub({
   stateSlots = new Map(),
   refs = [],
   runEffects = false,
+  runLayoutEffects = runEffects,
 } = {}) {
   let stateIndex = 0;
   let refIndex = 0;
   let effectIndex = 0;
+  let layoutEffectIndex = 0;
   const refSlots = [];
   const effectSlots = [];
+  const layoutEffectSlots = [];
   const depsChanged = (previous, next) => {
     if (!previous || !next || previous.length !== next.length) return true;
     return next.some((value, index) => !Object.is(value, previous[index]));
@@ -153,6 +156,7 @@ function createReactStub({
       stateIndex = 0;
       refIndex = 0;
       effectIndex = 0;
+      layoutEffectIndex = 0;
     },
     useCallback: (fn) => fn,
     useEffect: (effect, deps) => {
@@ -167,6 +171,19 @@ function createReactStub({
       slot.deps = deps ? [...deps] : null;
       slot.cleanup = effect() || null;
       effectSlots[index] = slot;
+    },
+    useLayoutEffect: (effect, deps) => {
+      if (!runLayoutEffects) return;
+      const index = layoutEffectIndex++;
+      const slot = layoutEffectSlots[index] || { deps: null, cleanup: null };
+      if (!depsChanged(slot.deps, deps)) {
+        layoutEffectSlots[index] = slot;
+        return;
+      }
+      if (typeof slot.cleanup === "function") slot.cleanup();
+      slot.deps = deps ? [...deps] : null;
+      slot.cleanup = effect() || null;
+      layoutEffectSlots[index] = slot;
     },
     useRef: (value) => {
       const index = refIndex++;
@@ -2535,6 +2552,127 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
   await cancelPromise;
 
   assert.deepEqual(stateUpdates.slice(updatesBeforeCancelResolution), []);
+});
+
+test("useChat.cancelRun completion is fenced after a committed thread switch before passive effects", async () => {
+  const oldThreadId = "thread-old";
+  const nextThreadId = "thread-next";
+  const sharedRunId = "run-shared";
+  const nextGate = {
+    runId: sharedRunId,
+    gateRef: "gate-next",
+    kind: "gate",
+  };
+  const stateUpdates = [];
+  const stateSlots = new Map();
+  let resolveCancelRequest;
+  let latestEventState;
+
+  const react = createReactStub({
+    initialByIndex: new Map([
+      [STATE_SLOT.activeRun, {
+        runId: sharedRunId,
+        threadId: oldThreadId,
+        status: "running",
+      }],
+      [STATE_SLOT.isProcessing, true],
+      [STATE_SLOT.stateThreadId, oldThreadId],
+    ]),
+    setCalls: stateUpdates,
+    stateSlots,
+    // Exercise the exact React ordering under review: the new thread has
+    // committed and layout effects ran, but passive effects have not.
+    runEffects: false,
+    runLayoutEffects: true,
+  });
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: react,
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () =>
+      new Promise((resolve) => {
+        resolveCancelRequest = resolve;
+      }),
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (eventState) => {
+      latestEventState = eventState;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+  const renderChat = (threadId) => {
+    react.__beginRender();
+    return context.globalThis.__testExports.useChat(threadId);
+  };
+
+  const oldChat = renderChat(oldThreadId);
+  const cancelPromise = oldChat.cancelRun("user_requested");
+
+  // React retries a render-phase state adjustment before committing it.
+  renderChat(nextThreadId);
+  renderChat(nextThreadId);
+
+  // Reuse the run id deliberately so only the committed thread fence can
+  // distinguish this new thread state from the cancellation request.
+  latestEventState.setIsProcessing(true);
+  latestEventState.setPendingGate(nextGate);
+  latestEventState.setActiveRun({
+    runId: sharedRunId,
+    threadId: nextThreadId,
+    status: "awaiting_gate",
+    source: "projection",
+  });
+  const updatesBeforeAcknowledgement = stateUpdates.length;
+
+  resolveCancelRequest({});
+  await cancelPromise;
+
+  assert.deepEqual(
+    stateUpdates.slice(updatesBeforeAcknowledgement),
+    [],
+    "an old cancellation acknowledgement must not clear the newly committed thread",
+  );
+  assert.equal(stateSlots.get(STATE_SLOT.isProcessing).value, true);
+  assert.equal(stateSlots.get(STATE_SLOT.pendingGate).value, nextGate);
+  assert.equal(
+    stateSlots.get(STATE_SLOT.activeRun).value.threadId,
+    nextThreadId,
+  );
 });
 
 test("useChat.send: connect-like prompts submit to the model", async () => {

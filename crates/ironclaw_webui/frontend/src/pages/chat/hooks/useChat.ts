@@ -134,13 +134,14 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
-  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
-  // the ref current for back-to-back synchronous reads inside event handlers;
-  // this effect additionally covers paths that set the state directly — the
-  // per-thread reset below uses the raw setter so render stays side-effect
-  // free (no ref mutation during render, which a concurrent render could
-  // discard without rolling back).
-  React.useEffect(() => {
+  // Mirror committed activeRun into the ref before asynchronous continuations
+  // can observe the commit. The setActiveRun wrapper keeps the ref current for
+  // back-to-back synchronous reads inside event handlers; this layout effect
+  // additionally covers paths that set the state directly — the per-thread
+  // reset below uses the raw setter so render stays side-effect free (no ref
+  // mutation during render, which a concurrent render could discard without
+  // rolling back).
+  React.useLayoutEffect(() => {
     activeRunRef.current = activeRun;
   }, [activeRun]);
   const getPendingMessages = React.useCallback(
@@ -260,7 +261,10 @@ export function useChat(threadId) {
     setActiveRunState(null);
   }
 
-  React.useEffect(() => {
+  // A cancellation acknowledgement can resume in a microtask immediately
+  // after this thread commits. Update the identity fence in the layout phase
+  // so it cannot still identify the previously committed thread.
+  React.useLayoutEffect(() => {
     threadIdRef.current = threadId;
   }, [threadId]);
   React.useEffect(
