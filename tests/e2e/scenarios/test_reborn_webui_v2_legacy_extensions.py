@@ -1915,6 +1915,48 @@ async def test_reborn_legacy_configure_modal_dismisses_without_saving(
         await harness["context"].close()
 
 
+async def test_reborn_v2_configure_modal_traps_and_restores_keyboard_focus(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={"config-tool": _manual_config_setup_payload()},
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        trigger = card.get_by_role("button", name="Configure")
+        await trigger.click()
+
+        dialog = page.get_by_role("dialog", name="Configure Config Tool")
+        await expect(dialog).to_be_visible(timeout=5000)
+        close_button = dialog.get_by_role("button", name="Close")
+        save_button = dialog.get_by_role("button", name="Save")
+        await expect(close_button).to_be_focused()
+
+        await page.keyboard.press("Shift+Tab")
+        await expect(save_button).to_be_focused()
+        await page.keyboard.press("Tab")
+        await expect(close_button).to_be_focused()
+
+        for _ in range(6):
+            await page.keyboard.press("Tab")
+            assert await dialog.evaluate(
+                "(element) => element.contains(document.activeElement)"
+            ), "Tab focus escaped the extension configuration dialog"
+
+        await page.keyboard.press("Escape")
+        await expect(dialog).to_have_count(0)
+        await expect(trigger).to_be_focused()
+        assert harness["setup_submit_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_configure_modal_enter_key_submits(
     reborn_v2_server, reborn_v2_browser
 ):
