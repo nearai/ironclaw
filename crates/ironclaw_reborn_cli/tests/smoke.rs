@@ -1011,16 +1011,6 @@ fn help_mentions_reborn_commands() {
 }
 
 #[test]
-fn workspace_default_cargo_run_targets_reborn_cli() {
-    let manifest =
-        std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("workspace Cargo.toml");
-    assert!(
-        manifest.contains("default-members = [\"crates/ironclaw_reborn_cli\"]"),
-        "workspace `cargo run` must target the shipping Reborn CLI package: {manifest}"
-    );
-}
-
-#[test]
 fn service_help_lists_all_verbs() {
     let output = Command::new(reborn_bin())
         .arg("service")

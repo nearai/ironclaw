@@ -9,5 +9,5 @@ cargo clippy --locked --all-targets -- -D clippy::correctness
 
 if [ "${IRONCLAW_PREPUSH_TEST:-1}" = "1" ]; then
     echo "==> tests (skip with IRONCLAW_PREPUSH_TEST=0)"
-    cargo test --locked --lib
+    cargo test --locked --workspace --lib
 fi
