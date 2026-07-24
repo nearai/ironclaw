@@ -26,7 +26,7 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use std::sync::Mutex;
 
-use crate::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
+use ironclaw_auth::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
 
@@ -254,11 +254,11 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .expect("auth flow");
 
     let response = product_auth
-        .handle_oauth_callback(crate::RebornOAuthCallbackRequest {
+        .handle_oauth_callback(ironclaw_auth::RebornOAuthCallbackRequest {
             scope: auth_scope.clone(),
             flow_id: flow.id,
             opaque_state_hash: state_hash(),
-            outcome: crate::RebornOAuthCallbackOutcome::Authorized {
+            outcome: ironclaw_auth::RebornOAuthCallbackOutcome::Authorized {
                 provider_request: OAuthProviderCallbackRequest {
                     provider: provider(),
                     account_label: label(),
@@ -516,7 +516,7 @@ async fn local_dev_dcr_oauth_callback_builds_and_wires_challenge_provider() {
 
     let _ = &services.product_auth;
     assert!(
-        services.product_auth.as_auth_challenge_provider().is_some(),
+        crate::product_auth_challenge_provider(&services.product_auth).is_some(),
         "DCR-backed product auth must expose the challenge provider projection path"
     );
 }
@@ -1090,7 +1090,7 @@ async fn create_vendor_flow(
 fn authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
-) -> crate::RebornOAuthCallbackRequest {
+) -> ironclaw_auth::RebornOAuthCallbackRequest {
     authorized_provider_request(scope, flow_id, provider(), vec![provider_scope("repo")])
 }
 
@@ -1099,12 +1099,12 @@ fn authorized_provider_request(
     flow_id: AuthFlowId,
     provider: AuthProviderId,
     scopes: Vec<ProviderScope>,
-) -> crate::RebornOAuthCallbackRequest {
-    crate::RebornOAuthCallbackRequest {
+) -> ironclaw_auth::RebornOAuthCallbackRequest {
+    ironclaw_auth::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
-        outcome: crate::RebornOAuthCallbackOutcome::Authorized {
+        outcome: ironclaw_auth::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
                 provider,
                 account_label: label(),
@@ -1127,12 +1127,12 @@ fn authorized_provider_request(
 fn vendor_authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
-) -> crate::RebornOAuthCallbackRequest {
-    crate::RebornOAuthCallbackRequest {
+) -> ironclaw_auth::RebornOAuthCallbackRequest {
+    ironclaw_auth::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
-        outcome: crate::RebornOAuthCallbackOutcome::Authorized {
+        outcome: ironclaw_auth::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
                 provider: vendor_provider(),
                 account_label: vendor_label(),

@@ -2,7 +2,7 @@
 
 The **WebUI host stack** for Reborn WebChat v2 — the single `products`-layer
 crate, above `ironclaw_reborn_composition`, that turns composition's product/API
-surface into a running HTTP server a browser can talk to. It owns three
+surface into a running HTTP server a browser can talk to. It owns four
 subsystems that used to live apart (see `README.md` for the fold-in map):
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, from the former
@@ -19,6 +19,11 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
    signed-token session store, and the `/auth/*` OAuth login surface that mints
    sessions.
+4. **Product-auth HTTP route serving** (`src/product_auth/`) — host-owned
+   routes that parse/bound OAuth/manual-token/account/cleanup HTTP input and
+   call `ironclaw_auth::RebornProductAuthServices`. Auth contracts and durable
+   services stay in `ironclaw_auth`; composition wires the service bundle into
+   this gateway.
 
 Composition deliberately stops at the
 `reborn_product_api_crates_do_not_bind_http_ingress` boundary — it returns a
@@ -60,6 +65,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
+| `product_auth_route_mount(state) -> ProductAuthRouteMount` | Product-auth route router + descriptors for OAuth start/callback/status, manual-token setup/submit, account selection/recovery/refresh, and lifecycle cleanup. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |

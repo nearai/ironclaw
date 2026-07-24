@@ -819,6 +819,58 @@ mod tests {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "kept as a local-dev runtime credential-account test double"
+    )]
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait::async_trait]
+    impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("configured-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                provider_identity: None,
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
         let run_context = run_context("durable-preview").await;

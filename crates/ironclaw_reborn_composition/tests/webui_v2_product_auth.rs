@@ -23,6 +23,7 @@ use ironclaw_auth::{
     OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService, SecretSubmitRequest,
     SecretSubmitResult,
 };
+use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
     AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
     SecretHandle, TenantId, UserId,
@@ -33,11 +34,11 @@ use ironclaw_product::{
     RebornExtensionListResponse, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
     rejecting_product_surface_error,
 };
-use ironclaw_reborn_composition::{
-    ProductAuthRouteState, RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    product_auth_route_mount,
+use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
+use ironclaw_webui::{
+    ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    product_auth_route_mount, webui_v2_app,
 };
-use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;

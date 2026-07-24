@@ -41,8 +41,8 @@ Not generic yet — the work:
 | Dispatcher selects package + runtime kind per invocation | `crates/ironclaw_dispatcher/src/lib.rs` |
 | Adapter trait duplicates manifest metadata (surface kind, capabilities, auth requirement, egress getters) | `crates/ironclaw_product_adapters/src/adapter.rs` |
 | Adapter registry projection is not the production path | `crates/ironclaw_product_adapter_registry/src/lib.rs` |
-| OAuth branches on Slack; providers multiplexed by string | `crates/ironclaw_reborn_composition/src/product_auth/serve/oauth.rs`, `.../credentials/product_auth_providers.rs`, `.../oauth/google_oauth.rs`, `src/slack/slack_personal_oauth.rs` |
-| Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, composition `product_auth/**` |
+| OAuth branches on Slack; providers multiplexed by string | `crates/ironclaw_webui/src/product_auth/oauth.rs`, composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`, `crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs` |
+| Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, `ironclaw_auth` recipe data + composition provider wiring |
 | Installed records persist raw TOML and reproject from it | `crates/ironclaw_extensions/src/installations.rs` |
 | Hosted MCP mutates capabilities from live `tools/list` | `crates/ironclaw_extensions/src/hosted_mcp_discovery.rs` |
 | Lifecycle emits Slack-specific connection copy; workflow has Slack cleanup literals | `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |

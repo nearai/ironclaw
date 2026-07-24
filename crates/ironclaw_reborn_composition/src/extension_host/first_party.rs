@@ -211,7 +211,7 @@ pub(crate) mod test_support {
     };
 
     use super::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
-    use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
+    use ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 
     /// The full set of first-party handler registrars a local-dev/test build
     /// needs, mirroring `ironclaw_reborn_cli::first_party::bundled_first_party_registrars`.

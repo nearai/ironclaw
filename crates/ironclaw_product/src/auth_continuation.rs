@@ -204,6 +204,23 @@ impl ProductAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
     }
 }
 
+#[async_trait]
+impl ironclaw_auth::RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
+    }
+}
+
 fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
     match continuation {
         AuthContinuationRef::SetupOnly => "setup_only",

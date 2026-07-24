@@ -39,6 +39,11 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    `Env` / `Session` / `Oidc` authenticators, `SignedTokenSessionStore`, and
    the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
    trait).
+4. **Product-auth HTTP route serving** (`src/product_auth/`): host-owned
+   WebUI routes that parse/bound HTTP input and call
+   `ironclaw_auth::RebornProductAuthServices`. The auth contracts and durable
+   services stay in `ironclaw_auth`; composition only wires the configured
+   service bundle into this gateway.
 
 ## Do not move in here
 
@@ -58,6 +63,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 ## Allowed dependencies
 
+`ironclaw_host_ingress` (Axum route-mount carriers),
+`ironclaw_auth` (product-auth service facade and route DTOs),
 `ironclaw_product` (wire DTOs and product command/view descriptors),
 `ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
 newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount

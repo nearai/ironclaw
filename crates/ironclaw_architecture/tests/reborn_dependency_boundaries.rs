@@ -614,6 +614,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         &dependencies,
         "ironclaw",
         [
+            "ironclaw_auth",
             "ironclaw_extension_host",
             "ironclaw_first_party_extensions",
             "ironclaw_reborn_composition",
@@ -623,7 +624,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -2333,15 +2334,9 @@ fn reborn_product_auth_contract_stays_reborn_native() {
 
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
-    collect_forbidden_reborn_auth_file_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs"),
-        &root,
-        &forbidden,
-        &mut violations,
-    );
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve"),
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve.rs"),
+        &root.join("crates/ironclaw_webui/src/product_auth"),
+        &root.join("crates/ironclaw_webui/src/product_auth.rs"),
         &root,
         &forbidden,
         &mut violations,
@@ -2614,9 +2609,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
-                "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -2643,7 +2636,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
-                "ironclaw_turns",
                 "ironclaw_wasm",
             ],
         },
@@ -2857,9 +2849,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through
-            // ironclaw_reborn_composition's facade (ProductSurface/runtime
-            // handles + product-auth mount builders) and the neutral
-            // ironclaw_host_ingress Axum mount carriers.
+            // the ProductSurface/runtime handles it receives from
+            // ironclaw_reborn_composition, the neutral ironclaw_host_ingress
+            // Axum mount carriers, and auth-owned product-auth service
+            // contracts. The direct `ironclaw_common` edge is limited to shared
+            // response/error DTO primitives used by product-auth HTTP routes;
+            // secret storage and durable auth ownership stay behind
+            // `ironclaw_auth`, not `ironclaw_secrets`.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -3650,6 +3646,20 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
+    LayerMatrixException {
+        crate_name: "ironclaw_webui",
+        dependency_name: "ironclaw_reborn_composition",
+        introduced: "2026-07-09",
+        removes_in: "W3.6",
+        reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_auth",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-23",
+        removes_in: "plan:docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md#auth-turn-gate-host-api-port",
+        reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
+    },
 ];
 
 fn layer_matrix_exception(
@@ -4127,7 +4137,7 @@ fn collect_forbidden_uses_allows_reborn_tracing_targets() {
         "ironclaw-reborn-auth-boundary-dir-tracing-test-{}",
         std::process::id()
     ));
-    let src = root.join("crates/ironclaw_reborn_composition/src/product_auth_serve");
+    let src = root.join("crates/ironclaw_webui/src/product_auth");
     std::fs::create_dir_all(&src).expect("test source directory must be created");
     let mod_rs = src.join("mod.rs");
     std::fs::write(

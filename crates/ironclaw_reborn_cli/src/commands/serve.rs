@@ -1596,10 +1596,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1629,10 +1629,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1673,10 +1673,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");

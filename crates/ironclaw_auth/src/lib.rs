@@ -24,6 +24,7 @@ pub mod loopback_oauth;
 // re-export path (see the compat note at the top of the module); narrows back
 // to `mod` when v1 retires.
 pub mod oauth;
+pub mod product_auth;
 mod provider;
 mod scope;
 #[cfg(any(test, feature = "test-support"))]
@@ -82,6 +83,28 @@ pub use oauth::{
     OAuthCallbackStateKind, OAuthClientId, OAuthProviderIdentity, OAuthProviderIdentitySubject,
     OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash,
     opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
+};
+pub use product_auth::api::auth::{
+    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
+    OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
+    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornOAuthStartFlowRequest, RebornProductAuthServicePorts, RebornProductAuthServices,
+};
+pub use product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock;
+pub use product_auth::credentials::runtime_credentials::host_managed_fallback::{
+    HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
+};
+pub use product_auth::credentials::runtime_credentials::{
+    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
+    RuntimeCredentialAccountVisibilityPolicy, map_account_error,
+    runtime_credential_account_selection_request,
+};
+pub use product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+pub use product_auth::oauth::oauth_gate::{
+    OAuthGateChallengeRequest, OAuthGateFlowDriver, auth_scope_for_blocked_turn, turn_gate_query,
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,

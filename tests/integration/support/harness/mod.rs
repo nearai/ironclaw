@@ -23,6 +23,7 @@ use std::{
 
 use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
+use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -46,8 +47,8 @@ use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornProductAuthServices,
-    RebornRuntimeInput, build_runtime,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
+    build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -433,25 +434,21 @@ impl HostRuntimeCapabilityHarness {
         let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
         let provider_id = AuthProviderId::new(provider)?;
         let challenge = product_auth
-            .request_manual_token_setup(
-                ironclaw_reborn_composition::RebornManualTokenSetupRequest::new(
-                    scope.clone(),
-                    provider_id.clone(),
-                    CredentialAccountLabel::new(label)?,
-                    ironclaw_auth::AuthContinuationRef::SetupOnly,
-                    chrono::Utc::now() + chrono::Duration::minutes(10),
-                ),
-            )
+            .request_manual_token_setup(ironclaw_auth::RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                provider_id.clone(),
+                CredentialAccountLabel::new(label)?,
+                ironclaw_auth::AuthContinuationRef::SetupOnly,
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            ))
             .await
             .map_err(|error| format!("manual token setup failed: {error:?}"))?;
         let submitted = product_auth
-            .submit_manual_token(
-                ironclaw_reborn_composition::RebornManualTokenSubmitRequest::new(
-                    scope.clone(),
-                    challenge.interaction_id,
-                    secrecy::SecretString::from(format!("itest-{provider}-token")),
-                ),
-            )
+            .submit_manual_token(ironclaw_auth::RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                secrecy::SecretString::from(format!("itest-{provider}-token")),
+            ))
             .await
             .map_err(|error| format!("manual token submit failed: {error:?}"))?;
         if provider_scopes.is_empty() {

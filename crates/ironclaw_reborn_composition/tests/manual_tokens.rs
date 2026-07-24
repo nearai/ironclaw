@@ -13,11 +13,11 @@ use ironclaw_auth::{
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
     OAuthCallbackInput, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
-use ironclaw_reborn_composition::{
+use ironclaw_auth::{
     RebornAuthContinuationDispatcher, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornProductAuthServices,
 };
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use secrecy::SecretString;
 
 const RAW_TOKEN: &str = "super-secret-manual-token";

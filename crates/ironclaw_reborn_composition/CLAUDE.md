@@ -9,8 +9,11 @@
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
 - Production and migration-dry-run profiles must fail closed on local-only or missing required handles.
-- Product auth composition must use `ironclaw_auth` trait-shaped ports. Do not
-  wire product auth through V1 OAuth routes, V1 pending maps, V1
+- Product auth composition must only wire `ironclaw_auth` services, recipes,
+  stores, secrets, network clients, and runtime/product adapters. Product-auth
+  contracts, durable services, continuations, refresh, cleanup, recipes, and
+  fakes live in `ironclaw_auth`; HTTP route serving lives in `ironclaw_webui`.
+  Do not wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
 - Product auth refresh and lifecycle cleanup callers should use
   `RebornProductAuthServices::refresh_credential_account` and
@@ -157,8 +160,8 @@ fail-closed reservation can represent those overlaps safely.
 
 ### Product-auth routes
 
-When `bundle.product_auth` is present, `webui_v2_app` also mounts the
-Reborn-native product-auth surface:
+When `bundle.product_auth` is present, `ironclaw_webui::webui_v2_app` also
+mounts the Reborn-native product-auth surface:
 
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the

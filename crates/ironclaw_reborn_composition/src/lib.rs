@@ -39,7 +39,6 @@ mod memory_provider_factory;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
-mod product_auth;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
@@ -106,14 +105,8 @@ pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretSto
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
-/// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
-/// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses the Google OAuth redirect URI from env into
-/// `OAuthRedirectUri` when building the runtime input / OAuth client config. The
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
-/// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
-/// the composition-facade set, so adding `ironclaw_auth` there would fail that
-/// test — the type must travel through this facade instead.
+/// OAuth redirect-URI newtype re-exported for runtime input construction; the
+/// remaining product-auth contracts are named directly from `ironclaw_auth`.
 pub use ironclaw_auth::OAuthRedirectUri;
 #[cfg(any(test, feature = "test-support"))]
 pub use ironclaw_auth::{
@@ -154,7 +147,6 @@ pub use ironclaw_product::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
 // the CLI consumes composition as its facade and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
@@ -221,20 +213,6 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// Composition's facade re-exports the continuation dispatcher for its own
-// downstream consumers (root test suites, the CLI) alongside the
-// product-auth service surface that produces it.
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
-pub use product_auth::api::auth::{
-    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
-    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
-};
-pub use product_auth::serve::{
-    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
-};
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
     ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
@@ -259,7 +237,8 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime, build_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
