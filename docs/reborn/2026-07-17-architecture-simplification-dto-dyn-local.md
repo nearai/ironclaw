@@ -1299,9 +1299,14 @@ lane-originated Approval/Resource gate is a `HostFailure::Permanent`, never a
 gate. "ALL policy, one place" is therefore stated precisely: *all pre-flightable
 policy in `authorize()`; dispatch-time auth discovery re-enters through the
 same gate vocabulary and the same resume path* — one gate model, two points of
-discovery. Cleanup milestone for the current `ironclaw_auth` → `ironclaw_turns`
-layer exception: move the blocked-gate prompt driver to a host-api-owned port so
-auth receives only neutral gate/run refs.
+discovery. Current implementation anchors: `ironclaw_host_api/src/resolution.rs`
+defines the neutral `Blocked::Auth` gate vocabulary, composition's
+`extension_host/run_delivery_ports.rs` adapts the product prompt source, and
+`ironclaw_reborn_composition/src/runtime.rs` passes neutral gate/run refs into
+`ironclaw_auth`'s `OAuthGateChallengeRequest`. Cleanup milestone for the current
+`ironclaw_auth` -> `ironclaw_turns` layer exception: move the blocked-gate prompt
+driver to a host-api-owned port so auth continues to receive only neutral
+gate/run refs.
 
 ### 5.3.2 Decision: the `Authorized` lifecycle is part of the contract
 
