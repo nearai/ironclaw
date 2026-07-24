@@ -292,9 +292,13 @@ fn channel_connection_display_preview(
     })
 }
 
-/// Structured channel connection requirements carry render chrome for WebUI.
-/// Strip them from model-visible lifecycle output so static fallback copy is
-/// never mistaken for live connection state.
+/// Remove WebUI-only connection chrome from model-visible lifecycle output.
+///
+/// Install responses carry the full requirement through the display-preview
+/// side channel, so the model-visible payload drops it entirely. Search
+/// responses must retain the manifest-declared strategy and instructions so
+/// the model does not invent a provider-specific connection flow; only the
+/// input label and failure copy are cleared.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -305,7 +309,12 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                extension.summary.channel_connection = None;
+                let Some(connection) = extension.summary.channel_connection.as_mut() else {
+                    continue;
+                };
+                connection.input_placeholder.clear();
+                connection.submit_label.clear();
+                connection.error_message.clear();
             }
         }
         _ => {}
@@ -710,9 +719,28 @@ mod tests {
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
             "model-visible search must still identify Slack as a channel: {slack}"
         );
+        let connection = &slack["channel_connection"];
+        assert_eq!(
+            connection["strategy"], "oauth",
+            "model-visible search must preserve the manifest strategy: {connection}"
+        );
         assert!(
-            slack.get("channel_connection").is_none(),
-            "model-visible search must not expose UI-only connection failure copy: {slack}"
+            connection["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("Slack account with OAuth")),
+            "model-visible search must preserve manifest guidance: {connection}"
+        );
+        assert_eq!(
+            connection["input_placeholder"], "",
+            "model-visible search must clear UI input chrome: {connection}"
+        );
+        assert_eq!(
+            connection["submit_label"], "",
+            "model-visible search must clear UI action chrome: {connection}"
+        );
+        assert_eq!(
+            connection["error_message"], "",
+            "model-visible search must clear UI-only failure copy: {connection}"
         );
         assert!(
             !serde_json::to_string(&search)
