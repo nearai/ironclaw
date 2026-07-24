@@ -102,13 +102,22 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // `assert_tool_result_contains` returns `Ok` when present, `Err` when
     // absent — invert to assert absence.
+    //
+    // The wire contract omits the `installation_phase` key entirely for a
+    // catalog entry the caller has no visible installation of
+    // (`LifecycleSearchExtensionSummary.installation_phase` is
+    // `skip_serializing_if = "Option::is_none"`), so after a propagated
+    // remove the key must not appear in this query's result at all. Guarding
+    // one stale value is not discriminating: phase 1 installs WITH a seeded
+    // credential, so a stale projection would read `active` (not
+    // `setup_needed`) and slip past a single-value probe.
     if viewer
-        .assert_tool_result_contains(r#""installation_phase":"setup_needed""#)
+        .assert_tool_result_contains(r#""installation_phase""#)
         .await
         .is_ok()
     {
         return Err(
-            "removed extension still shows installation_phase:setup_needed in cross-thread search; \
+            "removed extension still carries an installation_phase in cross-thread search; \
              builtin.extension_remove did not propagate through the shared store"
                 .into(),
         );

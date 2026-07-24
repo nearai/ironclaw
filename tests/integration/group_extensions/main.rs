@@ -20,6 +20,7 @@ mod support;
 // Modules are alphabetical (rustfmt reorders `mod` decls); execution order is
 // set by the `report.record(...)` sequence below, not declaration order.
 mod scenario_credential_extension_lifecycle_state_machine;
+mod scenario_existing_member_reinstall_reconciles_to_active;
 mod scenario_extension_install_github_normal_gate;
 mod scenario_extension_install_instance_not_configured;
 mod scenario_extension_install_reauth_gate;
@@ -193,6 +194,16 @@ async fn extensions_group_e2e_inner() {
     report.record(
         "google_family_install_gate_and_shared_account",
         scenario_google_family_install_gate_and_shared_account::run(&g).await,
+    );
+
+    // Scenario 11: the retired Activate action's structural successor — an
+    // EXISTING member's idempotent install retry reconciles setup_needed →
+    // active on the shared store (distinct actor via `with_actor_id`, so no
+    // scenario-order coupling; no remove in between; positively pins the
+    // intermediate setup_needed phase cross-thread).
+    report.record(
+        "existing_member_reinstall_reconciles_to_active",
+        scenario_existing_member_reinstall_reconciles_to_active::run(&g).await,
     );
 
     report.assert_all_passed();
