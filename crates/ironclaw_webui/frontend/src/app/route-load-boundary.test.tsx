@@ -1,6 +1,9 @@
+// @vitest-environment happy-dom
+
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import React from "react";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import "../i18n/en";
 import { I18nProvider } from "../lib/i18n";
@@ -31,5 +34,43 @@ test("route load failure offers a page reload recovery action", () => {
 });
 
 test("route error boundary switches to its sanitized fallback", () => {
-  assert.deepEqual(RouteErrorBoundary.getDerivedStateFromError(), { failed: true });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  let reloads = 0;
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  function ThrowingRoute(): React.ReactNode {
+    throw new Error("private chunk failure details");
+  }
+
+  try {
+    act(() => {
+      root.render(
+        <I18nProvider>
+          <RouteErrorBoundary
+            fallback={<RouteLoadError onRetry={() => { reloads += 1; }} />}
+          >
+            <ThrowingRoute />
+          </RouteErrorBoundary>
+        </I18nProvider>,
+      );
+    });
+
+    const alert = container.querySelector('[role="alert"]');
+    assert.ok(alert);
+    assert.match(alert.textContent ?? "", /This page couldn't be loaded/);
+    assert.doesNotMatch(alert.textContent ?? "", /private chunk failure details/);
+
+    const reload = alert.querySelector("button");
+    assert.ok(reload);
+    assert.equal(reload.textContent, "Reload page");
+    act(() => reload.click());
+    assert.equal(reloads, 1);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    console.error = originalConsoleError;
+  }
 });

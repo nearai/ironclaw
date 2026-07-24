@@ -290,6 +290,8 @@ SEL_V2 = {
     "thread_search": "input[placeholder='Search chats...']",
     "thread_load_more": "[data-testid='thread-load-more']",
     "sign_out_button": "button[title='Sign out']",
+    "nav_chat": "a[href='/chat']",
+    "nav_settings_inference": "a[href='/settings/inference']",
     "settings_search_input": "input[type='search'][placeholder='Search settings...']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",

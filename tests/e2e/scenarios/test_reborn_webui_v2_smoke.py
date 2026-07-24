@@ -251,7 +251,7 @@ async def test_reborn_v2_lazy_routes_preserve_direct_navigation(
             )
 
         javascript_assets.clear()
-        await page.locator('a[href="/chat"]').first.click()
+        await page.locator(SEL_V2["nav_chat"]).first.click()
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
             timeout=15000
         )
@@ -276,7 +276,7 @@ async def test_reborn_v2_chunk_failure_can_reload_and_recover(reborn_v2_page):
     await reborn_v2_page.route(
         "**/assets/settings-page-*.js", fail_first_settings_chunk
     )
-    await reborn_v2_page.locator('a[href="/settings/inference"]').first.click()
+    await reborn_v2_page.locator(SEL_V2["nav_settings_inference"]).first.click()
 
     load_error = reborn_v2_page.get_by_role("alert").filter(
         has_text="This page couldn't be loaded"
