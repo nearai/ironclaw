@@ -430,12 +430,30 @@ fn apply_registry_provider_env(config: &mut RegistryProviderConfig) -> Result<()
     Ok(())
 }
 
+/// Model the `auto` alias resolves to. The desktop app ships
+/// `NEARAI_MODEL=auto`, but cloud-api.near.ai has no `auto` alias and rejects it
+/// (HTTP 400), which previously surfaced as a model turn that never produced a
+/// reply. Map `auto` to a concrete, currently-served model. ("for now" — revisit
+/// when a real server-side auto-router exists; swap this one constant.)
+const NEARAI_AUTO_MODEL: &str = "z-ai/glm-5.2";
+
+/// Resolve the configured NEARAI model id: the `auto` alias (case-insensitive)
+/// maps to [`NEARAI_AUTO_MODEL`]; an unset value falls back to
+/// [`crate::DEFAULT_MODEL`]; any explicit id passes through unchanged.
+fn resolve_nearai_model(configured: Option<String>) -> String {
+    match configured {
+        Some(model) if model.trim().eq_ignore_ascii_case("auto") => NEARAI_AUTO_MODEL.to_string(),
+        Some(model) => model,
+        None => crate::DEFAULT_MODEL.to_string(),
+    }
+}
+
 fn nearai_config_from_env(chain: &ChainSettings) -> Result<NearAiConfig, LlmError> {
     let api_key = nonempty_env("NEARAI_API_KEY").map(SecretString::from);
     let base_url = default_nearai_base_url(nonempty_env("NEARAI_BASE_URL"));
     Ok(build_nearai_config(
         NearAiRuntimeFields {
-            model: nonempty_env("NEARAI_MODEL").unwrap_or_else(|| crate::DEFAULT_MODEL.to_string()),
+            model: resolve_nearai_model(nonempty_env("NEARAI_MODEL")),
             api_key,
             base_url,
             failover_cooldown_secs: 300,
@@ -459,7 +477,10 @@ fn nearai_config_from_dedicated(
 
     Ok(build_nearai_config(
         NearAiRuntimeFields {
-            model: resolved.model.clone(),
+            // Resolve the `auto` alias here too, so a dedicated provider config
+            // carrying `auto` doesn't reach a gateway that rejects it (same fix
+            // as the env path).
+            model: resolve_nearai_model(Some(resolved.model.clone())),
             api_key,
             base_url,
             failover_cooldown_secs: parse_optional_u64("LLM_FAILOVER_COOLDOWN_SECS", "nearai")?
@@ -773,6 +794,31 @@ fn config_error_to_llm_error(provider: &'static str) -> impl FnOnce(LlmConfigErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_nearai_model_maps_auto_to_default_glm_else_passthrough() {
+        // `auto` (any case, surrounding whitespace tolerated) → the concrete
+        // default model, so the literal string `auto` never reaches a gateway
+        // that would reject it.
+        assert_eq!(resolve_nearai_model(Some("auto".into())), NEARAI_AUTO_MODEL);
+        assert_eq!(resolve_nearai_model(Some("AUTO".into())), NEARAI_AUTO_MODEL);
+        assert_eq!(
+            resolve_nearai_model(Some("  Auto ".into())),
+            NEARAI_AUTO_MODEL
+        );
+        assert_eq!(NEARAI_AUTO_MODEL, "z-ai/glm-5.2");
+        // An explicit model id passes through unchanged.
+        assert_eq!(
+            resolve_nearai_model(Some("z-ai/glm-5".into())),
+            "z-ai/glm-5"
+        );
+        assert_eq!(
+            resolve_nearai_model(Some("anthropic/claude-haiku-4-5".into())),
+            "anthropic/claude-haiku-4-5"
+        );
+        // Unset falls back to the crate default.
+        assert_eq!(resolve_nearai_model(None), crate::DEFAULT_MODEL);
+    }
 
     const CHAIN_ENV_VARS: &[&str] = &[
         "LLM_REQUEST_TIMEOUT_SECS",
