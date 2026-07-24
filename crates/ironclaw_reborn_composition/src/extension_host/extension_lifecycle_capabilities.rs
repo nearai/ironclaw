@@ -15,9 +15,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    ChannelConnectionRequirement, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductPayload, LifecycleProductResponse, ProductSurfaceFailure,
-    RebornChannelConnectStrategy,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    ProductSurfaceFailure,
 };
 use serde::Deserialize;
 
@@ -308,9 +307,8 @@ fn channel_connection_display_preview(
 }
 
 /// Structured channel connection requirements carry render chrome for WebUI.
-/// For model-visible catalog search, retain only generated-code channel setup
-/// contracts the model needs to explain the next step. OAuth channels are
-/// started by host UI/actions, and static failure copy is not live state.
+/// Keep model-useful connection guidance in search output, but strip static
+/// failure copy so it is not presented as live state.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -321,28 +319,14 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                extension.summary.channel_connection = extension
-                    .summary
-                    .channel_connection
-                    .take()
-                    .and_then(model_visible_channel_connection);
+                if let Some(connection) = extension.summary.channel_connection.as_mut() {
+                    connection.error_message.clear();
+                }
             }
         }
         _ => {}
     }
     response
-}
-
-fn model_visible_channel_connection(
-    connection: ChannelConnectionRequirement,
-) -> Option<ChannelConnectionRequirement> {
-    if connection.strategy != RebornChannelConnectStrategy::WebGeneratedCode {
-        return None;
-    }
-    Some(ChannelConnectionRequirement {
-        error_message: String::new(),
-        ..connection
-    })
 }
 
 fn display_channel_name(channel: &str) -> String {
@@ -725,7 +709,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_visible_extension_search_projects_generated_code_without_ui_failure_copy() {
+    async fn model_visible_extension_search_omits_channel_connection_chrome() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-search-model-output-owner",
@@ -755,7 +739,7 @@ mod tests {
             "model-visible search must still identify Slack as a channel: {slack}"
         );
         assert!(
-            slack.get("channel_connection").is_none(),
+            slack["channel_connection"]["error_message"] == "",
             "model-visible search must not expose UI-only connection failure copy: {slack}"
         );
         assert!(
@@ -778,17 +762,21 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "telegram")
             .expect("Telegram search result");
-        let connection = &telegram["channel_connection"];
-        assert_eq!(connection["strategy"], "web_generated_code");
         assert!(
-            connection["instructions"]
+            telegram["surface_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
+            "model-visible search must still identify Telegram as a channel: {telegram}"
+        );
+        assert!(
+            telegram["channel_connection"]["instructions"]
                 .as_str()
                 .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
-            "generated-code connection guidance must remain model-visible: {connection}"
+            "generated-code connection guidance must remain model-visible: {telegram}"
         );
-        assert_eq!(
-            connection["error_message"], "",
-            "static pairing failure copy is UI-only, not live model state: {connection}"
+        assert!(
+            telegram["channel_connection"]["error_message"] == "",
+            "generated-code connection failure copy must stay out of model-visible lifecycle output: {telegram}"
         );
     }
 

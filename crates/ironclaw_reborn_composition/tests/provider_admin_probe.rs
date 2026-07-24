@@ -12,7 +12,7 @@
 //! a loopback listener here for the same reason.
 
 use ironclaw_llm::ProviderProtocol;
-use ironclaw_reborn_composition::{ProviderRepo, RebornProviderAdmin};
+use ironclaw_operator::{ProviderRepo, RebornProviderAdmin};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 /// One captured request: method, path, and the raw `Authorization` header

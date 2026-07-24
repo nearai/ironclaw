@@ -2901,7 +2901,8 @@ struct RebornProductionBuildContext {
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
     scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
     account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
-    nearai_mcp_bootstrap_config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    nearai_mcp_bootstrap_config:
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     native_extension_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
     /// Binary-injected neutral first-party bundle set (extension-runtime DEL-7):
@@ -3983,9 +3984,30 @@ async fn build_backend_production(
         filesystem_catalog.map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("available extension catalog could not be loaded: {error}"),
         })?;
+    let nearai_mcp_catalog_config = nearai_mcp_bootstrap_config
+        .as_ref()
+        .map(|config| {
+            let endpoint = config
+                .endpoint()
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "NEAR AI MCP first-party catalog endpoint could not be resolved: {error}"
+                    ),
+                })?;
+            ironclaw_extension_host::NearAiMcpBootstrapConfig::new(
+                endpoint.url,
+                config.clone().into_api_key(),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "NEAR AI MCP first-party catalog config could not be converted: {error}"
+                ),
+            })
+        })
+        .transpose()?;
     available_extensions.extend(
         AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
-            nearai_mcp_bootstrap_config.as_ref(),
+            nearai_mcp_catalog_config.as_ref(),
             &first_party_bundles,
         )
         .map_err(|error| RebornBuildError::InvalidConfig {

@@ -53,6 +53,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod product_surface_inbound;
+pub mod projection;
 mod reborn_services;
 mod run_delivery;
 mod workflow;

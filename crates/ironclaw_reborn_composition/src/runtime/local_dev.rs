@@ -45,10 +45,8 @@ use crate::local_dev_authorization::{
 };
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
-use crate::{
-    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
-    runtime::ComposedSelectableSkillContextSource,
-};
+use crate::runtime::ComposedSelectableSkillContextSource;
+use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 pub(crate) mod extension_surface;
 mod external_tool_capability;

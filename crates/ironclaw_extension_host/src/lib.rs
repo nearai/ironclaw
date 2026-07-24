@@ -142,6 +142,10 @@ pub use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,
 };
+pub use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
+};
 pub use lifecycle::{
     DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,
     SnapshotWatch,

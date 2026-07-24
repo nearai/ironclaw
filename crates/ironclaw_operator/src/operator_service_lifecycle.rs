@@ -235,7 +235,7 @@ fn read_command_stdout(
 
 /// Platform-backed local service lifecycle manager.
 #[derive(Clone)]
-pub(crate) struct RebornLocalServiceLifecycle {
+pub struct OperatorServiceLifecycle {
     platform: ServicePlatform,
     home_dir: Option<PathBuf>,
     executable: Result<PathBuf, String>,
@@ -259,10 +259,10 @@ struct WebuiBootEnv {
     user_id: UserId,
 }
 
-impl std::fmt::Debug for RebornLocalServiceLifecycle {
+impl std::fmt::Debug for OperatorServiceLifecycle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornLocalServiceLifecycle")
+            .debug_struct("OperatorServiceLifecycle")
             .field("platform", &self.platform)
             .field("home_dir", &self.home_dir.is_some())
             .field("executable", &"<redacted>")
@@ -272,8 +272,8 @@ impl std::fmt::Debug for RebornLocalServiceLifecycle {
     }
 }
 
-impl RebornLocalServiceLifecycle {
-    pub(crate) fn new() -> Self {
+impl OperatorServiceLifecycle {
+    pub fn new() -> Self {
         Self {
             platform: ServicePlatform::current(),
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
@@ -286,7 +286,7 @@ impl RebornLocalServiceLifecycle {
         }
     }
 
-    pub(crate) fn new_for_operator_with_boot_config(
+    pub fn new_for_operator_with_boot_config(
         operator_tenant_id: TenantId,
         operator_user_id: UserId,
         boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
@@ -812,14 +812,14 @@ impl RebornLocalServiceLifecycle {
     }
 }
 
-impl Default for RebornLocalServiceLifecycle {
+impl Default for OperatorServiceLifecycle {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
+impl OperatorServiceLifecycleService for OperatorServiceLifecycle {
     async fn control_service(
         &self,
         caller: ProductSurfaceCaller,
@@ -1148,8 +1148,8 @@ mod tests {
         }
     }
 
-    fn macos_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> RebornLocalServiceLifecycle {
-        RebornLocalServiceLifecycle::for_test(
+    fn macos_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> OperatorServiceLifecycle {
+        OperatorServiceLifecycle::for_test(
             ServicePlatform::Macos,
             Some(temp.path().to_path_buf()),
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1157,8 +1157,8 @@ mod tests {
         )
     }
 
-    fn linux_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> RebornLocalServiceLifecycle {
-        RebornLocalServiceLifecycle::for_test(
+    fn linux_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> OperatorServiceLifecycle {
+        OperatorServiceLifecycle::for_test(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1314,7 +1314,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
     async fn linux_install_escapes_systemd_special_characters_in_executable_path() {
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new("inactive"));
-        let service = RebornLocalServiceLifecycle::for_test(
+        let service = OperatorServiceLifecycle::for_test(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
             PathBuf::from("/usr/local/bin/iron%claw-$reborn"),
@@ -1520,7 +1520,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
     #[tokio::test]
     async fn install_without_home_reports_failed_resolution() {
-        let service = RebornLocalServiceLifecycle::for_test(
+        let service = OperatorServiceLifecycle::for_test(
             ServicePlatform::Linux,
             None,
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1544,7 +1544,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
     #[tokio::test]
     async fn install_without_executable_path_fails_before_writing_unit() {
         let temp = TempDir::new().expect("tempdir");
-        let service = RebornLocalServiceLifecycle::for_test_with_executable_error(
+        let service = OperatorServiceLifecycle::for_test_with_executable_error(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
             "current executable path could not be resolved: denied".to_string(),
@@ -1881,7 +1881,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
     #[tokio::test]
     async fn unsupported_platform_reports_unsupported() {
-        let service = RebornLocalServiceLifecycle::for_test(
+        let service = OperatorServiceLifecycle::for_test(
             ServicePlatform::Unsupported,
             None,
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),

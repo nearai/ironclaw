@@ -3,20 +3,19 @@ use std::{
     sync::Arc,
 };
 
-use async_trait::async_trait;
-use futures::{StreamExt, stream};
-use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
-};
-use ironclaw_product::{
-    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
-};
-use ironclaw_product::{
+use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref};
+use crate::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductSurfaceRejectionKind, RedactedString,
 };
+use async_trait::async_trait;
+use futures::{StreamExt, stream};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+};
+use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
     TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
@@ -30,8 +29,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_product::AuthChallengeProvider;
-use ironclaw_product::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
+use crate::AuthChallengeProvider;
+use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use ironclaw_runner::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
@@ -49,25 +48,25 @@ pub(super) struct TurnEventPayload {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct FailureExplanationInput {
-    pub(crate) failure_category: String,
-    pub(crate) fallback_summary: String,
+pub struct FailureExplanationInput {
+    pub failure_category: String,
+    pub fallback_summary: String,
     /// Model-visible, secret-scrubbed raw cause carried from the failure
     /// record (e.g. a provider HTTP status line or a missing schema-ref path).
     /// Unlike `fallback_summary`, this is the original error text so the
     /// explainer is given the real facts rather than only the coarse category.
     /// Producers scrub secret VALUES before populating it; the prompt builder
     /// re-runs [`sanitize_model_visible_text`] as defense in depth.
-    pub(crate) detail: Option<String>,
+    pub detail: Option<String>,
 }
 
 #[async_trait]
-pub(crate) trait FailureExplanationProvider: Send + Sync {
+pub trait FailureExplanationProvider: Send + Sync {
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String>;
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct NoopFailureExplanationProvider;
+pub struct NoopFailureExplanationProvider;
 
 pub(super) struct TurnEventDrain {
     pub(super) next_cursor: Option<TurnEventProjectionCursor>,
@@ -81,20 +80,21 @@ pub(super) enum TurnEventBridge {
     Enabled {
         service: Arc<TurnEventReducerService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
-        approval_requests: Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>>,
+        // arch-exempt: optional_arc, approval prompt enrichment is absent in minimal projection graphs, plan #4539
+        approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
         failure_explanation_cache: Arc<Mutex<FailureExplanationCache>>,
     },
 }
 
-pub(crate) struct ModelFailureExplanationProvider {
+pub struct ModelFailureExplanationProvider {
     system_inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
     permits: Arc<Semaphore>,
 }
 
 impl ModelFailureExplanationProvider {
     #[cfg(test)]
-    pub(crate) fn new(system_inference: Arc<dyn SystemInferencePort>) -> Self {
+    pub fn new(system_inference: Arc<dyn SystemInferencePort>) -> Self {
         Self {
             system_inference: Arc::new(move || Arc::clone(&system_inference)),
             permits: Arc::new(Semaphore::new(
@@ -103,7 +103,7 @@ impl ModelFailureExplanationProvider {
         }
     }
 
-    pub(crate) fn from_factory(
+    pub fn from_factory(
         system_inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
     ) -> Self {
         Self {
@@ -119,7 +119,7 @@ impl TurnEventBridge {
     pub(super) fn enabled(
         source: Arc<dyn TurnEventProjectionSource>,
         coordinator: Arc<dyn TurnCoordinator>,
-        approval_requests: Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>>,
+        approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
     ) -> Self {
         Self::Enabled {
             service: Arc::new(TurnEventReducerService::new(source)),
@@ -134,7 +134,7 @@ impl TurnEventBridge {
 
     pub(super) fn with_approval_requests(
         mut self,
-        requests: Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>>,
+        requests: Option<Arc<dyn ApprovalRequestStorePort>>,
     ) -> Self {
         if let Self::Enabled {
             approval_requests, ..
@@ -249,7 +249,7 @@ async fn turn_event_payloads_for_page(
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let futures = events.into_iter().map(|event| {
@@ -291,7 +291,7 @@ async fn turn_event_payloads(
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
@@ -373,7 +373,7 @@ async fn blocked_prompt_payload(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -462,7 +462,7 @@ async fn blocked_prompt_payload(
 
 async fn approval_gate_prompt(
     caller_user_id: &UserId,
-    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
     gate_ref: &GateRef,
     gate_ref_string: String,
@@ -493,13 +493,13 @@ async fn approval_gate_prompt(
 }
 
 /// Resolve an approval gate's request details (tool/action/reason) into the
-/// rendered context view, by looking it up in the `ApprovalRequestStore` by
+/// rendered context view, by looking it up in the `ApprovalRequestStorePort` by
 /// gate ref. Shared by the WebUI gate projection and the Slack approval prompt
 /// so both surface the *same* "what is being approved" data from one source.
 /// Returns `None` when no store is wired, the gate ref is not an approval ref,
 /// the request is missing, or the lookup fails.
-pub(crate) async fn approval_prompt_context_view(
-    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
+pub async fn approval_prompt_context_view(
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
@@ -517,7 +517,7 @@ struct ApprovalPromptLookup {
 }
 
 async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,

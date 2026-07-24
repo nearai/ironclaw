@@ -116,7 +116,6 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     "RebornLocalExtensionManagementPort",
     "RebornLocalLifecycleService",
     "RebornLocalRuntimeIdentity",
-    "RebornLocalServiceLifecycle",
     "RebornLocalSkillManagementError",
     "RebornLocalSkillManagementPort",
     //   mid-name LocalDev entries: none — cleared by the DeploymentConfig

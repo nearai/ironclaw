@@ -88,7 +88,7 @@ mod learning {
     use crate::extension_host::lifecycle::{
         RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     };
-    use crate::projection::LiveProjectionPublisher;
+    use ironclaw_product::projection::LiveProjectionPublisher;
 
     /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that
     /// obviously can't yield a reusable skill (pure chat, a single lookup). The
