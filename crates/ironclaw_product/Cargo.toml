@@ -22,7 +22,7 @@ host-auth-mint = ["ironclaw_host_api/host-auth-mint", "ironclaw_turns/host-auth-
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 rand = "0.10"

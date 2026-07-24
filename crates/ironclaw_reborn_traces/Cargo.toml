@@ -12,7 +12,7 @@ layer = "substrates"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22.1"
+base64 = "0.23.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 ed25519-dalek = { version = "2.2.0", features = ["std", "rand_core", "zeroize"] }

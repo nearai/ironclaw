@@ -11,7 +11,7 @@ layer = "substrates"
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-ulid = { version = "1", features = ["serde"] }
+ulid = { version = "3", features = ["serde"] }
 
 [dev-dependencies]
 serde_json = "1"
