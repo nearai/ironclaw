@@ -927,7 +927,7 @@ impl RebornBinaryE2EHarness {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+        turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
         product_harness: RebornProductSurfaceHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,

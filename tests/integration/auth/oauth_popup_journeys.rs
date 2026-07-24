@@ -232,18 +232,12 @@ app_id = "/app_id"
         .expect("persist install");
     let identity_store = Arc::new(RecordingIdentityStore::default());
     let scope = test_scope();
-    let binding_config = ChannelIdentityBindingConfig::for_test_with_admin_configuration(
+    let binding_config = ChannelIdentityBindingConfig::for_test(
         scope.resource.tenant_id.clone(),
         Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
         identity_store.clone(),
         identity_store.clone(),
-        vec![
-            ("acmechat_team_id".to_string(), "T-team".to_string()),
-            ("acmechat_app_id".to_string(), "A-app".to_string()),
-        ],
-    )
-    .await
-    .expect("configure manifest-declared administrator values");
+    );
     let provider = AuthProviderId::new(VENDOR).unwrap();
 
     let run_callback = |token_body: serde_json::Value, fill: u8| {

@@ -25,13 +25,13 @@ use super::filesystem::local_filesystem;
 
 #[derive(Debug, Error)]
 pub enum RebornProductSurfaceHarnessError {
-    #[error("failed to create product workflow harness tempdir: {0}")]
+    #[error("failed to create product surface harness tempdir: {0}")]
     Tempdir(#[from] std::io::Error),
     #[error("failed to configure local filesystem: {0}")]
     Filesystem(#[from] FilesystemError),
     #[error("invalid mount view: {0}")]
     MountView(#[from] HostApiError),
-    #[error("missing agent id in product workflow harness scope")]
+    #[error("missing agent id in product surface harness scope")]
     MissingAgentScope,
 }
 
@@ -145,7 +145,7 @@ impl RebornProductSurfaceHarness {
         self.filesystem
             .write_bytes(&self.scope, &path, bytes)
             .await
-            .map_err(|error| fs_error("write malformed product workflow record", error))
+            .map_err(|error| fs_error("write malformed product surface record", error))
     }
 }
 
@@ -200,20 +200,13 @@ where
         let binding_key = binding_key(&self.scope, &request)?;
         let reply_target_binding_ref =
             ironclaw_turns::ReplyTargetBindingRef::new(format!("reply:harness-{binding_key}"))
-                .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+                .map_err(|error| ProductSurfaceFailure::BindingResolutionFailed {
                     reason: error.to_string(),
                 })?;
         let binding = ResolvedBinding {
             tenant_id: self.scope.tenant_id.clone(),
             actor_user_id,
             subject_user_id,
-            source_binding_ref: ironclaw_turns::SourceBindingRef::new(format!(
-                "source:harness-{binding_key}"
-            ))
-            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
-                reason: error.to_string(),
-            })?,
-            reply_target_binding_ref: reply_target_binding_ref.clone(),
             thread_id: thread_id_for_binding(&self.scope, &request)?,
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
@@ -253,28 +246,6 @@ where
             .ok_or_else(|| ProductSurfaceFailure::BindingRequired {
                 reason: "product conversation binding not found".to_string(),
             })
-    }
-
-    async fn resolve_stored_reply_target(
-        &self,
-        request: ResolveStoredProductReplyTargetRequest,
-    ) -> Result<ResolvedStoredProductReplyTarget, ProductWorkflowError> {
-        let path = reply_target_path(&self.scope, &request.reply_target_binding_ref)?;
-        let target = read_json::<F, StoredHarnessReplyTarget>(&self.filesystem, &self.scope, &path)
-            .await?
-            .ok_or(ProductWorkflowError::BindingAccessDenied)?;
-        if target.tenant_id != request.scope.tenant_id
-            || target.thread_id != request.scope.thread_id
-            || target.actor_user_id != request.actor.user_id
-        {
-            return Err(ProductWorkflowError::BindingAccessDenied);
-        }
-        Ok(ResolvedStoredProductReplyTarget {
-            adapter_id: target.adapter_id,
-            installation_id: target.installation_id,
-            external_conversation_ref: target.external_conversation_ref,
-            route_kind: target.route_kind,
-        })
     }
 }
 
@@ -491,13 +462,13 @@ where
     let Some(versioned) = filesystem
         .get(scope, path)
         .await
-        .map_err(|error| fs_error("read product workflow record", error))?
+        .map_err(|error| fs_error("read product surface record", error))?
     else {
         return Ok(None);
     };
     let value = serde_json::from_slice(&versioned.entry.body).map_err(|error| {
         ProductSurfaceFailure::Transient {
-            reason: format!("failed to parse product workflow record: {error}"),
+            reason: format!("failed to parse product surface record: {error}"),
         }
     })?;
     Ok(Some(value))
@@ -515,12 +486,12 @@ where
 {
     let body =
         serde_json::to_vec_pretty(value).map_err(|error| ProductSurfaceFailure::Transient {
-            reason: format!("failed to serialize product workflow record: {error}"),
+            reason: format!("failed to serialize product surface record: {error}"),
         })?;
     filesystem
         .write_bytes(scope, path, body)
         .await
-        .map_err(|error| fs_error("write product workflow record", error))
+        .map_err(|error| fs_error("write product surface record", error))
 }
 
 fn binding_path(
@@ -552,12 +523,12 @@ fn binding_path(
 fn binding_key(
     scope: &ResourceScope,
     request: &ResolveBindingRequest,
-) -> Result<String, ProductWorkflowError> {
+) -> Result<String, ProductSurfaceFailure> {
     let agent_id =
         scope
             .agent_id
             .as_ref()
-            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
+            .ok_or_else(|| ProductSurfaceFailure::BindingResolutionFailed {
                 reason: "missing agent id in binding scope".to_string(),
             })?;
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
@@ -575,7 +546,7 @@ fn binding_key(
 fn reply_target_path(
     scope: &ResourceScope,
     reply_target: &ironclaw_turns::ReplyTargetBindingRef,
-) -> Result<ScopedPath, ProductWorkflowError> {
+) -> Result<ScopedPath, ProductSurfaceFailure> {
     let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(

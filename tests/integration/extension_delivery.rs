@@ -6,7 +6,7 @@
 //! composed runtime: a vendor-signed POST on the production ingress mount →
 //! host-side recipe verification → the real channel adapter's normalization →
 //! durable admission through the REAL `DefaultProductSurface` → a real turn
-//! against a scripted model → the canonical `RunDeliveryEventRouter` and
+//! against a scripted model → the canonical `RunDeliveryObserver` and
 //! per-channel event handler → the factory-built `DeliveryCoordinator` (sole
 //! delivery-state writer, §5.4) →
 //! the real adapter's `deliver` → the policy-enforced channel egress with
@@ -77,8 +77,7 @@ use ironclaw_product::{
 };
 use ironclaw_product::{
     ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
-    ResolveStoredProductReplyTargetRequest, RunDeliveryEventHandler, RunDeliveryEventRouter,
-    RunDeliveryObserver, RunDeliveryServices, StoredProductReplyTargetAccess,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -240,22 +239,14 @@ struct RecordingForwardObserver {
     acks: Mutex<Vec<ProductInboundAck>>,
     errors: Mutex<Vec<String>>,
     inner: Arc<RunDeliveryObserver>,
-    event_handler: Arc<RunDeliveryEventHandler>,
-    event_router: Arc<RunDeliveryEventRouter>,
 }
 
 impl RecordingForwardObserver {
-    fn new(
-        inner: Arc<RunDeliveryObserver>,
-        event_handler: Arc<RunDeliveryEventHandler>,
-        event_router: Arc<RunDeliveryEventRouter>,
-    ) -> Self {
+    fn new(inner: Arc<RunDeliveryObserver>) -> Self {
         Self {
             acks: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
             inner,
-            event_handler,
-            event_router,
         }
     }
 
@@ -290,11 +281,7 @@ impl RecordingForwardObserver {
 impl PostAdmissionObserver for RecordingForwardObserver {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
         self.acks.lock().expect("acks lock").push(ack.clone());
-        self.inner.observe_ack(envelope.clone(), ack.clone()).await;
-        self.event_handler
-            .reconcile_accepted_user_message(self.event_router.as_ref(), &envelope, &ack)
-            .await
-            .expect("accepted external turn reconciles onto the lifecycle router");
+        self.inner.observe_ack(envelope, ack).await;
     }
 
     async fn observe_error(
@@ -436,6 +423,7 @@ impl VendorIngress {
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
+            classifier: None,
             surface,
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
         }));
@@ -775,7 +763,7 @@ async fn assert_extension_has_no_user_installation(services: &RebornRuntime, ext
 }
 
 fn start_channel_host_assembly(
-    group: &RebornIntegrationGroup,
+    _group: &RebornIntegrationGroup,
     services: &RebornRuntime,
     inbound: &RebornIntegrationHarness,
 ) -> Arc<GenericChannelHostAssembly> {
@@ -785,9 +773,7 @@ fn start_channel_host_assembly(
                 .thread_service_for_test()
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
-            run_delivery_events: group
-                .run_delivery_events()
-                .expect("delivery group wires the canonical run-delivery event router"),
+            run_delivery_settings: RunDeliverySettings::default(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -1051,21 +1037,10 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         .build()
         .await
         .expect("inbound thread builds");
-    let event_router = group
-        .run_delivery_events()
-        .expect("delivery group wires the canonical run-delivery event router");
     let delivery_services = delivery_run_services(&inbound, services, "slack");
-    let event_handler = Arc::new(RunDeliveryEventHandler::new(
-        delivery_services.clone(),
-        "slack",
-        SLACK_INSTALLATION,
-    ));
-    event_router.register("slack", &event_handler);
-    let observer = Arc::new(RecordingForwardObserver::new(
-        Arc::new(RunDeliveryObserver::new(delivery_services)),
-        event_handler,
-        Arc::clone(&event_router),
-    ));
+    let observer = Arc::new(RecordingForwardObserver::new(Arc::new(
+        RunDeliveryObserver::new(delivery_services),
+    )));
     let ingress = VendorIngress::register(
         services
             .extension_ingress_parts()
@@ -1157,19 +1132,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         vendor_scope.explicit_owner_user_id(),
         "the admitted run actor must remain the exact user paired to the source route"
     );
-    let resolved_target = slack_binding_service
-        .resolve_stored_reply_target(ResolveStoredProductReplyTargetRequest {
-            scope: vendor_scope.clone(),
-            actor,
-            reply_target_binding_ref: completed.reply_target_binding_ref.clone(),
-            access: StoredProductReplyTargetAccess::OrdinaryReply,
-        })
-        .await
-        .expect("the admitted Slack source route remains authorized");
-    assert_eq!(resolved_target.adapter_id.as_str(), "slack");
-    assert_eq!(resolved_target.installation_id.as_str(), SLACK_INSTALLATION);
     assert_delivered_attempt(services, &vendor_scope).await;
-    event_router.wait_until_run_idle(run_id).await;
 
     // Wire seam: the coordinated FinalReply reached chat.postMessage with the
     // bridged bot token injected host-side (the adapter never saw it).
@@ -1241,10 +1204,6 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .build()
         .await
         .expect("inbound thread builds");
-    let event_router = group
-        .run_delivery_events()
-        .expect("delivery group wires the canonical run-delivery event router");
-
     // Attach the PRODUCTION channel host assembly (P6 S2) over the composed
     // runtime. The harness supplies only its run-world services — the
     // group's shared turn runtime executes the admitted runs — while the
@@ -1258,7 +1217,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 .thread_service_for_test()
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
-            run_delivery_events: Arc::clone(&event_router),
+            run_delivery_settings: RunDeliverySettings::default(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -1601,8 +1560,6 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let coordinator = inbound.turn_coordinator_for_test();
     wait_for_run_status_in_scope(&coordinator, &vendor_scope, run_id, TurnStatus::Completed).await;
     assert_delivered_attempt(services, &vendor_scope).await;
-    event_router.wait_until_run_idle(run_id).await;
-
     // Wire seam: the coordinated reply reached sendMessage on the Bot API
     // with the token substituted host-side. #6520 delivery is event-driven,
     // so poll the wire with the file's bounded deadline instead of a single
@@ -1737,9 +1694,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 .thread_service_for_test()
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
-            run_delivery_events: group
-                .run_delivery_events()
-                .expect("delivery group wires the canonical run-delivery event router"),
+            run_delivery_settings: RunDeliverySettings::default(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -2013,7 +1968,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         .await;
     assert_eq!(status, StatusCode::OK);
     ingress.drain().await;
-    // #6520 final-reply delivery is event-driven (RunDeliveryEventRouter), so
+    // #6520 final-reply delivery is observer-driven, so
     // the send can land after ingress drain returns; poll the wire with the
     // same bounded deadline the file's other async seams use.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);

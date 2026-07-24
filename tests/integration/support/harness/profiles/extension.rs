@@ -778,6 +778,7 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
+        inbound_payload_classifier: None,
     }
 }
 
@@ -786,6 +787,7 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
         extension_id: "telegram".to_string(),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         preference_target_codec: None,
+        inbound_payload_classifier: None,
     }
 }
 

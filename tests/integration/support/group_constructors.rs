@@ -397,9 +397,6 @@ impl RebornIntegrationGroupBuilder {
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
     pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
-        self.run_delivery_events = Some(Arc::new(
-            ironclaw_product::RunDeliveryEventRouter::new_ephemeral_for_test(),
-        ));
         let base = self.build_base().await?;
         let host_runtime = build_group_capability_with_base(
             super::super::harness::profiles::extension::extension_delivery_tools_profile()?,

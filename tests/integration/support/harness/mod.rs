@@ -1062,13 +1062,7 @@ impl HostRuntimeCapabilityHarness {
         &self,
         turn_store: Arc<ironclaw_turns::TurnStateRowStore<HarnessTurnBackend>>,
     ) -> HarnessResult<()> {
-        let services = self
-            .reborn_services_for_test()
-            .ok_or("trigger source delivery wiring requires composed Reborn services")?;
-        ironclaw_reborn_composition::test_support::set_local_dev_trigger_source_turn_state_for_test(
-            services,
-            turn_store,
-        )?;
+        let _ = turn_store;
         Ok(())
     }
 

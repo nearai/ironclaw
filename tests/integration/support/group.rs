@@ -67,7 +67,7 @@ use ironclaw_loop_host::{
 use ironclaw_product::ProductTriggerReason;
 use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ResolvedBinding, RunDeliveryEventRouter,
+    IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
@@ -227,11 +227,6 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
-    /// The production run-delivery lifecycle router wired into the group's
-    /// canonical turn-event sink. Present only for delivery-proof groups, so
-    /// those tests exercise the same event-driven final-reply path as the
-    /// channel host instead of relying on the admission observer.
-    pub(crate) run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -428,7 +423,6 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
-            run_delivery_events: None,
             trace_capture: false,
             tool_disclosure: None,
             budget: false,
@@ -457,12 +451,6 @@ impl RebornIntegrationGroup {
         self.shared.channel_connection.clone()
     }
 
-    /// The run-delivery lifecycle router wired into this group's canonical
-    /// turn-event bus. Available only to delivery-proof scenarios.
-    pub fn run_delivery_events(&self) -> Option<Arc<RunDeliveryEventRouter>> {
-        self.shared.run_delivery_events.clone()
-    }
-
     /// The group-canonical binding's ACTOR user id — the identity capability
     /// dispatch stamps as `authenticated_actor_user_id` on execution contexts
     /// (loop-host capability port reads `run_context.actor()`), and therefore
@@ -484,14 +472,17 @@ impl RebornIntegrationGroup {
         let GroupCapability::HostRuntime(harness) = &self.shared.capability else {
             return Err("source delivery target requires a host-runtime capability backend".into());
         };
-        let services = harness
+        let runtime = harness
             .reborn_services_for_test()
-            .ok_or("source delivery target requires composed Reborn services")?;
+            .ok_or("source delivery target requires composed Reborn runtime")?;
         let target_id = ironclaw_product::RebornOutboundDeliveryTargetId::new(target_id)?;
-        ironclaw_reborn_composition::test_support::register_static_source_delivery_target_for_test(
-            services,
+        let display_name = target_id.as_str().to_string();
+        runtime.register_static_outbound_delivery_target_for_test(
             provider_key,
             target_id,
+            provider_key,
+            display_name.as_str(),
+            None,
             reply_target_binding_ref,
         )?;
         Ok(())
@@ -741,9 +732,6 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
-    /// Canonical run-delivery lifecycle router for delivery-proof groups.
-    /// `into_group` composes this into the planned runtime's turn-event sink.
-    run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -948,9 +936,6 @@ impl RebornIntegrationGroupBuilder {
         if let Some((sink, _)) = &trace_capture {
             turn_event_sinks.push(Arc::clone(sink));
         }
-        if let Some(router) = self.run_delivery_events.clone() {
-            turn_event_sinks.push(router as Arc<dyn TurnEventSink>);
-        }
         let composed_turn_event_sink: Option<Arc<dyn TurnEventSink>> = match turn_event_sinks.len()
         {
             0 | 1 => turn_event_sinks.pop(),
@@ -1125,7 +1110,6 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
-                run_delivery_events: self.run_delivery_events,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
