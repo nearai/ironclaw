@@ -2477,7 +2477,7 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
         let disabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
             .with_env_trace_recording();
         assert!(
-            disabled.provider_factory.is_none(),
+            disabled.provider_factory().is_none(),
             "no recording factory should attach when IRONCLAW_RECORD_TRACE is unset"
         );
     }
@@ -2488,7 +2488,7 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
         let enabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
             .with_env_trace_recording();
         assert!(
-            enabled.provider_factory.is_some(),
+            enabled.provider_factory().is_some(),
             "IRONCLAW_RECORD_TRACE must attach the recording provider factory on the \
              serve/run resolution path"
         );

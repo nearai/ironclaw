@@ -1,4 +1,4 @@
-use std::{net::IpAddr, sync::Arc};
+use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
@@ -8,11 +8,18 @@ use ironclaw_host_api::{
     ExtensionId, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ResourceScope,
 };
+pub use ironclaw_operator::llm_admin::nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+};
+pub(crate) use ironclaw_operator::llm_admin::nearai_mcp::{
+    NearAiMcpBootstrapOutcome, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
+    nearai_mcp_bootstrap_config_from_llm_config, nearai_mcp_endpoint_from_base,
+    nearai_mcp_endpoint_from_env,
+};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecyclePublicState,
 };
-use secrecy::{ExposeSecret, SecretString};
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_host::extension_lifecycle::{
@@ -20,193 +27,6 @@ use crate::extension_host::extension_lifecycle::{
 };
 use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use crate::{RebornBuildError, RebornProductAuthServices};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NearAiMcpEndpoint {
-    pub(crate) url: String,
-    pub(crate) host_pattern: String,
-    pub(crate) port: Option<u16>,
-}
-
-#[derive(Clone, Debug)]
-pub struct NearAiMcpBootstrapConfig {
-    base_url: String,
-    api_key: SecretString,
-}
-
-const DEFAULT_NEARAI_MCP_BASE_URL: &str = "https://cloud-api.near.ai";
-
-impl NearAiMcpBootstrapConfig {
-    pub fn new(
-        base_url: impl Into<String>,
-        api_key: SecretString,
-    ) -> Result<Self, NearAiMcpBootstrapConfigError> {
-        let mut base_url = base_url.into().trim().to_string();
-        if base_url.is_empty() {
-            base_url = DEFAULT_NEARAI_MCP_BASE_URL.to_string();
-        }
-        if api_key.expose_secret().trim().is_empty() {
-            return Err(NearAiMcpBootstrapConfigError::MissingApiKey);
-        }
-        Ok(Self { base_url, api_key })
-    }
-
-    pub fn from_optional_parts(
-        base_url: Option<impl Into<String>>,
-        api_key: Option<SecretString>,
-    ) -> Result<Option<Self>, NearAiMcpBootstrapConfigError> {
-        let base_url = base_url
-            .map(Into::into)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let api_key = api_key.filter(|value| !value.expose_secret().trim().is_empty());
-        match (base_url, api_key) {
-            (Some(base_url), Some(api_key)) => Self::new(base_url, api_key).map(Some),
-            (None, None) => Ok(None),
-            (None, Some(api_key)) => Ok(Some(Self {
-                base_url: DEFAULT_NEARAI_MCP_BASE_URL.to_string(),
-                api_key,
-            })),
-            (Some(_), None) => Err(NearAiMcpBootstrapConfigError::MissingApiKey),
-        }
-    }
-
-    pub(crate) fn endpoint(&self) -> Result<NearAiMcpEndpoint, String> {
-        nearai_mcp_endpoint_from_base(Some(&self.base_url))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum NearAiMcpBootstrapConfigError {
-    #[error("NEARAI_API_KEY is required when NEARAI_BASE_URL is set")]
-    MissingApiKey,
-    #[error("NEAR AI session token could not be read: {reason}")]
-    SessionTokenRead { reason: String },
-}
-
-pub(crate) fn nearai_mcp_endpoint_from_env() -> Result<NearAiMcpEndpoint, String> {
-    let configured_base = ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    nearai_mcp_endpoint_from_base(configured_base.as_deref())
-}
-
-pub fn nearai_mcp_bootstrap_config_from_env()
--> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
-    nearai_mcp_bootstrap_config_from_lookup(ironclaw_common::env_helpers::env_or_override)
-}
-
-/// Env-shape parsing behind [`nearai_mcp_bootstrap_config_from_env`], with the
-/// variable lookup injected so tests stay hermetic without mutating process
-/// state.
-fn nearai_mcp_bootstrap_config_from_lookup(
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
-    let configured_base = lookup("NEARAI_BASE_URL")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let api_key = lookup("NEARAI_API_KEY")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(SecretString::from);
-    NearAiMcpBootstrapConfig::from_optional_parts(configured_base, api_key)
-}
-
-pub(crate) async fn nearai_mcp_bootstrap_config_from_llm_config(
-    config: &ironclaw_llm::LlmConfig,
-) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
-    if config.active_provider_id() != "nearai" {
-        return Ok(None);
-    }
-
-    if let Some(api_key) = &config.nearai.api_key {
-        return NearAiMcpBootstrapConfig::from_optional_parts(
-            Some(config.nearai.base_url.clone()),
-            Some(api_key.clone()),
-        );
-    }
-
-    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
-    if !session.has_token().await {
-        return Ok(None);
-    }
-    let token = session.get_token().await.map_err(|error| {
-        NearAiMcpBootstrapConfigError::SessionTokenRead {
-            reason: error.to_string(),
-        }
-    })?;
-    NearAiMcpBootstrapConfig::from_optional_parts(Some(config.nearai.base_url.clone()), Some(token))
-}
-
-pub(crate) fn nearai_mcp_endpoint_from_base(
-    configured_base: Option<&str>,
-) -> Result<NearAiMcpEndpoint, String> {
-    let base = configured_base.unwrap_or(DEFAULT_NEARAI_MCP_BASE_URL);
-    let mut url = url::Url::parse(base)
-        .map_err(|error| format!("NEARAI_BASE_URL must be an absolute URL: {error}"))?;
-    if url.scheme() != "https" {
-        return Err("NEARAI_BASE_URL must use https".to_string());
-    }
-    if url.username() != "" || url.password().is_some() {
-        return Err("NEARAI_BASE_URL must not include userinfo".to_string());
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("NEARAI_BASE_URL must not include query or fragment components".to_string());
-    }
-
-    let host = url
-        .host_str()
-        .ok_or_else(|| "NEARAI_BASE_URL must include a host".to_string())?
-        .to_ascii_lowercase();
-    let ip = host.parse::<IpAddr>().ok();
-    if ip.is_some_and(is_forbidden_endpoint_ip) {
-        return Err("NEARAI_BASE_URL host is not allowed".to_string());
-    }
-    if matches!(ip, Some(IpAddr::V6(_))) {
-        return Err("NEARAI_BASE_URL IPv6 hosts are not supported yet".to_string());
-    }
-
-    let mut path = url.path().trim_end_matches('/').to_string();
-    if path.eq_ignore_ascii_case("/v1") {
-        path = String::new();
-    }
-    if path.is_empty() {
-        url.set_path("/mcp");
-    } else if !path.eq_ignore_ascii_case("/mcp") {
-        url.set_path(&format!("{path}/mcp"));
-    } else {
-        url.set_path("/mcp");
-    }
-
-    Ok(NearAiMcpEndpoint {
-        url: url.to_string(),
-        host_pattern: host,
-        port: url.port(),
-    })
-}
-
-fn is_forbidden_endpoint_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.is_multicast()
-                || ip.octets()[0] == 0
-        }
-        IpAddr::V6(ip) => {
-            ip.is_unspecified()
-                || ip.is_unicast_link_local()
-                || ip.is_multicast()
-                || is_documentation_v6(ip)
-        }
-    }
-}
-
-fn is_documentation_v6(ip: std::net::Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    segments[0] == 0x2001 && segments[1] == 0x0db8
-}
 
 pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
@@ -313,7 +133,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
                         label: "NEAR AI API key".to_string(),
                         requester_extension,
                         existing_account,
-                        secret: config.api_key,
+                        secret: config.into_api_key(),
                     })
                     .await;
             if let Err(error) = credential_submit {
@@ -377,40 +197,6 @@ pub(crate) async fn bootstrap_nearai_mcp(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NearAiMcpBootstrapOutcome {
-    NotConfigured,
-    SkippedDisabled,
-    SkippedUnavailable,
-    SkippedUnsupportedStorage,
-    SkippedNonActivatable,
-    ReusedCredential,
-    SubmittedCredential,
-    Activated,
-}
-
-impl NearAiMcpBootstrapOutcome {
-    pub(crate) fn log_completion(self) {
-        match self {
-            Self::NotConfigured => tracing::debug!("NEAR AI MCP bootstrap is not configured"),
-            Self::SkippedDisabled
-            | Self::SkippedUnavailable
-            | Self::SkippedUnsupportedStorage
-            | Self::SkippedNonActivatable => tracing::debug!(
-                outcome = ?self,
-                "NEAR AI MCP bootstrap skipped; extension will not be auto-activated"
-            ),
-            Self::ReusedCredential | Self::SubmittedCredential | Self::Activated => {
-                tracing::debug!(outcome = ?self, "NEAR AI MCP bootstrap completed")
-            }
-        }
-    }
-}
-
-pub(crate) fn durable_product_auth_storage_enabled() -> bool {
-    true
-}
-
 fn nearai_mcp_bootstrap_account_is_usable(
     account: &CredentialAccount,
     requester_extension: &ExtensionId,
@@ -466,18 +252,6 @@ fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &ProductSurfaceErro
 mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, UserId};
-
-    /// Hermetic stand-in for the env lookup injected into
-    /// [`nearai_mcp_bootstrap_config_from_lookup`]: tests must not depend on
-    /// or mutate the process environment.
-    fn lookup_from<'a>(entries: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |key| {
-            entries
-                .iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| (*value).to_string())
-        }
-    }
 
     fn account_for_bootstrap_decision(
         requester_extension: &ExtensionId,
@@ -564,143 +338,5 @@ mod tests {
             panic!("expected newest account update binding, got {decision:?}");
         };
         assert_eq!(existing_account.account_id, expected_account_id);
-    }
-
-    #[test]
-    fn endpoint_validation_normalizes_custom_https_base() {
-        let endpoint = nearai_mcp_endpoint_from_base(Some("https://search.example.test/v1/"))
-            .expect("custom endpoint");
-
-        assert_eq!(endpoint.url, "https://search.example.test/mcp");
-        assert_eq!(endpoint.host_pattern, "search.example.test");
-        assert_eq!(endpoint.port, None);
-    }
-
-    #[test]
-    fn endpoint_validation_rejects_http_and_forbidden_ips() {
-        assert!(nearai_mcp_endpoint_from_base(Some("http://search.example.test")).is_err());
-        assert!(nearai_mcp_endpoint_from_base(Some("https://169.254.169.254")).is_err());
-        assert!(nearai_mcp_endpoint_from_base(Some("https://224.0.0.1")).is_err());
-    }
-
-    #[test]
-    fn endpoint_validation_allows_private_loopback_https_targets() {
-        let private =
-            nearai_mcp_endpoint_from_base(Some("https://10.0.0.12:8443")).expect("private IP");
-        let loopback =
-            nearai_mcp_endpoint_from_base(Some("https://127.0.0.1")).expect("loopback IP");
-
-        assert_eq!(private.host_pattern, "10.0.0.12");
-        assert_eq!(private.port, Some(8443));
-        assert_eq!(private.url, "https://10.0.0.12:8443/mcp");
-        assert_eq!(loopback.url, "https://127.0.0.1/mcp");
-    }
-
-    #[test]
-    fn bootstrap_config_from_optional_parts_trims_values() {
-        let config = NearAiMcpBootstrapConfig::from_optional_parts(
-            Some(" https://private.near.ai/v1/ "),
-            Some(SecretString::from(" nearai-test-key ")),
-        )
-        .expect("valid config")
-        .expect("present config");
-
-        assert_eq!(config.base_url, "https://private.near.ai/v1/");
-        assert_eq!(
-            config.endpoint().expect("endpoint").url,
-            "https://private.near.ai/mcp"
-        );
-    }
-
-    #[test]
-    fn bootstrap_config_from_optional_parts_ignores_empty_pair() {
-        assert!(
-            NearAiMcpBootstrapConfig::from_optional_parts(
-                Some("   "),
-                Some(SecretString::from(" \t "))
-            )
-            .expect("empty pair")
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn bootstrap_config_from_optional_parts_defaults_base_url_when_api_key_is_present() {
-        let config = NearAiMcpBootstrapConfig::from_optional_parts(
-            None::<String>,
-            Some(SecretString::from("nearai-test-key")),
-        )
-        .expect("default base url")
-        .expect("present config");
-
-        assert_eq!(config.base_url, DEFAULT_NEARAI_MCP_BASE_URL);
-        assert_eq!(
-            config.endpoint().expect("endpoint").url,
-            "https://cloud-api.near.ai/mcp"
-        );
-    }
-
-    #[test]
-    fn bootstrap_config_from_optional_parts_defaults_whitespace_base_url_when_api_key_is_present() {
-        let config = NearAiMcpBootstrapConfig::from_optional_parts(
-            Some("   "),
-            Some(SecretString::from("nearai-test-key")),
-        )
-        .expect("default base url")
-        .expect("present config");
-
-        assert_eq!(config.base_url, DEFAULT_NEARAI_MCP_BASE_URL);
-        assert_eq!(
-            config.endpoint().expect("endpoint").url,
-            "https://cloud-api.near.ai/mcp"
-        );
-    }
-
-    #[test]
-    fn bootstrap_config_from_optional_parts_rejects_base_url_without_api_key() {
-        assert_eq!(
-            NearAiMcpBootstrapConfig::from_optional_parts(Some("https://private.near.ai"), None)
-                .expect_err("missing api key"),
-            NearAiMcpBootstrapConfigError::MissingApiKey
-        );
-    }
-
-    #[test]
-    fn bootstrap_config_from_env_defaults_base_url_when_only_api_key_set() {
-        let config = nearai_mcp_bootstrap_config_from_lookup(lookup_from(&[(
-            "NEARAI_API_KEY",
-            "nearai-test-key",
-        )]))
-        .expect("env config")
-        .expect("present config");
-
-        assert_eq!(config.base_url, DEFAULT_NEARAI_MCP_BASE_URL);
-        assert_eq!(config.api_key.expose_secret(), "nearai-test-key");
-    }
-
-    #[test]
-    fn bootstrap_config_from_env_uses_both_env_vars_when_set() {
-        let config = nearai_mcp_bootstrap_config_from_lookup(lookup_from(&[
-            ("NEARAI_BASE_URL", " https://search.example.test/v1/ "),
-            ("NEARAI_API_KEY", " nearai-test-key "),
-        ]))
-        .expect("env config")
-        .expect("present config");
-
-        assert_eq!(config.base_url, "https://search.example.test/v1/");
-        assert_eq!(config.api_key.expose_secret(), "nearai-test-key");
-        assert_eq!(
-            config.endpoint().expect("endpoint").url,
-            "https://search.example.test/mcp"
-        );
-    }
-
-    #[test]
-    fn bootstrap_config_from_env_returns_none_when_no_env_vars() {
-        assert!(
-            nearai_mcp_bootstrap_config_from_lookup(lookup_from(&[]))
-                .expect("env config")
-                .is_none()
-        );
     }
 }

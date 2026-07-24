@@ -4899,7 +4899,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
             .await
             .expect("open local dev secret store");
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        ironclaw_operator::LlmKeyStore::new(store)
             .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
             .await
             .expect("seed provider key");

@@ -568,6 +568,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         [
             "ironclaw_extension_host",
             "ironclaw_first_party_extensions",
+            "ironclaw_operator",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
@@ -575,7 +576,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1819,14 +1820,14 @@ fn reborn_boot_config_file_layout_is_pinned() {
          Landmines` section: \"Do not bake secret material into blueprints/config.\""
     );
 
-    // Provider-catalog load-from-path must be reachable from
-    // composition without forcing `ironclaw_reborn_config` to depend
-    // on `ironclaw_llm` (which would violate _config's standalone
-    // boundary). The composition crate is the legitimate consumer.
-    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_admin/llm_catalog.rs");
+    // Provider-catalog load-from-path must be reachable from the operator
+    // control-plane without forcing `ironclaw_reborn_config` to depend on
+    // `ironclaw_llm` (which would violate _config's standalone boundary).
+    // The composition crate only re-exports this surface for compatibility.
+    let llm_catalog = root.join("crates/ironclaw_operator/src/llm_admin/llm_catalog.rs");
     assert!(
         llm_catalog.exists(),
-        "composition must expose a catalog resolver at {} so the CLI can stitch \
+        "operator must expose a catalog resolver at {} so the CLI can stitch \
          RebornConfigFile + providers.json into a RebornLlmConfig without itself \
          depending on ironclaw_llm",
         llm_catalog.display()
@@ -1839,7 +1840,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     ] {
         assert!(
             llm_catalog_src.contains(required),
-            "composition llm_catalog must expose `{required}` so the resolver path is \
+            "operator llm_catalog must expose `{required}` so the resolver path is \
              stable; see reborn_boot_config_file_layout_is_pinned"
         );
     }

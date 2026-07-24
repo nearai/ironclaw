@@ -1134,7 +1134,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/projection/display_preview.rs",
+        "crates/ironclaw_product/src/projection/display_preview.rs",
         "web-access",
     ),
     // DEL-7: the manifest-egress policy builder's comment names the GSuite
@@ -1191,11 +1191,23 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearai_mcp",
     ),
     (
+        "crates/ironclaw_operator/src/llm_admin/mod.rs",
+        "nearai_mcp",
+    ),
+    (
         "crates/ironclaw_reborn_composition/src/llm_admin/nearai_mcp.rs",
         "nearai_mcp",
     ),
     (
         "crates/ironclaw_reborn_composition/src/llm_admin/nearai_mcp.rs",
+        "nearaimcp",
+    ),
+    (
+        "crates/ironclaw_operator/src/llm_admin/nearai_mcp.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_operator/src/llm_admin/nearai_mcp.rs",
         "nearaimcp",
     ),
     (
@@ -1270,11 +1282,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "telegram",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "github",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "google",
     ),
     (
@@ -1293,12 +1305,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs",
         "slack",
     ),
+    ("crates/ironclaw_product/src/projection.rs", "slack"),
     (
-        "crates/ironclaw_reborn_composition/src/projection.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/projection/turn_events.rs",
+        "crates/ironclaw_product/src/projection/turn_events.rs",
         "slack",
     ),
     (
@@ -1334,14 +1343,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_reborn_composition/Cargo.toml", "telegram"),
     // lane-4: branch — the provider catalog names github_copilot (an LLM
     // provider id, not the github extension); degenericize with the catalog
-    // slice or carve under an LLM-provider path outside composition.
+    // slice.
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/provider_admin.rs",
+        "crates/ironclaw_operator/src/llm_admin/provider_admin.rs",
         "github",
     ),
     // lane-4: doc — NEAR AI login copy names its upstream SSO providers.
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "github",
     ),
     // Sixth-fold debt: the second-channel host PR's frontend surface

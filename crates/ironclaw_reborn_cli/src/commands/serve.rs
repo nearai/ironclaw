@@ -251,8 +251,9 @@ impl ServeCommand {
             IpAddr::from_str(raw)
                 .map_err(|err| anyhow!("[webui].listen_host `{raw}` invalid: {err}"))?
         } else {
-            IpAddr::from_str(DEFAULT_SERVE_HOST)
-                .expect("DEFAULT_SERVE_HOST is a crate-local literal that parses as IpAddr") // safety: crate-local const known to be valid
+            IpAddr::from_str(DEFAULT_SERVE_HOST).map_err(|err| {
+                anyhow!("DEFAULT_SERVE_HOST `{DEFAULT_SERVE_HOST}` invalid: {err}")
+            })?
         };
         // `port = 0` would tell the OS to pick a free port — useful
         // when invoked from a test harness with `--port 0`, but in a
@@ -585,7 +586,10 @@ impl ServeCommand {
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
-            if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
+            if let Some(nearai_mount) = runtime
+                .nearai_login_callback_mount()
+                .context("failed to compose NEAR AI login callback route")?
+            {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }
             if let Some(mount) = public_mount {

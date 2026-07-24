@@ -513,7 +513,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
             .await
             .map_err(anyhow::Error::from)?;
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        ironclaw_operator::LlmKeyStore::new(store)
             .exists(&provider_id)
             .await
             .map_err(anyhow::Error::from)

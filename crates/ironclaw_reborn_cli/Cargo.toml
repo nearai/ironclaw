@@ -35,6 +35,7 @@ clap_complete = "4.5.0"
 # second terminal-masking dependency.
 crossterm = "0.29"
 dotenvy = "0.15"
+ironclaw_operator = { path = "../ironclaw_operator", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
@@ -92,7 +93,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", feat
 # `commands::onboard::llm_credentials`'s write-ordering test builds the real
 # `ironclaw_secrets::SecretStore::ephemeral_over(..)` (plus
 # `keychain::generate_master_key_hex`); production onboarding code only ever
-# touches secrets through `ironclaw_reborn_composition::LlmKeyStore`'s facade
+# touches secrets through `ironclaw_operator::LlmKeyStore`'s facade
 # (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }

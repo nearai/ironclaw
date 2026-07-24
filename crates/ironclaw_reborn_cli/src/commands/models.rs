@@ -68,8 +68,7 @@ impl ModelsCommand {
 impl ModelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
-        let admin =
-            ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+        let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
         let list = admin.list(
             self.provider.as_deref(),
             self.verbose || self.provider.is_some(),
@@ -90,8 +89,7 @@ impl ModelsListCommand {
 impl ModelsStatusCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
-        let admin =
-            ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+        let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
         let status = admin.status()?;
 
         if self.json {
@@ -106,8 +104,7 @@ impl ModelsStatusCommand {
 impl ModelsSetCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
-        let admin =
-            ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+        let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
         let outcome = admin.set_model(&self.model)?;
         print_write_outcome(WriteOutcomeKind::Model, &outcome);
         Ok(())
@@ -117,8 +114,7 @@ impl ModelsSetCommand {
 impl ModelsSetProviderCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
-        let admin =
-            ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
+        let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
         let outcome = admin.set_provider(&self.provider, self.model.as_deref())?;
         print_write_outcome(WriteOutcomeKind::Provider, &outcome);
         Ok(())

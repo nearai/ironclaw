@@ -1790,16 +1790,24 @@ impl RebornRuntime {
     /// `None` when no LLM seam or boot config was wired.
     pub fn nearai_login_callback_mount(
         &self,
-    ) -> Option<crate::webui::route_mounts::PublicRouteMount> {
-        let boot = self.boot.clone()?;
-        let session = self.webui_llm_session()?;
-        let reload = self.webui_llm_reload_trigger()?;
-        let states = self.webui_nearai_login_states()?;
-        Some(
+    ) -> Result<Option<crate::webui::route_mounts::PublicRouteMount>, crate::RebornBuildError> {
+        let Some(boot) = self.boot.clone() else {
+            return Ok(None);
+        };
+        let Some(session) = self.webui_llm_session() else {
+            return Ok(None);
+        };
+        let Some(reload) = self.webui_llm_reload_trigger() else {
+            return Ok(None);
+        };
+        let Some(states) = self.webui_nearai_login_states() else {
+            return Ok(None);
+        };
+        Ok(Some(
             crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
                 session, reload, boot, states,
-            ),
-        )
+            )?,
+        ))
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -3308,7 +3316,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     if !has_nearai_mcp_bootstrap_config
         && let Some(llm) = llm.as_ref()
         && let Some(config) =
-            crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+            crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(llm.config())
                 .await
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: format!("NEAR AI MCP bootstrap config: {error}"),
@@ -3456,7 +3464,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // with only the model overridden. `llm` no longer feeds the model gateway
     // build below (see `build_production_model_gateway`).
     let skill_learning_provider = match llm.as_ref() {
-        Some(resolved) => build_skill_learning_provider(&resolved.config).await,
+        Some(resolved) => build_skill_learning_provider(resolved.config()).await,
         None => None,
     };
     // Caller instrumentation seam (e.g. a benchmark harness layering
@@ -3467,7 +3475,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // cheap Arc handle rather than move the factory out of the borrow.
     let boot_provider_factory = llm
         .as_ref()
-        .and_then(|resolved| resolved.provider_factory.clone());
+        .and_then(|resolved| resolved.provider_factory());
     #[cfg(any(test, feature = "test-support"))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
@@ -4820,7 +4828,7 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?
     {
-        crate::llm_admin::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
+        crate::llm_admin::llm_catalog::apply_stored_api_key(llm.config_mut(), stored);
     }
 
     Ok(Some(llm))
@@ -4835,7 +4843,7 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
         return Ok(());
     };
     let Some(config) =
-        crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+        crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(llm.config())
             .await
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("NEAR AI MCP bootstrap config: {error}"),
