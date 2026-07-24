@@ -826,7 +826,7 @@ mod tests {
     struct ConfiguredRuntimeCredentialAccounts;
 
     #[async_trait::async_trait]
-    impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl ironclaw_auth::RuntimeCredentialAccountSelectionService
         for ConfiguredRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -839,7 +839,7 @@ mod tests {
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: ironclaw_auth::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             let now = chrono::Utc::now();
             Ok(ironclaw_auth::CredentialAccount {

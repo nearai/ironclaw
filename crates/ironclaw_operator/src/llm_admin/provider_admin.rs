@@ -5,13 +5,17 @@
 //! Reborn `$IRONCLAW_REBORN_HOME/config.toml` and reads the shared provider
 //! catalog through `ironclaw_llm`.
 
-use std::{fmt, path::PathBuf};
+use std::path::PathBuf;
 
+use ironclaw_host_api::operator_llm::{
+    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
+    RebornModelRoutesState, RebornProviderInfo, RebornProviderList, RebornProviderMetadata,
+    RebornProviderSelection, RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
+};
 use ironclaw_reborn_config::{
     DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
     begin_default_llm_slot_update, update_default_llm_slot,
 };
-use serde::Serialize;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -442,116 +446,6 @@ impl RebornProviderAdmin {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RebornProviderList {
-    pub providers: Vec<RebornProviderInfo>,
-    #[serde(skip_serializing)]
-    pub config_file: PathBuf,
-    #[serde(skip_serializing)]
-    pub providers_file: PathBuf,
-    pub v1_state: RebornV1State,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RebornProviderInfo {
-    pub id: String,
-    pub description: String,
-    pub default_model: String,
-    pub active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<RebornProviderMetadata>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RebornProviderMetadata {
-    pub aliases: Vec<String>,
-    pub protocol: String,
-    pub model_env: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
-    pub api_key_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential_kind: Option<&'static str>,
-    pub accepts_api_key: bool,
-    pub can_list_models: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RebornProviderStatus {
-    pub routes: RebornModelRoutesState,
-    pub default: Option<RebornProviderSelection>,
-    #[serde(skip_serializing)]
-    pub config_file: PathBuf,
-    #[serde(skip_serializing)]
-    pub providers_file: PathBuf,
-    pub v1_state: RebornV1State,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RebornProviderSelection {
-    pub provider_id: Option<String>,
-    pub provider_known: bool,
-    pub model: Option<String>,
-    pub api_key_env: Option<String>,
-    pub base_url: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RebornProviderWriteOutcome {
-    pub provider_id: String,
-    pub model: String,
-    pub api_key_env: Option<String>,
-    pub api_key_required: bool,
-    pub missing_api_key: bool,
-    #[serde(skip_serializing)]
-    pub config_file: PathBuf,
-    pub v1_state: RebornV1State,
-}
-
-/// An LLM provider fully resolvable from environment variables alone — see
-/// [`RebornProviderAdmin::detect_env_llm`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DetectedEnvLlm {
-    pub provider_id: String,
-    pub model: String,
-}
-
-/// Result of probing a not-yet-persisted provider/key/model combination —
-/// see [`RebornProviderAdmin::probe_candidate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderProbeOutcome {
-    pub ok: bool,
-    pub models: Vec<String>,
-    pub message: String,
-}
-
-/// Id of the tenant-pinned OpenRouter example overlay entry
-/// `ironclaw_reborn_cli::commands::config::init::PROVIDERS_STUB` seeds into
-/// a fresh `providers.json` — see [`RebornProviderAdmin::menu_entries`]'s
-/// doc for why this is filtered off the numbered menu. Named constant (not
-/// an inline literal) because the two crates aren't type-linked (the stub
-/// is a raw JSON string literal); `menu_entries_excludes_the_example_overlay_provider`
-/// pins them staying in sync.
-pub const EXAMPLE_OVERLAY_PROVIDER_ID: &str = "example-openrouter";
-
-/// One entry on the interactive `onboard` numbered provider menu — see
-/// [`RebornProviderAdmin::menu_entries`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProviderMenuEntry {
-    pub id: String,
-    pub display_name: String,
-    /// A MENU-LEVEL value — see [`effective_api_key_required`]'s doc for
-    /// why this can differ from the raw `providers.json` `api_key_required`
-    /// field for `session_token`-kind providers (`nearai`).
-    pub api_key_required: bool,
-    pub description: String,
-    pub aliases: Vec<String>,
-}
-
 /// Whether `definition` should be treated as requiring an API key for
 /// reborn onboarding purposes — the value [`RebornProviderAdmin::menu_entries`]
 /// puts in [`ProviderMenuEntry::api_key_required`], and what
@@ -573,49 +467,6 @@ fn effective_api_key_required(definition: &ironclaw_llm::registry::ProviderDefin
         return true;
     }
     definition.api_key_required
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum RebornV1State {
-    #[serde(rename = "not-used")]
-    NotUsed,
-}
-
-impl RebornV1State {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotUsed => "not-used",
-        }
-    }
-}
-
-impl fmt::Display for RebornV1State {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum RebornModelRoutesState {
-    #[serde(rename = "configured")]
-    Configured,
-    #[serde(rename = "not-configured")]
-    NotConfigured,
-}
-
-impl RebornModelRoutesState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Configured => "configured",
-            Self::NotConfigured => "not-configured",
-        }
-    }
-}
-
-impl fmt::Display for RebornModelRoutesState {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
 }
 
 #[derive(Debug, Error)]
@@ -688,6 +539,8 @@ fn active_selection_from_env(
     let resolved = match ironclaw_llm::resolve_provider_config_from_env(providers_path) {
         Ok(resolved) => resolved?,
         Err(error) => {
+            // silent-ok: provider list/status display degrades env-resolution
+            // failure to "no active provider" instead of blocking settings UI.
             tracing::debug!(%error, "active provider env resolution failed; reporting none");
             return None;
         }

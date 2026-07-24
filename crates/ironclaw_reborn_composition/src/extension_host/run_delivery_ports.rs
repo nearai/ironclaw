@@ -128,7 +128,7 @@ impl ApprovalPromptContextSource for ProjectionApprovalPromptContextSource {
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView> {
-        crate::projection::approval_prompt_context_view(
+        ironclaw_product::projection::approval_prompt_context_view(
             Some(self.approval_requests.as_ref()),
             gate_ref,
             owner_user_id,

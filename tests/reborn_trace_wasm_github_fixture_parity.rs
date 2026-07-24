@@ -20,6 +20,13 @@ use parity_qa_support::{
 };
 use serde_json::json;
 
+fn github_wasm_trace_wait() -> HarnessWaitConfig {
+    HarnessWaitConfig {
+        timeout: Duration::from_secs(45),
+        poll_interval: Duration::from_millis(10),
+    }
+}
+
 #[tokio::test]
 async fn reborn_trace_advertises_github_v2_wasm_capabilities() {
     let expected_capabilities =
@@ -47,10 +54,7 @@ async fn reborn_trace_advertises_github_v2_wasm_capabilities() {
         .wait_for_status_with_config(
             submitted.run_id,
             TurnStatus::Completed,
-            HarnessWaitConfig {
-                timeout: Duration::from_secs(45),
-                poll_interval: Duration::from_millis(10),
-            },
+            github_wasm_trace_wait(),
         )
         .await
         .expect("completed run");
@@ -137,10 +141,7 @@ async fn reborn_trace_wasm_guest_operation_failure_recovers_with_changed_action(
         .wait_for_status_with_config(
             submitted.run_id,
             TurnStatus::Completed,
-            HarnessWaitConfig {
-                timeout: Duration::from_secs(15),
-                poll_interval: Duration::from_millis(10),
-            },
+            github_wasm_trace_wait(),
         )
         .await
         .expect("WASM guest failure is recovered in the same run");
@@ -206,10 +207,7 @@ async fn reborn_trace_executes_github_v2_wasm_capability_matrix() {
         .wait_for_status_with_config(
             submitted.run_id,
             TurnStatus::Completed,
-            HarnessWaitConfig {
-                timeout: Duration::from_secs(15),
-                poll_interval: Duration::from_millis(10),
-            },
+            github_wasm_trace_wait(),
         )
         .await
         .expect("completed run");

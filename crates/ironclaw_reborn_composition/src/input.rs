@@ -209,11 +209,8 @@ pub struct RebornHostBindings {
     /// Injected credential-account visibility policy (extension-family-aware,
     /// e.g. the GSuite account visibility policy). `None` falls back to the safe
     /// fail-closed default in the product-auth services.
-    pub(crate) credential_account_visibility_policy: Option<
-        Arc<
-            dyn ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
-    >,
+    pub(crate) credential_account_visibility_policy:
+        Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     /// Resolved memory profile binding policy (issue #3537). `None` means the
     /// behavior-preserving default: every required memory profile binds to the
     /// host-bundled native provider. The CLI resolves this from the `[memory]`
@@ -787,7 +784,7 @@ impl RebornHostBindings {
 
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
-        config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
+        config: ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
         self.deployment.nearai_mcp_bootstrap_config = Some(config);
         self
@@ -795,7 +792,7 @@ impl RebornHostBindings {
 
     pub fn with_optional_nearai_mcp_bootstrap_config(
         mut self,
-        config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+        config: Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
         self.deployment.nearai_mcp_bootstrap_config = config;
         self
@@ -936,9 +933,7 @@ impl RebornHostBindings {
     /// Inject the credential-account visibility policy (see the field doc).
     pub fn with_credential_account_visibility_policy(
         mut self,
-        policy: Arc<
-            dyn ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
+        policy: Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>,
     ) -> Self {
         self.credential_account_visibility_policy = Some(policy);
         self

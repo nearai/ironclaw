@@ -56,6 +56,7 @@ mod lifecycle_auth_continuation;
 mod outbound_delivery;
 mod policy;
 mod product_surface_inbound;
+pub mod projection;
 mod reborn_services;
 mod run_delivery;
 mod trigger_final_reply_target;

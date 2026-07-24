@@ -95,9 +95,9 @@ pub use product_auth::api::auth::{
 };
 pub use product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock;
 pub use product_auth::credentials::runtime_credentials::{
-    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
-    RuntimeCredentialAccountVisibilityPolicy, map_account_error,
-    runtime_credential_account_selection_request,
+    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionRequest,
+    RuntimeCredentialAccountSelectionService, RuntimeCredentialAccountVisibilityPolicy,
+    map_account_error, runtime_credential_account_selection_request,
 };
 pub use product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 pub use product_auth::oauth::oauth_gate::{

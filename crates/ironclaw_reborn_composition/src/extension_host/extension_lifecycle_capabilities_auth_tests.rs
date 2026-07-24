@@ -13,7 +13,7 @@ use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 use crate::extension_host::extension_lifecycle_capabilities::EXTENSION_INSTALL_CAPABILITY_ID;
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
-use ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
+use ironclaw_auth::RuntimeCredentialAccountSelectionRequest;
 use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
 #[tokio::test]

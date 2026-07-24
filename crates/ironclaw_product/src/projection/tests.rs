@@ -4,8 +4,11 @@ use super::turn_events::{
 };
 use super::*;
 
+use crate::{
+    CapabilityActivityStatusView, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionItem,
+};
 use async_trait::async_trait;
-use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
@@ -13,13 +16,7 @@ use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
     InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ProcessId,
-    ResourceEstimate, ResourceScope, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId, VendorId,
-};
-use ironclaw_product::{
-    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
+    ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStorePort, RunStateError};
 use ironclaw_turns::{
@@ -36,8 +33,6 @@ use ironclaw_turns::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
-
-use ironclaw_product::AuthChallengeView;
 
 mod cursor_validation;
 mod display_preview;
@@ -69,6 +64,68 @@ fn resource_scope(
         thread_id: Some(thread_id.clone()),
         invocation_id,
     }
+}
+
+#[tokio::test]
+async fn projection_outbound_store_mount_is_tenant_user_scoped() {
+    let scoped = outbound_scoped(Arc::new(InMemoryBackend::new()));
+    let agent_id = AgentId::new("projection-outbound-agent").unwrap();
+    let thread_id = ThreadId::new("projection-outbound-thread").unwrap();
+    let scope_a = resource_scope(
+        &TenantId::new("projection-outbound-tenant-a").unwrap(),
+        &UserId::new("projection-outbound-user-a").unwrap(),
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let scope_b = resource_scope(
+        &TenantId::new("projection-outbound-tenant-b").unwrap(),
+        &UserId::new("projection-outbound-user-b").unwrap(),
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let same_tenant_other_user = resource_scope(
+        &scope_a.tenant_id,
+        &UserId::new("projection-outbound-user-c").unwrap(),
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let other_tenant_same_user = resource_scope(
+        &TenantId::new("projection-outbound-tenant-c").unwrap(),
+        &scope_a.user_id,
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let path = ScopedPath::new("/outbound/subscriptions/shared-key.json").unwrap();
+
+    scoped
+        .write_bytes(&scope_a, &path, br#"{"owner":"a"}"#.to_vec())
+        .await
+        .unwrap();
+
+    let owner_a = scoped.read_bytes(&scope_a, &path).await.unwrap();
+    assert_eq!(owner_a, br#"{"owner":"a"}"#);
+    assert!(
+        scoped.read_bytes(&scope_b, &path).await.is_err(),
+        "same outbound alias path must not cross tenant/user mount roots"
+    );
+    assert!(
+        scoped
+            .read_bytes(&same_tenant_other_user, &path)
+            .await
+            .is_err(),
+        "same outbound alias path must not cross user mount roots"
+    );
+    assert!(
+        scoped
+            .read_bytes(&other_tenant_same_user, &path)
+            .await
+            .is_err(),
+        "same outbound alias path must not cross tenant mount roots"
+    );
 }
 
 fn contains_run_status(
@@ -371,58 +428,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
         } else {
             Err(TurnError::ScopeNotFound)
         }
-    }
-}
-
-struct FakeAuthChallengeProvider {
-    expected_owner_user_id: UserId,
-    expected_run_id: TurnRunId,
-    expected_gate_ref: String,
-}
-
-struct FailingAuthChallengeProvider;
-
-#[async_trait]
-impl AuthChallengeProvider for FakeAuthChallengeProvider {
-    async fn challenge_for_gate(
-        &self,
-        _scope: &TurnScope,
-        owner_user_id: &UserId,
-        run_id: TurnRunId,
-        gate_ref: &str,
-        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
-        if owner_user_id != &self.expected_owner_user_id
-            || run_id != self.expected_run_id
-            || gate_ref != self.expected_gate_ref
-        {
-            return Ok(None);
-        }
-        Ok(Some(AuthChallengeView {
-            kind: AuthPromptChallengeKind::OAuthUrl,
-            provider: AuthProviderId::new("github".to_string()).unwrap(),
-            account_label: None,
-            authorization_url: Some(
-                OAuthAuthorizationUrl::new("https://github.com/login/oauth/authorize".to_string())
-                    .unwrap(),
-            ),
-            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
-            pairing: None,
-        }))
-    }
-}
-
-#[async_trait]
-impl AuthChallengeProvider for FailingAuthChallengeProvider {
-    async fn challenge_for_gate(
-        &self,
-        _scope: &TurnScope,
-        _owner_user_id: &UserId,
-        _run_id: TurnRunId,
-        _gate_ref: &str,
-        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
-        Err(ironclaw_auth::AuthProductError::BackendUnavailable)
     }
 }
 

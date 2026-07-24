@@ -15,12 +15,12 @@ use ironclaw_llm::LlmProvider;
 use ironclaw_product::ActiveModelReader;
 
 /// [`ActiveModelReader`] over the runtime's live primary provider handle.
-pub(crate) struct ProviderActiveModelReader {
+pub struct ProviderActiveModelReader {
     provider: Arc<dyn LlmProvider>,
 }
 
 impl ProviderActiveModelReader {
-    pub(crate) fn new(provider: Arc<dyn LlmProvider>) -> Self {
+    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
         Self { provider }
     }
 }

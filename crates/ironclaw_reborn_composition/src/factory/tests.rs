@@ -1015,7 +1015,7 @@ async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() 
         .await
         .expect("opener must succeed over a bare root");
 
-    let keys = crate::LlmKeyStore::new(store);
+    let keys = ironclaw_operator::LlmKeyStore::new(store);
     keys.put(
         "nearai",
         ironclaw_secrets::SecretMaterial::from("sk-test-value"),
@@ -1045,7 +1045,7 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
     let first = open_local_dev_secret_store(root)
         .await
         .expect("first open must succeed");
-    crate::LlmKeyStore::new(first)
+    ironclaw_operator::LlmKeyStore::new(first)
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-reopen-value"),
@@ -1056,7 +1056,7 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
     let second = open_local_dev_secret_store(root)
         .await
         .expect("second open (simulating `serve`) must succeed");
-    let read = crate::LlmKeyStore::new(second)
+    let read = ironclaw_operator::LlmKeyStore::new(second)
         .read("nearai")
         .await
         .expect("read through the second open")
@@ -1349,7 +1349,7 @@ fn nearai_bootstrap_input_with_base(
     api_key: &str,
 ) -> RebornHostBindings {
     crate::deployment::local_dev_build_input(owner, root).with_nearai_mcp_bootstrap_config(
-        crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
+        ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
             base_url,
             secrecy::SecretString::from(api_key.to_string()),
         )
@@ -1917,7 +1917,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         .extension_management;
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
-            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                 "https://private.near.ai",
                 secrecy::SecretString::from("nearai-second-key"),
             )
@@ -1931,7 +1931,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     .expect("second NEAR AI MCP bootstrap");
     assert_eq!(
         outcome,
-        crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
+        ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
     );
     let accounts = first
         .product_auth
@@ -1990,7 +1990,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         .expect("disable NEAR AI MCP extension");
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
-            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                 "https://private.near.ai",
                 secrecy::SecretString::from("nearai-test-key"),
             )
@@ -2004,7 +2004,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     .expect("bootstrap should reinstall discovered extension");
     assert_eq!(
         outcome,
-        crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
+        ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
     );
     // #6520 lifecycle projection is caller-scoped and takes the production
     // credential gate; the owner is the operator this runtime was built with.
@@ -2055,7 +2055,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
 #[tokio::test]
 async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
+    let config = ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
         "http://private.near.ai",
         secrecy::SecretString::from("nearai-test-key"),
     )

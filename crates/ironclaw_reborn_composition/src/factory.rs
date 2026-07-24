@@ -1391,9 +1391,8 @@ struct ProductAuthServicesCompositionInput {
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStorePort>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
-    credential_account_visibility_policy: Option<
-        Arc<dyn ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy>,
-    >,
+    credential_account_visibility_policy:
+        Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     /// Durable auth-flow record projection wired for the builder's OWN durable
     /// product-auth service (filesystem-backed local-dev / production-shaped
     /// path). `None` when a caller supplied its own product-auth bundle — that
@@ -3710,7 +3709,8 @@ struct RebornProductionBuildContext {
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
     scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
     account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
-    nearai_mcp_bootstrap_config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    nearai_mcp_bootstrap_config:
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     native_extension_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
     /// Binary-injected neutral first-party bundle set (extension-runtime DEL-7):
@@ -3722,11 +3722,8 @@ struct RebornProductionBuildContext {
     first_party_registrars:
         Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
     /// Injected credential-account visibility policy (see the build-input field).
-    credential_account_visibility_policy: Option<
-        Arc<
-            dyn ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
-    >,
+    credential_account_visibility_policy:
+        Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     workspace_filesystems: Option<WorkspaceFilesystems>,
     local_dev_storage_root: Option<PathBuf>,
     default_system_prompt_path: Option<PathBuf>,

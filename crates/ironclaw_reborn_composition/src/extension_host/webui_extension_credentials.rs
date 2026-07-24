@@ -6,7 +6,7 @@ use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthProductError, CredentialAccountLabel,
     CredentialAccountSelectionRequest, RebornAuthProductError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornProductAuthServices,
-    product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+    RuntimeCredentialAccountSelectionRequest,
 };
 use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_product::{

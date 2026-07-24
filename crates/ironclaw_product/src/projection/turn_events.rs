@@ -3,19 +3,17 @@ use std::{
     sync::Arc,
 };
 
-use async_trait::async_trait;
-use futures::{StreamExt, stream};
-use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
-};
-use ironclaw_product::{
-    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
-};
-use ironclaw_product::{
+use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref};
+use crate::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
+};
+use async_trait::async_trait;
+use futures::{StreamExt, stream};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
 };
 use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
@@ -31,8 +29,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_product::AuthChallengeProvider;
-use ironclaw_product::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
+use crate::AuthChallengeProvider;
+use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use ironclaw_runner::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
@@ -50,25 +48,25 @@ pub(super) struct TurnEventPayload {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct FailureExplanationInput {
-    pub(crate) failure_category: String,
-    pub(crate) fallback_summary: String,
+pub struct FailureExplanationInput {
+    pub failure_category: String,
+    pub fallback_summary: String,
     /// Model-visible, secret-scrubbed raw cause carried from the failure
     /// record (e.g. a provider HTTP status line or a missing schema-ref path).
     /// Unlike `fallback_summary`, this is the original error text so the
     /// explainer is given the real facts rather than only the coarse category.
     /// Producers scrub secret VALUES before populating it; the prompt builder
     /// re-runs [`sanitize_model_visible_text`] as defense in depth.
-    pub(crate) detail: Option<String>,
+    pub detail: Option<String>,
 }
 
 #[async_trait]
-pub(crate) trait FailureExplanationProvider: Send + Sync {
+pub trait FailureExplanationProvider: Send + Sync {
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String>;
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct NoopFailureExplanationProvider;
+pub struct NoopFailureExplanationProvider;
 
 pub(super) struct TurnEventDrain {
     pub(super) next_cursor: Option<TurnEventProjectionCursor>,
@@ -89,14 +87,14 @@ pub(super) enum TurnEventBridge {
     },
 }
 
-pub(crate) struct ModelFailureExplanationProvider {
+pub struct ModelFailureExplanationProvider {
     system_inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
     permits: Arc<Semaphore>,
 }
 
 impl ModelFailureExplanationProvider {
     #[cfg(test)]
-    pub(crate) fn new(system_inference: Arc<dyn SystemInferencePort>) -> Self {
+    pub fn new(system_inference: Arc<dyn SystemInferencePort>) -> Self {
         Self {
             system_inference: Arc::new(move || Arc::clone(&system_inference)),
             permits: Arc::new(Semaphore::new(
@@ -105,7 +103,7 @@ impl ModelFailureExplanationProvider {
         }
     }
 
-    pub(crate) fn from_factory(
+    pub fn from_factory(
         system_inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
     ) -> Self {
         Self {
@@ -500,7 +498,7 @@ async fn approval_gate_prompt(
 /// so both surface the *same* "what is being approved" data from one source.
 /// Returns `None` when no store is wired, the gate ref is not an approval ref,
 /// the request is missing, or the lookup fails.
-pub(crate) async fn approval_prompt_context_view(
+pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
