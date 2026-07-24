@@ -1,21 +1,23 @@
 """Typed inventory for harvested provider and representative product journeys."""
 
 import json
-import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
+import tomllib
 from journey_types import (
-    EvidenceRunner,
-    ExecutableEvidence,
+    CargoEvidence,
     JourneyCase,
     JourneyDeliveryTarget,
     JourneyExecution,
     JourneyIngress,
     ObservableAssertion,
+    ProductJourneyCase,
+    ProviderJourneyCase,
     ProviderWorld,
+    PytestEvidence,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 
@@ -49,8 +51,7 @@ _REPEAT_AFTER_RESET = {
     "qa_10f_slack_mention_encoding",
 }
 
-_PYTEST_PROVIDER_EVIDENCE = ExecutableEvidence(
-    runner=EvidenceRunner.PYTEST,
+_PYTEST_PROVIDER_EVIDENCE = PytestEvidence(
     source="tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
     test="test_qa_journey_provider_leg_replays_through_emulate",
 )
@@ -88,7 +89,7 @@ def _mutable_provider_worlds(calls: Iterable[dict]) -> tuple[ProviderWorld, ...]
     return tuple(sorted(worlds, key=str))
 
 
-def _provider_journey_cases() -> tuple[JourneyCase, ...]:
+def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     excluded = set(manifest["no_model_cases"])
     excluded.update(manifest.get("quarantined_model_cases", []))
@@ -102,7 +103,7 @@ def _provider_journey_cases() -> tuple[JourneyCase, ...]:
         if not any(call["name"] in EMULATE_SUPPORTED_TOOLS for call in calls):
             continue
         cases.append(
-            JourneyCase(
+            ProviderJourneyCase(
                 case_id=case_id,
                 trace=str(trace_path.relative_to(ROOT)),
                 provider_worlds=_provider_worlds(calls),
@@ -126,7 +127,7 @@ PROVIDER_JOURNEY_CASES = _provider_journey_cases()
 
 
 def _provider_journey_runs() -> tuple[
-    tuple[JourneyCase, ...],
+    tuple[ProviderJourneyCase, ...],
     tuple[str, ...],
 ]:
     runs = []
@@ -143,24 +144,21 @@ def _provider_journey_runs() -> tuple[
 PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = _provider_journey_runs()
 
 PRODUCT_JOURNEY_CASES = (
-    JourneyCase(
+    ProductJourneyCase(
         case_id="webui_text_turn_persists",
-        trace=None,
         provider_worlds=(ProviderWorld.NONE,),
         mutable_provider_worlds=(),
         ingress=JourneyIngress.WEBUI,
         execution=JourneyExecution.STANDALONE_REBORN,
         delivery_target=JourneyDeliveryTarget.WEBUI,
         assertions=(ObservableAssertion.DURABLE_STATE,),
-        evidence=ExecutableEvidence(
-            runner=EvidenceRunner.PYTEST,
+        evidence=PytestEvidence(
             source="tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
             test="test_reborn_v2_text_turn_persists",
         ),
     ),
-    JourneyCase(
+    ProductJourneyCase(
         case_id="slack_inbound_real_turn_reply",
-        trace=None,
         provider_worlds=(ProviderWorld.SLACK,),
         mutable_provider_worlds=(ProviderWorld.SLACK,),
         ingress=JourneyIngress.SLACK,
@@ -171,16 +169,14 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.EXACT_DESTINATION,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
-        evidence=ExecutableEvidence(
-            runner=EvidenceRunner.CARGO,
+        evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="slack_final_reply_flows_through_the_real_delivery_coordinator",
             target="reborn_integration_extension_delivery",
         ),
     ),
-    JourneyCase(
+    ProductJourneyCase(
         case_id="telegram_inbound_real_turn_reply",
-        trace=None,
         provider_worlds=(ProviderWorld.TELEGRAM,),
         mutable_provider_worlds=(ProviderWorld.TELEGRAM,),
         ingress=JourneyIngress.TELEGRAM,
@@ -191,16 +187,14 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.EXACT_DESTINATION,
             ObservableAssertion.CREDENTIAL_INJECTION,
         ),
-        evidence=ExecutableEvidence(
-            runner=EvidenceRunner.CARGO,
+        evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test="telegram_update_becomes_a_turn_and_a_coordinated_reply",
             target="reborn_integration_extension_delivery",
         ),
     ),
-    JourneyCase(
-        case_id="scheduled_trigger_default_slack_delivery",
-        trace=None,
+    ProductJourneyCase(
+        case_id="scheduled_trigger_slack_delivery_default_and_explicit",
         provider_worlds=(ProviderWorld.SLACK,),
         mutable_provider_worlds=(ProviderWorld.SLACK,),
         ingress=JourneyIngress.SCHEDULED_TRIGGER,
@@ -213,34 +207,7 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.CREDENTIAL_INJECTION,
             ObservableAssertion.RESTART_IDEMPOTENCY,
         ),
-        evidence=ExecutableEvidence(
-            runner=EvidenceRunner.CARGO,
-            source=("crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs"),
-            test=(
-                "scheduled_trigger_results_reach_exact_slack_targets_once_"
-                "across_restart"
-            ),
-            target="trigger_poller_e2e",
-            manifest="crates/ironclaw_reborn_composition/Cargo.toml",
-        ),
-    ),
-    JourneyCase(
-        case_id="scheduled_trigger_explicit_slack_delivery",
-        trace=None,
-        provider_worlds=(ProviderWorld.SLACK,),
-        mutable_provider_worlds=(ProviderWorld.SLACK,),
-        ingress=JourneyIngress.SCHEDULED_TRIGGER,
-        execution=JourneyExecution.REBORN_INTEGRATION,
-        delivery_target=JourneyDeliveryTarget.SLACK,
-        assertions=(
-            ObservableAssertion.DURABLE_STATE,
-            ObservableAssertion.EXACT_DESTINATION,
-            ObservableAssertion.EXACT_MUTATION_COUNT,
-            ObservableAssertion.CREDENTIAL_INJECTION,
-            ObservableAssertion.RESTART_IDEMPOTENCY,
-        ),
-        evidence=ExecutableEvidence(
-            runner=EvidenceRunner.CARGO,
+        evidence=CargoEvidence(
             source=("crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs"),
             test=(
                 "scheduled_trigger_results_reach_exact_slack_targets_once_"

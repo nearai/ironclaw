@@ -3,19 +3,26 @@
 import ast
 import json
 import re
-import tomllib
 from pathlib import Path
 
 import pytest
-
+import tomllib
 from journey_cases import (
     ALL_JOURNEY_CASES,
     PROVIDER_JOURNEY_CASES,
+    PROVIDER_JOURNEY_RUN_IDS,
+    PROVIDER_JOURNEY_RUNS,
     required_delivery_targets,
     required_ingresses,
     uncovered_surfaces,
 )
-from journey_types import EvidenceRunner, JourneyCase, ProviderWorld
+from journey_types import (
+    CargoEvidence,
+    JourneyCase,
+    ProviderJourneyCase,
+    ProviderWorld,
+    PytestEvidence,
+)
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -52,13 +59,48 @@ def _cargo_targets(manifest_path: Path) -> dict[str, str]:
     }
 
 
-def _disabling_pytest_marks(node: ast.AST) -> set[str]:
-    return {
+def _disabling_pytest_marks(
+    node: ast.AST,
+    aliases: dict[str, set[str]],
+) -> set[str]:
+    marks = {
         candidate.attr
         for candidate in ast.walk(node)
         if isinstance(candidate, ast.Attribute)
         and candidate.attr in _DISABLING_PYTEST_MARKS
     }
+    for candidate in ast.walk(node):
+        if isinstance(candidate, ast.Name):
+            marks.update(aliases.get(candidate.id, set()))
+    return marks
+
+
+def _pytest_mark_aliases(tree: ast.Module) -> dict[str, set[str]]:
+    aliases: dict[str, set[str]] = {}
+    changed = True
+    while changed:
+        changed = False
+        for statement in tree.body:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+            if statement.value is None:
+                continue
+            marks = _disabling_pytest_marks(statement.value, aliases)
+            for target in targets:
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id != "pytestmark"
+                    and marks
+                    and aliases.get(target.id) != marks
+                ):
+                    aliases[target.id] = marks
+                    changed = True
+    return aliases
 
 
 def _assert_python_test_declaration(
@@ -67,6 +109,7 @@ def _assert_python_test_declaration(
     source_label: str,
 ) -> None:
     tree = ast.parse(source)
+    aliases = _pytest_mark_aliases(tree)
     module_disabling_marks = set()
     for statement in tree.body:
         if isinstance(statement, (ast.Assign, ast.AnnAssign)):
@@ -79,7 +122,17 @@ def _assert_python_test_declaration(
                 isinstance(target, ast.Name) and target.id == "pytestmark"
                 for target in targets
             ):
-                module_disabling_marks.update(_disabling_pytest_marks(statement.value))
+                module_disabling_marks.update(
+                    _disabling_pytest_marks(statement.value, aliases)
+                )
+        elif (
+            isinstance(statement, ast.AugAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == "pytestmark"
+        ):
+            module_disabling_marks.update(
+                _disabling_pytest_marks(statement.value, aliases)
+            )
     assert not module_disabling_marks, (
         f"pytest evidence {test_name!r} is disabled by module-level marks "
         f"{sorted(module_disabling_marks)} in {source_label}"
@@ -97,7 +150,7 @@ def _assert_python_test_declaration(
     disabling_marks = {
         mark
         for decorator in tests[test_name].decorator_list
-        for mark in _disabling_pytest_marks(decorator)
+        for mark in _disabling_pytest_marks(decorator, aliases)
     }
     assert not disabling_marks, (
         f"pytest evidence {test_name!r} is disabled by test-level marks "
@@ -105,8 +158,7 @@ def _assert_python_test_declaration(
     )
 
 
-def _assert_python_evidence(case: JourneyCase) -> None:
-    evidence = case.evidence
+def _assert_python_evidence(case: JourneyCase, evidence: PytestEvidence) -> None:
     source_path = ROOT / evidence.source
     assert source_path.is_file(), f"{case.case_id}: missing {evidence.source}"
     _assert_python_test_declaration(
@@ -116,20 +168,78 @@ def _assert_python_evidence(case: JourneyCase) -> None:
     )
 
 
-def _assert_rust_evidence(case: JourneyCase) -> None:
-    evidence = case.evidence
-    source_path = ROOT / evidence.source
-    assert source_path.is_file(), f"{case.case_id}: missing {evidence.source}"
-    source = source_path.read_text(encoding="utf-8")
+def _rust_code_without_comments_or_strings(source: str) -> str:
+    """Mask Rust comments and strings while preserving line positions."""
+    result = list(source)
+    index = 0
+    block_depth = 0
+    while index < len(source):
+        if block_depth:
+            if source.startswith("/*", index):
+                result[index : index + 2] = "  "
+                block_depth += 1
+                index += 2
+            elif source.startswith("*/", index):
+                result[index : index + 2] = "  "
+                block_depth -= 1
+                index += 2
+            else:
+                if source[index] != "\n":
+                    result[index] = " "
+                index += 1
+            continue
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            end = len(source) if end == -1 else end
+            result[index:end] = " " * (end - index)
+            index = end
+            continue
+        if source.startswith("/*", index):
+            result[index : index + 2] = "  "
+            block_depth = 1
+            index += 2
+            continue
+        raw_match = re.match(r'(?:b)?r(#{0,255})"', source[index:])
+        if raw_match:
+            hashes = raw_match.group(1)
+            delimiter = f'"{hashes}'
+            end = source.find(delimiter, index + raw_match.end())
+            end = len(source) if end == -1 else end + len(delimiter)
+            for position in range(index, end):
+                if source[position] != "\n":
+                    result[position] = " "
+            index = end
+            continue
+        if source[index] == '"':
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                end += 1
+                if source[end - 1] == '"':
+                    break
+            for position in range(index, min(end, len(source))):
+                if source[position] != "\n":
+                    result[position] = " "
+            index = end
+            continue
+        index += 1
+    return "".join(result)
+
+
+def _assert_rust_test_declaration(
+    source: str,
+    test_name: str,
+    source_label: str,
+) -> None:
+    source = _rust_code_without_comments_or_strings(source)
     declaration = re.compile(
         rf"(?P<attributes>(?:^[ \t]*#\s*\[[^\n]+\][ \t]*\n)+)"
-        rf"^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+{re.escape(evidence.test)}\s*\(",
+        rf"^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+{re.escape(test_name)}\s*\(",
         re.MULTILINE,
     ).search(source)
-    assert declaration, (
-        f"{case.case_id}: Rust evidence {evidence.test!r} is missing from "
-        f"{evidence.source}"
-    )
+    assert declaration, f"Rust evidence {test_name!r} is missing from {source_label}"
     attributes = set(
         re.findall(
             r"#\s*\[\s*([A-Za-z_][A-Za-z0-9_:]*)",
@@ -137,36 +247,76 @@ def _assert_rust_evidence(case: JourneyCase) -> None:
         )
     )
     assert attributes & {"test", "tokio::test"}, (
-        f"{case.case_id}: Rust evidence {evidence.test!r} is not executable"
+        f"Rust evidence {test_name!r} is not executable"
     )
     assert not attributes & {"cfg", "cfg_attr", "ignore"}, (
-        f"{case.case_id}: Rust evidence {evidence.test!r} is disabled"
+        f"Rust evidence {test_name!r} is disabled"
     )
 
+
+def _assert_cargo_target(
+    case_id: str,
+    evidence: CargoEvidence,
+    source_path: Path,
+    root: Path = ROOT,
+) -> None:
     manifest_path = (
-        ROOT / evidence.manifest
+        root / evidence.manifest
         if evidence.manifest is not None
-        else ROOT / "Cargo.toml"
+        else root / "Cargo.toml"
     )
     targets = _cargo_targets(manifest_path)
     if evidence.target in targets:
         expected_source = (manifest_path.parent / targets[evidence.target]).resolve()
         assert expected_source == source_path.resolve(), (
-            f"{case.case_id}: Cargo target {evidence.target!r} points to "
+            f"{case_id}: Cargo target {evidence.target!r} points to "
             f"{expected_source}, not {source_path}"
         )
         return
 
     auto_target = manifest_path.parent / "tests" / f"{evidence.target}.rs"
     assert auto_target.resolve() == source_path.resolve(), (
-        f"{case.case_id}: unknown Cargo target {evidence.target!r} in {manifest_path}"
+        f"{case_id}: unknown Cargo target {evidence.target!r} in {manifest_path}"
     )
+
+
+def _assert_rust_evidence(case: JourneyCase, evidence: CargoEvidence) -> None:
+    source_path = ROOT / evidence.source
+    assert source_path.is_file(), f"{case.case_id}: missing {evidence.source}"
+    _assert_rust_test_declaration(
+        source_path.read_text(encoding="utf-8"),
+        evidence.test,
+        evidence.source,
+    )
+    _assert_cargo_target(case.case_id, evidence, source_path)
 
 
 def test_provider_journey_registry_matches_every_harvested_emulate_journey():
     """Manifest additions cannot bypass the typed whole-path runner."""
     registered = {case.case_id for case in PROVIDER_JOURNEY_CASES}
     assert registered == _manifest_provider_journeys()
+
+
+def test_provider_journey_runs_preserve_isolated_repeat_cases():
+    """The two isolation probes remain doubled while ordinary cases run once."""
+    expected_repeat_cases = {
+        "qa_5d_slack_strategy_doc_answer",
+        "qa_10f_slack_mention_encoding",
+    }
+    actual_repeat_cases = {
+        case.case_id for case in PROVIDER_JOURNEY_CASES if case.repeat_after_reset
+    }
+    assert actual_repeat_cases == expected_repeat_cases
+
+    expected_ids = []
+    for case in PROVIDER_JOURNEY_CASES:
+        expected_ids.append(case.case_id)
+        if case.case_id in expected_repeat_cases:
+            expected_ids.append(f"{case.case_id}-isolated-repeat")
+    assert list(PROVIDER_JOURNEY_RUN_IDS) == expected_ids
+    assert [case.case_id for case in PROVIDER_JOURNEY_RUNS] == [
+        case_id.removesuffix("-isolated-repeat") for case_id in expected_ids
+    ]
 
 
 def test_every_journey_has_complete_typed_executable_evidence():
@@ -180,16 +330,16 @@ def test_every_journey_has_complete_typed_executable_evidence():
     for case in ALL_JOURNEY_CASES:
         assert case.provider_worlds, f"{case.case_id}: provider_worlds is empty"
         assert case.assertions, f"{case.case_id}: assertions is empty"
-        if case.trace is not None:
+        if isinstance(case, ProviderJourneyCase):
             trace_path = ROOT / case.trace
             assert trace_path.is_file(), f"{case.case_id}: missing trace {case.trace}"
             assert ProviderWorld.NONE not in case.provider_worlds, (
                 f"{case.case_id}: provider trace has no classified provider world"
             )
-        if case.evidence.runner is EvidenceRunner.PYTEST:
-            _assert_python_evidence(case)
+        if isinstance(case.evidence, PytestEvidence):
+            _assert_python_evidence(case, case.evidence)
         else:
-            _assert_rust_evidence(case)
+            _assert_rust_evidence(case, case.evidence)
 
 
 def test_every_supported_ingress_and_delivery_target_has_journey_evidence():
@@ -235,13 +385,64 @@ def test_surface_gate_reports_a_new_uncovered_surface():
             "def test_required_journey():\n"
             "    pass\n"
         ),
+        (
+            "skip = pytest.mark.skip\n"
+            "@skip(reason='disabled')\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
+        (
+            "pytestmark = []\n"
+            "pytestmark += [pytest.mark.skip]\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
     ],
 )
 def test_python_evidence_rejects_disabled_tests(source: str):
     """A named Python test cannot satisfy the gate while disabled."""
-    with pytest.raises(AssertionError, match="disabled by .* marks"):
+    with pytest.raises(AssertionError, match=r"disabled by .* marks"):
         _assert_python_test_declaration(
             source,
             "test_required_journey",
             "synthetic.py",
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '#[cfg(feature = "disabled")]\n#[test]\nfn required_journey() {}\n',
+        "#[cfg_attr(test, ignore)]\n#[test]\nfn required_journey() {}\n",
+        "#[ignore]\n#[test]\nfn required_journey() {}\n",
+        "/*\n#[tokio::test]\nasync fn required_journey() {}\n*/\n",
+    ],
+)
+def test_rust_evidence_rejects_disabled_or_commented_tests(source: str):
+    """Disabled or commented Rust declarations cannot satisfy the gate."""
+    with pytest.raises(AssertionError, match=r"(disabled|missing)"):
+        _assert_rust_test_declaration(source, "required_journey", "synthetic.rs")
+
+
+def test_cargo_evidence_rejects_a_misdirected_target(tmp_path: Path):
+    """A Cargo target must resolve to the source named by the evidence."""
+    (tmp_path / "tests").mkdir()
+    manifest_path = tmp_path / "Cargo.toml"
+    manifest_path.write_text(
+        '[[test]]\nname = "journey"\npath = "tests/actual.rs"\n',
+        encoding="utf-8",
+    )
+    expected_source = tmp_path / "tests/expected.rs"
+    expected_source.touch()
+    evidence = CargoEvidence(
+        source="tests/expected.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="points to"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            expected_source,
+            root=tmp_path,
         )

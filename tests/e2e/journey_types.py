@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TypeAlias
 
 
 class ProviderWorld(StrEnum):
@@ -41,33 +42,49 @@ class ObservableAssertion(StrEnum):
     RESTART_IDEMPOTENCY = "restart_idempotency"
 
 
-class EvidenceRunner(StrEnum):
-    PYTEST = "pytest"
-    CARGO = "cargo"
+@dataclass(frozen=True)
+class PytestEvidence:
+    """One exact Pytest declaration that CI can execute."""
+
+    source: str
+    test: str
 
 
 @dataclass(frozen=True)
-class ExecutableEvidence:
-    """One exact test declaration that CI can execute."""
+class CargoEvidence:
+    """One exact Cargo test declaration that CI can execute."""
 
-    runner: EvidenceRunner
     source: str
     test: str
-    target: str | None = None
+    target: str
     manifest: str | None = None
 
 
 @dataclass(frozen=True)
-class JourneyCase:
-    """One declarative whole-path proof; runners retain execution logic."""
+class JourneyCaseBase:
+    """Shared metadata for one declarative whole-path proof."""
 
     case_id: str
-    trace: str | None
     provider_worlds: tuple[ProviderWorld, ...]
     mutable_provider_worlds: tuple[ProviderWorld, ...]
     ingress: JourneyIngress
     execution: JourneyExecution
     delivery_target: JourneyDeliveryTarget
     assertions: tuple[ObservableAssertion, ...]
-    evidence: ExecutableEvidence
+    evidence: PytestEvidence | CargoEvidence
+
+
+@dataclass(frozen=True)
+class ProviderJourneyCase(JourneyCaseBase):
+    """A harvested provider journey whose full-path runner requires a trace."""
+
+    trace: str
     repeat_after_reset: bool = False
+
+
+@dataclass(frozen=True)
+class ProductJourneyCase(JourneyCaseBase):
+    """A trace-less product journey proved by its owning executable test."""
+
+
+JourneyCase: TypeAlias = ProviderJourneyCase | ProductJourneyCase
