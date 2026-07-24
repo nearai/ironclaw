@@ -5,10 +5,13 @@ import {
   RUN_FAILURE_ID_PREFIX,
 } from "./message-types";
 
-export const CONNECTION_LOST_RUN_FAILURE_MESSAGE =
-  "Connection to the server was lost. Please reconnect and try again.";
-const REQUEST_FAILURE_FALLBACK_MESSAGE =
-  "The request failed before it could be sent.";
+export const CONNECTION_LOST_RUN_FAILURE_KEY = "chat.failure.connectionLost";
+const REQUEST_FAILURE_FALLBACK_KEY = "chat.failure.request";
+
+type Translate = (
+  key: string,
+  params?: Record<string, string | number>,
+) => string;
 
 type RunFailureMessageInput = {
   status?: string | null;
@@ -52,7 +55,7 @@ export function failureMessageForRunStatus({
   failureSummary,
   connectionStatus,
   connectionInterrupted,
-}: RunFailureMessageInput = {}): string {
+}: RunFailureMessageInput, t: Translate): string {
   if (
     shouldPreferConnectionLostRunFailure({
       failureCategory,
@@ -61,17 +64,19 @@ export function failureMessageForRunStatus({
       connectionInterrupted,
     })
   ) {
-    return CONNECTION_LOST_RUN_FAILURE_MESSAGE;
+    return t(CONNECTION_LOST_RUN_FAILURE_KEY);
   }
   if (typeof failureSummary === "string" && failureSummary.trim()) {
     return failureSummary.trim();
   }
   if (typeof failureCategory === "string" && failureCategory.trim()) {
-    return `The run failed: ${failureCategory.trim().replaceAll("_", " ")}.`;
+    return t("chat.failure.runCategory", {
+      detail: failureCategory.trim().replaceAll("_", " "),
+    });
   }
   return status === "recovery_required"
-    ? "The run is awaiting recovery — backend reported `recovery_required`."
-    : "The run failed before producing a reply.";
+    ? t("chat.failure.recoveryRequired")
+    : t("chat.failure.run");
 }
 
 type StreamFailureMessageInput = {
@@ -92,24 +97,57 @@ function messageContainsSensitiveCredential(message: string): boolean {
   );
 }
 
-export function failureMessageForRequestError(error: unknown): string {
+function isClientGeneratedRequestMessage(
+  error: unknown,
+  message: string,
+): boolean {
+  if (!message) return true;
+  if (messageContainsSensitiveCredential(message)) return true;
+  if (typeof error !== "object" || error === null) return false;
+
+  const requestError = error as {
+    name?: unknown;
+    body?: unknown;
+    payload?: unknown;
+    statusText?: unknown;
+  };
+  if (requestError.name === "TypeError" || requestError.name === "AbortError") {
+    return true;
+  }
+  if (requestError.name !== "ApiError") return false;
+
+  if (requestError.payload && typeof requestError.payload === "object") {
+    return true;
+  }
+  const body = normalizeText(requestError.body);
+  if (body && !body.startsWith("{") && !body.startsWith("[")) {
+    return false;
+  }
+  const statusText = normalizeText(requestError.statusText);
+  return !body || message === statusText || message === "Request failed";
+}
+
+export function failureMessageForRequestError(
+  error: unknown,
+  t: Translate,
+): string {
   const message =
     typeof (error as { message?: unknown })?.message === "string"
       ? (error as { message: string }).message.trim()
       : "";
-  if (!message) return REQUEST_FAILURE_FALLBACK_MESSAGE;
-  return messageContainsSensitiveCredential(message)
-    ? REQUEST_FAILURE_FALLBACK_MESSAGE
+  return isClientGeneratedRequestMessage(error, message)
+    ? t(REQUEST_FAILURE_FALLBACK_KEY)
     : message;
 }
 
 export function failureMessageForStreamError(
-  { error, kind, retryable }: StreamFailureMessageInput = {},
+  { error, kind, retryable }: StreamFailureMessageInput,
+  t: Translate,
 ): string {
   const detail = humanizeFailureToken(kind || error || "stream_error");
   return retryable
-    ? `The chat stream hit a retryable error: ${detail}.`
-    : `The chat stream failed: ${detail}.`;
+    ? t("chat.failure.streamRetryable", { detail })
+    : t("chat.failure.stream", { detail });
 }
 
 function humanizeFailureToken(token: unknown): string {
@@ -121,7 +159,10 @@ function humanizeFailureToken(token: unknown): string {
 
 export function rewriteConnectionLostRunFailures(
   messages: any,
-  { runId }: { runId?: string | null } = {},
+  {
+    runId,
+    t,
+  }: { runId?: string | null; t: Translate },
 ) {
   if (!Array.isArray(messages)) return messages;
   if (!runId) return messages;
@@ -136,7 +177,7 @@ export function rewriteConnectionLostRunFailures(
       failureCategory: message.failureCategory,
       failureSummary: message.failureSummary || message.content,
       connectionInterrupted: true,
-    });
+    }, t);
     if (content === message.content) return message;
     changed = true;
     return { ...message, content };
@@ -149,21 +190,27 @@ export function upsertConnectionLostRunFailure(
   {
     runId,
     timestamp,
-  }: { runId?: string | null; timestamp?: string | null } = {},
+    t,
+  }: {
+    runId?: string | null;
+    timestamp?: string | null;
+    t: Translate;
+  },
 ) {
   if (!Array.isArray(messages)) return messages;
   const messageId = `${RUN_FAILURE_ID_PREFIX}${runId || "connection-lost"}`;
+  const content = t(CONNECTION_LOST_RUN_FAILURE_KEY);
   const nextMessage = createErrorChatMessage({
     id: messageId,
-    content: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+    content,
     timestamp: timestamp || new Date().toISOString(),
     failureStatus: "failed",
     failureCategory: "connection_lost",
-    failureSummary: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+    failureSummary: content,
   });
   const existing = messages.findIndex((message) => message?.id === messageId);
   if (existing < 0) return [...messages, nextMessage];
-  if (messages[existing]?.content === CONNECTION_LOST_RUN_FAILURE_MESSAGE) {
+  if (messages[existing]?.content === content) {
     return messages;
   }
   const next = [...messages];

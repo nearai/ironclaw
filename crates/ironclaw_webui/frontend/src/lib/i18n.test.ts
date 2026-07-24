@@ -240,6 +240,26 @@ test("locale packs include automation action failure copy", () => {
   }
 });
 
+test("locale packs include client-generated chat failure copy", () => {
+  const requiredKeys = [
+    "chat.failure.connectionLost",
+    "chat.failure.request",
+    "chat.failure.runCategory",
+    "chat.failure.recoveryRequired",
+    "chat.failure.run",
+    "chat.failure.streamRetryable",
+    "chat.failure.stream",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
 test("locale packs include extension setup and OAuth failure copy", () => {
   const requiredKeys = [
     "extensions.state.setup_needed",

@@ -66,6 +66,7 @@ export function useChatEvents({
   connectionContextForRunFailure = emptyConnectionContext,
   onStreamError = noop,
   onRunSettled,
+  t,
 }) {
   // Track which runIds we've already settled so that SSE replays
   // (reconnect with `last-event-id`, repeated snapshots) don't trigger
@@ -229,6 +230,7 @@ export function useChatEvents({
             failureCategory: failureCategoryFromRunState(runState),
             failureSummary: null,
             connectionContextForRunFailure,
+            t,
           });
           settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
@@ -255,6 +257,7 @@ export function useChatEvents({
             error: frame.error,
             kind: frame.kind,
             retryable: false,
+            t,
           });
           return;
         }
@@ -278,6 +281,7 @@ export function useChatEvents({
             toolActivityStateRef,
             noteConnectionInterruptedRunId,
             connectionContextForRunFailure,
+            t,
           });
           return;
         }
@@ -299,6 +303,7 @@ export function useChatEvents({
       noteConnectionInterruptedRunId,
       connectionContextForRunFailure,
       onRunSettled,
+      t,
     ],
   );
 }
@@ -407,6 +412,7 @@ function applyProjectionItems({
   toolActivityStateRef,
   noteConnectionInterruptedRunId,
   connectionContextForRunFailure,
+  t,
 }) {
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
@@ -493,6 +499,7 @@ function applyProjectionItems({
             promptRunIdRef,
             locallyResolvedGatesRef,
             connectionContextForRunFailure,
+            t,
           });
           activeRunId = null;
         }
@@ -572,6 +579,7 @@ function applyProjectionItems({
             failureCategory,
             failureSummary,
             connectionContextForRunFailure,
+            t,
           });
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
@@ -748,6 +756,7 @@ function settleTerminalRunAfterResolvedPrompt({
   promptRunIdRef,
   locallyResolvedGatesRef,
   connectionContextForRunFailure,
+  t,
 }) {
   setIsProcessing(false);
   setPendingGate(null);
@@ -765,6 +774,7 @@ function settleTerminalRunAfterResolvedPrompt({
       failureCategory,
       failureSummary,
       connectionContextForRunFailure,
+      t,
     });
   }
 }
@@ -791,6 +801,7 @@ function appendRunFailureMessage(
     failureCategory,
     failureSummary,
     connectionContextForRunFailure,
+    t,
   },
 ) {
   // Dedup by `err-<runId>` so replays of the same projection
@@ -810,7 +821,7 @@ function appendRunFailureMessage(
       failureCategory,
       failureSummary,
       ...connectionContext,
-    });
+    }, t);
     if (existing >= 0) {
       const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
       if (!hasUsefulUpdate || prev[existing].content === content) return prev;
@@ -864,7 +875,7 @@ function promotedRunFailureMessage(message, messageId) {
     : message;
 }
 
-function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
+function appendStreamFailureMessage(setMessages, { error, kind, retryable, t }) {
   const baseMessageId = streamFailureMessageId({ error, kind, retryable });
   setMessages((prev) => {
     const lastMessage = prev[prev.length - 1];
@@ -874,7 +885,7 @@ function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
       ...prev,
       createErrorChatMessage({
         id: messageId,
-        content: failureMessageForStreamError({ error, kind, retryable }),
+        content: failureMessageForStreamError({ error, kind, retryable }, t),
         timestamp: new Date().toISOString(),
       }),
     ];
