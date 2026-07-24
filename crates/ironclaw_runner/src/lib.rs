@@ -21,6 +21,7 @@ pub mod app_loop_family;
 mod context_shadow;
 pub mod driver_registry;
 pub mod failure_categories;
+pub mod failure_classification;
 pub mod failure_lane;
 pub mod failure_summary;
 pub mod hook_gate_refs;

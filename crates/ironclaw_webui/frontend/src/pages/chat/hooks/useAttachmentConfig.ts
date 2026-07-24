@@ -3,7 +3,7 @@ import { fetchSession, readStoredToken } from "../../../lib/api";
 import { FALLBACK_ATTACHMENT_LIMITS } from "../lib/attachments";
 
 // Map the server's `session.attachments` contract (snake_case wire shape from
-// `WebUiAttachmentCapabilities`) into the camelCase limits `stageFiles`
+// `ProductAttachmentCapabilities`) into the camelCase limits `stageFiles`
 // consumes. Falls back to the conservative client defaults until the session
 // resolves; the server re-validates regardless, so the fallback only changes
 // how early the picker warns.

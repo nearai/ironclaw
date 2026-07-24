@@ -88,21 +88,23 @@ pub use first_party_tools::{
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
     HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
-    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
+    register_outbound_delivery_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -110,8 +112,8 @@ pub use first_party_tools::{
 };
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
-    InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
-    InvocationServicesResolver, LocalInvocationServicesResolver, ToolCallHttpEgress,
+    ConfiguredInvocationServicesResolver, InvocationServices, InvocationServicesError,
+    InvocationServicesResolutionRequest, InvocationServicesResolver, ToolCallHttpEgress,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
@@ -133,6 +135,11 @@ pub use sandbox_process::{
     RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
     RebornScopedSandboxCommandTransport,
 };
+/// Scoped cleanup guard consumed by the generic extension activation
+/// transaction's composition adapter. Raw obligation handoff stores remain
+/// private; `reborn_host_runtime_services_do_not_expose_lower_substrate_handles`
+/// enforces that direct path stays closed.
+pub use services::ProductAuthRuntimeHandoffGuard;
 pub use services::{
     ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,
     ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
@@ -605,6 +612,7 @@ pub enum RuntimeFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    GateDeclined,
     Internal,
     InvalidInput,
     InvalidOutput,
@@ -627,6 +635,7 @@ impl RuntimeFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::GateDeclined => "gate_declined",
             Self::Internal => "internal",
             Self::InvalidInput => "invalid_input",
             Self::InvalidOutput => "invalid_output",
@@ -866,6 +875,7 @@ pub type RuntimeAuthResume = (
     Value,
     Option<ApprovalRequestId>,
 );
+pub type RuntimeAuthDecline = (ExecutionContext, CapabilityId);
 
 #[async_trait]
 pub trait HostRuntime: Send + Sync {
@@ -916,6 +926,19 @@ pub trait HostRuntime: Send + Sync {
                 RuntimeFailureKind::Unavailable,
                 Some("capability auth-resume is unsupported by this host runtime".to_string()),
             ),
+        ))
+    }
+
+    /// Terminalize a capability invocation whose auth gate was denied by the
+    /// user. Implementations must durably fail the exact blocked invocation and
+    /// must not dispatch the capability. The default fails closed because it
+    /// cannot provide that durable evidence.
+    async fn decline_auth_capability(
+        &self,
+        _request: RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Err(HostRuntimeError::unavailable(
+            "capability auth decline is unsupported by this host runtime",
         ))
     }
 

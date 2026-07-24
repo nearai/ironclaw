@@ -6,6 +6,8 @@
 //! caller path (auth layer + body limit + rate limit + handler +
 //! `RebornProductAuthServices`) is exercised, not just the facade helpers.
 
+// arch-exempt: large_file, product-auth route contracts stay in one caller-level suite until the WebUI route split lands, plan #5985
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,22 +19,11 @@ use ironclaw_auth::{
     NewCredentialAccount,
 };
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
-use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_product_workflow::{
-    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
+    TenantId, UserId,
 };
+use ironclaw_product::rejecting_product_surface_error;
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
@@ -81,211 +72,29 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl RebornServicesApi for UnusedServices {
-    async fn create_thread(
+impl ironclaw_host_api::ProductSurface for UnusedServices {
+    async fn invoke(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 
-    async fn submit_turn(
+    async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 
     async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 }
 
@@ -301,7 +110,7 @@ fn build_fixture() -> AppFixture {
         Arc::new(NoopAuthDispatcher::default()),
     ));
     let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices),
+        product_surface: Arc::new(UnusedServices),
         product_auth: Some(product_auth),
         readiness: RebornReadiness::disabled(),
     };
@@ -1207,7 +1016,7 @@ async fn follow_up_routes_require_invocation_id() {
 
 #[test]
 fn auth_prompt_view_serialises_optional_fields_when_present() {
-    use ironclaw_product_adapters::{AuthPromptChallengeKind, AuthPromptView};
+    use ironclaw_product::{AuthPromptChallengeKind, AuthPromptView};
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1228,6 +1037,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
                 .with_timezone(&chrono::Utc),
         ),
         connection: None,
+        pairing: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
@@ -1249,7 +1059,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
 
 #[test]
 fn auth_prompt_view_omits_optional_fields_when_absent() {
-    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_product::AuthPromptView;
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1264,6 +1074,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
         authorization_url: None,
         expires_at: None,
         connection: None,
+        pairing: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert!(
@@ -1299,7 +1110,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
 #[test]
 fn auth_prompt_view_deserialises_without_optional_fields() {
     // Simulate a legacy serialised row (no new fields) — must round-trip as None.
-    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_product::AuthPromptView;
 
     let legacy_json = r#"{
         "turn_run_id": "11111111-1111-1111-1111-111111111111",
@@ -1324,7 +1135,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1688,7 +1499,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1768,7 +1579,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         InMemoryAuthProductServices, NewAuthFlow, TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 

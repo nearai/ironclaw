@@ -9,12 +9,10 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_adapters::{
-    AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope,
-    ProductProjectionReadInput, ProductRejection, ProductRejectionKind, ProductWorkflow,
-    ProjectionReadRequest, ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
+use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_product::{
+    AuthRequirement, ProductInboundAck, ProductInboundPayload, ProductOutboundEnvelope,
+    ProductRejection, ProductRejectionKind, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
     OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
@@ -33,13 +31,15 @@ use ironclaw_reborn_openai_compat::{
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
-use support::in_memory_openai_compat_ref_store;
+use support::{
+    FakeProductSurface, RecordedProductSurfaceSubmit, in_memory_openai_compat_ref_store,
+};
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn responses_create_submits_product_workflow_and_returns_projection() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_create_submits_product_surface_and_returns_projection() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let reader = Arc::new(StaticResponsesReader::completed("hello from reborn"));
     let router = test_router(workflow.clone(), reader);
 
@@ -77,8 +77,8 @@ async fn responses_create_submits_product_workflow_and_returns_projection() {
 }
 
 #[tokio::test]
-async fn responses_context_extension_is_injected_into_product_workflow_payload() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_context_extension_is_injected_into_product_surface_payload() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("ok")),
@@ -119,8 +119,8 @@ async fn responses_context_extension_is_injected_into_product_workflow_payload()
 }
 
 #[tokio::test]
-async fn responses_legacy_untyped_message_input_is_normalized_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_legacy_untyped_message_input_is_normalized_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("ok")),
@@ -156,8 +156,8 @@ async fn responses_legacy_untyped_message_input_is_normalized_before_product_wor
 }
 
 #[tokio::test]
-async fn responses_context_alias_is_accepted_and_sanitized_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_context_alias_is_accepted_and_sanitized_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("ok")),
@@ -196,7 +196,7 @@ async fn responses_context_alias_is_accepted_and_sanitized_before_product_workfl
 
 #[tokio::test]
 async fn responses_idempotency_replays_same_id_and_conflicts_on_different_body() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
         OpenAiResponseId::new("resp_placeholder").expect("id"),
         "ok",
@@ -250,7 +250,7 @@ async fn responses_idempotency_replays_same_id_and_conflicts_on_different_body()
 
 #[tokio::test]
 async fn responses_idempotency_replays_across_route_aliases() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
         OpenAiResponseId::new("resp_placeholder").expect("id"),
         "ok",
@@ -290,7 +290,7 @@ async fn responses_idempotency_replays_across_route_aliases() {
 
 #[tokio::test]
 async fn responses_idempotency_replay_without_accepted_ack_resubmits() {
-    let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(deferred_busy_ack()));
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
@@ -326,7 +326,7 @@ async fn responses_idempotency_replay_without_accepted_ack_resubmits() {
 
 #[tokio::test]
 async fn responses_handlers_require_authenticated_caller_before_side_effects() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
@@ -362,7 +362,7 @@ async fn responses_handlers_require_authenticated_caller_before_side_effects() {
 
 #[tokio::test]
 async fn responses_retrieve_reads_authorized_projection() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
         OpenAiResponseId::new("resp_placeholder").expect("id"),
@@ -397,8 +397,64 @@ async fn responses_retrieve_reads_authorized_projection() {
 }
 
 #[tokio::test]
-async fn responses_cancel_uses_product_workflow_control_action() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_retrieve_continuation_uses_stored_projection_thread() {
+    let workflow = Arc::new(FakeProductSurface::new());
+    let ref_store = in_memory_openai_compat_ref_store();
+    let reader = Arc::new(RecordingResponsesReader::new(completed_response(
+        OpenAiResponseId::new("resp_placeholder").expect("id"),
+        "read",
+    )));
+    let router = router_with_store(workflow.clone(), ref_store, reader.clone());
+
+    let first = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                json!({"model": "gpt-reborn", "input": "hello"}),
+                None,
+            ))
+            .await
+            .expect("first create"),
+    )
+    .await;
+    let first_id = first["id"].as_str().expect("first id");
+    let continuation = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                json!({
+                    "model": "gpt-reborn",
+                    "previous_response_id": first_id,
+                    "input": "continue"
+                }),
+                None,
+            ))
+            .await
+            .expect("continuation create"),
+    )
+    .await;
+    let continuation_id = continuation["id"].as_str().expect("continuation id");
+
+    let retrieved = router
+        .oneshot(get_request(&format!("/api/v1/responses/{continuation_id}")))
+        .await
+        .expect("retrieve continuation");
+
+    assert_eq!(retrieved.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 2);
+    let read_requests = reader.read_requests();
+    assert_eq!(read_requests.len(), 1);
+    assert_eq!(
+        read_requests[0].projection_read.scope.thread_id.as_str(),
+        first_id
+    );
+}
+
+#[tokio::test]
+async fn responses_cancel_uses_product_surface_control_action() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(StaticResponsesReader::cancelled());
     let router = router_with_store(workflow.clone(), ref_store, reader);
@@ -425,23 +481,27 @@ async fn responses_cancel_uses_product_workflow_control_action() {
     assert_eq!(cancelled.status(), http::StatusCode::OK);
     let body = json_body(cancelled).await;
     assert_eq!(body["status"], "cancelled");
-    assert_eq!(workflow.accepted_count(), 2);
-    let cancel_payload = serde_json::to_string(
-        workflow
-            .accepted_envelopes()
-            .last()
-            .expect("cancel envelope")
-            .payload(),
-    )
-    .expect("payload");
-    assert!(cancel_payload.contains("cancel_run"));
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(workflow.cancel_count(), 1);
+    let cancel_request = workflow.cancel_requests().pop().expect("cancel request");
+    assert_eq!(
+        cancel_request.client_action_id.as_deref(),
+        Some(format!("{id}:cancel").as_str())
+    );
+    assert!(
+        cancel_request
+            .reason
+            .as_deref()
+            .expect("cancel reason")
+            .contains("Responses API")
+    );
 }
 
 #[tokio::test]
-async fn responses_cancel_rejected_busy_ack_returns_429_and_does_not_read_projection() {
-    // Create a response first (FakeProductWorkflow returns Accepted by default) so the
+async fn responses_cancel_product_surface_busy_returns_429_and_does_not_read_projection() {
+    // Create a response first (FakeProductSurface returns Accepted by default) so the
     // ref_store has a valid mapping that the cancel path can look up.
-    let create_workflow = Arc::new(FakeProductWorkflow::new());
+    let create_workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
         OpenAiResponseId::new("resp_placeholder").expect("id"),
@@ -463,20 +523,21 @@ async fn responses_cancel_rejected_busy_ack_returns_429_and_does_not_read_projec
     .await;
     let id = created["id"].as_str().expect("id from create");
 
-    // Now issue cancel through a router whose workflow always returns RejectedBusy.
-    let cancel_workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    // Now issue cancel through a router whose ProductSurface reports the run is busy.
+    let cancel_workflow = Arc::new(FakeProductSurface::with_error(support::rate_limited()));
     let cancel_router =
-        router_with_product_workflow(cancel_workflow, ref_store, reader.clone(), caller());
+        router_with_product_surface(cancel_workflow.clone(), ref_store, reader.clone(), caller());
     let cancelled = cancel_router
         .oneshot(post_empty(&format!("/api/v1/responses/{id}/cancel")))
         .await
         .expect("cancel");
 
-    // RejectedBusy on cancel must surface as a non-retryable 429 (terminal/settled outcome).
+    // ProductSurface busy on cancel must surface as a non-retryable 429.
     assert_eq!(cancelled.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(cancel_workflow.cancel_count(), 0);
 
-    // accepted_cancel_ack_from_ack errors out before read_response is called, so the
-    // projection reader must never have been touched for the cancel leg.
+    // ProductSurface errors before read_response is called, so the projection
+    // reader must never have been touched for the cancel leg.
     assert_eq!(
         reader.read_count(),
         0,
@@ -485,8 +546,8 @@ async fn responses_cancel_rejected_busy_ack_returns_429_and_does_not_read_projec
 }
 
 #[tokio::test]
-async fn unsupported_responses_tools_and_unwired_stream_reject_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn unsupported_responses_tools_and_unwired_stream_reject_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -531,13 +592,9 @@ async fn unsupported_responses_tools_and_unwired_stream_reject_before_product_wo
 }
 
 #[tokio::test]
-async fn responses_product_workflow_error_redacts_request_and_backend_details() {
-    let workflow = Arc::new(ErrorWorkflow::new(ProductAdapterError::Internal {
-        detail: RedactedString::new(
-            "provider stack /host/path /Users/alice SECRET_SENTINEL sk-live runtime trace",
-        ),
-    }));
-    let router = router_with_product_workflow(
+async fn responses_product_surface_error_redacts_request_and_backend_details() {
+    let workflow = Arc::new(FakeProductSurface::with_error(support::internal_error()));
+    let router = router_with_product_surface(
         workflow,
         in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -564,7 +621,7 @@ async fn responses_product_workflow_error_redacts_request_and_backend_details() 
 
 #[tokio::test]
 async fn responses_empty_tools_array_is_absent_equivalent() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("ok")),
@@ -625,7 +682,7 @@ async fn responses_create_ack_error_paths_are_sanitized() {
 async fn responses_binding_required_rejection_carries_input_param() {
     // BindingRequired on the Responses surface must carry param="input" so API
     // consumers can identify which request field is the root cause.
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::BindingRequired,
     )));
     let service = OpenAiResponsesWorkflow::new(
@@ -658,7 +715,7 @@ async fn responses_binding_required_rejection_carries_input_param() {
 async fn responses_invalid_request_rejection_carries_input_param() {
     // InvalidRequest on the Responses surface must carry param="input" so API
     // consumers can identify which request field is the root cause.
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::InvalidRequest,
     )));
     let service = OpenAiResponsesWorkflow::new(
@@ -700,7 +757,7 @@ async fn responses_create_ambiguous_resolution_rejection_returns_409() {
     .await;
 
     // Also verify the wire body contains the canonical error code.
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::AmbiguousResolution,
     )));
     let service = OpenAiResponsesWorkflow::new(
@@ -727,8 +784,8 @@ async fn responses_create_ambiguous_resolution_rejection_returns_409() {
 }
 
 #[tokio::test]
-async fn previous_response_id_must_be_authorized_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn previous_response_id_must_be_authorized_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -753,8 +810,7 @@ async fn previous_response_id_must_be_authorized_before_product_workflow() {
 
 #[tokio::test]
 async fn responses_wait_timeout_detaches_without_resubmitting() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
-    workflow.program_projection_read_resolution(sample_projection_read_request());
+    let workflow = Arc::new(FakeProductSurface::new());
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
@@ -780,7 +836,7 @@ async fn responses_wait_timeout_detaches_without_resubmitting() {
 
 #[tokio::test]
 async fn dropping_response_create_future_cancels_projection_wait() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let reader = Arc::new(DropAwareResponsesReader::default());
     let router = test_router(workflow.clone(), reader.clone());
 
@@ -803,7 +859,7 @@ async fn dropping_response_create_future_cancels_projection_wait() {
 
 #[tokio::test]
 async fn responses_input_items_preserve_function_call_context_and_sanitize_delimiters() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("ok")),
@@ -859,8 +915,8 @@ async fn responses_input_items_preserve_function_call_context_and_sanitize_delim
 }
 
 #[tokio::test]
-async fn responses_rejects_excessive_input_items_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_rejects_excessive_input_items_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -890,7 +946,7 @@ async fn responses_rejects_excessive_input_items_before_product_workflow() {
 
 #[tokio::test]
 async fn responses_rejects_empty_input_and_malformed_json_before_side_effects() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -927,8 +983,8 @@ async fn responses_rejects_empty_input_and_malformed_json_before_side_effects() 
 }
 
 #[tokio::test]
-async fn responses_rejects_oversized_context_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_rejects_oversized_context_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -959,7 +1015,7 @@ async fn responses_rejects_oversized_context_before_product_workflow() {
 }
 
 #[tokio::test]
-async fn responses_rejects_invalid_model_before_product_workflow() {
+async fn responses_rejects_invalid_model_before_product_surface() {
     // Same `model` bounds as Chat Completions: byte cap, control characters,
     // and surrounding whitespace all reject with a sanitized 400 naming the
     // `model` param before any product-workflow side effect.
@@ -972,7 +1028,7 @@ async fn responses_rejects_invalid_model_before_product_workflow() {
     ];
     for model in cases {
         for path in ["/api/v1/responses", "/v1/responses"] {
-            let workflow = Arc::new(FakeProductWorkflow::new());
+            let workflow = Arc::new(FakeProductSurface::new());
             let router = test_router(
                 workflow.clone(),
                 Arc::new(StaticResponsesReader::completed("unused")),
@@ -1008,8 +1064,8 @@ async fn responses_rejects_invalid_model_before_product_workflow() {
 }
 
 #[tokio::test]
-async fn responses_rejects_oversized_body_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn responses_rejects_oversized_body_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
@@ -1033,7 +1089,7 @@ async fn responses_rejects_oversized_body_before_product_workflow() {
 #[tokio::test]
 async fn lookup_and_cancel_nonexistent_ids_return_same_not_found_shape() {
     let router = test_router(
-        Arc::new(FakeProductWorkflow::new()),
+        Arc::new(FakeProductSurface::new()),
         Arc::new(StaticResponsesReader::completed("unused")),
     );
 
@@ -1054,7 +1110,7 @@ async fn lookup_and_cancel_nonexistent_ids_return_same_not_found_shape() {
 
 #[tokio::test]
 async fn lookup_and_cancel_cross_scope_ids_return_same_not_found_shape() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(StaticResponsesReader::completed("unused"));
     let alice_router = router_with_store_and_caller(
@@ -1111,7 +1167,7 @@ async fn lookup_and_cancel_cross_scope_ids_return_same_not_found_shape() {
 }
 
 async fn assert_fixed_ack_status(ack: ProductInboundAck, status: http::StatusCode) {
-    let workflow = Arc::new(FixedAckWorkflow::new(ack));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(ack));
     let service = OpenAiResponsesWorkflow::new(
         workflow,
         in_memory_openai_compat_ref_store(),
@@ -1134,14 +1190,14 @@ async fn assert_fixed_ack_status(ack: ProductInboundAck, status: http::StatusCod
 }
 
 fn test_router(
-    workflow: Arc<FakeProductWorkflow>,
+    workflow: Arc<FakeProductSurface>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
 ) -> axum::Router {
     router_with_store(workflow, in_memory_openai_compat_ref_store(), reader)
 }
 
 fn router_with_store(
-    workflow: Arc<FakeProductWorkflow>,
+    workflow: Arc<FakeProductSurface>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
 ) -> axum::Router {
@@ -1149,17 +1205,16 @@ fn router_with_store(
 }
 
 fn router_with_store_and_caller(
-    workflow: Arc<FakeProductWorkflow>,
+    workflow: Arc<FakeProductSurface>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     caller: OpenAiCompatAuthenticatedCaller,
 ) -> axum::Router {
-    workflow.program_projection_read_resolution(sample_projection_read_request());
-    router_with_product_workflow(workflow, ref_store, reader, caller)
+    router_with_product_surface(workflow, ref_store, reader, caller)
 }
 
-fn router_with_product_workflow(
-    workflow: Arc<dyn ProductWorkflow>,
+fn router_with_product_surface(
+    workflow: Arc<dyn ProductSurface>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     caller: OpenAiCompatAuthenticatedCaller,
@@ -1228,15 +1283,15 @@ async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("json")
 }
 
-fn submitted_user_message_text(envelope: &ProductInboundEnvelope) -> &str {
+fn submitted_user_message_text(envelope: &RecordedProductSurfaceSubmit) -> String {
     let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
         panic!("expected user message payload");
     };
-    payload.text.as_str()
+    payload.text
 }
 
-fn submitted_user_message_json(envelope: &ProductInboundEnvelope) -> Value {
-    serde_json::from_str(submitted_user_message_text(envelope)).expect("submitted payload json")
+fn submitted_user_message_json(envelope: &RecordedProductSurfaceSubmit) -> Value {
+    serde_json::from_str(&submitted_user_message_text(envelope)).expect("submitted payload json")
 }
 
 fn caller() -> OpenAiCompatAuthenticatedCaller {
@@ -1258,21 +1313,6 @@ fn caller_for_user(user_id: &str) -> OpenAiCompatAuthenticatedCaller {
         ),
     )
     .expect("caller")
-}
-
-fn sample_projection_read_request() -> ProjectionReadRequest {
-    ProjectionReadRequest {
-        actor: TurnActor::new(UserId::new("user-a").expect("user")),
-        scope: TurnScope::new_with_owner(
-            TenantId::new("tenant-a").expect("tenant"),
-            Some(AgentId::new("agent-a").expect("agent")),
-            Some(ProjectId::new("project-a").expect("project")),
-            ThreadId::new("thread-openai-response").expect("thread"),
-            Some(UserId::new("user-a").expect("user")),
-        ),
-        after_cursor: None,
-        limit: None,
-    }
 }
 
 fn sample_projection_subscription_request() -> ProjectionSubscriptionRequest {
@@ -1311,74 +1351,6 @@ fn completed_response(id: OpenAiResponseId, text: &str) -> OpenAiResponseObject 
             input_tokens_details: None,
             cost: None,
         }),
-    }
-}
-
-struct FixedAckWorkflow {
-    ack: ProductInboundAck,
-    seen_envelopes: Mutex<Vec<ProductInboundEnvelope>>,
-    read_inputs: Mutex<Vec<ProductProjectionReadInput>>,
-}
-
-impl FixedAckWorkflow {
-    fn new(ack: ProductInboundAck) -> Self {
-        Self {
-            ack,
-            seen_envelopes: Mutex::new(Vec::new()),
-            read_inputs: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn seen_count(&self) -> usize {
-        self.seen_envelopes
-            .lock()
-            .expect("workflow seen lock")
-            .len()
-    }
-}
-
-#[async_trait]
-impl ProductWorkflow for FixedAckWorkflow {
-    async fn submit_inbound(
-        &self,
-        envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.seen_envelopes
-            .lock()
-            .expect("workflow seen lock")
-            .push(envelope);
-        Ok(self.ack.clone())
-    }
-
-    async fn read_projection(
-        &self,
-        request: ProductProjectionReadInput,
-    ) -> Result<ProjectionReadRequest, ProductAdapterError> {
-        self.read_inputs
-            .lock()
-            .expect("workflow read lock")
-            .push(request);
-        Ok(sample_projection_read_request())
-    }
-}
-
-struct ErrorWorkflow {
-    error: ProductAdapterError,
-}
-
-impl ErrorWorkflow {
-    fn new(error: ProductAdapterError) -> Self {
-        Self { error }
-    }
-}
-
-#[async_trait]
-impl ProductWorkflow for ErrorWorkflow {
-    async fn submit_inbound(
-        &self,
-        _envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        Err(self.error.clone())
     }
 }
 
@@ -1530,6 +1502,7 @@ impl OpenAiResponsesProjectionReader for DropAwareResponsesReader {
 struct RecordingResponsesReader {
     response: OpenAiResponseObject,
     reads: Mutex<usize>,
+    read_requests: Mutex<Vec<OpenAiResponseReadRequest>>,
 }
 
 impl RecordingResponsesReader {
@@ -1537,11 +1510,19 @@ impl RecordingResponsesReader {
         Self {
             response,
             reads: Mutex::new(0),
+            read_requests: Mutex::new(Vec::new()),
         }
     }
 
     fn read_count(&self) -> usize {
         *self.reads.lock().expect("reader lock")
+    }
+
+    fn read_requests(&self) -> Vec<OpenAiResponseReadRequest> {
+        self.read_requests
+            .lock()
+            .expect("reader request lock")
+            .clone()
     }
 }
 
@@ -1571,6 +1552,10 @@ impl OpenAiResponsesProjectionReader for RecordingResponsesReader {
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, ironclaw_reborn_openai_compat::OpenAiCompatHttpError> {
         *self.reads.lock().expect("reader lock") += 1;
+        self.read_requests
+            .lock()
+            .expect("reader request lock")
+            .push(request.clone());
         Ok(OpenAiResponseObject {
             id: request.public_id,
             ..self.response.clone()
@@ -1839,13 +1824,12 @@ impl OpenAiCompatRefStore for FailsFirstResumeCompletionMark {
 }
 
 fn router_with_external_tools(
-    workflow: Arc<FakeProductWorkflow>,
+    workflow: Arc<FakeProductSurface>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     store: Arc<dyn OpenAiCompatExternalToolStore>,
     resume: Arc<dyn OpenAiCompatExternalToolResume>,
 ) -> axum::Router {
-    workflow.program_projection_read_resolution(sample_projection_read_request());
     let service = OpenAiResponsesWorkflow::new(workflow, ref_store, reader)
         .with_external_tools(store, resume);
     openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
@@ -1853,14 +1837,13 @@ fn router_with_external_tools(
 }
 
 fn router_with_external_tools_and_streamer(
-    workflow: Arc<FakeProductWorkflow>,
+    workflow: Arc<FakeProductSurface>,
     ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
     store: Arc<dyn OpenAiCompatExternalToolStore>,
     resume: Arc<dyn OpenAiCompatExternalToolResume>,
 ) -> axum::Router {
-    workflow.program_projection_read_resolution(sample_projection_read_request());
     workflow.program_projection_resolution(sample_projection_subscription_request());
     let service = OpenAiResponsesWorkflow::new(workflow, ref_store, reader)
         .with_projection_streamer(streamer)
@@ -1871,7 +1854,7 @@ fn router_with_external_tools_and_streamer(
 
 #[tokio::test]
 async fn responses_with_external_tools_registers_specs_after_submit() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools(
@@ -1916,7 +1899,7 @@ async fn responses_with_external_tools_registers_specs_after_submit() {
 
 #[tokio::test]
 async fn responses_idempotency_replay_retries_tool_registration_after_partial_create_failure() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(FailsFirstRegisterExternalToolStore::new());
     let resume = Arc::new(RecordingExternalToolResume::default());
@@ -1967,7 +1950,7 @@ async fn responses_idempotency_replay_retries_tool_registration_after_partial_cr
 
 #[tokio::test]
 async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools_and_streamer(
@@ -2009,7 +1992,7 @@ async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
 
 #[tokio::test]
 async fn responses_function_call_output_resumes_parked_run_without_new_submit() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
@@ -2075,7 +2058,7 @@ async fn responses_function_call_output_resumes_parked_run_without_new_submit() 
 
 #[tokio::test]
 async fn responses_function_call_output_idempotency_replay_does_not_resubmit_output() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
@@ -2143,7 +2126,7 @@ async fn responses_function_call_output_idempotency_replay_does_not_resubmit_out
 #[tokio::test]
 async fn responses_function_call_output_replay_recovers_when_completion_marker_failed_after_resume()
 {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = Arc::new(FailsFirstResumeCompletionMark::new());
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(ConflictAfterFirstResume::new());
@@ -2214,7 +2197,7 @@ async fn responses_function_call_output_replay_recovers_when_completion_marker_f
 
 #[tokio::test]
 async fn responses_function_call_output_rejects_mixed_continuation_input() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
@@ -2271,7 +2254,7 @@ async fn responses_function_call_output_rejects_mixed_continuation_input() {
 async fn responses_function_call_output_without_external_tools_is_rejected() {
     // With no external-tool store wired, a `function_call_output` continuation
     // fails closed instead of being serialized into a fresh transcript turn.
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let ref_store = in_memory_openai_compat_ref_store();
     let router = router_with_store(
         workflow.clone(),

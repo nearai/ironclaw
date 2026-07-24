@@ -487,7 +487,7 @@ fn approval_resume_token(resume: Option<CapabilityApprovalResume>) -> Option<Res
 
 /// The opaque auth resume token, when the producer carried one.
 fn auth_resume_token(resume: Option<CapabilityAuthResume>) -> Option<ResumeToken> {
-    resume.and_then(|resume| resume_token_of(&resume.resume_token))
+    resume.and_then(|resume| resume.resume_token.as_ref().and_then(resume_token_of))
 }
 
 /// Convert a loop-facing [`CapabilityResumeToken`] to a host_api [`ResumeToken`].
@@ -1176,7 +1176,8 @@ mod tests {
         }
 
         let auth_resume = CapabilityAuthResume {
-            resume_token: CapabilityResumeToken::new("auth-resume-1").unwrap(),
+            resume_token: Some(CapabilityResumeToken::new("auth-resume-1").unwrap()),
+            disposition: None,
             prior_approval: None,
         };
         let gated = auth_required(

@@ -10,8 +10,8 @@ use futures_util::FutureExt;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityDescriptor, MountView, ResourceEstimate, ResourceReservation, UserId,
-    runtime_policy::EffectiveRuntimePolicy,
+    CapabilityDescriptor, InvocationOrigin, MountView, ResourceEstimate, ResourceReservation,
+    UserId, runtime_policy::EffectiveRuntimePolicy,
 };
 use serde_json::Value;
 
@@ -64,6 +64,8 @@ where
     /// Loop turn-run identity forwarded from the dispatch request. `None`
     /// for non-loop callers.
     pub run_id: Option<ironclaw_host_api::RunId>,
+    /// Host-sealed origin used by capability-boundary policy.
+    pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -688,6 +690,7 @@ where
             // attribute the action to the acting user.
             authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             run_id: request.run_id,
+            origin: request.origin,
             estimate: request.estimate,
             mounts: request.mounts,
             services,
@@ -1129,6 +1132,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     match error {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::InvalidToolCatalog { .. } => RuntimeDispatchErrorKind::OutputDecode,
         McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,

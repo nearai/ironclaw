@@ -7,10 +7,11 @@ use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_product_workflow::{
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+use ironclaw_outbound::{
+    DeliveryTargetCapabilities, OutboundDeliveryTargetRegistrationOutcome,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
 };
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,
@@ -18,11 +19,9 @@ use ironclaw_turns::{
 };
 
 use crate::RebornCompositionProfile;
-use crate::input::RebornBuildInput;
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
 };
-use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::build_reborn_runtime;
@@ -37,8 +36,8 @@ struct OutboundDeliveryTriggerGateway {
 
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    summary: RebornOutboundDeliveryTargetSummary,
-    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    summary: OutboundDeliveryTargetSummary,
+    capabilities: DeliveryTargetCapabilities,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -46,15 +45,17 @@ struct StaticOutboundDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         // Fixture available to whichever caller asks: claim the querying caller
         // as owner so it survives the registry's caller-scoping filter.
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            },
+            owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
 }
@@ -185,8 +186,8 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     std::fs::create_dir_all(&host_home).expect("host home");
     let gateway = Arc::new(OutboundDeliveryTriggerGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev_with_profile(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "runtime-outbound-trigger-owner",
             root.path().join("local-dev"),
@@ -213,17 +214,19 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     let registered = runtime.register_outbound_delivery_target_provider(
         "slack:test",
         Arc::new(StaticOutboundDeliveryTargetProvider {
-            summary: RebornOutboundDeliveryTargetSummary::new(
+            summary: OutboundDeliveryTargetSummary::new(
                 slack_target_id,
                 "slack",
                 "Slack DM",
                 Some("Personal Slack direct message".to_string()),
             )
             .expect("target summary"),
-            capabilities: RebornOutboundDeliveryTargetCapabilities {
+            capabilities: DeliveryTargetCapabilities {
                 final_replies: true,
+                progress: false,
                 gate_prompts: false,
                 auth_prompts: false,
+                modalities: Vec::new(),
             },
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:slack-dm")
                 .expect("reply target"),

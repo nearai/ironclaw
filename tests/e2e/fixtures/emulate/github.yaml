@@ -31,3 +31,38 @@ github:
         - reborn
         - qa
       auto_init: true
+  workflows:
+    - owner: nearai
+      repo: ironclaw
+      id: 101
+      name: CI
+      path: .github/workflows/ci.yml
+  workflow_runs:
+    - owner: nearai
+      repo: ironclaw
+      workflow_id: 101
+      id: 1001
+      name: CI
+      head_branch: main
+      head_sha: seeded-main-sha
+      event: workflow_dispatch
+      status: completed
+      conclusion: failure
+      actor: reborn-dev
+      run_attempt: 1
+      logs: REBORN_PROVIDER_CASE_RUN_LOG
+  jobs:
+    - owner: nearai
+      repo: ironclaw
+      run_id: 1001
+      id: 2001
+      name: provider-contract
+      status: completed
+      conclusion: failure
+      logs: REBORN_PROVIDER_CASE_JOB_LOG
+  artifacts:
+    - owner: nearai
+      repo: ironclaw
+      run_id: 1001
+      id: 3001
+      name: provider-results

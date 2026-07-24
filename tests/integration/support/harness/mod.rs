@@ -43,11 +43,11 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
+use ironclaw_product::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput,
-    RebornProductAuthServices, build_reborn_services,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornProductAuthServices,
+    RebornRuntimeInput, build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -87,6 +87,21 @@ pub(crate) type HarnessCapabilityParts = (
 pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
 pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
+fn write_system_skill_fixture(
+    storage_root: &std::path::Path,
+    name: &str,
+    description: &str,
+    prompt: &str,
+) -> HarnessResult<()> {
+    let dir = storage_root.join("system").join("skills").join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    Ok(())
+}
+
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -119,6 +134,7 @@ impl HarnessCapabilityMode {
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -138,13 +154,24 @@ impl HarnessCapabilityMode {
             }
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
-                    harness.install_durable_capability_io(turn_thread_service);
+                    harness.install_durable_capability_io(
+                        turn_thread_service,
+                        trajectory_observer.clone(),
+                    );
+                }
+                if harness
+                    .capability_ids
+                    .iter()
+                    .any(|id| id.as_str() == ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID)
+                    && harness.reborn_services_for_test().is_some()
+                {
+                    harness.install_trigger_source_turn_state_for_test(Arc::clone(&turn_store))?;
                 }
                 if harness.trigger_active_run_lookup_requested {
                     harness.install_trigger_active_run_lookup_for_test(turn_store)?;
                 }
                 Ok((
-                    harness.capability_factory(milestone_sink),
+                    harness.capability_factory(milestone_sink, trajectory_observer),
                     Arc::new(HostRuntimeHarnessSurfaceResolver),
                     harness.input_resolver(),
                     harness.capability_result_writer(),
@@ -271,11 +298,10 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// trait than `attachment_test_support`'s `LoopAttachmentReadPort`, though
     /// the same concrete reader implements both. `Some` only for
     /// `new_with_options`-built harnesses.
-    inbound_attachment_reader: Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>>,
-    /// Backing handles for the synthetic `outbound_delivery_*` capabilities
-    /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`;
-    /// `create_capability_port` wraps the port with the two capabilities via
-    /// `apply_synthetic_capability_wrappers` when this is `Some`.
+    inbound_attachment_reader: Option<Arc<dyn ironclaw_product::InboundAttachmentReader>>,
+    /// Backing handles for the synthetic outbound target list/set test seam.
+    /// `Some` only for `outbound_target_tools()`; route-current stays on the
+    /// normal first-party lane and uses the composed product service/store.
     outbound_target_tools: Option<OutboundTargetToolsParts>,
     /// C-MULTIUSER seam: when `true`, [`create_capability_port`] resolves the
     /// capability-execution user from the RUN's owner/actor (mirroring
@@ -321,7 +347,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// piecewise test-support accessors. `Some` only for `new_with_options`-built
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
-    reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    reborn_services: Option<ironclaw_reborn_composition::RebornRuntime>,
     /// Set from `HostRuntimeHarnessOptions::with_trigger_active_run_lookup_for_test()`
     /// (#5886) at construction; read by `HarnessCapabilityMode::into_parts` to
     /// decide whether to call `install_trigger_active_run_lookup_for_test` once
@@ -615,8 +641,10 @@ impl HostRuntimeCapabilityHarness {
         let HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
+            local_runtime_identity,
             seed_extension_credentials,
             skill_activation_tenant,
+            system_skill_fixtures,
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
@@ -626,7 +654,6 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
-            account_setup_descriptors,
             recording_network_egress,
             google_oauth_backend_for_test,
         } = options;
@@ -634,6 +661,14 @@ impl HostRuntimeCapabilityHarness {
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        for fixture in &system_skill_fixtures {
+            write_system_skill_fixture(
+                &storage_root,
+                &fixture.name,
+                &fixture.description,
+                &fixture.prompt,
+            )?;
+        }
         let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {
             copy_dir_recursive(
@@ -656,11 +691,15 @@ impl HostRuntimeCapabilityHarness {
             )?
             .with_local_dev_confirmed_host_home_root(host_home_root)
         } else {
-            RebornBuildInput::local_dev(service_label, storage_root)
+            ironclaw_reborn_composition::local_dev_build_input(service_label, storage_root)
         };
+        if let Some((tenant_id, agent_id)) = &local_runtime_identity {
+            input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
+        }
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
         }
+        input = input.with_bundled_first_party_for_test();
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
@@ -675,9 +714,6 @@ impl HostRuntimeCapabilityHarness {
             // and lifecycle installs fail with "available extension was not
             // found".
             input = input.with_trusted_fixture_extensions_for_test();
-        }
-        if !account_setup_descriptors.is_empty() {
-            input = input.with_account_setup_descriptors(account_setup_descriptors);
         }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
@@ -695,7 +731,17 @@ impl HostRuntimeCapabilityHarness {
             input =
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
-        let services = build_reborn_services(input).await?;
+        let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        if let Some((tenant_id, agent_id)) = local_runtime_identity {
+            runtime_input =
+                runtime_input.with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: service_label.to_string(),
+                    reply_target_binding_id: service_label.to_string(),
+                });
+        }
+        let services = build_runtime(runtime_input).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
@@ -733,7 +779,7 @@ impl HostRuntimeCapabilityHarness {
         // C-JOURNEY: capture product-auth before `services.host_runtime` is
         // moved out below, so `seed_github_credential_account` can create a
         // real credential account later (auth-gate happy-path resume).
-        let product_auth = services.product_auth.clone();
+        let product_auth = Some(services.product_auth_for_test());
         // E-SKILL: build the local-dev skill context source only when this
         // harness surfaces the synthetic `skill_activate` capability (i.e.
         // `skill_activation_tools`). Built with the caller-supplied tenant
@@ -804,8 +850,7 @@ impl HostRuntimeCapabilityHarness {
         // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
         // not just the pieces already extracted above.
         let runtime = services
-            .host_runtime
-            .clone()
+            .host_runtime_for_test()
             .ok_or("local-dev Reborn services missing host runtime")?;
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
@@ -886,17 +931,19 @@ impl HostRuntimeCapabilityHarness {
     /// gate dispatch instead of the harness's direct-resume test shortcut.
     pub(crate) fn reborn_services_for_test(
         &self,
-    ) -> Option<&ironclaw_reborn_composition::RebornServices> {
+    ) -> Option<&ironclaw_reborn_composition::RebornRuntime> {
         self.reborn_services.as_ref()
     }
 
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            trajectory_observer,
         })
     }
 
@@ -948,11 +995,13 @@ impl HostRuntimeCapabilityHarness {
     fn install_durable_capability_io(
         &self,
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) {
         let (io, result_writer_io) =
-            ironclaw_reborn_composition::test_support::staged_capability_io_for_test(
+            ironclaw_reborn_composition::test_support::staged_capability_io_with_observer_for_test(
                 thread_service.clone(),
                 self.user_id.clone(),
+                trajectory_observer,
             );
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
@@ -1000,6 +1049,25 @@ impl HostRuntimeCapabilityHarness {
             trigger_runtime,
             CapabilityId::new(ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID)?,
         ));
+        Ok(())
+    }
+
+    /// Route source-delivery lookup through the same turn-state store the
+    /// group coordinator writes. The production binary already uses one store
+    /// for both paths; only the integration group composes its coordinator
+    /// after the capability harness exists, so it must fill this late-bound
+    /// test seam before the first run.
+    fn install_trigger_source_turn_state_for_test(
+        &self,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    ) -> HarnessResult<()> {
+        let services = self
+            .reborn_services_for_test()
+            .ok_or("trigger source delivery wiring requires composed Reborn services")?;
+        ironclaw_reborn_composition::test_support::set_local_dev_trigger_source_turn_state_for_test(
+            services,
+            turn_store,
+        )?;
         Ok(())
     }
 
@@ -1423,16 +1491,7 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        let dir = self
-            .storage_root_for_test()
-            .join("system")
-            .join("skills")
-            .join(name);
-        std::fs::create_dir_all(&dir)?;
-        let body = format!(
-            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
-        );
-        std::fs::write(dir.join("SKILL.md"), body)?;
+        write_system_skill_fixture(&self.storage_root_for_test(), name, description, prompt)?;
         Ok(())
     }
 
@@ -1484,7 +1543,7 @@ impl HostRuntimeCapabilityHarness {
     /// `RebornServices::with_inbound_attachment_reader`.
     pub(crate) fn inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
         self.inbound_attachment_reader.clone()
     }
 
@@ -1545,6 +1604,7 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
         // the harness opts in, else the fixed harness user — see
@@ -1642,8 +1702,7 @@ impl HostRuntimeCapabilityHarness {
                 )
             });
         let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
-            Arc::clone(&parts.facade)
-                as Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>
+            Arc::clone(&parts.facade) as Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>
         });
         let outbound_delivery_target_set_requires_approval = self
             .outbound_target_tools
@@ -1677,6 +1736,9 @@ impl HostRuntimeCapabilityHarness {
         // this must be an empty set for it, not treated as activation-backed.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             if let Some(services) = self.reborn_services.as_ref() {
+                // #6520 folded caller-scoping into the lifecycle facade the
+                // method reads through; provider trust decisions are
+                // tenant-level activation facts, so no per-run caller arg.
                 match services
                     .local_dev_active_extension_authority_for_test(&execution_extension)
                     .await
@@ -1707,9 +1769,9 @@ impl HostRuntimeCapabilityHarness {
         );
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
-        // builtin/extension grant otherwise). Excludes the synthetic-capability
-        // ids, which are surfaced by wrapping the port directly. See
-        // `additional_capability_grants` doc for the invariant.
+        // builtin/extension grant otherwise). Excludes only capabilities still
+        // surfaced by wrapping the port directly; route-current deliberately
+        // remains a normal first-party capability and receives a real grant.
         let synthetic_capability_ids: std::collections::HashSet<&str> = [
             ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
             ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
@@ -1789,7 +1851,7 @@ impl HostRuntimeCapabilityHarness {
                 .unwrap_or_else(|| {
                     Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
                 }),
-            trajectory_observer: None,
+            trajectory_observer,
             // Feeds the same active-extension authority (installed +
             // activated extensions like `github`, `gmail`, MCP servers)
             // production's `capability_wiring` folds into every refresh
@@ -1949,11 +2011,11 @@ impl HostRuntimeCapabilityHarness {
     /// installation, so such a provider has NO production trust decision at
     /// all and this entry is the ONLY thing that ever trusts it (see
     /// `file_and_github_auth_tools_profile` / `extension_visibility_probe_tools_profile`,
-    /// neither of which runs a real install→activate handshake). A provider
+    /// neither of which runs the real install/readiness path). A provider
     /// IS activation-backed (must be excluded here) only once
     /// `local_dev_active_extension_authority_for_test` actually reports a
     /// trust entry for it -- e.g. `extension_lifecycle_tools_profile`'s real
-    /// credentialed install+activate flow. See `harness_trust_tests` below
+    /// credentialed install flow. See `harness_trust_tests` below
     /// for the regression pin covering both shapes.
     fn build_additional_provider_trust(
         provider_id: &ExtensionId,
@@ -2090,7 +2152,7 @@ fn turn_state_root_filesystem(
 /// that decision (`additional_provider_trust` extends the base map AFTER
 /// `extension_surface.provider_trust()`, last-writer-wins). Pure unit tests
 /// against the extracted helper, independent of the full async harness/tokio
-/// runtime, so the invariant is pinned even without a live extension-activation
+/// runtime, so the invariant is pinned even without a live extension-install
 /// scenario.
 #[cfg(test)]
 mod harness_trust_tests {
@@ -2099,7 +2161,7 @@ mod harness_trust_tests {
     /// The exact shape `extension_lifecycle_tools_profile_for_user` builds:
     /// a blanket `bundled_extension_provider_trust()`-style entry for
     /// `gmail` (the provider CodeRabbit's finding named), where `gmail` IS in
-    /// `activation_backed_providers` (its real credentialed install+activate
+    /// `activation_backed_providers` (its real credentialed install
     /// handshake already produced a production trust decision). Before the
     /// fix this test would have observed an unbounded `gmail` entry here; the
     /// fix must make it absent so the activation-backed production decision
@@ -2185,7 +2247,7 @@ mod harness_trust_tests {
         let additional = vec![(visprobe_provider.clone(), effects.clone())];
         // reborn_services is wired for this harness shape (`new_with_options`)
         // but `visprobe` was only ever `publish_bundled_extension_for_test`'d,
-        // never installed+activated -- so it must be ABSENT from
+        // never installed to active -- so it must be ABSENT from
         // `activation_backed_providers`, not folded in via a blanket
         // `reborn_services.is_some()` check.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
@@ -2203,7 +2265,7 @@ mod harness_trust_tests {
                 .get(&visprobe_provider)
                 .map(|decision| &decision.authority_ceiling.allowed_effects),
             Some(&effects),
-            "a publish-only (never installed+activated) provider must still get its \
+            "a publish-only (never installed to active) provider must still get its \
              synthetic trust entry even when the harness has `reborn_services` wired, \
              or its capabilities become invisible: {result:?}"
         );

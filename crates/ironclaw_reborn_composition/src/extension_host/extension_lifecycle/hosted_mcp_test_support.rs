@@ -170,6 +170,7 @@ fn runtime_json_response(
 /// JSON-RPC call carried an `authorization` header on the wire.
 pub(crate) struct HostedMcpDiscoveryNetworkScript {
     tool_name: String,
+    tool_count: usize,
     tool_description: String,
     authorized_methods: std::sync::Mutex<Vec<(String, bool)>>,
 }
@@ -178,6 +179,7 @@ impl HostedMcpDiscoveryNetworkScript {
     pub(crate) fn with_tool_name(tool_name: &str) -> Self {
         Self {
             tool_name: tool_name.to_string(),
+            tool_count: 1,
             tool_description: format!("Scripted hosted MCP tool {tool_name}"),
             authorized_methods: std::sync::Mutex::new(Vec::new()),
         }
@@ -185,6 +187,11 @@ impl HostedMcpDiscoveryNetworkScript {
 
     pub(crate) fn with_tool_description(mut self, tool_description: impl Into<String>) -> Self {
         self.tool_description = tool_description.into();
+        self
+    }
+
+    pub(crate) fn with_tool_count(mut self, tool_count: usize) -> Self {
+        self.tool_count = tool_count;
         self
     }
 
@@ -230,17 +237,31 @@ impl ironclaw_network::NetworkHttpEgress for HostedMcpDiscoveryNetworkScript {
                 "serverInfo": {"name": "hosted-mcp-test", "version": "1.0.0"}
             }),
             "notifications/initialized" => serde_json::json!({}),
-            "tools/list" => serde_json::json!({
-                "tools": [{
-                    "name": self.tool_name,
-                    "description": self.tool_description,
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"query": {"type": "string"}},
-                        "required": ["query"]
-                    },
-                    "annotations": {"readOnlyHint": true}
-                }]
+            "tools/list" => {
+                let tools = (0..self.tool_count)
+                    .map(|index| {
+                        let name = if self.tool_count == 1 {
+                            self.tool_name.clone()
+                        } else {
+                            format!("{}-{index}", self.tool_name)
+                        };
+                        serde_json::json!({
+                            "name": name,
+                            "description": self.tool_description,
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                                "required": ["query"]
+                            },
+                            "annotations": {"readOnlyHint": true}
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({ "tools": tools })
+            }
+            "tools/call" => serde_json::json!({
+                "content": [{"type": "text", "text": "scripted hosted MCP result"}],
+                "isError": false
             }),
             _ => return Err(invalid("unexpected_json_rpc_method")),
         };

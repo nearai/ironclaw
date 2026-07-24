@@ -71,6 +71,11 @@ function stateFromThreadSummary(thread) {
   return null;
 }
 
+export function emptySearchMessageKey(query, totalMatches, hasMore) {
+  if (!query.trim() || totalMatches > 0) return null;
+  return hasMore ? "chat.moreConversationsAvailable" : "common.noChatsMatch";
+}
+
 function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDelete }) {
   const t = useT();
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
@@ -227,9 +232,13 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
 export function SidebarThreads({
   threads,
   activeThreadId,
+  hasMore = false,
+  isLoadingMore = false,
+  loadMoreError = null,
   rebornProjectsEnabled = false,
   onSelect,
   onDelete,
+  onLoadMore,
   onNavigate,
 }) {
   const [collapsed, setCollapsed] = React.useState(false);
@@ -274,6 +283,7 @@ export function SidebarThreads({
       totalMatches: pinnedList.length + recentList.length,
     };
   }, [threads, query, pinnedIds]);
+  const emptySearchKey = emptySearchMessageKey(query, totalMatches, hasMore);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col px-2">
@@ -332,14 +342,21 @@ export function SidebarThreads({
         <div
           className="mt-1 flex flex-col gap-2 overflow-y-auto [scrollbar-width:thin]"
         >
-          {threads.length === 0 &&
+          {threads.length === 0 && !hasMore &&
           (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
             {t("chat.noConversations")}
           </div>)}
-          {threads.length > 0 &&
-          totalMatches === 0 &&
+          {threads.length === 0 && hasMore && emptySearchKey === null &&
+          (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
+            {t("chat.moreConversationsAvailable")}
+          </div>)}
+          {emptySearchKey === "common.noChatsMatch" &&
           (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
             {t("common.noChatsMatch").replace("{query}", query)}
+          </div>)}
+          {emptySearchKey === "chat.moreConversationsAvailable" &&
+          (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
+            {t("chat.moreConversationsAvailable")}
           </div>)}
 
           <ThreadGroup
@@ -360,6 +377,24 @@ export function SidebarThreads({
             onSelect={onSelect}
             onDelete={onDelete}
           />
+          {hasMore &&
+          (<button
+            type="button"
+            data-testid="thread-load-more"
+            disabled={isLoadingMore}
+            aria-busy={isLoadingMore || undefined}
+            onClick={onLoadMore}
+            className="mx-1 rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-2 text-[12px] font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-wait disabled:opacity-60"
+          >
+            {isLoadingMore ? t("common.loading") : t("common.loadMore")}
+          </button>)}
+          {loadMoreError &&
+          (<div
+            role="alert"
+            className="px-3 py-1 text-[11px] text-[var(--v2-danger-text)]"
+          >
+            {t("chat.loadMoreFailed")}
+          </div>)}
         </div>
         </>
       )}

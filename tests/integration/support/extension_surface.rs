@@ -18,13 +18,11 @@
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
-pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 
 pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: &[&str] = &[
     EXTENSION_SEARCH_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID,
-    EXTENSION_ACTIVATE_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID,
 ];
 
@@ -165,9 +163,9 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "google-slides.format_paragraph",
     "google-slides.replace_shapes_with_image",
     "google-slides.batch_update",
-    // `nearai` and `notion` are hosted-MCP packages: their v3 manifests
-    // declare no static tools (the former v2 placeholder tools became live
-    // discovery), so they contribute nothing to this static grant list.
+    // NEAR AI pins its core search capability so it is available before live
+    // discovery. Notion remains discovery-only.
+    "nearai.web_search",
 ];
 
 /// Bundled first-party extension asset directories under

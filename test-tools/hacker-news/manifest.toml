@@ -32,6 +32,7 @@ id = "hacker-news.top_stories"
 description = "Return the current top Hacker News stories (title, url, score, author, comment count). Optional `limit` (1-10, default 5)."
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 visibility = "model"
 input_schema_ref = "schemas/hacker-news/top_stories.input.v1.json"
 output_schema_ref = "schemas/hacker-news/top_stories.output.v1.json"

@@ -11,7 +11,7 @@ use ironclaw_turns::LoopFailureKind;
 const GENERIC_FAILURE_SUMMARY: &str = "The run failed before producing a reply. Retry the run, and contact support if it keeps happening.";
 
 #[tokio::test]
-async fn webui_event_stream_projects_failed_run_failure_summary() {
+async fn product_event_stream_projects_failed_run_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-failed-thread",
         "lease_expired",
@@ -21,7 +21,7 @@ async fn webui_event_stream_projects_failed_run_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_no_progress_failure_summary() {
+async fn product_event_stream_projects_no_progress_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-no-progress-thread",
         "no_progress_detected",
@@ -31,7 +31,7 @@ async fn webui_event_stream_projects_no_progress_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_iteration_limit_failure_summary() {
+async fn product_event_stream_projects_iteration_limit_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-iteration-limit-thread",
         "iteration_limit",
@@ -41,7 +41,7 @@ async fn webui_event_stream_projects_iteration_limit_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_context_build_failed_failure_summary() {
+async fn product_event_stream_projects_context_build_failed_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-context-build-thread",
         "context_build_failed",
@@ -51,7 +51,7 @@ async fn webui_event_stream_projects_context_build_failed_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_scheduler_heartbeat_failure_summary() {
+async fn product_event_stream_projects_scheduler_heartbeat_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-scheduler-heartbeat-thread",
         "scheduler_heartbeat_failed",
@@ -61,7 +61,7 @@ async fn webui_event_stream_projects_scheduler_heartbeat_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_host_stage_unavailable_failure_summary() {
+async fn product_event_stream_projects_host_stage_unavailable_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-host-stage-thread",
         "host_stage_unavailable_checkpoint",
@@ -71,7 +71,7 @@ async fn webui_event_stream_projects_host_stage_unavailable_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_scheduler_executor_panic_summary() {
+async fn product_event_stream_projects_scheduler_executor_panic_summary() {
     assert_failed_run_status_summary(
         "webui-events-scheduler-panic-thread",
         "scheduler_executor_panic",
@@ -81,7 +81,7 @@ async fn webui_event_stream_projects_scheduler_executor_panic_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_unknown_failure_summary_without_echoing_code() {
+async fn product_event_stream_projects_unknown_failure_summary_without_echoing_code() {
     assert_failed_run_status_summary(
         "webui-events-unknown-thread",
         "unexpected_new_failure",
@@ -95,7 +95,7 @@ async fn webui_event_stream_projects_unknown_failure_summary_without_echoing_cod
 // With no explainer wired, the projection must carry the specific fallback
 // summary end-to-end instead of degrading to the generic failure summary.
 #[tokio::test]
-async fn webui_event_stream_projects_capability_protocol_error_summary() {
+async fn product_event_stream_projects_capability_protocol_error_summary() {
     assert_failed_run_status_summary(
         "webui-events-capability-protocol-thread",
         "capability_protocol_error",
@@ -414,7 +414,7 @@ async fn assert_failed_run_status_summary(
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_invalid_model_output_detail_summary() {
+async fn product_event_stream_projects_invalid_model_output_detail_summary() {
     assert_failed_run_status_summary_for_event(
         "webui-events-invalid-model-output-detail-thread",
         "model_invalid_output",
@@ -463,7 +463,7 @@ async fn assert_failed_run_status_summary_for_event(
 /// offer a retry affordance. Regression guard for the retry-from-failed
 /// surfacing path.
 #[tokio::test]
-async fn webui_event_stream_projects_retryable_flag_for_failed_run() {
+async fn product_event_stream_projects_retryable_flag_for_failed_run() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -498,7 +498,7 @@ async fn webui_event_stream_projects_retryable_flag_for_failed_run() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -576,7 +576,7 @@ async fn assert_failed_run_status_summary_internal(
     };
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -606,7 +606,7 @@ async fn assert_failed_run_status_summary_internal(
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_model_credit_exhaustion_failure_summary() {
+async fn product_event_stream_projects_model_credit_exhaustion_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-credit-failed-thread",
         MODEL_CREDITS_EXHAUSTED_CATEGORY,
@@ -616,7 +616,7 @@ async fn webui_event_stream_projects_model_credit_exhaustion_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_model_credentials_failure_summary() {
+async fn product_event_stream_projects_model_credentials_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-model-credentials-thread",
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
@@ -626,7 +626,7 @@ async fn webui_event_stream_projects_model_credentials_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_budget_accounting_failure_summary() {
+async fn product_event_stream_projects_budget_accounting_failure_summary() {
     assert_failed_run_status_summary(
         "webui-events-budget-accounting-thread",
         BUDGET_ACCOUNTING_FAILED_CATEGORY,
@@ -636,7 +636,7 @@ async fn webui_event_stream_projects_budget_accounting_failure_summary() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_pins_model_credentials_summary_before_explainer() {
+async fn product_event_stream_pins_model_credentials_summary_before_explainer() {
     assert_failed_run_status_summary_with_explainer(
         "webui-events-pinned-model-credentials-thread",
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
@@ -649,7 +649,7 @@ async fn webui_event_stream_pins_model_credentials_summary_before_explainer() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_uses_model_failure_explanation_when_available() {
+async fn product_event_stream_uses_model_failure_explanation_when_available() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -694,7 +694,7 @@ async fn webui_event_stream_uses_model_failure_explanation_when_available() {
     }));
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -725,7 +725,7 @@ async fn webui_event_stream_uses_model_failure_explanation_when_available() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_caches_model_failure_explanation_across_replay() {
+async fn product_event_stream_caches_model_failure_explanation_across_replay() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -771,7 +771,7 @@ async fn webui_event_stream_caches_model_failure_explanation_across_replay() {
 
     for _ in 0..2 {
         let events = services
-            .webui_event_stream()
+            .product_event_stream()
             .drain(ProjectionSubscriptionRequest {
                 actor: actor.clone(),
                 scope: scope.clone(),
@@ -802,7 +802,7 @@ async fn webui_event_stream_caches_model_failure_explanation_across_replay() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_recovery_required_failure_summary() {
+async fn product_event_stream_projects_recovery_required_failure_summary() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -846,7 +846,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -923,7 +923,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
     ))));
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,

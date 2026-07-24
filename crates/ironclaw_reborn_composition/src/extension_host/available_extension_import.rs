@@ -6,7 +6,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
@@ -153,6 +153,7 @@ where
 /// coordinates the bounded decode and subsequent catalog/filesystem writes.
 pub(crate) fn imported_extension_package(
     files: Vec<(String, Vec<u8>)>,
+    reserved_bundled_ids: &[String],
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     let manifest_toml = files
         .iter()
@@ -190,7 +191,7 @@ pub(crate) fn imported_extension_package(
         )));
     }
     let extension_id = record.manifest().id.clone();
-    if reserved_host_bundled_extension_id(&extension_id) {
+    if reserved_host_bundled_extension_id(&extension_id, reserved_bundled_ids) {
         return Err(map_binding_error(format!(
             "extension id `{}` is reserved for host-bundled extensions and cannot be imported",
             extension_id.as_str()
@@ -253,6 +254,7 @@ pub(crate) fn imported_extension_package(
         assets,
         onboarding_override: None,
         oauth_setup_override: None,
+        search_aliases: Vec::new(),
     })
 }
 
@@ -339,6 +341,7 @@ output_schema_ref = "schemas/search.output.json"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .unwrap();
@@ -414,6 +417,7 @@ output_schema_ref = "schemas/search.output.json"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .unwrap();
@@ -434,6 +438,7 @@ output_schema_ref = "schemas/search.output.json"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .unwrap();
@@ -477,6 +482,7 @@ output_schema_ref = "schemas/search.output.json"
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .expect("one stale manifest must not abort the catalog load");
@@ -503,6 +509,7 @@ output_schema_ref = "schemas/search.output.json"
         let error = AvailableExtensionCatalog::from_filesystem_root(
             &UnreadableManifestFilesystem,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .expect_err("transient manifest read error must abort the catalog load");
@@ -589,7 +596,7 @@ prompt_doc_ref = "prompts/run.md"
                 }
             })
             .collect::<Vec<_>>();
-        let error = imported_extension_package(files)
+        let error = imported_extension_package(files, &[])
             .expect_err("core-module wasm must be rejected at import");
         assert!(format!("{error}").contains("not a WASI component"));
     }
@@ -628,8 +635,9 @@ prompt_doc_ref = "prompts/run.md"
 
     #[test]
     fn imported_extension_package_validates_as_installed_local() {
-        let package = imported_extension_package(importable_tool_bundle_files("uploaded-tool"))
-            .expect("complete wasm tool bundle must import");
+        let package =
+            imported_extension_package(importable_tool_bundle_files("uploaded-tool"), &[])
+                .expect("complete wasm tool bundle must import");
         assert_eq!(package.source, ManifestSource::InstalledLocal);
         assert_eq!(package.package_ref.id.as_str(), "uploaded-tool");
     }
@@ -637,14 +645,16 @@ prompt_doc_ref = "prompts/run.md"
     #[tokio::test]
     async fn imported_bundle_reloads_as_installed_local_after_restart() {
         let fs = InMemoryBackend::default();
-        let package = imported_extension_package(importable_tool_bundle_files("uploaded-tool"))
-            .expect("complete wasm tool bundle must import");
+        let package =
+            imported_extension_package(importable_tool_bundle_files("uploaded-tool"), &[])
+                .expect("complete wasm tool bundle must import");
         materialize_available_extension(&fs, &package)
             .await
             .expect("materialize uploaded bundle");
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
         )
         .await
         .expect("catalog reload from filesystem");
@@ -657,12 +667,17 @@ prompt_doc_ref = "prompts/run.md"
 
     #[test]
     fn imported_extension_package_rejects_first_party_trust_claims() {
-        let error = imported_extension_package(vec![(
-            "manifest.toml".to_string(),
-            include_str!("../../../ironclaw_first_party_extensions/assets/github/manifest.toml")
+        let error = imported_extension_package(
+            vec![(
+                "manifest.toml".to_string(),
+                include_str!(
+                    "../../../ironclaw_first_party_extensions/assets/github/manifest.toml"
+                )
                 .as_bytes()
                 .to_vec(),
-        )])
+            )],
+            &[],
+        )
         .expect_err("first-party trust claims must be rejected");
         // The bundled github manifest is v3, so the rejection comes from the
         // v3 reader's source/trust gate ("trust `FirstPartyRequested` is not
@@ -678,8 +693,11 @@ prompt_doc_ref = "prompts/run.md"
 
     #[test]
     fn imported_extension_package_rejects_reserved_host_bundled_extension_ids() {
-        let error = imported_extension_package(importable_tool_bundle_files("github"))
-            .expect_err("reserved ids must be rejected");
+        let error = imported_extension_package(
+            importable_tool_bundle_files("github"),
+            &["github".to_string()],
+        )
+        .expect_err("reserved ids must be rejected");
         assert!(format!("{error}").contains("reserved"));
     }
 
@@ -713,10 +731,10 @@ visibility = "model"
 input_schema_ref = "schemas/run.input.json"
 output_schema_ref = "schemas/run.output.json"
 "#;
-        let error = imported_extension_package(vec![(
-            "manifest.toml".to_string(),
-            manifest.as_bytes().to_vec(),
-        )])
+        let error = imported_extension_package(
+            vec![("manifest.toml".to_string(), manifest.as_bytes().to_vec())],
+            &[],
+        )
         .expect_err("non-wasm runtimes must be rejected");
         assert!(format!("{error}").contains("wasm runtime"));
     }
@@ -733,7 +751,7 @@ output_schema_ref = "schemas/run.output.json"
                 .into_iter()
                 .filter(|(path, _)| path != missing)
                 .collect::<Vec<_>>();
-            let error = imported_extension_package(files)
+            let error = imported_extension_package(files, &[])
                 .expect_err("missing declared assets must be rejected at import");
             let message = format!("{error}");
             assert!(

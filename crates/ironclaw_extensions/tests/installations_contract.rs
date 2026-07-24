@@ -2,13 +2,12 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
 use ironclaw_extensions::{
-    CapabilityProviderHostApiContract, ExtensionActivationState, ExtensionCredentialBinding,
-    ExtensionCredentialHandle, ExtensionHealthMessage, ExtensionHealthSnapshot,
-    ExtensionHealthStatus, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
-    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
-    ManifestSource, ManifestV2Error,
+    CapabilityProviderHostApiContract, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    FilesystemExtensionInstallationStore, HostApiContractRegistry, InstallationOwner,
+    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::{Filter, InMemoryBackend, Page, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath};
@@ -94,7 +93,6 @@ fn installation(hash: &str) -> ExtensionInstallation {
     ExtensionInstallation::new(
         installation_id("acme-tools-prod"),
         extension_id("acme-tools"),
-        ExtensionActivationState::Installed,
         ExtensionManifestRef::new(extension_id("acme-tools"), Some(manifest_hash(hash))),
         vec![],
         Utc::now(),
@@ -107,7 +105,6 @@ fn installation_with_manifest_hash(hash: Option<&str>) -> ExtensionInstallation 
     ExtensionInstallation::new(
         installation_id("acme-tools-prod"),
         extension_id("acme-tools"),
-        ExtensionActivationState::Installed,
         ExtensionManifestRef::new(extension_id("acme-tools"), hash.map(manifest_hash)),
         vec![],
         Utc::now(),
@@ -161,7 +158,6 @@ async fn upsert_installation_rejects_unknown_manifest() {
             ExtensionInstallation::new(
                 installation_id("missing-prod"),
                 extension_id("missing-tools"),
-                ExtensionActivationState::Installed,
                 ExtensionManifestRef::new(
                     extension_id("missing-tools"),
                     Some(manifest_hash("sha256:missing")),
@@ -265,15 +261,6 @@ async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair(
 async fn missing_installation_mutations_return_not_found() {
     let store = filesystem_store().await;
     let missing = installation_id("missing-prod");
-
-    let activation_err = store
-        .set_activation_state(&missing, ExtensionActivationState::Enabled)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        activation_err,
-        ExtensionInstallationError::InstallationNotFound { .. }
-    ));
 
     let health_err = store
         .update_health(&missing, ExtensionHealthSnapshot::healthy())
@@ -401,7 +388,6 @@ fn new_installation_uses_updated_at_for_initial_health_timestamp() {
     let installation = ExtensionInstallation::new(
         installation_id("acme-tools-prod"),
         extension_id("acme-tools"),
-        ExtensionActivationState::Installed,
         ExtensionManifestRef::new(
             extension_id("acme-tools"),
             Some(manifest_hash("sha256:abc")),
@@ -439,7 +425,6 @@ fn persisted_reconstruction_preserves_health_timestamp_and_bindings() {
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: installation_id("acme-tools"),
             extension_id: extension_id.clone(),
-            activation_state: ExtensionActivationState::Enabled,
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
             credential_bindings: vec![binding.clone()],
             health: health.clone(),
@@ -455,7 +440,7 @@ fn persisted_reconstruction_preserves_health_timestamp_and_bindings() {
 }
 
 #[tokio::test]
-async fn enabled_installations_sort_by_updated_at_desc_then_id() {
+async fn installations_sort_by_id() {
     let older = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
@@ -475,7 +460,6 @@ async fn enabled_installations_sort_by_updated_at_desc_then_id() {
                 ExtensionInstallation::new(
                     installation_id(id),
                     extension_id("acme-tools"),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(
                         extension_id("acme-tools"),
                         Some(manifest_hash("sha256:abc")),
@@ -491,13 +475,13 @@ async fn enabled_installations_sort_by_updated_at_desc_then_id() {
     }
 
     let ids: Vec<_> = store
-        .list_enabled_installations()
+        .list_installations()
         .await
         .unwrap()
         .into_iter()
         .map(|installation| installation.installation_id().as_str().to_owned())
         .collect();
-    assert_eq!(ids, ["acme-tools-c", "acme-tools-a", "acme-tools-b"]);
+    assert_eq!(ids, ["acme-tools-a", "acme-tools-b", "acme-tools-c"]);
 }
 
 #[tokio::test]

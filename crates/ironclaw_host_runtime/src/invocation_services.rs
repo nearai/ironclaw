@@ -174,9 +174,10 @@ impl InvocationServicesError {
     }
 }
 
-/// Local-host implementation for plans whose required backends are local.
+/// Configured service resolver for plans whose required backends are available
+/// through the composed host ports.
 #[derive(Clone)]
-pub struct LocalInvocationServicesResolver {
+pub struct ConfiguredInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
@@ -188,7 +189,7 @@ pub struct LocalInvocationServicesResolver {
     post_edit_check: Option<PostEditCheckConfig>,
 }
 
-impl LocalInvocationServicesResolver {
+impl ConfiguredInvocationServicesResolver {
     pub fn new(
         filesystem: Arc<dyn RootFilesystem>,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -248,7 +249,7 @@ impl LocalInvocationServicesResolver {
     }
 }
 
-impl InvocationServicesResolver for LocalInvocationServicesResolver {
+impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
     fn resolve(
         &self,
         request: InvocationServicesResolutionRequest<'_>,
@@ -332,7 +333,7 @@ fn local_host_process_execution_permitted(plan: &ExecutionPlan) -> bool {
         && matches!(plan.deployment, DeploymentMode::LocalSingleUser)
 }
 
-impl LocalInvocationServicesResolver {
+impl ConfiguredInvocationServicesResolver {
     /// Select the process port the post-edit check must run through, matching
     /// the plan's process-isolation boundary: the local host port only when
     /// local host execution is permitted (`LocalSingleUser` + `LocalHost`), the

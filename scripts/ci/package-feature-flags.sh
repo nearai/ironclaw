@@ -36,11 +36,8 @@ fallback_feature_flags() {
 }
 
 case "${package}" in
-  ironclaw_product_adapters)
+  ironclaw_product)
     printf '%s\n' "--features test-support,host-auth-mint"
-    ;;
-  ironclaw_product_workflow)
-    printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_composition)
     # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider
@@ -73,8 +70,6 @@ case "${package}" in
   ironclaw_reborn_openai_compat)
     ;;
   ironclaw_architecture | \
-  ironclaw_product_adapter_registry | \
-  ironclaw_product_context | \
   ironclaw_reborn_config | \
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \

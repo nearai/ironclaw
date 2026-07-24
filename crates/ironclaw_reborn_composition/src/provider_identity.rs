@@ -16,8 +16,8 @@ use std::{
 };
 
 use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::AdapterInstallationId;
-use ironclaw_product_workflow::{
+use ironclaw_product::AdapterInstallationId;
+use ironclaw_product::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
     ResolvedProductActorUser,
 };
@@ -354,7 +354,7 @@ pub fn installation_scoped_provider_user_id(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
+    use ironclaw_product::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
     use super::*;
 

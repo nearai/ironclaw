@@ -9,16 +9,18 @@
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
 };
-use ironclaw_reborn_composition::{RebornBuildInput, build_reborn_services};
+use ironclaw_reborn_composition::{RebornRuntimeInput, build_runtime};
 
 /// Write survives a fresh libsql reopen of the same on-disk file. Failure
 /// class of PR #4782 (two stores over different mount views).
 #[tokio::test]
 async fn filesystem_outbound_state_store_persists_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        "w6-outbound-durability",
-        dir.path().join("local-dev"),
+    let services = build_runtime(RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_dev_build_input(
+            "w6-outbound-durability",
+            dir.path().join("local-dev"),
+        ),
     ))
     .await
     .expect("services build");
@@ -26,9 +28,13 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     let store = services
         .local_dev_outbound_preferences_for_test()
         .expect("local-dev outbound_preferences wired");
-    let storage_root = services
-        .local_dev_storage_root_for_test()
-        .expect("local-dev storage root");
+    // The runtime canonicalizes the local-dev storage root at build time
+    // (`canonicalize_local_dev_path` == `std::fs::canonicalize`), so reproduce
+    // the exact on-disk path the store was opened over from this test's own
+    // input path rather than reaching for a removed runtime accessor. The
+    // build already created (and canonicalized) this directory.
+    let storage_root = std::fs::canonicalize(dir.path().join("local-dev"))
+        .expect("canonicalize local-dev storage root");
 
     let tenant = ironclaw_host_api::TenantId::new("w6-outbound-tenant").unwrap();
     let user = ironclaw_host_api::UserId::new("w6-outbound-user").unwrap();

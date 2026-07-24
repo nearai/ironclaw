@@ -1,0 +1,89 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_4a_gmail_connect",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw \"connect to Gmail.\" Go through the flow w/ Gmail.\nExpected result: Gmail is connected"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Gmail.\" Go through the flow w/ Gmail.\nExpecte",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b7b2d6b7e5444a619de28b02",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Gmail"
+            }
+          }
+        ],
+        "input_tokens": 13403,
+        "output_tokens": 63
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Gmail.\" Go through the flow w/ Gmail.\nExpecte",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_443bbac06ee34d83af8bfb50",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "gmail"
+            }
+          }
+        ],
+        "input_tokens": 13746,
+        "output_tokens": 61
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Gmail.\" Go through the flow w/ Gmail.\nExpecte",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_5e8f8c466ac546eea7d98f97",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "gmail"
+            }
+          }
+        ],
+        "input_tokens": 14054,
+        "output_tokens": 50
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Gmail.\" Go through the flow w/ Gmail.\nExpecte",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "Gmail is now connected. Here's a summary of the flow:\n\n| Step | Status |\n|------|--------|\n| **1. Search for Gmail extension** | ✅ Found `gmail` (host-bundled, v0.1.0) |\n| **2. Install extension** | ✅ Installed successfully |\n| **3. Activate extension** | ✅ Activated — all Gmail tools are now available |\n\n**Available tools:**\n- `gmail.list_messages` — list messages\n- `gmail.get_message` — read a message\n- `gmail.send_message` — send email\n- `gmail.create_draft` — create a draft\n- `gmail.reply_to_message` — reply to a thread\n- `gmail.trash_message` — move to trash\n\nNo additional credentials or OAuth were required — the host environment already has Gmail configured. You can start using it right away. What would you like to do with Gmail?",
+        "input_tokens": 15708,
+        "output_tokens": 206
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.extension_activate"
+    ]
+  }
+}

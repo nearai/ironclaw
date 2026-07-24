@@ -85,10 +85,9 @@ def _telegram_preflight(
     ``GET /api/webchat/v2/extensions/telegram/pairing/status``; the deep-link
     code is consumed through the extension webhook. The bot token env is
     therefore the credential prerequisite; the v1 monolith WASM channel
-    artifacts (``channels-src/telegram``) are no longer part of the reborn
-    lane. ``TELEGRAM_WEBHOOK_SECRET`` presence is reported for diagnostics
-    only — the reborn host never consumes an operator-supplied webhook
-    secret.
+    artifacts are no longer part of the reborn lane.
+    ``TELEGRAM_WEBHOOK_SECRET`` presence is reported for diagnostics only --
+    the reborn host never consumes an operator-supplied webhook secret.
     """
     copied_home_mentions = False
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"

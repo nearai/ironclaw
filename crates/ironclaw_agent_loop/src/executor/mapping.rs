@@ -92,6 +92,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
+        AgentLoopHostErrorKind::ContentFiltered => Some(ModelErrorClass::ContentFiltered),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
         // Accounting storage failed before the host could establish a
         // trustworthy budget outcome. Preserve the typed host error instead
@@ -451,6 +452,7 @@ mod tests {
             (K::Unavailable, Some(C::Unavailable)),
             (K::Internal, Some(C::Internal)),
             (K::InvalidOutput, Some(C::InvalidOutput)),
+            (K::ContentFiltered, Some(C::ContentFiltered)),
             (K::BudgetExceeded, Some(C::ContextOverflow)),
             // Model-fixable-by-rebuild: iteration retry refreshes the surface
             // and prompt bundle; exhaustion -> `model_stale_request`.

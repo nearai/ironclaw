@@ -142,6 +142,7 @@ pub(super) fn mock_mcp_extension_package(
             required_host_ports: Vec::new(),
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
         }],
@@ -160,6 +161,7 @@ pub(super) fn mock_mcp_extension_package(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
     }];

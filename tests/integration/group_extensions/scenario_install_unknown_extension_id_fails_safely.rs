@@ -12,13 +12,11 @@
 //! `RuntimeDispatchErrorKind::InputEncode` — the `"invalid_input"` reason token,
 //! a `Failed` (not `Denied`) outcome distinct from Scenario 1's success path.
 //!
-//! Phase 2 pins the PROVENANCE half of the same arm: `InvalidBindingRequest`'s
-//! `reason` interpolates the MODEL-CHOSEN `extension_id` verbatim, so it must
-//! ride the UNTRUSTED diagnostic channel. Routing it onto the trusted
-//! host-remediation channel would stamp
-//! `ObservationTrust::HostAuthored` on attacker-influenced text and thereby skip
-//! the credential-vocabulary scan `ironclaw_threads` applies to untrusted
-//! output.
+//! Phase 2 pins the catalog-disclosure half of the same arm: install resolves
+//! the model-chosen id against the available catalog before mutating state and
+//! returns one fixed generic diagnostic. The caller-supplied id must not be
+//! interpolated into that diagnostic, which would disclose catalog details and
+//! create an untrusted-text provenance obligation that this path does not need.
 
 use super::reborn_support::assertions::ToolErrorClass;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -51,55 +49,43 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     h.assert_no_tool_error(ToolErrorClass::Denied, "invalid_input")
         .await?;
 
-    model_chosen_extension_id_is_not_labelled_host_authored(g).await
+    model_chosen_extension_id_is_not_reflected_by_catalog_error(g).await
 }
 
-/// The exact string an UNTRUSTED diagnostic collapses to at the host_api
-/// boundary. Its PRESENCE is the proof the text was scanned; the adversarial
-/// id's absence is the proof it was not waved through as host-authored.
-const DEGRADED_PLACEHOLDER: &str = "capability summary unavailable";
+/// The fixed catalog-safe reason returned for every unknown extension id.
+const GENERIC_NOT_FOUND: &str = "available extension was not found";
 
-/// Phase 2: `builtin.extension_activate` with a model-chosen `extension_id`
+/// Phase 2: `builtin.extension_install` with a model-chosen `extension_id`
 /// that is itself credential vocabulary (`api_key` — a
 /// `CREDENTIAL_MARKERS` entry, and a legal `ExtensionId`: lowercase ASCII plus
-/// `_`). The reason interpolates it verbatim into "extension api_key is not
-/// installed".
-///
-/// On the untrusted channel that whole string fails the `SafeSummary`
-/// credential-vocabulary scan and collapses to the placeholder, which is
-/// correct. On the trusted host-remediation channel the scan is skipped by
-/// provenance and the attacker-influenced text reaches thread history intact —
-/// the defect this pins.
-async fn model_chosen_extension_id_is_not_labelled_host_authored(
+/// `_`). Catalog resolution must return the same fixed diagnostic as every
+/// other unknown id, rather than reflecting the caller-controlled value.
+async fn model_chosen_extension_id_is_not_reflected_by_catalog_error(
     g: &RebornIntegrationGroup,
 ) -> HarnessResult<()> {
     let h = g
-        .thread("ext-activate-adversarial-id")
+        .thread("ext-install-adversarial-id")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "api_key"}),
             ),
             RebornScriptedReply::text("no such extension"),
         ])
         .build()
         .await?;
-    h.submit_turn("activate the api_key extension").await?;
-    h.assert_tool_invoked("builtin.extension_activate").await?;
+    h.submit_turn("install the api_key extension").await?;
+    h.assert_tool_invoked("builtin.extension_install").await?;
 
     h.assert_conversation_history_lacks("extension api_key is not installed")
         .await
         .map_err(|error| {
-            format!(
-                "a reason interpolating the MODEL-CHOSEN extension_id must ride the untrusted \
-                 diagnostic channel and be scanned, not be stamped HostAuthored and waved \
-                 through: {error}"
-            )
+            format!("the catalog error must not interpolate the MODEL-CHOSEN extension_id: {error}")
         })?;
-    h.assert_conversation_history_contains(DEGRADED_PLACEHOLDER)
+    h.assert_conversation_history_contains(GENERIC_NOT_FOUND)
         .await
         .map_err(|error| {
-            format!("the scanned-and-collapsed placeholder must be what reaches history: {error}")
+            format!("the fixed generic catalog diagnostic must reach history: {error}")
         })?;
     Ok(())
 }

@@ -279,7 +279,7 @@ test("tool activity cards use unprefixed display names", () => {
 test("tool activity cards map gate-declined lifecycle frames to declined status", () => {
   const card = toolCardFromActivity({
     invocation_id: "invocation-declined",
-    capability_id: "builtin.extension_activate",
+    capability_id: "builtin.extension_install",
     status: "failed",
     error_kind: "gate_declined",
   });
@@ -292,8 +292,8 @@ test("tool activity cards map gate-declined lifecycle frames to declined status"
 test("tool preview cards preserve gate-declined error kind as declined status", () => {
   const card = toolCardFromPreview({
     invocation_id: "invocation-preview-declined",
-    capability_id: "builtin.extension_activate",
-    title: "extension_activate",
+    capability_id: "builtin.extension_install",
+    title: "extension_install",
     status: "failed",
     error_kind: "gate_declined",
     output_summary: "gate_declined",

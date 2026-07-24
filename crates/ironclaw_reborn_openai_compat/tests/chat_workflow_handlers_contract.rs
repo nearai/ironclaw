@@ -6,14 +6,14 @@ mod support;
 
 use async_trait::async_trait;
 use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
+use base64::Engine as _;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_adapters::{
-    AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductCommandResultPayload,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
-    ProductProjectionSubject, ProductRejection, ProductRejectionKind, ProductWorkflow,
-    ProjectionReadRequest, ProtocolAuthEvidence, ProtocolAuthFailure, RedactedString,
+use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
+use ironclaw_product::{
+    AuthRequirement, ProductCommandResultPayload, ProductInboundAck, ProductInboundPayload,
+    ProductRejection, ProductRejectionKind, ProtocolAuthEvidence, ProtocolAuthFailure,
 };
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
@@ -26,14 +26,16 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface, OpenAiCompatRouterState,
     OpenAiCompatTurnRunRef, OpenAiUsage, openai_compat_router_with_state,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId};
 use serde_json::{Value, json};
-use support::in_memory_openai_compat_ref_store;
+use support::{
+    FakeProductSurface, RecordedProductSurfaceSubmit, in_memory_openai_compat_ref_store,
+};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn chat_completion_route_submits_product_workflow_and_returns_projection() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn chat_completion_route_submits_product_surface_and_returns_projection() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(StaticChatProjectionReader::text("hello from reborn"));
     let router = test_router(workflow.clone(), projection_reader);
 
@@ -75,7 +77,7 @@ async fn chat_completion_route_submits_product_workflow_and_returns_projection()
 
 #[tokio::test]
 async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_body() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(StaticChatProjectionReader::text("ok"));
     let router = test_router(workflow.clone(), projection_reader);
     let body = json!({
@@ -105,7 +107,7 @@ async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_
     assert_eq!(
         workflow.seen_envelopes().len(),
         1,
-        "replay must not re-submit to ProductWorkflow"
+        "replay must not re-submit to ProductSurface"
     );
 
     let conflict = router
@@ -127,7 +129,7 @@ async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_
 
 #[tokio::test]
 async fn invalid_chat_completion_does_not_reserve_idempotency_key() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(StaticChatProjectionReader::text("ok"));
     let router = test_router(workflow.clone(), projection_reader);
 
@@ -163,7 +165,7 @@ async fn invalid_chat_completion_does_not_reserve_idempotency_key() {
 
 #[tokio::test]
 async fn chat_completion_rejects_malformed_json_body() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -180,7 +182,7 @@ async fn chat_completion_rejects_malformed_json_body() {
 
 #[tokio::test]
 async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
@@ -198,7 +200,7 @@ async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workfl
 }
 
 #[tokio::test]
-async fn chat_completion_rejects_invalid_model_before_product_workflow() {
+async fn chat_completion_rejects_invalid_model_before_product_surface() {
     // Each value violates a distinct `model` bound: over the 256-byte cap,
     // a control character, and surrounding whitespace. All must reject with a
     // sanitized 400 naming the `model` param before the product workflow runs.
@@ -210,7 +212,7 @@ async fn chat_completion_rejects_invalid_model_before_product_workflow() {
         "gpt-reborn ",
     ];
     for model in cases {
-        let workflow = Arc::new(FakeProductWorkflow::new());
+        let workflow = Arc::new(FakeProductSurface::new());
         let router = test_router(
             workflow.clone(),
             Arc::new(StaticChatProjectionReader::text("unused")),
@@ -245,7 +247,7 @@ async fn chat_completion_rejects_invalid_model_before_product_workflow() {
 
 #[tokio::test]
 async fn chat_completion_rejects_invalid_idempotency_key_header() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -268,7 +270,7 @@ async fn chat_completion_rejects_invalid_idempotency_key_header() {
 
 #[tokio::test]
 async fn chat_completion_deferred_busy_ack_returns_429() {
-    let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(deferred_busy_ack()));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -292,7 +294,7 @@ async fn chat_completion_deferred_busy_ack_returns_429() {
 
 #[tokio::test]
 async fn chat_completion_rejected_busy_ack_returns_429() {
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_busy_ack()));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -316,9 +318,11 @@ async fn chat_completion_rejected_busy_ack_returns_429() {
 
 #[tokio::test]
 async fn chat_completion_duplicate_ack_unwraps_to_accepted() {
-    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::Duplicate {
-        prior: Box::new(accepted_ack()),
-    }));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(
+        ProductInboundAck::Duplicate {
+            prior: Box::new(accepted_ack()),
+        },
+    ));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("ok")),
@@ -342,7 +346,7 @@ async fn chat_completion_duplicate_ack_unwraps_to_accepted() {
 
 #[tokio::test]
 async fn chat_completion_noop_ack_returns_internal_error() {
-    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::NoOp));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(ProductInboundAck::NoOp));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -366,10 +370,12 @@ async fn chat_completion_noop_ack_returns_internal_error() {
 
 #[tokio::test]
 async fn chat_completion_command_result_ack_returns_internal_error() {
-    let workflow = Arc::new(FixedAckWorkflow::new(ProductInboundAck::CommandResult {
-        command: "unexpected".to_string(),
-        payload: ProductCommandResultPayload::new(json!({"ok": true})),
-    }));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(
+        ProductInboundAck::CommandResult {
+            command: "unexpected".to_string(),
+            payload: ProductCommandResultPayload::new(json!({"ok": true})),
+        },
+    ));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -393,7 +399,7 @@ async fn chat_completion_command_result_ack_returns_internal_error() {
 
 #[tokio::test]
 async fn chat_completion_idempotency_retries_after_busy_without_500() {
-    let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(deferred_busy_ack()));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -421,7 +427,7 @@ async fn chat_completion_idempotency_retries_after_busy_without_500() {
 
 #[tokio::test]
 async fn chat_completion_replayed_pending_ref_submits_and_records_accepted_ack() {
-    let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(accepted_ack()));
     let ref_store = in_memory_openai_compat_ref_store();
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
@@ -475,7 +481,7 @@ async fn chat_completion_replayed_pending_ref_submits_and_records_accepted_ack()
 
 #[tokio::test]
 async fn chat_completion_binding_required_rejection_returns_404() {
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::BindingRequired,
     )));
     let router = test_router_with_workflow(
@@ -505,7 +511,7 @@ async fn chat_completion_binding_required_rejection_returns_404() {
 
 #[tokio::test]
 async fn chat_completion_access_denied_rejection_returns_403() {
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::AccessDenied,
     )));
     let router = test_router_with_workflow(
@@ -530,7 +536,7 @@ async fn chat_completion_access_denied_rejection_returns_403() {
 
 #[tokio::test]
 async fn chat_completion_unknown_installation_rejection_returns_503_retryable() {
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::UnknownInstallation,
     )));
     let router = test_router_with_workflow(
@@ -557,7 +563,7 @@ async fn chat_completion_unknown_installation_rejection_returns_503_retryable() 
 
 #[tokio::test]
 async fn chat_completion_invalid_request_rejection_returns_400() {
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::InvalidRequest,
     )));
     let router = test_router_with_workflow(
@@ -587,7 +593,7 @@ async fn chat_completion_invalid_request_rejection_returns_400() {
 
 #[tokio::test]
 async fn chat_completion_policy_denied_rejection_returns_403() {
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::PolicyDenied,
     )));
     let router = test_router_with_workflow(
@@ -617,7 +623,7 @@ async fn chat_completion_ambiguous_resolution_rejection_returns_409() {
     // AccessDenied (403) or a 5xx. This test exercises the handler-level
     // mapping to catch any layer between error_from_rejection() and the
     // axum response that could accidentally suppress or remap the code.
-    let workflow = Arc::new(FixedAckWorkflow::new(rejected_ack(
+    let workflow = Arc::new(FakeProductSurface::with_outcome(rejected_ack(
         ProductRejectionKind::AmbiguousResolution,
     )));
     let router = test_router_with_workflow(
@@ -644,7 +650,7 @@ async fn chat_completion_ambiguous_resolution_rejection_returns_409() {
 
 #[tokio::test]
 async fn chat_completion_projection_reader_error_is_propagated_as_response() {
-    let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
+    let workflow = Arc::new(FakeProductSurface::with_outcome(accepted_ack()));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(ErrorChatProjectionReader::new(
@@ -674,12 +680,8 @@ async fn chat_completion_projection_reader_error_is_propagated_as_response() {
 }
 
 #[tokio::test]
-async fn chat_completion_product_workflow_error_redacts_request_and_backend_details() {
-    let workflow = Arc::new(ErrorWorkflow::new(ProductAdapterError::Internal {
-        detail: RedactedString::new(
-            "provider stack /host/path /Users/alice SECRET_SENTINEL sk-live runtime trace",
-        ),
-    }));
+async fn chat_completion_product_surface_error_redacts_request_and_backend_details() {
+    let workflow = Arc::new(FakeProductSurface::with_error(support::internal_error()));
     let router = test_router_with_workflow(
         workflow,
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -723,7 +725,7 @@ fn authenticated_caller_rejects_missing_claim() {
 
 #[tokio::test]
 async fn chat_completion_array_content_messages_are_rendered_to_text() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("ok")),
@@ -763,8 +765,45 @@ async fn chat_completion_array_content_messages_are_rendered_to_text() {
 }
 
 #[tokio::test]
+async fn chat_completion_accepts_inline_image_over_webui_legacy_cap() {
+    let workflow = Arc::new(FakeProductSurface::new());
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("ok")),
+    );
+    let mut image = vec![0u8; 6 * 1024 * 1024];
+    image[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(image);
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe this"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:image/png;base64,{image_base64}")
+                            }
+                        }
+                    ]
+                }]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 1);
+}
+
+#[tokio::test]
 async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("ok")),
@@ -812,8 +851,8 @@ async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
 }
 
 #[tokio::test]
-async fn chat_completion_rejects_excessive_message_count_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn chat_completion_rejects_excessive_message_count_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -835,8 +874,8 @@ async fn chat_completion_rejects_excessive_message_count_before_product_workflow
 }
 
 #[tokio::test]
-async fn wired_chat_completion_requires_authenticated_caller_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn wired_chat_completion_requires_authenticated_caller_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
@@ -918,8 +957,8 @@ fn authenticated_caller_rejects_auth_tenant_scope_mismatch() {
 }
 
 #[tokio::test]
-async fn streaming_chat_completion_requires_streamer_before_product_workflow() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn streaming_chat_completion_requires_streamer_before_product_surface() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -943,8 +982,7 @@ async fn streaming_chat_completion_requires_streamer_before_product_workflow() {
 
 #[tokio::test]
 async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitting() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
-    workflow.program_projection_read_resolution(sample_projection_read_request());
+    let workflow = Arc::new(FakeProductSurface::new());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
@@ -972,10 +1010,10 @@ async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitti
 }
 
 #[tokio::test]
-async fn projection_reader_is_not_called_when_product_workflow_read_resolution_fails() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+async fn projection_reader_receives_canonical_product_surface_read_request() {
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(RecordingChatProjectionReader::new(
-        OpenAiChatCompletionProjection::text("should not be read"),
+        OpenAiChatCompletionProjection::text("ok"),
     ));
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
@@ -998,43 +1036,28 @@ async fn projection_reader_is_not_called_when_product_workflow_read_resolution_f
         .await
         .expect("response");
 
-    assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), http::StatusCode::OK);
     assert_eq!(workflow.accepted_count(), 1);
     assert_eq!(workflow.read_inputs().len(), 1);
-    assert_eq!(projection_reader.request_count(), 0);
-}
-
-#[tokio::test]
-async fn projection_reader_is_not_called_when_read_resolution_scope_mismatches_caller() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
-    let mut mismatched_read = sample_projection_read_request();
-    mismatched_read.actor = TurnActor::new(UserId::new("user-b").expect("user"));
-    workflow.program_projection_read_resolution(mismatched_read);
-    let projection_reader = Arc::new(RecordingChatProjectionReader::new(
-        OpenAiChatCompletionProjection::text("should not be read"),
-    ));
-    let router = test_router_with_workflow(workflow.clone(), projection_reader.clone());
-
-    let response = router
-        .oneshot(chat_request(
-            json!({
-                "model": "gpt-reborn",
-                "messages": [{"role": "user", "content": "hello"}]
-            }),
-            Some("mismatched-read-key"),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
-    assert_eq!(workflow.accepted_count(), 1);
-    assert_eq!(workflow.read_inputs().len(), 1);
-    assert_eq!(projection_reader.request_count(), 0);
+    assert_eq!(projection_reader.request_count(), 1);
+    let projection_request = projection_reader.last_request();
+    assert_eq!(
+        workflow.read_inputs()[0],
+        projection_request.projection_read
+    );
+    assert_eq!(
+        projection_request.projection_read.actor,
+        TurnActor::new(UserId::new("user-a").expect("user"))
+    );
+    assert_eq!(
+        projection_request.projection_read.scope.thread_id.as_str(),
+        projection_request.public_id.as_str()
+    );
 }
 
 #[tokio::test]
 async fn model_only_tool_call_output_shape_is_preserved() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(StaticChatProjectionReader::projection(
         OpenAiChatCompletionProjection {
             assistant_content: None,
@@ -1096,7 +1119,7 @@ async fn model_only_tool_call_output_shape_is_preserved() {
 
 #[tokio::test]
 async fn requested_model_and_projection_read_are_forwarded_to_projection_reader() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(RecordingChatProjectionReader::new(
         OpenAiChatCompletionProjection::text("ok"),
     ));
@@ -1116,25 +1139,21 @@ async fn requested_model_and_projection_read_are_forwarded_to_projection_reader(
     assert_eq!(response.status(), http::StatusCode::OK);
     let read_inputs = workflow.read_inputs();
     assert_eq!(read_inputs.len(), 1);
-    assert!(matches!(
-        &read_inputs[0].subject,
-        ProductProjectionSubject::AdapterExternalRefs { .. }
-    ));
-    assert_eq!(read_inputs[0].thread_id_hint, None);
     assert_eq!(read_inputs[0].after_cursor, None);
     assert_eq!(read_inputs[0].limit, None);
 
     let projection_request = projection_reader.last_request();
     assert_eq!(projection_request.requested_model, "gpt-reborn-model-hint");
+    assert_eq!(read_inputs[0], projection_request.projection_read);
     assert_eq!(
-        projection_request.projection_read,
-        sample_projection_read_request()
+        projection_request.projection_read.scope.thread_id.as_str(),
+        projection_request.public_id.as_str()
     );
 }
 
 #[tokio::test]
 async fn client_tools_are_forwarded_as_model_only_projection_reader_metadata() {
-    let workflow = Arc::new(FakeProductWorkflow::new());
+    let workflow = Arc::new(FakeProductSurface::new());
     let projection_reader = Arc::new(RecordingChatProjectionReader::new(
         OpenAiChatCompletionProjection::text("ok"),
     ));
@@ -1181,7 +1200,7 @@ async fn client_tools_are_forwarded_as_model_only_projection_reader_metadata() {
     assert!(!submitted.to_string().contains("lookup_order"));
 }
 
-fn submitted_chat_text_json(envelope: &ProductInboundEnvelope) -> Value {
+fn submitted_chat_text_json(envelope: &RecordedProductSurfaceSubmit) -> Value {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(payload) => {
             serde_json::from_str(&payload.text).expect("structured chat message text")
@@ -1191,15 +1210,14 @@ fn submitted_chat_text_json(envelope: &ProductInboundEnvelope) -> Value {
 }
 
 fn test_router(
-    workflow: Arc<FakeProductWorkflow>,
+    workflow: Arc<FakeProductSurface>,
     projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
 ) -> axum::Router {
-    workflow.program_projection_read_resolution(sample_projection_read_request());
     test_router_with_workflow(workflow, projection_reader)
 }
 
 fn test_router_with_workflow(
-    workflow: Arc<dyn ProductWorkflow>,
+    workflow: Arc<dyn ProductSurface>,
     projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
 ) -> axum::Router {
     let service = OpenAiChatCompletionsWorkflow::new(
@@ -1210,6 +1228,7 @@ fn test_router_with_workflow(
     openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(Arc::new(
         service,
     )))
+    .layer(DefaultBodyLimit::max(14 * 1024 * 1024))
     .layer(axum::Extension(caller()))
 }
 
@@ -1253,92 +1272,6 @@ fn caller() -> OpenAiCompatAuthenticatedCaller {
         ),
     )
     .expect("caller")
-}
-
-fn sample_projection_read_request() -> ProjectionReadRequest {
-    ProjectionReadRequest {
-        actor: TurnActor::new(UserId::new("user-a").expect("user")),
-        scope: TurnScope::new(
-            TenantId::new("tenant-a").expect("tenant"),
-            Some(AgentId::new("agent-a").expect("agent")),
-            Some(ProjectId::new("project-a").expect("project")),
-            ThreadId::new("thread-openai-chat").expect("thread"),
-        ),
-        after_cursor: None,
-        limit: None,
-    }
-}
-
-struct FixedAckWorkflow {
-    ack: ProductInboundAck,
-    seen_envelopes: Mutex<Vec<ProductInboundEnvelope>>,
-    read_inputs: Mutex<Vec<ProductProjectionReadInput>>,
-}
-
-impl FixedAckWorkflow {
-    fn new(ack: ProductInboundAck) -> Self {
-        Self {
-            ack,
-            seen_envelopes: Mutex::new(Vec::new()),
-            read_inputs: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn seen_count(&self) -> usize {
-        self.seen_envelopes
-            .lock()
-            .expect("workflow seen lock")
-            .len()
-    }
-
-    fn read_count(&self) -> usize {
-        self.read_inputs.lock().expect("workflow read lock").len()
-    }
-}
-
-#[async_trait]
-impl ProductWorkflow for FixedAckWorkflow {
-    async fn submit_inbound(
-        &self,
-        envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ironclaw_product_adapters::ProductAdapterError> {
-        self.seen_envelopes
-            .lock()
-            .expect("workflow seen lock")
-            .push(envelope);
-        Ok(self.ack.clone())
-    }
-
-    async fn read_projection(
-        &self,
-        request: ProductProjectionReadInput,
-    ) -> Result<ProjectionReadRequest, ironclaw_product_adapters::ProductAdapterError> {
-        self.read_inputs
-            .lock()
-            .expect("workflow read lock")
-            .push(request);
-        Ok(sample_projection_read_request())
-    }
-}
-
-struct ErrorWorkflow {
-    error: ProductAdapterError,
-}
-
-impl ErrorWorkflow {
-    fn new(error: ProductAdapterError) -> Self {
-        Self { error }
-    }
-}
-
-#[async_trait]
-impl ProductWorkflow for ErrorWorkflow {
-    async fn submit_inbound(
-        &self,
-        _envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        Err(self.error.clone())
-    }
 }
 
 fn accepted_ack() -> ProductInboundAck {

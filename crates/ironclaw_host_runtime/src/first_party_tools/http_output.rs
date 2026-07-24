@@ -76,14 +76,14 @@ pub(super) fn shape_response(
 /// When an outbound `builtin.http` request is rejected for missing or invalid
 /// authorization, nudge the model toward the extension that can inject
 /// credentials for the host, rather than concluding the resource is
-/// inaccessible and giving up. Hint-only: the model still drives the
-/// install/activate flow.
+/// inaccessible and giving up. Hint-only: the model still drives install and
+/// the manifest-declared readiness flow.
 fn unauthorized_extension_hint(status: u16) -> Option<&'static str> {
     matches!(status, 401 | 403 | 407).then_some(
         "This request was rejected for authentication/authorization. If this host is served by \
          an installable extension, that extension injects the required credentials for you: \
          search for it with builtin.extension_search (by the service or domain name), then \
-         builtin.extension_install and builtin.extension_activate, and retry through the \
+         builtin.extension_install, and retry through the \
          extension's tools instead of an unauthenticated builtin.http call.",
     )
 }

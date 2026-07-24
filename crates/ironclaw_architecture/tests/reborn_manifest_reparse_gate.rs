@@ -53,7 +53,7 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "one-time CAS migration compiles pre-resolved filesystem rows before the store opens",
     ),
     (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
+        "crates/ironclaw_product/src/adapter_registry.rs",
         1,
         ReparseCategory::Compiler,
         "parse_product_adapter_manifest_record — the registry manifest compiler entry",

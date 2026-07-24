@@ -240,7 +240,7 @@ fn reborn_crate_dependency_boundaries_hold() {
     // depend only on `ironclaw_host_api` plus `ironclaw_prompt_envelope`, because
     // it owns prompt-safe wrapping for retrieved memory context (#5327). Enforced
     // as an allowlist (forbid every other workspace ironclaw crate) so future
-    // deps — e.g. `ironclaw_turns`, `ironclaw_product_workflow`, `ironclaw_runner`
+    // deps — e.g. `ironclaw_turns`, `ironclaw_product`, `ironclaw_runner`
     // — cannot silently slip past a blocklist that only names today's offenders.
     let memory_contract_allowed = [
         "ironclaw_memory",
@@ -279,7 +279,7 @@ fn reborn_crate_dependency_boundaries_hold() {
     // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
     // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
     // as an allowlist so it can never reach UPSTREAM (into
-    // `ironclaw_reborn_composition` / `ironclaw_product_workflow`) or onto the v1
+    // `ironclaw_reborn_composition` / `ironclaw_product`) or onto the v1
     // legacy enclave — the "never reach upstream" property the crate guarantees.
     let reborn_identity_allowed = [
         "ironclaw_reborn_identity",
@@ -522,9 +522,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_first_party_extensions/src",
         "crates/ironclaw_host_api/src",
         "crates/ironclaw_host_runtime/src",
-        "crates/ironclaw_product_adapters/src",
-        "crates/ironclaw_product_adapter_registry/src",
-        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_product/src",
         "crates/ironclaw_webui/src",
         "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_extension/src",
@@ -617,6 +615,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw",
         [
             "ironclaw_extension_host",
+            "ironclaw_first_party_extensions",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
@@ -2046,6 +2045,34 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 }
 
 #[test]
+fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
+    let root = workspace_root();
+    let factory =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
+            .expect("composition factory source must be readable");
+    let owner_transaction = std::fs::read_to_string(
+        root.join("crates/ironclaw_extension_host/src/activation_transaction.rs"),
+    )
+    .expect("extension-host activation transaction source must be readable");
+
+    for forbidden in [
+        "reconcile_hosted_mcp_runtime_readiness",
+        "reconcile_hosted_mcp_startup",
+    ] {
+        assert!(
+            !factory.contains(forbidden),
+            "composition startup must not invoke hosted-MCP discovery through `{forbidden}`; \
+             discovery requires a real caller/run ResourceScope"
+        );
+        assert!(
+            !owner_transaction.contains(forbidden),
+            "extension-host must not expose ambient hosted-MCP startup probing through \
+             `{forbidden}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let forbidden = [
         ForbiddenUse {
@@ -2094,9 +2121,9 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_reborn_event_store/src",
         "crates/ironclaw_reborn_api/src",
         "crates/ironclaw_reborn_openai_compat/src",
-        "crates/ironclaw_product_adapters/src",
-        "crates/ironclaw_product_adapter_registry/src",
-        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_product/src",
+        "crates/ironclaw_product/src",
+        "crates/ironclaw_product/src",
         "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_extension/src",
         "crates/ironclaw_outbound/src",
@@ -2162,7 +2189,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
         },
         ForbiddenUse {
             pattern: "IncomingMessage",
-            reason: "OpenAI-compatible Reborn routes must enter through ProductWorkflow, not legacy channel ingress",
+            reason: "OpenAI-compatible Reborn routes must enter through ProductSurface, not legacy channel ingress",
             exempt: None,
         },
         ForbiddenUse {
@@ -2184,7 +2211,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
 
     assert!(
         violations.is_empty(),
-        "Reborn OpenAI-compatible routes must stay ProductWorkflow/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
+        "Reborn OpenAI-compatible routes must stay ProductSurface/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
         violations.join("\n")
     );
 }
@@ -2558,10 +2585,9 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
-            crate_name: "ironclaw_product_workflow",
+            crate_name: "ironclaw_product",
             forbidden: vec![
                 "ironclaw_dispatcher",
-                "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",
@@ -2600,9 +2626,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
@@ -2630,9 +2655,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // rule's forbidden list.
         BoundaryRule {
             // OpenAI-compatible route surface is a Reborn product/API facade.
-            // It may depend on host ingress vocabulary and ProductWorkflow
-            // adapter contracts, but it must not revive v1 gateway/LLM proxy
-            // paths or reach into runtime/composition services directly.
+            // It may depend on host ingress vocabulary, product adapter
+            // contracts, and the ProductSurface facade, but it must not revive
+            // v1 gateway/LLM proxy paths or reach into runtime/composition
+            // services directly.
             crate_name: "ironclaw_reborn_openai_compat",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -2657,7 +2683,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
@@ -2677,44 +2702,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_turns",
-                "ironclaw_wasm",
-            ],
-        },
-        BoundaryRule {
-            // Registry projects ProductAdapter host-api sections from the single
-            // Extension Manifest v2 over extension-owned installation and activation
-            // state. Runtime/dispatcher/engine crates would invert ownership, secrets
-            // crates could expose raw material instead of opaque handles, and v1
-            // WASM/channel crates would bypass the Reborn registry boundary.
-            crate_name: "ironclaw_product_adapter_registry",
-            forbidden: vec![
-                "ironclaw_legacy",
-                "ironclaw_authorization",
-                "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_events",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_product_workflow",
-                "ironclaw_reborn_event_store",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_threads",
-                "ironclaw_tui",
                 "ironclaw_wasm",
             ],
         },
@@ -2744,9 +2731,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
-                "ironclaw_product_adapter_registry",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
@@ -2785,9 +2771,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
-                "ironclaw_product_adapter_registry",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
@@ -2825,7 +2810,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
                 "ironclaw_runner",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -2869,7 +2853,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // the axum serve loop for the composed v2 Router. Since the
             // `ironclaw_webui_v2` route surface was folded into this crate
             // (as its `webui_v2` module), it now legitimately consumes the
-            // `ironclaw_product_workflow` `RebornServicesApi` facade the v2
+            // `ironclaw_product` `ProductSurface` facade the v2
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through
@@ -2896,8 +2880,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_product_adapter_registry",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_config",
@@ -3067,9 +3049,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_memory",
                 "ironclaw_network",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_reborn_event_store",
                 "ironclaw_runner",
                 "ironclaw",
@@ -3122,8 +3103,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
@@ -3197,9 +3177,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
@@ -3465,9 +3444,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapter_registry",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
+                "ironclaw_product",
+                "ironclaw_product",
                 "ironclaw_runner",
                 "ironclaw",
                 "ironclaw_reborn_composition",
@@ -3594,13 +3572,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W4.3",
         reason: "conversation ingress still names turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_product_context",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "product context still names turn DTOs that move to turn_contracts if the JIT split fires",
     },
     LayerMatrixException {
         crate_name: "ironclaw_hooks",

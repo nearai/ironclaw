@@ -1,0 +1,109 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_5b_drive_connect",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw \"connect to Google Drive.\" Go through the auth flow.\nExpected result: Google Drive is connected"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Drive.\" Go through the auth flow.\nExpe",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_cd8a46ff9cc84f6a9cccb2ac",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Google Drive"
+            }
+          }
+        ],
+        "input_tokens": 13395,
+        "output_tokens": 62
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Drive.\" Go through the auth flow.\nExpe",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_1712bbf850b74ceca0731b09",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "google-drive"
+            }
+          }
+        ],
+        "input_tokens": 14078,
+        "output_tokens": 67
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Drive.\" Go through the auth flow.\nExpe",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_45ca16e50ec9400f9580e358",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "google-drive"
+            }
+          }
+        ],
+        "input_tokens": 14449,
+        "output_tokens": 51
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Drive.\" Go through the auth flow.\nExpe",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_211415126a1d493fb5acae77",
+            "name": "google-drive__list_files",
+            "arguments": {
+              "page_size": 3
+            }
+          }
+        ],
+        "input_tokens": 17280,
+        "output_tokens": 62
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Drive.\" Go through the auth flow.\nExpe",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "text",
+        "content": "✅ **Google Drive is connected!**\n\nHere's a summary of what happened:\n\n1. **Installed** the Google Drive extension\n2. **Activated** it — the auth flow completed automatically (no additional credentials needed)\n3. **Verified** by listing files — successfully found existing files in the account\n\nThe Google Drive tools are now available:\n\n| Tool | Purpose |\n|------|---------|\n| `list_files` | Search/list files & folders |\n| `get_file` | Get file metadata |\n| `download_file` | Download text/doc content |\n| `upload_file` | Upload new text files |\n| `create_folder` | Create folders |\n| `share_file` | Share with others |\n| `update_file` | Rename/move/star files |\n| `delete_file` / `trash_file` | Remove files |\n\nI can see there are already some files in the account (including Google Sheets like the bug tracker). Ready to use Drive for anything you need!",
+        "input_tokens": 18555,
+        "output_tokens": 203
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "google-drive.list_files"
+    ]
+  }
+}

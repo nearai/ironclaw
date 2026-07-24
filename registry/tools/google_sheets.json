@@ -11,11 +11,6 @@
     "data",
     "sheets"
   ],
-  "source": {
-    "dir": "tools-src/google-sheets",
-    "capabilities": "google-sheets-tool.capabilities.json",
-    "crate_name": "google-sheets-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-google-sheets-0.2.1-wasm32-wasip2.tar.gz",

@@ -23,7 +23,7 @@ function telegramPairingPanelSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { PairingWebCodePanel, pairingBotUsernameFromDeepLink, formatPairingCountdown };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { PairingWebCodePanel, formatPairingCountdown };`;
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -197,24 +197,16 @@ function createPanelHarness({ pairingResponses = [], startResponses = [], qrResu
   };
 }
 
-test("pairingBotUsernameFromDeepLink derives the bot handle from the deep link", () => {
+test("formatPairingCountdown formats the remaining lifetime", () => {
   const harness = createPanelHarness();
-  const { pairingBotUsernameFromDeepLink, formatPairingCountdown } =
-    harness.context.globalThis.__testExports;
-
-  assert.equal(
-    pairingBotUsernameFromDeepLink("https://t.me/ironclaw_bot?start=TG-PAIR-42"),
-    "ironclaw_bot",
-  );
-  assert.equal(pairingBotUsernameFromDeepLink("https://evil.example/ironclaw_bot"), "");
-  assert.equal(pairingBotUsernameFromDeepLink(null), "");
+  const { formatPairingCountdown } = harness.context.globalThis.__testExports;
 
   assert.equal(formatPairingCountdown(90_000), "1:30");
   assert.equal(formatPairingCountdown(5_000), "0:05");
   assert.equal(formatPairingCountdown(-1), "0:00");
 });
 
-test("PairingWebCodePanel mints a code when the stored one is stale and renders code, link, QR, username, countdown", async () => {
+test("PairingWebCodePanel renders only manifest-backed code, link, QR, and countdown data", async () => {
   const harness = createPanelHarness({
     pairingResponses: [
       {
@@ -245,7 +237,10 @@ test("PairingWebCodePanel mints a code when the stored one is stale and renders 
   );
   const body = JSON.stringify(rendered);
   assert.ok(body.includes("TG-PAIR-42"), "renders the pairing code");
-  assert.ok(body.includes("@ironclaw_bot"), "renders the copyable bot username");
+  assert.ok(
+    !body.includes("@ironclaw_bot"),
+    "the generic panel must not infer provider-specific identity from a URL",
+  );
   assert.ok(body.includes("Expires in 1:30"), "renders the countdown");
   assert.deepEqual(valuesAfter(rendered, "href="), ["https://t.me/ironclaw_bot?start=TG-PAIR-42"]);
   assert.ok(valuesAfter(rendered, "target=").includes("_blank"));
@@ -253,7 +248,7 @@ test("PairingWebCodePanel mints a code when the stored one is stale and renders 
   assert.ok(body.includes("Telegram pairing QR"), "QR image carries its alt text");
 });
 
-test("PairingWebCodePanel copy buttons write the code and @username to the clipboard", async () => {
+test("PairingWebCodePanel copies only the manifest-backed pairing code", async () => {
   const harness = createPanelHarness({
     pairingResponses: [
       {
@@ -276,9 +271,8 @@ test("PairingWebCodePanel copy buttons write the code and @username to the clipb
 
   const clicks = valuesAfter(rendered, "onClick=");
   await clicks[0]();
-  await clicks[1]();
 
-  assert.deepEqual(harness.clipboardWrites, ["TG-PAIR-42", "@ironclaw_bot"]);
+  assert.deepEqual(harness.clipboardWrites, ["TG-PAIR-42"]);
 });
 
 test("PairingWebCodePanel flips to the renewal state at expiry and renewal re-renders a fresh code + QR", async () => {

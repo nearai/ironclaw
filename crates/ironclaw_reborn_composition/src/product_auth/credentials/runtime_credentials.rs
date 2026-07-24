@@ -139,21 +139,43 @@ pub(crate) async fn missing_runtime_credential_auth_requirements(
     scope: &ResourceScope,
     requirements: Vec<RuntimeCredentialAuthRequirement>,
 ) -> Result<Vec<RuntimeCredentialAuthRequirement>, CredentialStageError> {
-    let mut missing = Vec::new();
-    for requirement in requirements {
-        if runtime_credential_auth_requirement_configured(accounts, scope, &requirement).await? {
-            continue;
-        }
-        missing.push(requirement);
-    }
+    let (_, missing) =
+        runtime_credential_accounts_and_missing_requirements(accounts, scope, requirements).await?;
     Ok(missing)
 }
 
-async fn runtime_credential_auth_requirement_configured(
+/// Resolve both missing requirements and the existing redacted account
+/// snapshots selected to authorize an operation. Callers that perform
+/// external work after dropping their own lock compare the snapshots again
+/// before publishing; account replacement, refresh, or revocation therefore
+/// fences stale work without inventing a composition-owned authority type.
+pub(crate) async fn runtime_credential_accounts_and_missing_requirements(
+    accounts: &dyn RuntimeCredentialAccountSelectionService,
+    scope: &ResourceScope,
+    requirements: Vec<RuntimeCredentialAuthRequirement>,
+) -> Result<
+    (
+        Vec<CredentialAccount>,
+        Vec<RuntimeCredentialAuthRequirement>,
+    ),
+    CredentialStageError,
+> {
+    let mut missing = Vec::new();
+    let mut selected_accounts = Vec::new();
+    for requirement in requirements {
+        match configured_runtime_credential_account(accounts, scope, &requirement).await? {
+            Some(account) => selected_accounts.push(account),
+            None => missing.push(requirement),
+        }
+    }
+    Ok((selected_accounts, missing))
+}
+
+async fn configured_runtime_credential_account(
     accounts: &dyn RuntimeCredentialAccountSelectionService,
     scope: &ResourceScope,
     requirement: &RuntimeCredentialAuthRequirement,
-) -> Result<bool, CredentialStageError> {
+) -> Result<Option<CredentialAccount>, CredentialStageError> {
     let request = runtime_credential_account_selection_request(
         scope,
         &requirement.provider,
@@ -165,10 +187,10 @@ async fn runtime_credential_auth_requirement_configured(
         .select_unique_configured_runtime_account(request)
         .await
     {
-        Ok(account) if account.access_secret.is_some() => Ok(true),
+        Ok(account) if account.access_secret.is_some() => Ok(Some(account)),
         Ok(_) => Err(CredentialStageError::Backend),
         Err(error) => match map_account_error(error) {
-            CredentialStageError::AuthRequired => Ok(false),
+            CredentialStageError::AuthRequired => Ok(None),
             CredentialStageError::Backend => Err(CredentialStageError::Backend),
         },
     }
@@ -199,7 +221,13 @@ impl ProductAuthRuntimeCredentialAccountSelector {
     }
 }
 
-pub(crate) trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
+/// Decides whether a resolved credential account is visible to a given
+/// requester extension. Injected on [`crate::RebornProductAuthServices`] so the
+/// assembling binary can supply an extension-family-aware policy (e.g. the
+/// GSuite Google-account policy) without composition naming a concrete
+/// extension crate; absent an injection, the strictly-more-restrictive
+/// [`DefaultRuntimeCredentialAccountVisibilityPolicy`] applies.
+pub trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
     fn account_visible_to_requester(
         &self,
         account: &CredentialAccount,
@@ -207,10 +235,12 @@ pub(crate) trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
     ) -> bool;
 }
 
-#[cfg(test)]
-struct DefaultRuntimeCredentialAccountVisibilityPolicy;
+/// The safe default: an account is visible only when it is authorized for the
+/// requester extension. Strictly more restrictive than any extension-family
+/// policy an injected [`RuntimeCredentialAccountVisibilityPolicy`] may widen to,
+/// so a build that injects no policy fails closed.
+pub(crate) struct DefaultRuntimeCredentialAccountVisibilityPolicy;
 
-#[cfg(test)]
 impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccountVisibilityPolicy {
     fn account_visible_to_requester(
         &self,

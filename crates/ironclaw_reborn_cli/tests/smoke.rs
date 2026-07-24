@@ -4237,7 +4237,7 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
 /// listener.
 /// - Uses onboard's OWN provisioned token file (not a hand-seeded one) to
 ///   drive the login → ticket → exchange flow, then goes one step further
-///   and uses the exchanged bearer to call the real `RebornServicesApi`,
+///   and uses the exchanged bearer to call the real `ProductSurface`,
 ///   proving the session is mintable AND usable.
 #[test]
 fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
@@ -4363,7 +4363,7 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
     );
 
     // 3. The exchanged bearer must authorize a real request against the
-    //    production RebornServicesApi, not just be well-formed — catches a
+    //    production ProductSurface, not just be well-formed — catches a
     //    bearer the auth middleware rejects.
     let api_request = format!(
         "GET /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
@@ -4657,7 +4657,7 @@ fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Resul
 /// pins the fix: the stub HTTP server captures the `Authorization` header
 /// the live provider actually sends, and asserts it carries the stored key.
 #[test]
-fn stored_key_reaches_real_turn_via_webui_api() {
+fn stored_key_reaches_real_turn_via_product_surface() {
     const STORED_KEY: &str = "sk-smoke-real-turn-stored-nearai-key";
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -4749,7 +4749,7 @@ fn stored_key_reaches_real_turn_via_webui_api() {
     );
 }
 
-/// Companion to `stored_key_reaches_real_turn_via_webui_api`: proves the
+/// Companion to `stored_key_reaches_real_turn_via_product_surface`: proves the
 /// stored-key path is not a one-boot fluke by driving TWO independent `serve`
 /// boots (fresh child process each time, same `reborn_home`, no `onboard` or
 /// `models set-provider` run again in between) and asserting the second boot

@@ -10,9 +10,9 @@
 // stands for v1 gateway routes that lack a v2 counterpart.
 //
 // Request/response shapes mirror the Rust DTOs in
-// `ironclaw_product_workflow::webui_inbound` and
-// `ironclaw_product_workflow::reborn_services::types`. The error
-// envelope mirrors `RebornServicesError`.
+// `ironclaw_product::product_surface_inbound` and
+// `ironclaw_product::reborn_services::types`. The error
+// envelope mirrors `ProductSurfaceError`.
 
 const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
@@ -25,7 +25,7 @@ export class ApiError extends Error {
     this.statusText = statusText;
     this.body = body;
     this.headers = headers;
-    // Parsed RebornServicesError when the server returned JSON in
+    // Parsed ProductSurfaceError when the server returned JSON in
     // the documented shape. Undefined for non-JSON 5xx / proxy errors.
     this.payload = payload;
   }
@@ -45,7 +45,7 @@ export function storeToken(token) {
 
 // Generate a client action id (idempotency key) for mutating requests.
 // Must be a non-empty token with no control characters; `crypto.randomUUID`
-// satisfies the validator in `webui_inbound::parse_client_action_id`.
+// satisfies the validator in `product_surface_inbound::parse_client_action_id`.
 export function clientActionId() {
   if (typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -181,6 +181,7 @@ export function listThreads({
   projectId,
   needsApproval,
   candidateThreadId,
+  signal,
 } = {}) {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -188,7 +189,7 @@ export function listThreads({
   if (projectId) url.searchParams.set("project_id", projectId);
   if (needsApproval) url.searchParams.set("needs_approval", "true");
   if (candidateThreadId) url.searchParams.set("candidate_thread_id", candidateThreadId);
-  return apiFetch(url.pathname + url.search);
+  return apiFetch(url.pathname + url.search, { signal });
 }
 
 export function deleteThread({ threadId } = {}) {
@@ -381,10 +382,11 @@ export function listOutboundDeliveryTargets() {
   return apiFetch(`${V2_BASE}/outbound/targets`);
 }
 
-export function setOutboundPreferences({ finalReplyTargetId } = {}) {
+export function setOutboundPreferences({ finalReplyTargetId, clientActionId: clientId } = {}) {
   return apiFetch(`${V2_BASE}/outbound/preferences`, {
     method: "POST",
     body: JSON.stringify({
+      client_action_id: clientId || clientActionId(),
       final_reply_target_id: finalReplyTargetId ?? null,
     }),
   });
@@ -454,7 +456,7 @@ export function queryOperatorLogs({
 
 // --- Messages ---
 
-// `attachments` is an array of `WebUiInboundAttachment`
+// `attachments` is an array of `ProductInboundAttachment`
 // (`{ mime_type, filename, data_base64 }`). Omitted from the body when
 // empty so a text-only send keeps the original wire shape.
 export function sendMessage({
@@ -692,8 +694,11 @@ export function submitManualToken({
 
 // --- Extension setup ---
 
-export function setupExtension(extensionName, { action, payload } = {}) {
-  const body = {};
+export function setupExtension(
+  extensionName,
+  { action, payload, clientActionId: clientId } = {},
+) {
+  const body = { client_action_id: clientId || clientActionId() };
   if (action) body.action = action;
   if (payload !== undefined) body.payload = payload;
   return apiFetch(

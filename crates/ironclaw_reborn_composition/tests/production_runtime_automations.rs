@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
     AgentId, TenantId, UserId,
     runtime_policy::{
@@ -26,12 +27,16 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort,
 };
-use ironclaw_product_workflow::{WebUiAuthenticatedCaller, WebUiListAutomationsRequest};
-use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
-    builtin_first_party_trust_policy,
+use ironclaw_product::{
+    AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
+use ironclaw_reborn_composition::{
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
+};
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 
 // ─── minimal sandbox transport stub ──────────────────────────────────────────
 
@@ -70,8 +75,8 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "runtime-automation-prod-owner",
             db,
@@ -79,9 +84,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,
@@ -109,7 +112,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
         .expect("production runtime builds");
 
     let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-automation-prod-tenant").unwrap(),
         UserId::new("runtime-automation-prod-owner").unwrap(),
         Some(AgentId::new("runtime-automation-prod-agent").unwrap()),
@@ -119,11 +122,29 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // An empty list is fine — the key invariant is that the facade is wired
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
-    let result = bundle
-        .api
-        .list_automations(caller, WebUiListAutomationsRequest::default())
-        .await
-        .expect("production automation facade must be reachable (not 503)");
+    let result = ironclaw_host_api::ProductSurface::query(
+        bundle.product_surface.as_ref(),
+        caller,
+        ironclaw_host_api::ProductSurfaceQueryRequest {
+            view_id: AUTOMATIONS_VIEW.id.to_string(),
+            input: serde_json::to_value(ProductListAutomationsRequest::default())
+                .expect("automation list params"),
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await
+    .expect("production automation facade must be reachable (not 503)");
+    let result = ironclaw_product::RebornViewPage {
+        payload: result
+            .items
+            .into_iter()
+            .next()
+            .expect("automation list payload"),
+        next_cursor: result.next_cursor,
+    };
+    let result: RebornListAutomationsResponse =
+        serde_json::from_value(result.payload).expect("automation list response");
     assert_eq!(
         result.automations.len(),
         0,

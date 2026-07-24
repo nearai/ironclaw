@@ -24,7 +24,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, PollSettings, PostgresProductionSubstrateConfig,
-    RebornBuildInput, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
+    RebornHostBindings, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, build_libsql_production_host_runtime_services,
     build_postgres_production_host_runtime_services, build_reborn_runtime, build_webui_services,
     hosted_single_tenant_runtime_policy, local_runtime_build_input,

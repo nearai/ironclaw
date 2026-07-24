@@ -191,6 +191,7 @@ test("SidebarThreads exposes a visible delete action for listed threads", async 
       activeThreadId="thread-old"
       onSelect={() => {}}
       onDelete={() => {}}
+      onLoadMore={() => {}}
       onNavigate={() => {}}
     />,
   );
@@ -238,4 +239,77 @@ test("SidebarThreads surfaces delete handler failures from the delete button", a
   assert.equal(event.defaultPrevented, true);
   assert.equal(event.propagationStopped, true);
   assert.equal(context.errors.length, 1);
+});
+
+test("SidebarThreads offers pagination when older conversations are available", async () => {
+  const { SidebarThreads } = await import("./sidebar-threads");
+  const html = renderToStaticMarkup(
+    <SidebarThreads
+      threads={[{ id: "thread-new", title: "Recent topic" }]}
+      activeThreadId={null}
+      hasMore
+      onSelect={() => {}}
+      onDelete={() => {}}
+      onLoadMore={() => {}}
+      onNavigate={() => {}}
+    />,
+  );
+
+  assert.match(html, /data-testid="thread-load-more"/);
+  assert.match(html, />common\.loadMore</);
+});
+
+test("SidebarThreads explains an empty loaded page when older pages remain", async () => {
+  const { SidebarThreads } = await import("./sidebar-threads");
+  const html = renderToStaticMarkup(
+    <SidebarThreads
+      threads={[]}
+      activeThreadId={null}
+      hasMore
+      onSelect={() => {}}
+      onDelete={() => {}}
+      onLoadMore={() => {}}
+      onNavigate={() => {}}
+    />,
+  );
+
+  assert.match(html, />chat\.moreConversationsAvailable</);
+  assert.match(html, /data-testid="thread-load-more"/);
+  assert.doesNotMatch(html, />chat\.noConversations</);
+});
+
+test("incomplete sidebar search invites loading older conversations", async () => {
+  const { emptySearchMessageKey } = await import("./sidebar-threads");
+
+  assert.equal(
+    emptySearchMessageKey("older topic", 0, true),
+    "chat.moreConversationsAvailable",
+  );
+  assert.equal(
+    emptySearchMessageKey("older topic", 0, false),
+    "common.noChatsMatch",
+  );
+  assert.equal(emptySearchMessageKey("older topic", 1, true), null);
+});
+
+test("SidebarThreads disables the load-more action while a page is loading", async () => {
+  const { SidebarThreads } = await import("./sidebar-threads");
+  const html = renderToStaticMarkup(
+    <SidebarThreads
+      threads={[{ id: "thread-new", title: "Recent topic" }]}
+      activeThreadId={null}
+      hasMore
+      isLoadingMore
+      onSelect={() => {}}
+      onDelete={() => {}}
+      onLoadMore={() => {}}
+      onNavigate={() => {}}
+    />,
+  );
+
+  const button = html.match(/<button[^>]*data-testid="thread-load-more"[^>]*>/)?.[0];
+  assert.ok(button);
+  assert.match(button, /disabled=""/);
+  assert.match(button, /aria-busy="true"/);
+  assert.match(html, />common\.loading</);
 });

@@ -544,6 +544,7 @@ mod tests {
                                 },
                             ],
                             network_targets: Vec::new(),
+                            max_egress_bytes: None,
                             resource_profile: None,
                             origin_gate_matrix: None,
                         }],

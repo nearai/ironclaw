@@ -400,7 +400,8 @@ where
                         revision,
                         expected_revision,
                     );
-                    let retired_revisions = record.retired_revisions.iter().copied().collect();
+                    let retired_revisions: Vec<u64> =
+                        record.retired_revisions.iter().copied().collect();
                     Ok(CasApply::new(
                         record,
                         ReserveCasOutcome {
@@ -526,6 +527,79 @@ where
         };
         self.load_revision_snapshot(scope, &group_id, published_revision)
             .await
+    }
+
+    /// Roll back exactly the revision published by `reservation` to the
+    /// record that was active when that reservation was created.
+    ///
+    /// The active-revision comparison and replay-receipt removal happen in
+    /// the same CAS update. A later writer therefore fences this rollback:
+    /// once another revision is active, this method returns
+    /// [`AdminConfigurationStoreError::StaleReservation`] without changing
+    /// its values. Removing the failed request's replay receipt lets the
+    /// caller retry the same idempotency key against the restored revision.
+    pub async fn rollback_commit(
+        &self,
+        scope: &ResourceScope,
+        reservation: &AdminConfigurationReservation,
+        previous: Option<&AdminConfigurationRecord>,
+    ) -> Result<(), AdminConfigurationStoreError> {
+        if reservation.tenant_id != scope.tenant_id {
+            return Err(AdminConfigurationStoreError::UnknownReservation);
+        }
+        let (previous_revision, previous_values) = match previous {
+            Some(previous)
+                if previous.tenant_id == scope.tenant_id
+                    && previous.group_id == reservation.group_id
+                    && previous.revision == reservation.expected_revision =>
+            {
+                (previous.revision, previous.values.clone())
+            }
+            None if reservation.expected_revision == 0 => (0, BTreeMap::new()),
+            _ => return Err(AdminConfigurationStoreError::UnknownReservation),
+        };
+        let path = group_path(&reservation.group_id)?;
+        let tenant_id = scope.tenant_id.clone();
+        let group_id = reservation.group_id.clone();
+        let key = reservation.idempotency_key.as_str().to_string();
+        let request_digest = reservation.request_digest;
+        let failed_revision = reservation.revision;
+        let retired_revisions = cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            &path,
+            decode_record,
+            encode_record,
+            |current: Option<StoredAdminConfigurationRecord>| {
+                let outcome = (|| {
+                    let mut record =
+                        current.ok_or(AdminConfigurationStoreError::UnknownReservation)?;
+                    ensure_record_owner(&record, &tenant_id, &group_id)?;
+                    let Some(replay) = record.replays.get(&key) else {
+                        return Err(AdminConfigurationStoreError::StaleReservation);
+                    };
+                    if replay.request_digest != request_digest
+                        || replay.revision != failed_revision
+                        || record.active_revision != failed_revision
+                    {
+                        return Err(AdminConfigurationStoreError::StaleReservation);
+                    }
+                    record.active_revision = previous_revision;
+                    record.values = previous_values.clone();
+                    record.replays.remove(&key);
+                    record.retired_revisions.insert(failed_revision);
+                    let retired_revisions: Vec<u64> =
+                        record.retired_revisions.iter().copied().collect();
+                    Ok(CasApply::new(record, retired_revisions))
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_cas_error)?;
+        self.cleanup_retired_revisions(scope, &group_id, &retired_revisions)
+            .await;
+        Ok(())
     }
 
     async fn stage_revision_snapshot(

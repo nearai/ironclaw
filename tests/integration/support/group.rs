@@ -64,11 +64,12 @@ use ironclaw_loop_host::{
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
-use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    IdempotencyLedger, InboundTurnService, ResolvedBinding,
+use ironclaw_product::ProductTriggerReason;
+use ironclaw_product::{
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
+    IdempotencyLedger, InboundTurnService, ResolvedBinding, RunDeliveryEventRouter,
 };
+use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
@@ -123,8 +124,8 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ErrLlmKind, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm,
-    scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
+    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -227,6 +228,11 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// The production run-delivery lifecycle router wired into the group's
+    /// canonical turn-event sink. Present only for delivery-proof groups, so
+    /// those tests exercise the same event-driven final-reply path as the
+    /// channel host instead of relying on the admission observer.
+    pub(crate) run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -421,11 +427,13 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
+            run_delivery_events: None,
             trace_capture: false,
             tool_disclosure: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
@@ -448,12 +456,76 @@ impl RebornIntegrationGroup {
         self.shared.channel_connection.clone()
     }
 
+    /// The run-delivery lifecycle router wired into this group's canonical
+    /// turn-event bus. Available only to delivery-proof scenarios.
+    pub fn run_delivery_events(&self) -> Option<Arc<RunDeliveryEventRouter>> {
+        self.shared.run_delivery_events.clone()
+    }
+
     /// The group-canonical binding's ACTOR user id — the identity capability
     /// dispatch stamps as `authenticated_actor_user_id` on execution contexts
     /// (loop-host capability port reads `run_context.actor()`), and therefore
     /// the caller identity extension-removal channel cleanup disconnects.
     pub fn canonical_actor_user(&self) -> UserId {
         self.shared.canonical_binding.actor_user_id.clone()
+    }
+
+    /// Register a hermetic external delivery target on the exact local
+    /// outbound registry `builtin.trigger_create` consults. Scenarios pass the
+    /// host-sealed reply binding read from an already-submitted source run;
+    /// no model-authored id participates in this setup.
+    pub fn register_source_delivery_target_for_test(
+        &self,
+        provider_key: &str,
+        target_id: &str,
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef,
+    ) -> HarnessResult<()> {
+        let GroupCapability::HostRuntime(harness) = &self.shared.capability else {
+            return Err("source delivery target requires a host-runtime capability backend".into());
+        };
+        let services = harness
+            .reborn_services_for_test()
+            .ok_or("source delivery target requires composed Reborn services")?;
+        let target_id = ironclaw_product::RebornOutboundDeliveryTargetId::new(target_id)?;
+        ironclaw_reborn_composition::test_support::register_static_source_delivery_target_for_test(
+            services,
+            provider_key,
+            target_id,
+            reply_target_binding_ref,
+        )?;
+        Ok(())
+    }
+
+    /// Register the same real scripted provider chain used by ordinary group
+    /// threads for a caller scope materialized from a channel adapter. This
+    /// lets channel-origin whole-path tests execute model tool calls on the
+    /// exact admitted run instead of pre-writing the side effect under test.
+    pub async fn register_scope_script_for_test(
+        &self,
+        scope: TurnScope,
+        session_label: &str,
+        replies: impl IntoIterator<Item = RebornScriptedReply>,
+    ) -> HarnessResult<Arc<TraceLlm>> {
+        let scripted_llm = Arc::new(scripted_trace_llm(replies));
+        let raw: Arc<dyn LlmProvider> = scripted_llm.clone();
+        let session = create_session_manager(SessionConfig {
+            session_path: self
+                .shared
+                .turn_root
+                .path()
+                .join(format!("{session_label}.session.json")),
+            ..SessionConfig::default()
+        })
+        .await;
+        let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        let provider = provider_chain_over(raw, &llm_config, session).await?;
+        let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
+            .map_err(|reason| format!("invalid model profile id: {reason}"))?;
+        let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+        let gateway: Arc<dyn HostManagedModelGateway> =
+            Arc::new(LlmProviderModelGateway::new(provider, policy));
+        self.shared.scope_gateway.register(scope, gateway);
+        Ok(scripted_llm)
     }
 
     /// Create a per-thread *workflow* builder for `conversation_id`, over the
@@ -646,6 +718,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional observer wired into the group's ONE production
+    /// capability-port factory. Default `None`.
+    trajectory_observer: Option<Arc<dyn RebornTrajectoryObserver>>,
     /// Lease-wedge coverage: overrides the turn-state store's
     /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
     /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
@@ -655,7 +730,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
     lease_recovery_interval_override: Option<Duration>,
     /// When `true`, wire the REAL approval/auth interaction services into
-    /// every thread's `DefaultProductWorkflow` (see
+    /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
@@ -665,6 +740,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
+    /// Canonical run-delivery lifecycle router for delivery-proof groups.
+    /// `into_group` composes this into the planned runtime's turn-event sink.
+    run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -778,6 +856,7 @@ impl RebornIntegrationGroupBuilder {
             milestone_sink.clone(),
             group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             Arc::clone(&turn_store),
+            self.trajectory_observer.clone(),
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
@@ -869,6 +948,9 @@ impl RebornIntegrationGroupBuilder {
         }
         if let Some((sink, _)) = &trace_capture {
             turn_event_sinks.push(Arc::clone(sink));
+        }
+        if let Some(router) = self.run_delivery_events.clone() {
+            turn_event_sinks.push(router as Arc<dyn TurnEventSink>);
         }
         let composed_turn_event_sink: Option<Arc<dyn TurnEventSink>> = match turn_event_sinks.len()
         {
@@ -1044,6 +1126,7 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                run_delivery_events: self.run_delivery_events,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
@@ -1118,19 +1201,22 @@ pub struct RebornThreadBuilder<'g> {
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
-/// parked-until-released, or unconditional failure. One enum instead of an
-/// `Option<ParkingModelGate>` + `bool` pair (mirrors `ShellMode` in
-/// `builder.rs`) so the three modes are mutually exclusive BY CONSTRUCTION —
+/// parked-until-released, bounded recoverable failure, or unconditional
+/// failure. One enum instead of an `Option<ParkingModelGate>` + `bool` pair
+/// (mirrors `ShellMode` in `builder.rs`) so the four modes are mutually exclusive BY CONSTRUCTION —
 /// no tuple-priority rule needed at the dispatch site, and no state can
 /// silently ask for "parked AND failing" at once.
 #[derive(Default)]
-enum ThreadModelMode {
+pub(crate) enum ThreadModelMode {
     /// Normal scripted playback (the default).
     #[default]
     Normal,
     /// This thread's model call parks until the gate is released (E-GATEWAY
     /// seam), enabling a mid-turn cancel test.
     Parked(ParkingModelGate),
+    /// Reports a recoverable provider failure a bounded number of times, then
+    /// resumes normal scripted playback.
+    Recoverable(RecoverableModelFailureScript),
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
@@ -1145,21 +1231,16 @@ impl<'g> RebornThreadBuilder<'g> {
         self
     }
 
+    pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
+        self.model_mode = mode;
+        self
+    }
+
     /// Park this thread's model call until `gate` is released (E-GATEWAY seam).
     /// The parking provider sits at the same vendor-SDK seam as the scripted
     /// provider, so the real decorator chain still runs on top.
-    pub fn park_model(self, gate: ParkingModelGate) -> Self {
-        self.park_model_opt(Some(gate))
-    }
-
-    /// Internal: set the optional park gate (used by the flat builder to thread
-    /// its own park gate through the degenerate one-thread group). A `Some`
-    /// gate always wins, matching the old tuple-priority contract, even if
-    /// `fail_model_opt` is called first.
-    pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
-        if let Some(gate) = gate {
-            self.model_mode = ThreadModelMode::Parked(gate);
-        }
+    pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -1176,28 +1257,17 @@ impl<'g> RebornThreadBuilder<'g> {
     /// Fail this thread's model call unconditionally with a fixed, non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS — provider-`Err` failure category).
     /// Sits at the same vendor-SDK seam as `park_model`/scripted playback.
-    pub fn fail_model(self) -> Self {
-        self.fail_model_opt(Some(ErrLlmKind::ContextLength))
+    pub fn fail_model(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
+        self
     }
 
     /// Credentials arm of [`Self::fail_model`]: the model call always fails
     /// with non-retryable `LlmError::AuthFailed`, driving the pinned
     /// `model_credentials_unavailable` failure category through the real
     /// provider-error mapping.
-    pub fn fail_model_auth(self) -> Self {
-        self.fail_model_opt(Some(ErrLlmKind::AuthFailed))
-    }
-
-    /// Internal: set the fail-model kind (used by the flat builder to thread
-    /// its own knob through the degenerate one-thread group). Never downgrades
-    /// an already-`Parked` mode, matching the old tuple-priority contract
-    /// (`park_model` always wins over `fail_model`).
-    pub(crate) fn fail_model_opt(mut self, fail: Option<ErrLlmKind>) -> Self {
-        if let Some(kind) = fail
-            && !matches!(self.model_mode, ThreadModelMode::Parked(_))
-        {
-            self.model_mode = ThreadModelMode::Failing(kind);
-        }
+    pub fn fail_model_auth(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
         self
     }
 
@@ -1265,15 +1335,28 @@ impl<'g> RebornThreadBuilder<'g> {
         // way.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
-        // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
-        // three modes mutually exclusive by construction — no priority rule
-        // needed here.
-        let raw: Arc<dyn LlmProvider> = match self.model_mode {
-            ThreadModelMode::Parked(gate) => {
-                Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
+        // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
+        // provider modes mutually exclusive by construction — no priority
+        // rule is needed here.
+        let (raw, model_provider_call_probe): (
+            Arc<dyn LlmProvider>,
+            Option<ModelProviderCallProbe>,
+        ) = match self.model_mode {
+            ThreadModelMode::Parked(gate) => (
+                Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+                None,
+            ),
+            ThreadModelMode::Recoverable(script) => {
+                let (provider, probe) = recoverable_failure_trace_llm(
+                    script.failure,
+                    script.successful_calls_before_failures,
+                    script.failures,
+                    scripted_llm.clone(),
+                );
+                (Arc::new(provider), Some(probe))
             }
-            ThreadModelMode::Failing(kind) => Arc::new(ErrLlm::new(kind)),
-            ThreadModelMode::Normal => scripted_llm.clone(),
+            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
+            ThreadModelMode::Normal => (scripted_llm.clone(), None),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
@@ -1334,7 +1417,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
-        let mut workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let mut workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         // Real gate-dispatch seam: wire the harness's own local-dev interaction
         // services, but over the GROUP's shared `turn_store` (not the harness's
@@ -1397,6 +1480,7 @@ impl<'g> RebornThreadBuilder<'g> {
             event_seq: AtomicU64::new(1),
             capability_recorder,
             scripted_llm,
+            model_provider_call_probe,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,

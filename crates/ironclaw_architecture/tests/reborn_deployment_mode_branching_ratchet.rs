@@ -70,12 +70,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          memory-deployment axis, not a raw label. Retires into `DeploymentConfig` \
          when it grows a memory-binding axis (#5264).",
     ),
-    (
-        "readiness.rs",
-        "Readiness diagnostics carry a profile as an operator-facing **label** \
-         on the wire (`RebornReadinessDiagnostic::profile`), not a branch. \
-         Retires only if that wire field is reshaped.",
-    ),
 ];
 
 fn workspace_root() -> PathBuf {

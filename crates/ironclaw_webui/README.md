@@ -27,8 +27,8 @@ across it:
 ### 1. WebChat v2 route surface + SPA (`src/webui_v2/`)
 
 The native WebChat v2 HTTP routes on top of
-`ironclaw_product_workflow::RebornServicesApi`. Handlers are thin: they read the
-`WebUiAuthenticatedCaller` + `WebUiV2Capabilities` injected as axum extensions,
+`ironclaw_host_api::ProductSurface`. Handlers are thin: they read the
+`ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
 dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
 
 - `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` — build
@@ -39,7 +39,7 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
   stack; the table is locked by `tests/webui_v2_descriptors_contract.rs`.
 - ~60 routes across sessions, threads/timeline, message send, SSE + WebSocket
   event streams, logs, automations, connectable channels, extensions
-  (install/import/activate/setup lifecycle), LLM config, tool-approval settings,
+  (install/import/setup/remove lifecycle), LLM config, tool-approval settings,
   operator setup/config/diagnostics, admin user management, and trace credits.
   The full table lives in `CLAUDE.md`.
 - **Streaming:** `stream_events` (SSE) and `stream_events_ws` (WebSocket) share
@@ -87,8 +87,8 @@ attach under their feature flag.
 - Reaches the rest of Reborn **only** through composition's facade
   (`RebornWebuiBundle`, product-auth mount builders, the
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary) and
-  `ironclaw_product_workflow::RebornServicesApi`.
-- **No** direct dependency on `ironclaw_product_adapters` or any lower substrate
+  `ironclaw_host_api::ProductSurface`.
+- **No** direct dependency on `ironclaw_product` or any lower substrate
   crate; **no** v1 `src/` import; **no** v1 secrets / settings / DB. Host auth
   stays host-owned here (Path A of `docs/reborn/how-to-port-channel-to-reborn.md`).
 - These edges are enforced by `crates/ironclaw_architecture` — see

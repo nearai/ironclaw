@@ -7,10 +7,9 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceErrorCode;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-use ironclaw_product_workflow::{
-    AutomationProductFacade, ProductAgentBoundCaller, RebornServicesErrorCode,
-};
+use ironclaw_product::{AutomationProductFacade, ProductAgentBoundCaller};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -359,7 +358,7 @@ async fn resolve_run_thread_scope_backend_error_maps_to_unavailable() {
         .resolve_run_thread_scope(caller(), &thread_id)
         .await
         .expect_err("backend error must propagate as 503");
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 }
@@ -442,7 +441,7 @@ async fn resolve_run_thread_scope_timeout_maps_to_unavailable() {
     .await
     .expect("facade timeout should complete promptly")
     .expect_err("stalled repository should time out");
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 }

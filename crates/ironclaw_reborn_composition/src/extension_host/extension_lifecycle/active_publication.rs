@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{EffectKind, PackageSource};
-use ironclaw_product_workflow::ProductWorkflowError;
+use ironclaw_product::ProductWorkflowError;
 use ironclaw_trust::{
     AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus, TrustError,
 };

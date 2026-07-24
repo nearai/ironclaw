@@ -7,7 +7,7 @@
 //! `hmac_sha256` recipe verifies the signed vendor POST host-side, the
 //! fixture's real channel adapter normalizes the payload, and the generic
 //! inbound sink commits durable dedupe + admission through the REAL
-//! `DefaultProductWorkflow` (idempotency ledger → conversation binding → turn
+//! `DefaultProductSurface` (idempotency ledger → conversation binding → turn
 //! submission) before the 2xx leaves the router.
 //!
 //! Pinned here: ING-1 (route from the active snapshot on the production
@@ -30,6 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_reborn_composition::{
     ChannelInboundSinkConfig, ChannelIngressRegistration, ExtensionIngressParts,
     GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
@@ -74,7 +75,7 @@ fn acme_signature(timestamp: &str, body: &str) -> String {
 /// message entered the existing binding + turn-submission pipeline).
 #[derive(Default)]
 struct RecordingAdmissionObserver {
-    acks: Mutex<Vec<ironclaw_product_adapters::ProductInboundAck>>,
+    acks: Mutex<Vec<ironclaw_product::ProductInboundAck>>,
     errors: Mutex<Vec<String>>,
 }
 
@@ -82,16 +83,16 @@ struct RecordingAdmissionObserver {
 impl PostAdmissionObserver for RecordingAdmissionObserver {
     async fn observe_ack(
         &self,
-        _envelope: ironclaw_product_adapters::ProductInboundEnvelope,
-        ack: ironclaw_product_adapters::ProductInboundAck,
+        _envelope: ironclaw_product::ProductInboundEnvelope,
+        ack: ironclaw_product::ProductInboundAck,
     ) {
         self.acks.lock().expect("acks lock").push(ack);
     }
 
     async fn observe_error(
         &self,
-        _envelope: ironclaw_product_adapters::ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
+        _envelope: ironclaw_product::ProductInboundEnvelope,
+        error: ironclaw_product::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -117,15 +118,15 @@ impl AcmeIngress {
         harness: &reborn_support::builder::RebornIntegrationHarness,
     ) -> Self {
         let observer = Arc::new(RecordingAdmissionObserver::default());
+        let surface = harness.product_workflow_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
-            adapter_id: ironclaw_product_adapters::ProductAdapterId::new("acme-messenger")
+            adapter_id: ironclaw_product::ProductAdapterId::new("acme-messenger")
                 .expect("adapter id"),
             evidence: VerifiedEvidenceMint::RequestSignature {
                 signature_header: "X-Acme-Signature".to_string(),
                 timestamp_header: Some("X-Acme-Request-Timestamp".to_string()),
             },
-            classifier: None,
-            workflow: harness.product_workflow_for_test(),
+            surface,
             observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
         }));
         parts.registry.register(
@@ -198,12 +199,7 @@ impl AcmeIngress {
             .lock()
             .expect("acks lock")
             .iter()
-            .filter(|ack| {
-                matches!(
-                    ack,
-                    ironclaw_product_adapters::ProductInboundAck::Accepted { .. }
-                )
-            })
+            .filter(|ack| matches!(ack, ironclaw_product::ProductInboundAck::Accepted { .. }))
             .count()
     }
 
@@ -213,18 +209,13 @@ impl AcmeIngress {
             .lock()
             .expect("acks lock")
             .iter()
-            .filter(|ack| {
-                matches!(
-                    ack,
-                    ironclaw_product_adapters::ProductInboundAck::Duplicate { .. }
-                )
-            })
+            .filter(|ack| matches!(ack, ironclaw_product::ProductInboundAck::Duplicate { .. }))
             .count()
     }
 }
 
-/// Install + activate the acme fixture through the production lifecycle
-/// tools, then return the composed runtime's REAL ingress parts.
+/// Install the acme fixture through the production lifecycle tool (which
+/// completes readiness internally), then return the runtime's REAL ingress.
 async fn activate_acme(group: &RebornIntegrationGroup) -> ExtensionIngressParts {
     let lifecycle = group
         .thread("conv-acme-ingress-lifecycle")
@@ -233,12 +224,7 @@ async fn activate_acme(group: &RebornIntegrationGroup) -> ExtensionIngressParts 
                 "builtin.extension_install",
                 json!({"extension_id": "acme-messenger"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "acme-messenger"}),
-            ),
-            RebornScriptedReply::text("activated"),
+            RebornScriptedReply::text("installed and ready"),
         ])
         .build()
         .await
@@ -252,17 +238,9 @@ async fn activate_acme(group: &RebornIntegrationGroup) -> ExtensionIngressParts 
         .await
         .expect("install turn completes");
     lifecycle
-        .assert_tool_result_contains("\"installed\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await
-        .expect("install reported success");
-    lifecycle
-        .submit_turn("activate the acme messenger extension")
-        .await
-        .expect("activate turn completes");
-    lifecycle
-        .assert_tool_result_contains("\"activated\":true")
-        .await
-        .expect("activation reported success");
+        .expect("install completed readiness and publication");
 
     group
         .capability_harness()
@@ -296,7 +274,7 @@ async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
 
     // The inbound thread: its scripted reply is never consulted (the router
     // path ends at turn admission), but its workflow is the REAL per-thread
-    // DefaultProductWorkflow the sink submits through.
+    // DefaultProductSurface the sink submits through.
     let inbound_thread = group
         .thread("conv-acme-ingress-inbound")
         .script([RebornScriptedReply::text("unused")])
@@ -307,7 +285,7 @@ async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
 
     // Unknown extension/suffix stay unmatched on the production mount.
     let (status, _) = ingress.post_signed("{}").await;
-    assert_eq!(status, StatusCode::OK, "activated route serves");
+    assert_eq!(status, StatusCode::OK, "active extension route serves");
     let mut unknown = Request::builder()
         .method("POST")
         .uri("/webhooks/extensions/unknown-ext/events");

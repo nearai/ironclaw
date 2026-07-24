@@ -98,16 +98,21 @@ claims the flow through `AuthFlowManager`, performs provider exchange through
 `AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
 If continuation dispatch fails, the handler returns a sanitized retryable
-error instead of reporting callback success. Lifecycle continuations take a
-durable, per-flow claim with a lease/fence before their side effect; retry or
-explicit reconciliation may reclaim an abandoned lease without re-exchanging
-provider code, and only the current claimant may settle it. After the
-continuation marker is stored, callback replay returns the completed flow
-without dispatching again. A lifecycle activation that is still missing
-another declared credential settles the current credential flow successfully
-with typed credential blockers; it does not revoke that credential or resume
-blocked runs. The completion that satisfies the final credential activates the
-extension, publishes its tools, and then delegates to blocked-auth fanout.
+error instead of reporting callback success. Lifecycle continuations are
+at-least-once and idempotent on flow id: a process-local single-flight guard
+suppresses overlapping dispatch in one host, the durable continuation marker
+prevents replay after acknowledgement, and explicit reconciliation retries an
+unacknowledged continuation without re-exchanging provider code. A lifecycle
+continuation that is still missing another declared credential settles the
+current credential flow successfully with typed setup blockers; it does not
+revoke that credential or resume blocked runs. A completion that satisfies the
+final credential re-enters the extension's complete typed readiness
+reconciliation. The public lifecycle becomes `active` only after every declared
+tenant and personal prerequisite plus bind, discovery, provisioning, conflict,
+and atomic publication checks succeed. Tool-bearing manifests must publish
+their usable tools before becoming active; channel-only manifests publish their
+declared channel surface. Only that successful reconciliation delegates to
+blocked-auth fanout.
 Callback route code must not activate extensions, resume turns, replay prompts,
 or dispatch runtime work directly.
 
@@ -122,16 +127,18 @@ need host-only client metadata; the Google setup route builds the Google
 authorization URL from configured Reborn product-auth client metadata and keeps
 the static redirect URI aligned with the provider exchange client.
 
-`ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
+`ironclaw_product::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
 that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
 using the canonical turn scope, actor, run id, and gate ref carried by the auth
-event. It does not define auth state, credential vocabulary, or generic
-continuation dispatch. Setup-only, lifecycle-activation, and product-action
-continuations remain explicit cases for their owning continuation dispatchers.
-The provider callback route itself never owns those side effects.
+event. `ProductAuthContinuationDispatcher` is the workflow-owned, at-least-once
+continuation port. Its lifecycle decorator re-enters the canonical idempotent
+extension install/readiness command before delegating to turn-gate fan-out;
+composition only fills and wires that decorator. It does not define auth state
+or credential vocabulary, and the provider callback route itself never owns
+those side effects.
 
-`ironclaw_product_workflow::AuthInteractionService` owns the product/WebUI
+`ironclaw_product::AuthInteractionService` owns the product/WebUI
 blocked-auth interaction loop from #3094. It reads auth-required gates from
 scoped blocked run-state plus auth-flow records, returns redacted
 adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
@@ -244,6 +251,10 @@ Rules:
   host context and trusted installation defaults. They must not accept
   caller-supplied `AuthFlowKind` or `AuthContinuationRef`; route-specific
   code chooses the allowed flow kind and continuation.
+- Extension-scoped OAuth start accepts only the installed manifest credential
+  requirement name. The server resolves provider, account label, and scopes
+  from that requirement; the global provider recipe catalog is only a protocol
+  and scope ceiling and cannot authorize a requirement for another extension.
 - Durable records may store state/verifier/code hashes, ids, handles, and
   redacted metadata only.
 - Raw OAuth state, authorization code, PKCE verifier, access token, refresh
@@ -257,10 +268,16 @@ Rules:
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
   provider inputs and completing the flow.
-- Once a callback is tied to a known scoped flow, missing authorization code,
-  missing one-shot PKCE material, or malformed/invalid scope input must durably
-  mark that flow `failed` before discarding callback material. Provider denial
-  is terminal through the same scoped flow boundary.
+- A provider redirect's optional `scope` echo is bounded as untrusted input but
+  is not grant authority: providers may omit, normalize, or return cumulative
+  scopes there. The token response is the authoritative granted-scope source;
+  the auth engine applies the recipe's missing-scope policy and clamps an
+  echoed grant to the unified recipe ceiling before storing it.
+- Once a callback is tied to a known scoped flow, missing authorization code or
+  malformed/oversized callback input must be rejected before token exchange or
+  product effects. A missing authorization code leaves the flow pending for a
+  valid retry. Missing one-shot PKCE material and provider denial are terminal
+  and durably mark the flow `failed` before discarding callback material.
 - Callback completion emits typed continuations; callback routes must not
   directly activate extensions, resume turns, replay messages, or dispatch work.
 - Terminal flows cannot be completed or canceled again.
@@ -502,9 +519,10 @@ tenant/user fields.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
-| `GET`  | `/api/reborn/product-auth/oauth/callback/{flow_id}` | Public OAuth callback; validates scope/state hash before any product effect. |
+| `POST` | `/api/webchat/v2/extensions/{package_id}/setup/oauth/start` | Open an installed extension's manifest-declared OAuth requirement by opaque requirement name; provider, label, scopes, and lifecycle continuation are server-owned. |
+| `GET`  | `/api/reborn/product-auth/oauth/callback/{provider}` | Public OAuth callback; validates the scoped flow and state hash before any product effect. |
 | `GET` | `/api/reborn/product-auth/oauth/flow/{flow_id}/status` | Observational caller-scoped durable status read. It performs no continuation dispatch, activation, compensation, provider cleanup, or other writes. |
-| `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that resumes a claimed lifecycle continuation or converges its exact compensation and provider cleanup journals. |
+| `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that retries only a completed flow's unfenced internal continuation. It never repeats provider exchange, revokes a valid credential, or performs uninstall cleanup. |
 | `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
 | `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
@@ -522,6 +540,9 @@ Rules:
   lookup and revalidates installation after the flow/connection epoch is
   created. If removal wins the race, start is aborted and its one-shot state is
   cleaned instead of returning an authorization URL for an uninstalled package.
+  The same lookup resolves the selected OAuth requirement from the installed
+  lifecycle manifest projection; browser-supplied provider, label, and scope
+  fields are rejected rather than treated as credential authority.
 - Browser watchers use the explicit `POST .../reconcile` command when recovery
   is required. `GET .../status` remains safe for caches, probes, and monitoring
   because it is strictly observational.
@@ -601,6 +622,15 @@ Rules:
   cleanup quarantine reporting;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.
+
+`ironclaw_reborn_composition` caller-level tests additionally cover:
+
+- an incomplete provider redirect `scope` echo still reaching exchange with the
+  server-owned requested scopes
+  (`webui_v2_product_auth::product_auth_google_oauth_callback_ignores_incomplete_redirect_scope`);
+- a callback without an authorization code being rejected before exchange while
+  the valid flow remains pending for retry
+  (`webui_v2_product_auth::product_auth_google_oauth_callback_missing_code_is_rejected_without_exchange`).
 
 ---
 

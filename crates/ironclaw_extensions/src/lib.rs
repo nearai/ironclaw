@@ -431,8 +431,8 @@ pub type CapabilityManifest = CapabilityDeclV2;
 
 pub use canonicalization::canonicalize_installation_rows;
 pub use installations::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
+    ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
@@ -734,6 +734,7 @@ fn capability_descriptors_from_manifest(
                 default_permission: capability.default_permission,
                 runtime_credentials: capability.runtime_credentials.clone(),
                 network_targets: capability.network_targets.clone(),
+                max_egress_bytes: capability.max_egress_bytes,
                 resource_profile: capability.resource_profile.clone(),
                 origin_gate_matrix: capability.origin_gate_matrix.clone(),
             })

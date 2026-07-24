@@ -11,11 +11,6 @@
     "brave",
     "internet"
   ],
-  "source": {
-    "dir": "tools-src/web-search",
-    "capabilities": "web-search-tool.capabilities.json",
-    "crate_name": "web-search-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-web-search-0.2.2-wasm32-wasip2.tar.gz",

@@ -3,7 +3,7 @@
 //! This harness drives the product caller path used by the #3702 validation
 //! ports:
 //!
-//! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
+//! inbound bytes -> ProductAdapter -> DefaultProductSurface ->
 //! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
 //! Reborn planned agent loop -> model/capability/transcript evidence.
 //!
@@ -27,14 +27,13 @@ use ironclaw_loop_host::{
     JsonSpawnSubagentInputCodec,
 };
 use ironclaw_network::NetworkHttpRequest;
-use ironclaw_product_adapters::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflow,
-};
-use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+use ironclaw_product::{
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
+};
+use ironclaw_product::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
 };
 use ironclaw_runner::subagent::{
     await_edge::{
@@ -95,7 +94,7 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
-    workflow: DefaultProductWorkflow,
+    workflow: DefaultProductSurface,
     external_conversation_id: String,
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
@@ -795,6 +794,7 @@ impl RebornBinaryE2EHarness {
             milestone_sink.clone(),
             thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             Arc::clone(&turn_store),
+            None,
         )?;
         // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
         // mount) — the await-edge tree lives at
@@ -903,7 +903,7 @@ impl RebornBinaryE2EHarness {
             composition.coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
 
         Ok(Self::from_composition(
             ingress,
@@ -926,7 +926,7 @@ impl RebornBinaryE2EHarness {
     #[allow(clippy::too_many_arguments)]
     fn from_composition(
         ingress: RebornTestIngress,
-        workflow: DefaultProductWorkflow,
+        workflow: DefaultProductSurface,
         external_conversation_id: String,
         binding: ResolvedBinding,
         thread_scope: ThreadScope,

@@ -8,14 +8,14 @@ use futures::{StreamExt, stream};
 use ironclaw_host_api::{
     Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
+    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
+};
+use ironclaw_product::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
-};
-use ironclaw_product_workflow::{
-    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
@@ -31,8 +31,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use ironclaw_product_workflow::AuthChallengeProvider;
-use ironclaw_product_workflow::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
+use ironclaw_product::AuthChallengeProvider;
+use ironclaw_product::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use ironclaw_runner::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
@@ -800,7 +800,7 @@ fn gate_projection_item(
             .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
         body: Some(body),
         allow_always: prompt_context.allow_always.unwrap_or(false),
-        auth_context: prompt_context.auth_context,
+        auth_context: prompt_context.auth_context.map(Box::new),
     }))
 }
 

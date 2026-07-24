@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, LibSqlRootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FileType, LibSqlRootFilesystem, PostgresRootFilesystem,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ResourceScope,
@@ -103,15 +104,39 @@ async fn build_libsql_scoped() -> (
     )
 }
 
+async fn build_postgres_scoped() -> Option<Arc<ScopedFilesystem<PostgresRootFilesystem>>> {
+    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        return None;
+    }
+    let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()?;
+    let config = url.parse::<tokio_postgres::Config>().ok()?;
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .ok()?;
+    let root = Arc::new(PostgresRootFilesystem::new(pool));
+    root.run_migrations().await.ok()?;
+    let unique_root = format!("/turn-replay-test/{}", uuid::Uuid::new_v4().simple());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").ok()?,
+        VirtualPath::new(unique_root).ok()?,
+        MountPermissions::read_write_list_delete(),
+    )])
+    .ok()?;
+    Some(Arc::new(ScopedFilesystem::with_fixed_view(root, mounts)))
+}
+
 /// Seed `threads * events_per_thread` event rows as bare (unprojected) bodies —
 /// the pre-upgrade on-disk shape — interleaved across the global cursor space so
 /// each thread's events are scattered. Cursor `c` belongs to thread `c % threads`.
 /// The store's backfill re-projects them via production logic on first read.
-async fn seed(
-    scoped: &ScopedFilesystem<LibSqlRootFilesystem>,
-    threads: usize,
-    events_per_thread: usize,
-) -> usize {
+async fn seed<F>(scoped: &ScopedFilesystem<F>, threads: usize, events_per_thread: usize) -> usize
+where
+    F: RootFilesystem,
+{
     let total = threads * events_per_thread;
     for cursor in 1..=total as u64 {
         let scope = thread_scope((cursor as usize - 1) % threads);
@@ -185,6 +210,77 @@ where
     }
     samples.sort();
     samples[samples.len() / 2]
+}
+
+#[tokio::test]
+async fn durable_event_log_replay_pages_by_global_cursor_on_libsql() {
+    let (_dir, scoped) = build_libsql_scoped().await;
+    seed(&scoped, 2, 3).await;
+    let store = FilesystemTurnStateRowStore::new(scoped);
+
+    let first = store
+        .read_turn_event_log_after(None, 2)
+        .await
+        .expect("first bounded replay page");
+    assert_eq!(
+        first
+            .entries
+            .iter()
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>(),
+        vec![EventCursor(1), EventCursor(2)]
+    );
+    assert!(first.truncated);
+    assert_eq!(first.rebase_required, None);
+
+    let second = store
+        .read_turn_event_log_after(Some(first.next_cursor), 2)
+        .await
+        .expect("second bounded replay page");
+    assert_eq!(
+        second
+            .entries
+            .iter()
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>(),
+        vec![EventCursor(3), EventCursor(4)]
+    );
+    assert!(second.truncated);
+}
+
+#[tokio::test]
+async fn durable_event_log_replay_pages_by_global_cursor_on_postgres() {
+    let Some(scoped) = build_postgres_scoped().await else {
+        return;
+    };
+    seed(&scoped, 2, 3).await;
+    let store = FilesystemTurnStateRowStore::new(scoped);
+
+    let first = store
+        .read_turn_event_log_after(None, 2)
+        .await
+        .expect("first bounded Postgres replay page");
+    assert_eq!(
+        first
+            .entries
+            .iter()
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>(),
+        vec![EventCursor(1), EventCursor(2)]
+    );
+    assert!(first.truncated);
+    let second = store
+        .read_turn_event_log_after(Some(first.next_cursor), 2)
+        .await
+        .expect("second bounded Postgres replay page");
+    assert_eq!(
+        second
+            .entries
+            .iter()
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>(),
+        vec![EventCursor(3), EventCursor(4)]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

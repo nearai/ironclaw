@@ -1,0 +1,264 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_6d_gmail_to_sheet_routine",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails from a near.ai address to my Google Sheet called ABC.\"\nExpected result: Routine created"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_c6f4cd520c5a4e98b00180f9",
+            "name": "builtin__skill_list",
+            "arguments": {}
+          },
+          {
+            "id": "call_930c449b33574cd08e575ffc",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "google"
+            }
+          },
+          {
+            "id": "call_6496219e1f424a438d1611e8",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "gmail"
+            }
+          }
+        ],
+        "input_tokens": 13414,
+        "output_tokens": 112
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_45a9f42d5c624b689988754e",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "gmail"
+            }
+          },
+          {
+            "id": "call_fe824fced38a4abaaffcbb96",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "google-sheets"
+            }
+          },
+          {
+            "id": "call_38a8887c077e44d1980086f7",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "google-drive"
+            }
+          }
+        ],
+        "input_tokens": 19679,
+        "output_tokens": 186
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_8ed8feb731a24463b8654de2",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "gmail"
+            }
+          },
+          {
+            "id": "call_476e4c05e7454ee1bab07c24",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "google-sheets"
+            }
+          },
+          {
+            "id": "call_d269efee76e741b6aad1f1f3",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "google-drive"
+            }
+          }
+        ],
+        "input_tokens": 20680,
+        "output_tokens": 138
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 14
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_fcfc0391898940f6840cbf6a",
+            "name": "google-drive__list_files",
+            "arguments": {
+              "query": "name = 'ABC' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+            }
+          }
+        ],
+        "input_tokens": 28014,
+        "output_tokens": 107
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 16
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_637ae3be89154accbce79374",
+            "name": "google-sheets__get_spreadsheet",
+            "arguments": {
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
+            }
+          }
+        ],
+        "input_tokens": 29888,
+        "output_tokens": 102
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 18
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b2f61d83efab4a038cdbcaf4",
+            "name": "builtin__time",
+            "arguments": {
+              "operation": "now"
+            }
+          }
+        ],
+        "input_tokens": 30221,
+        "output_tokens": 103
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 20
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_62a3441546dd49cd969a9a57",
+            "name": "google-sheets__read_values",
+            "arguments": {
+              "range": "Sheet1!A1:Z10",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
+            }
+          },
+          {
+            "id": "call_d9f11fab06e74d6493778b9e",
+            "name": "gmail__list_messages",
+            "arguments": {
+              "max_results": 5,
+              "query": "from:near.ai"
+            }
+          }
+        ],
+        "input_tokens": 30462,
+        "output_tokens": 222
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 23
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_d68a63d688e14ed5997af53f",
+            "name": "gmail__get_message",
+            "arguments": {
+              "message_id": "19f14fdaaac85796"
+            }
+          }
+        ],
+        "input_tokens": 31032,
+        "output_tokens": 118
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 25
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_fb774d5b00b94ba5b05fa71c",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "name": "Check inbox for near.ai emails -> ABC sheet",
+              "prompt": "Every 30 minutes, check the Gmail inbox for unread emails from @near.ai addresses. For each new message not already recorded in the Google Sheet \"ABC\" (spreadsheet ID: GOOGLE_RESOURCE_ID_REDACTED, sheet: Sheet1), append a row with columns: Date/Time, From, Subject, Message ID. Use the sheet's header row (Date/Time, From, Subject, Message ID) to determine existing entries — skip any message whose Message ID is already in column D. Append new rows to the first empty row after existing data.",
+              "schedule": {
+                "expression": "*/30 * * * *",
+                "kind": "cron",
+                "timezone": "UTC"
+              }
+            }
+          }
+        ],
+        "input_tokens": 35329,
+        "output_tokens": 385
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw, \"Every 30 minutes, check my inbox and add any new emails",
+        "min_message_count": 27
+      },
+      "response": {
+        "type": "text",
+        "content": "The routine has been created successfully. Here's what was set up:\n\n**Routine:** \"Check inbox for near.ai emails -> ABC sheet\"\n\n- **Schedule:** Every 30 minutes (`*/30 * * * *` UTC)\n- **Next run:** 2026-07-21T14:30:00 UTC\n- **Sheet:** \"ABC\" → `Sheet1` with headers: `Date/Time | From | Subject | Message ID`\n\nOn each fire, it will:\n1. Query Gmail for unread messages from `@near.ai` senders\n2. Check the Google Sheet for existing Message IDs (column D) to avoid duplicates\n3. Append any new rows with the email's date/time, sender, subject, and message ID\n\nThe trigger is active and enabled — it will begin checking every 30 minutes starting at the next 30-minute mark.",
+        "input_tokens": 35893,
+        "output_tokens": 183
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.trigger_create"
+    ]
+  }
+}

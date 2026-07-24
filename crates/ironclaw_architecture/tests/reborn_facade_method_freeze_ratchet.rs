@@ -1,42 +1,32 @@
-//! Anti-slippage ratchet for the product-facade method surface (§5.2 / §5.2.5 /
-//! §10 of `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! Anti-slippage ratchet for the product-surface method contract (§5.2 /
+//! §5.2.5 / §10 of
+//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
 //!
-//! §5.2's target: the product surface is the *turn lifecycle* + two generic
-//! conduits (`invoke` for commands, `query` for reads) that never grow. A feature
-//! adds a **capability descriptor** and/or a **view descriptor**, never a facade
-//! method. §5.2.5 step 1 is "freeze the facade now" — check in the current
-//! `RebornServicesApi` method set so any *new* method fails CI and the migration
-//! stops the bleeding before it starts.
+//! §5.2's target: product consumers share the neutral
+//! `ironclaw_host_api::ProductSurface` vocabulary (`invoke`, `query`, and
+//! `stream_events`). Feature work adds a **capability descriptor** and/or a
+//! **view descriptor**, never a product-local facade method.
 //!
-//! This test freezes the `RebornServicesApi` method set after the first view
-//! migration replaced the two dedicated log-query methods with the generic
-//! `query` read conduit. It now also admits `invoke`, the second generic conduit
-//! named by §5.2. Adding that canonical target conduit is convergence toward the
-//! frozen end-state, not a feature-method exception: `invoke` is admitted by
-//! exact name, both conduits are required below, and every other addition stays
-//! banned. The ratchet fails on any subsequent change:
+//! This test freezes that shared host API method set and asserts the
+//! old product-local facade trait stays retired. The
+//! ratchet fails on any subsequent change:
 //!
-//! - a **new** trait method (not in [`FROZEN_REBORN_SERVICES_METHODS`]) fails —
-//!   the feature belongs in a capability/view descriptor, not a new facade method;
-//! - a **removed** method not trimmed from the allowlist fails — so the list
-//!   shrinks in lock-step as each mutation migrates to a descriptor and reviewers
-//!   watch it get shorter (the §10 monotonic-shrink contract);
+//! - a **new** host `ProductSurface` method fails — the feature belongs in a
+//!   capability/view descriptor, not a new facade method;
+//! - a **removed** host method fails — callers share this exact three-word
+//!   vocabulary unless §5.2 is intentionally revised;
 //! - a **duplicate** method name in the block fails (defensive; a trait cannot
 //!   legally declare two, but the scan is explicit about it).
 //!
-//! Scoped to the *method set*: the extractor reads only the `RebornServicesApi`
-//! trait block, at trait-declaration depth (a `fn` inside a default-method body is
-//! ignored), with comments and string literals stripped (shared
+//! Scoped to the *method set*: the extractor reads only the host
+//! `ProductSurface` trait block, at trait-declaration depth (a `fn` inside a
+//! default-method body is ignored), with comments and string literals stripped (shared
 //! [`ratchet_support::strip_comments_and_strings`]).
 //!
-//! Definition of done for this axis (§5.2.5 step 5 / §10): the facade *is* the
-//! turn lifecycle (`open_conversation`, `submit_turn`, `events`, `reply`,
-//! `resolve_gate`, `cancel`) + `invoke` + `query` — the allowlist shrinks to that
-//! ~8-method set and every other entry migrates to a matrix-declared capability
-//! descriptor or a view descriptor. The follow-on §10 obligation ("every
-//! capability descriptor declares an origin→gate matrix") lands with the
-//! descriptor registry and is a separate ratchet — this one holds the method
-//! surface from growing while that migration runs.
+//! Definition of done for this axis (§5.2.5 step 5 / §10): product consumers use
+//! `host_api::ProductSurface` (`invoke`, `query`, `stream_events`) plus
+//! descriptors, and the product crate does not reintroduce its own product
+//! surface trait vocabulary.
 
 // This ratchet uses only the shared stripper + workspace-root helper; the
 // type-def scanners in the shared module are unreachable from this binary
@@ -48,116 +38,17 @@ use std::collections::BTreeSet;
 
 use ratchet_support::{strip_comments_and_strings, workspace_root};
 
-/// Path (relative to the workspace root) of the crate that defines the facade
-/// trait — the §-referenced contract owner (`type-placement.md` rule 3).
-const FACADE_SOURCE: &str = "crates/ironclaw_product_workflow/src/reborn_services.rs";
-const FACADE_TRAIT: &str = "RebornServicesApi";
+/// Path (relative to the workspace root) of the crate that defines the shared
+/// product-surface contract.
+const HOST_PRODUCT_SURFACE_SOURCE: &str = "crates/ironclaw_host_api/src/product_surface.rs";
+/// Product implementation source that must not grow another local ProductSurface
+/// trait.
+const PRODUCT_REBORN_SERVICES_SOURCE: &str = "crates/ironclaw_product/src/reborn_services.rs";
+const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
+const RETIRED_PROTO_FACADE_TRAIT: &str = "RebornServicesApi";
 
-/// The frozen inventory of `RebornServicesApi` methods, as of the §5.2.5 freeze.
-/// Grouped by the product domain each method serves, so a reviewer can see which
-/// cluster is migrating as entries disappear. Remove an entry in the same PR that
-/// deletes its method (because the method became a capability/view descriptor).
-/// The sole post-freeze addition is §5.2's canonical `invoke` target conduit,
-/// already listed below; never add another product operation here.
-const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
-    // --- turn lifecycle (the irreducible core, §5.2.3) ---
-    "create_thread",
-    "submit_turn",
-    "delete_thread",
-    "get_timeline",
-    "global_auto_approve_enabled",
-    "read_attachment",
-    "stream_events",
-    "supports_stream_events_subscription",
-    "subscribe_events",
-    "cancel_run",
-    "resolve_gate",
-    "retry_run",
-    "get_run_state",
-    "invoke",
-    "query",
-    // --- filesystem / project browsing (→ view descriptors, §5.2.2) ---
-    "list_project_dir",
-    "stat_project_path",
-    "read_project_file",
-    "list_fs_mounts",
-    "browse_fs_dir",
-    "stat_fs_path",
-    "read_fs_file",
-    // --- projects + membership (→ capability + view descriptors) ---
-    "list_projects",
-    "create_project",
-    "get_project",
-    "update_project",
-    "delete_project",
-    "list_project_members",
-    "add_project_member",
-    "update_project_member_role",
-    "remove_project_member",
-    "list_threads",
-    // --- automations (→ Automation-origin descriptors, §5.2.1) ---
-    "list_automations",
-    "pause_automation",
-    "resume_automation",
-    "rename_automation",
-    "delete_automation",
-    // --- trace / credits ---
-    "trace_credits",
-    "trace_account_traces",
-    "trace_account_login_link",
-    "authorize_trace_hold",
-    // --- outbound channels ---
-    "get_outbound_preferences",
-    "set_outbound_preferences",
-    "list_outbound_delivery_targets",
-    // --- extensions + skills ---
-    "list_extensions",
-    "list_skills",
-    "search_skills",
-    "install_skill",
-    "read_skill_content",
-    "update_skill",
-    "remove_skill",
-    "set_skill_auto_activate",
-    "set_auto_activate_learned",
-    "list_extension_registry",
-    "install_extension",
-    "import_extension",
-    "activate_extension",
-    "remove_extension",
-    "setup_extension",
-    // --- LLM admin config ---
-    "get_llm_config",
-    "upsert_llm_provider",
-    "delete_llm_provider",
-    "set_active_llm",
-    "test_llm_connection",
-    "list_llm_models",
-    "start_nearai_login",
-    "complete_nearai_wallet_login",
-    "start_codex_login",
-    // --- operator setup / config / diagnostics ---
-    "get_operator_setup",
-    "run_operator_setup",
-    "list_operator_config",
-    "get_operator_config_key",
-    "set_operator_config_key",
-    "validate_operator_config",
-    "get_operator_diagnostics",
-    "get_operator_status",
-    "run_operator_service_lifecycle",
-    // --- admin users + per-user secrets ---
-    "list_admin_users",
-    "get_admin_user",
-    "create_admin_user",
-    "update_admin_user",
-    "set_admin_user_status",
-    "set_admin_user_role",
-    "delete_admin_user",
-    "list_admin_user_secrets",
-    "put_admin_user_secret",
-    "delete_admin_user_secret",
-];
+/// The frozen inventory of shared `host_api::ProductSurface` methods.
+const EXPECTED_HOST_PRODUCT_SURFACE_METHODS: &[&str] = &["invoke", "query", "stream_events"];
 
 /// Extract the method names declared **directly** in `trait <trait_name>`'s block
 /// — i.e. at trait-declaration depth, so a `fn` nested inside a default-method
@@ -169,7 +60,7 @@ fn extract_trait_methods(source: &str, trait_name: &str) -> Vec<String> {
     let decl = format!("trait {trait_name}");
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     // Word-boundary match so a rename that keeps the same method set —
-    // `trait RebornServicesApiV2`, `RebornServicesApi_legacy`, or a `subtrait`-
+    // `trait ProductSurfaceV2`, `ProductSurface_legacy`, or a `subtrait`-
     // like prefix — does NOT silently bind here and defeat the rename guard
     // (#6292 IronLoop/Gemini): `trait` must start a word and the char right
     // after the trait name must not be an identifier char.
@@ -247,17 +138,17 @@ fn extract_trait_methods(source: &str, trait_name: &str) -> Vec<String> {
 }
 
 #[test]
-fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
-    let source_path = workspace_root().join(FACADE_SOURCE);
+fn host_product_surface_method_set_is_frozen() {
+    let source_path = workspace_root().join(HOST_PRODUCT_SURFACE_SOURCE);
     let source = std::fs::read_to_string(&source_path)
-        .unwrap_or_else(|e| panic!("failed to read facade source {source_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to read product surface source {source_path:?}: {e}"));
 
-    let found = extract_trait_methods(&source, FACADE_TRAIT);
+    let found = extract_trait_methods(&source, PRODUCT_SURFACE_TRAIT);
     assert!(
         !found.is_empty(),
-        "no `{FACADE_TRAIT}` methods were extracted from {FACADE_SOURCE}: the trait was renamed, \
-         moved, or the extractor no longer recognizes its block — update this ratchet to keep \
-         tracking the facade surface."
+        "no `{PRODUCT_SURFACE_TRAIT}` methods were extracted from {HOST_PRODUCT_SURFACE_SOURCE}: \
+         the trait was renamed, moved, or the extractor no longer recognizes its block — update \
+         this ratchet to keep tracking the shared product-surface contract."
     );
 
     // Duplicate detection (defensive — a trait cannot legally declare two, but a
@@ -269,37 +160,50 @@ fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
         .collect();
     assert!(
         duplicated.is_empty(),
-        "`{FACADE_TRAIT}` block yielded duplicate method names {duplicated:?} — the extractor or \
-         the trait is malformed."
+        "`{PRODUCT_SURFACE_TRAIT}` block yielded duplicate method names {duplicated:?} — the \
+         extractor or the trait is malformed."
     );
 
-    let frozen: BTreeSet<&str> = FROZEN_REBORN_SERVICES_METHODS.iter().copied().collect();
+    let expected: BTreeSet<&str> = EXPECTED_HOST_PRODUCT_SURFACE_METHODS
+        .iter()
+        .copied()
+        .collect();
     let found_set: BTreeSet<&str> = found.iter().map(String::as_str).collect();
 
-    for conduit in ["invoke", "query"] {
-        assert!(
-            found_set.contains(conduit),
-            "`{FACADE_TRAIT}` must retain §5.2's canonical `{conduit}` conduit; removing or \
-             renaming it reopens per-feature facade growth."
-        );
-    }
-
-    let added: Vec<&str> = found_set.difference(&frozen).copied().collect();
+    let added: Vec<&str> = found_set.difference(&expected).copied().collect();
     assert!(
         added.is_empty(),
-        "New `{FACADE_TRAIT}` methods are banned (arch-simplification §5.2/§5.2.5/§10): the product \
-         surface is turn-lifecycle + `invoke`/`query`; a new product operation is a matrix-declared \
-         capability descriptor or a view descriptor, never a facade method. Offending new methods: \
-         {added:?}."
+        "New `{PRODUCT_SURFACE_TRAIT}` methods are banned (arch-simplification §5.2/§5.2.5/§10): \
+         a new product operation is a matrix-declared capability descriptor or a view descriptor, \
+         never a facade method. Offending new methods: {added:?}."
     );
 
-    let removed: Vec<&str> = frozen.difference(&found_set).copied().collect();
+    let removed: Vec<&str> = expected.difference(&found_set).copied().collect();
     assert!(
         removed.is_empty(),
-        "FROZEN_REBORN_SERVICES_METHODS lists methods that no longer exist on `{FACADE_TRAIT}`: \
-         {removed:?}. A facade method was removed (good — §5.2 migration progress!) — trim it from \
-         the allowlist in the same PR so the ratchet keeps shrinking toward the turn-lifecycle + \
-         `invoke`/`query` end-state (§10)."
+        "Expected shared `{PRODUCT_SURFACE_TRAIT}` methods are missing: {removed:?}. Product \
+         consumers share exactly `invoke`, `query`, and `stream_events` unless §5.2 is revised."
+    );
+}
+
+#[test]
+fn product_local_product_surface_traits_stay_retired() {
+    let source_path = workspace_root().join(PRODUCT_REBORN_SERVICES_SOURCE);
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|e| panic!("failed to read product source {source_path:?}: {e}"));
+    let stripped = strip_comments_and_strings(&source);
+    let product_surface_needle = format!("pub trait {PRODUCT_SURFACE_TRAIT}");
+    let retired_needle = format!("trait {RETIRED_PROTO_FACADE_TRAIT}");
+
+    assert!(
+        !stripped.contains(&product_surface_needle),
+        "`ironclaw_product::{PRODUCT_SURFACE_TRAIT}` was retired; use \
+         `ironclaw_host_api::{PRODUCT_SURFACE_TRAIT}` and descriptors instead."
+    );
+    assert!(
+        !stripped.contains(&retired_needle),
+        "`{RETIRED_PROTO_FACADE_TRAIT}` was retired into `{PRODUCT_SURFACE_TRAIT}`; do not \
+         reintroduce the proto-facade split."
     );
 }
 
@@ -355,23 +259,23 @@ fn extract_trait_methods_self_test() {
 #[test]
 fn extract_trait_methods_missing_trait_self_test() {
     let sample = "pub trait Other { fn a(&self); }";
-    assert!(extract_trait_methods(sample, "RebornServicesApi").is_empty());
+    assert!(extract_trait_methods(sample, "ProductSurface").is_empty());
 }
 
 /// #6292 IronLoop/Gemini: the trait lookup must be a WORD-boundary match, not a
 /// substring match — otherwise a rename that keeps the same method set (e.g.
-/// `RebornServicesApiV2` or `RebornServicesApi_legacy`) would silently bind here
+/// `ProductSurfaceV2` or `ProductSurface_legacy`) would silently bind here
 /// and defeat the freeze's rename guard. A prefixed `subtrait`-like token must
-/// not bind either. Only the exact `trait RebornServicesApi` block is picked up.
+/// not bind either. Only the exact `trait ProductSurface` block is picked up.
 #[test]
 fn extract_trait_methods_rejects_renamed_or_prefixed_trait_self_test() {
     for renamed in [
-        "pub trait RebornServicesApiV2 { fn a(&self); }",
-        "pub trait RebornServicesApi_legacy { fn a(&self); }",
-        "pub subtrait RebornServicesApi { fn a(&self); }",
+        "pub trait ProductSurfaceV2 { fn a(&self); }",
+        "pub trait ProductSurface_legacy { fn a(&self); }",
+        "pub subtrait ProductSurface { fn a(&self); }",
     ] {
         assert!(
-            extract_trait_methods(renamed, "RebornServicesApi").is_empty(),
+            extract_trait_methods(renamed, "ProductSurface").is_empty(),
             "must not bind to a renamed/prefixed trait: {renamed}"
         );
     }
@@ -379,15 +283,15 @@ fn extract_trait_methods_rejects_renamed_or_prefixed_trait_self_test() {
     // still binds.
     assert_eq!(
         extract_trait_methods(
-            "trait RebornServicesApi: Send { fn a(&self); }",
-            "RebornServicesApi"
+            "trait ProductSurface: Send { fn a(&self); }",
+            "ProductSurface"
         ),
         vec!["a".to_string()],
     );
     assert_eq!(
         extract_trait_methods(
-            "pub trait RebornServicesApi { fn b(&self); }",
-            "RebornServicesApi"
+            "pub trait ProductSurface { fn b(&self); }",
+            "ProductSurface"
         ),
         vec!["b".to_string()],
     );

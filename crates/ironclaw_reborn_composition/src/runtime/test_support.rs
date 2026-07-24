@@ -2,22 +2,72 @@
 // interaction-service wiring, for harnesses that build their own planned
 // runtime and bypass `build_reborn_runtime` (W5-WEBUI-API-2).
 //
-// `turn_coordinator` is caller-supplied, never `self.turn_coordinator`: a
-// `RebornServices` from `build_reborn_services` alone carries the coordinator
-// minted in `build_local_runtime`, not the caller's own planned-runtime one.
-//
 // Lives under `crate::runtime` (not `factory.rs`) — the recipe needs
 // module-private types only reachable from here.
 
 use super::*;
 
-impl RebornServices {
-    /// Real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`, via the
-    /// shared `build_approval_interaction_service` recipe so the two never drift.
-    /// `Ok(None)` without a local-dev runtime; `Err` surfaces a local-dev capability-policy
-    /// or grantee-resolver construction failure instead of collapsing it into `None`. No
-    /// audit sink threaded — production wires one for audit-log observability only, not
-    /// correctness the test needs.
+fn build_approval_interaction_service_with_parts(
+    parts: &InteractionServiceTestParts,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    turn_run_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
+    let approval_turn_runs = Arc::new(SnapshotApprovalTurnRunLocator::new(turn_run_source));
+    let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
+        parts.approval_requests.clone(),
+        approval_turn_runs,
+    ));
+    let approval_resolver = Arc::new(ApprovalResolverPort::new(
+        parts.approval_requests.clone(),
+        parts.capability_leases.clone(),
+    ));
+    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+        parts.persistent_approval_policies.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        parts.tool_permission_overrides.clone();
+
+    Ok(Arc::new(
+        DefaultApprovalInteractionService::new(
+            approval_read_model,
+            Arc::new(approval::PolicyApprovalLeaseTermsProvider::new(
+                Arc::clone(&parts.builtin_capability_policy),
+                Arc::clone(&parts.extension_registry),
+                parts.workspace_mounts.clone(),
+                parts.skill_mounts.clone(),
+                parts.memory_mounts.clone(),
+                parts.system_extensions_lifecycle_mounts.clone(),
+                extension_surface::ExtensionCapabilitySurfaceSource::new(Some({
+                    let mut facade = crate::extension_host::lifecycle::LifecycleFacade::new(
+                        Arc::clone(&parts.skill_management),
+                    )
+                    .with_extension_management(Arc::clone(&parts.extension_management))
+                    .with_admin_configuration_resolver(Arc::clone(
+                        &parts.admin_configuration_resolver,
+                    ))
+                    .with_runtime_credential_accounts(
+                        parts
+                            .product_auth
+                            .runtime_credential_account_selection_service(),
+                    );
+                    if let Some(egress) = parts.runtime_http_egress.as_ref() {
+                        facade = facade.with_runtime_http_egress(Arc::clone(egress));
+                    }
+                    Arc::new(facade)
+                })),
+            )),
+            approval_resolver,
+            turn_coordinator,
+        )
+        .with_persistent_policy_store(persistent_approval_policies)
+        .with_persistent_grantee_resolver(Arc::new(RegistryPersistentApprovalGranteeResolver::new(
+            Arc::clone(&parts.extension_registry),
+        )?))
+        .with_tool_permission_override_store(tool_permission_overrides),
+    ))
+}
+
+impl RebornRuntime {
+    /// Real approval interaction service owned by this runtime.
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in production builds.
     #[cfg(feature = "test-support")]
@@ -25,25 +75,18 @@ impl RebornServices {
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
-        let Some(local_runtime) = self.local_runtime.as_ref() else {
-            return Ok(None);
+        let Some(parts) = self.interaction_service_test_parts.as_ref() else {
+            return Ok(Some(Arc::clone(&self.approval_interaction_service)));
         };
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("local-dev capability policy is invalid: {error}"),
-            }
-        })?);
-        Ok(Some(build_approval_interaction_service(
-            local_runtime,
-            builtin_capability_policy,
+        build_approval_interaction_service_with_parts(
+            parts,
             turn_coordinator,
-            None,
-        )?))
+            Arc::clone(&self.turn_run_snapshot_source),
+        )
+        .map(Some)
     }
 
-    /// WebUI auth-interaction service via the same `build_webui_auth_interaction_service`
-    /// helper `build_reborn_runtime` uses. `None` only without a local-dev runtime; falls
-    /// back to `UnavailableAuthInteractionService` if `product_auth` has no flow-record source.
+    /// Auth-interaction service owned by this runtime.
     ///
     /// For tests only -- gated behind `test-support`, ships zero bytes in production builds.
     #[cfg(feature = "test-support")]
@@ -51,10 +94,9 @@ impl RebornServices {
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Option<Arc<dyn AuthInteractionService>> {
-        let local_runtime = self.local_runtime.as_ref()?;
-        Some(build_webui_auth_interaction_service(
-            self.product_auth.as_deref(),
-            Arc::clone(&local_runtime.turn_state),
+        Some(build_webui_auth_interaction_service_with_turn_run_source(
+            self.product_auth.as_ref(),
+            Arc::clone(&self.turn_run_snapshot_source),
             turn_coordinator,
         ))
     }
@@ -63,7 +105,7 @@ impl RebornServices {
     /// the caller substitute the turn-run snapshot source the interaction
     /// service's approval locator reads from — for harnesses whose real runs
     /// live in a DIFFERENT `TurnStateStore` composition than this
-    /// `RebornServices`' own `local_runtime.turn_state` (e.g.
+    /// this runtime's own turn state (e.g.
     /// `RebornIntegrationGroup`, whose runs execute against its own
     /// `shared.turn_store` via a separate `build_default_planned_runtime`).
     /// Generic over `F` so any `FilesystemTurnStateRowStore<F>`-backed store can be
@@ -83,23 +125,15 @@ impl RebornServices {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        let Some(local_runtime) = self.local_runtime.as_ref() else {
+        let Some(parts) = self.interaction_service_test_parts.as_ref() else {
             return Ok(None);
         };
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("local-dev capability policy is invalid: {error}"),
-            }
-        })?);
-        Ok(Some(
-            build_approval_interaction_service_with_turn_run_source(
-                local_runtime,
-                builtin_capability_policy,
-                turn_coordinator,
-                None,
-                turn_state as Arc<dyn TurnRunSnapshotSource>,
-            )?,
-        ))
+        build_approval_interaction_service_with_parts(
+            parts,
+            turn_coordinator,
+            turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+        )
+        .map(Some)
     }
 
     /// Auth-side counterpart of
@@ -119,10 +153,9 @@ impl RebornServices {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        self.local_runtime.as_ref()?;
         Some(build_webui_auth_interaction_service_with_turn_run_source(
-            self.product_auth.as_deref(),
-            turn_state as Arc<dyn TurnRunSnapshotSource>,
+            self.product_auth.as_ref(),
+            turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
             turn_coordinator,
         ))
     }

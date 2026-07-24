@@ -773,6 +773,43 @@ impl TurnEventProjectionSource for TurnStateEngine {
             inner.event_retention_floor,
         ))
     }
+
+    async fn read_turn_event_log_after(
+        &self,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        let inner = self.lock_inner()?;
+        let after = after.unwrap_or_default();
+        if inner.event_retention_floor > EventCursor::default()
+            && after < inner.event_retention_floor
+        {
+            return Ok(TurnEventPage {
+                entries: Vec::new(),
+                next_cursor: inner.event_retention_floor,
+                truncated: false,
+                rebase_required: Some(inner.event_retention_floor),
+            });
+        }
+        let mut entries = inner
+            .events
+            .iter()
+            .filter(|event| event.cursor > after)
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|event| event.cursor);
+        let truncated = entries.len() > limit;
+        if truncated {
+            entries.truncate(limit);
+        }
+        let next_cursor = entries.last().map_or(after, |event| event.cursor);
+        Ok(TurnEventPage {
+            entries,
+            next_cursor,
+            truncated,
+            rebase_required: None,
+        })
+    }
 }
 
 #[async_trait]

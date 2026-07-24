@@ -471,6 +471,12 @@ pub struct CapabilityDeclV2 {
     /// A capability that declares the `network` effect but no credential uses
     /// this to populate its egress allowlist directly from the manifest.
     pub network_targets: Vec<NetworkTargetPattern>,
+    /// Optional per-capability egress cap (bytes), independent of credentials.
+    /// A networked capability uses this to bound its egress from the manifest
+    /// rather than a composition special-case. `#[serde(default)]` keeps
+    /// persisted records without the field parsing to `None`.
+    #[serde(default)]
+    pub max_egress_bytes: Option<u64>,
     pub resource_profile: Option<ResourceProfile>,
     /// Declared per-origin gate matrix (§5.2.1). `None` = undeclared; a later
     /// slice populates real matrices and threads this into authorization.
@@ -1226,6 +1232,7 @@ impl CapabilityDeclV2 {
             required_host_ports,
             runtime_credentials,
             network_targets,
+            max_egress_bytes: raw.max_egress_bytes,
             resource_profile: raw.resource_profile,
             origin_gate_matrix: raw.origin_gate_matrix,
         })
@@ -1765,6 +1772,10 @@ pub(crate) struct RawCapabilityV2 {
     pub(crate) runtime_credentials: Vec<RawRuntimeCredentialV2>,
     #[serde(default)]
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
+    /// Optional per-capability egress cap (bytes). `#[serde(default)]` so
+    /// existing manifests without the key parse to `None`.
+    #[serde(default)]
+    pub(crate) max_egress_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) resource_profile: Option<ResourceProfile>,
     /// Per-origin gate matrix (§5.2.1). `#[serde(default)]` so existing

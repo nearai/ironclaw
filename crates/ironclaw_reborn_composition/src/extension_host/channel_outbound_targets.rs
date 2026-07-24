@@ -6,7 +6,7 @@
 //! come from generic state only:
 //!
 //! - **Shared conversations** — the extension's `*_subject_routes`
-//!   `[channel.config]` value: entries whose subject is the caller become
+//!   administrator value: entries whose subject is the caller become
 //!   the caller's shared-conversation targets.
 //! - **Personal direct messages** — the generic per-(extension, user)
 //!   DM-target store seeded by post-bind provisioning (and the H.4 fold).
@@ -19,24 +19,27 @@
 //! so saved targets keep resolving across the setup→durable-id migration
 //! (each resolve returns a freshly encoded ref carrying the durable id).
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, RwLock, Weak};
 
 use async_trait::async_trait;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, ResourceScope, TenantId, UserId};
+use ironclaw_outbound::{OutboundDeliveryTargetProvider, OutboundError, RunFinalReplyDestination};
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
+    ProductConversationRouteKind, ResolveStoredProductReplyTargetRequest,
+    StoredProductReplyTargetAccess,
 };
-use ironclaw_product_workflow::{
-    PreferenceTargetCodec, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetSummary, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    CurrentDeliveryTarget, CurrentDeliveryTargetResolver, PreferenceTargetCodec,
+    ProductWorkflowError,
 };
-use ironclaw_turns::ReplyTargetBindingRef;
+use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
-use crate::extension_host::channel_config::ChannelConfigService;
+use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::extension_host::channel_dm_targets::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
@@ -45,10 +48,199 @@ use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
     handle_declares_field, shared_channel_admission_handles,
 };
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
+    OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope,
+    OutboundDeliveryTargetSummary,
 };
-use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
+
+/// Product-facing current-target authority over the canonical outbound
+/// registry. The registry owns caller scoping and destination identity; this
+/// adapter only asks the registered vendor codec to decode the already
+/// authorized external binding into the product workflow's conversation
+/// shape.
+///
+/// The assembly is attached after runtime construction. A weak reference
+/// avoids a cycle because the assembly's delivery dependencies hold this
+/// resolver. Before attachment (or after assembly shutdown), external target
+/// decoding fails closed while host-owned destinations such as WebApp remain
+/// resolvable directly through the canonical registry.
+pub(crate) struct ComposedCurrentDeliveryTargetResolver {
+    targets: Arc<MutableOutboundDeliveryTargetRegistry>,
+    assembly: RwLock<Weak<GenericChannelHostAssembly>>,
+}
+
+impl ComposedCurrentDeliveryTargetResolver {
+    pub(crate) fn new(targets: Arc<MutableOutboundDeliveryTargetRegistry>) -> Self {
+        Self {
+            targets,
+            assembly: RwLock::new(Weak::new()),
+        }
+    }
+
+    pub(crate) fn attach_assembly(
+        &self,
+        assembly: &Arc<GenericChannelHostAssembly>,
+    ) -> Result<(), ProductWorkflowError> {
+        let mut slot = self
+            .assembly
+            .write()
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("current delivery target assembly lock failed: {error}"),
+            })?;
+        *slot = Arc::downgrade(assembly);
+        Ok(())
+    }
+
+    fn assembly(&self) -> Result<Option<Arc<GenericChannelHostAssembly>>, ProductWorkflowError> {
+        self.assembly
+            .read()
+            .map(|assembly| assembly.upgrade())
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("current delivery target assembly lock failed: {error}"),
+            })
+    }
+
+    fn outbound_scope(tenant_id: TenantId, user_id: UserId) -> OutboundDeliveryTargetScope {
+        OutboundDeliveryTargetScope::new(tenant_id, user_id)
+    }
+}
+
+#[async_trait]
+impl CurrentDeliveryTargetResolver for ComposedCurrentDeliveryTargetResolver {
+    async fn resolve_current_target(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<CurrentDeliveryTarget>, ProductWorkflowError> {
+        let caller = Self::outbound_scope(scope.tenant_id.clone(), actor.user_id.clone());
+        let Some(entry) = self
+            .targets
+            .resolve_reply_target_binding(&caller, target)
+            .await
+            .map_err(map_current_target_error)?
+        else {
+            return Ok(None);
+        };
+        let RunFinalReplyDestination::External {
+            reply_target_binding_ref,
+        } = entry.destination
+        else {
+            return Ok(None);
+        };
+        let Some(assembly) = self.assembly()? else {
+            return Ok(None);
+        };
+        let extension_id = entry.summary.channel.as_str().to_string();
+        let Some(codec) = assembly.preference_target_codec(&extension_id) else {
+            return Ok(None);
+        };
+        let Some(external_conversation_ref) =
+            codec.conversation_for_target(&reply_target_binding_ref)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CurrentDeliveryTarget {
+            extension_id,
+            external_conversation_ref,
+            personal_direct_message: codec.is_personal_direct_message(&reply_target_binding_ref),
+        }))
+    }
+
+    async fn resolve_current_destination(
+        &self,
+        scope: &ResourceScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<RunFinalReplyDestination>, ProductWorkflowError> {
+        let caller = Self::outbound_scope(scope.tenant_id.clone(), scope.user_id.clone());
+        self.targets
+            .resolve_outbound_delivery_target(&caller, target_id)
+            .await
+            .map(|entry| entry.map(|entry| entry.destination))
+            .map_err(map_current_target_error)
+    }
+
+    async fn resolve_current_target_id(
+        &self,
+        scope: &ResourceScope,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetId>, ProductWorkflowError> {
+        let caller = Self::outbound_scope(scope.tenant_id.clone(), scope.user_id.clone());
+        let resolved = self
+            .targets
+            .resolve_reply_target_binding(&caller, target)
+            .await
+            .map_err(map_current_target_error)?;
+        if let Some(entry) = resolved {
+            return Ok(Some(entry.summary.target_id));
+        }
+
+        let Some(thread_id) = scope.thread_id.clone() else {
+            return Ok(None);
+        };
+        let Some(assembly) = self.assembly()? else {
+            return Ok(None);
+        };
+        let stored = assembly
+            .resolve_stored_reply_target(ResolveStoredProductReplyTargetRequest {
+                scope: TurnScope::new_with_owner(
+                    scope.tenant_id.clone(),
+                    scope.agent_id.clone(),
+                    scope.project_id.clone(),
+                    thread_id,
+                    Some(scope.user_id.clone()),
+                ),
+                actor: TurnActor::new(scope.user_id.clone()),
+                reply_target_binding_ref: target.clone(),
+                access: StoredProductReplyTargetAccess::OrdinaryReply,
+            })
+            .await?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        let Some(codec) = assembly.preference_target_codec(stored.adapter_id.as_str()) else {
+            return Ok(None);
+        };
+        let expects_direct_message = stored.route_kind == ProductConversationRouteKind::Direct;
+        let entries = self
+            .targets
+            .list_outbound_delivery_targets(&caller)
+            .await
+            .map_err(map_current_target_error)?;
+        Ok(entries.into_iter().find_map(|entry| {
+            if entry.summary.channel.as_str() != stored.adapter_id.as_str() {
+                return None;
+            }
+            let RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            } = &entry.destination
+            else {
+                return None;
+            };
+            if codec.is_personal_direct_message(reply_target_binding_ref) != expects_direct_message
+            {
+                return None;
+            }
+            let conversation = codec.conversation_for_target(reply_target_binding_ref)?;
+            same_channel_destination(&conversation, &stored.external_conversation_ref)
+                .then_some(entry.summary.target_id)
+        }))
+    }
+}
+
+fn same_channel_destination(
+    left: &ExternalConversationRef,
+    right: &ExternalConversationRef,
+) -> bool {
+    left == right
+}
+
+fn map_current_target_error(error: OutboundError) -> ProductWorkflowError {
+    ProductWorkflowError::Transient {
+        reason: format!("current delivery target lookup failed: {error}"),
+    }
+}
 
 /// The deployment identity every encoded binding ref carries (the same
 /// identity the assembly binds per-extension workflows under).
@@ -64,7 +256,11 @@ pub(crate) struct ChannelOutboundTargetIdentity {
 pub(crate) struct GenericChannelOutboundTargetDeps {
     pub(crate) watch: SnapshotWatch,
     pub(crate) assembly: Arc<GenericChannelHostAssembly>,
-    pub(crate) channel_config: Arc<ChannelConfigService>,
+    pub(crate) admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
+    /// Durable caller-membership authority. The active snapshot and
+    /// administrator configuration are tenant-global and therefore cannot
+    /// authorize a requesting user's personal target access.
+    pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
     pub(crate) dm_targets: Arc<FilesystemChannelDmTargetStore>,
     pub(crate) identity: ChannelOutboundTargetIdentity,
 }
@@ -94,15 +290,50 @@ impl GenericChannelOutboundTargetProvider {
         Self { deps }
     }
 
-    /// Per-request contexts for every active channel extension with a
-    /// registered preference-target codec, in extension-id order.
-    async fn contexts(&self) -> Result<Vec<ChannelTargetContext>, RebornServicesError> {
+    /// Per-request contexts for every active channel extension the caller is
+    /// currently a durable member of, with a registered preference-target
+    /// codec, in extension-id order.
+    async fn contexts(
+        &self,
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<ChannelTargetContext>, OutboundError> {
+        let visible_installations = self
+            .deps
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target = "ironclaw::reborn::channel_outbound_targets",
+                    %error,
+                    "installation membership unavailable while resolving outbound targets"
+                );
+                OutboundError::Backend
+            })?
+            .into_iter()
+            .filter(|installation| installation.owner().visible_to(&caller.user_id))
+            .fold(
+                BTreeMap::<String, BTreeSet<String>>::new(),
+                |mut visible, installation| {
+                    visible
+                        .entry(installation.extension_id().as_str().to_string())
+                        .or_default()
+                        .insert(installation.installation_id().as_str().to_string());
+                    visible
+                },
+            );
         let snapshot = self.deps.watch.current();
         let mut contexts = Vec::new();
         for extension_id in snapshot.extension_ids() {
             let Some(active) = snapshot.extension(&extension_id) else {
                 continue;
             };
+            if !visible_installations
+                .get(&active.extension_id)
+                .is_some_and(|installation_ids| installation_ids.contains(&active.installation_id))
+            {
+                continue;
+            }
             let Some(context) = self.context_for_extension(&active).await? else {
                 continue;
             };
@@ -114,7 +345,7 @@ impl GenericChannelOutboundTargetProvider {
     async fn context_for_extension(
         &self,
         active: &ActiveExtension,
-    ) -> Result<Option<ChannelTargetContext>, RebornServicesError> {
+    ) -> Result<Option<ChannelTargetContext>, OutboundError> {
         let Some(channel) = active.resolved.channel.as_ref() else {
             return Ok(None);
         };
@@ -144,10 +375,11 @@ impl GenericChannelOutboundTargetProvider {
         // The `*_team_id` connection-scoping claim (same handle-suffix
         // convention as the identity hook) supplies the space id.
         let mut space_id = None;
-        if let Some(field) = channel
-            .config
-            .fields
+        if let Some(field) = active
+            .resolved
+            .admin_configuration
             .iter()
+            .flat_map(|descriptor| &descriptor.fields)
             .filter(|field| !field.secret)
             .find(|field| handle_declares_field(field.handle.as_str(), "team_id"))
         {
@@ -158,7 +390,7 @@ impl GenericChannelOutboundTargetProvider {
         }
 
         let mut subject_routes = BTreeMap::new();
-        let handles = shared_channel_admission_handles(&channel.config.fields);
+        let handles = shared_channel_admission_handles(&active.resolved.admin_configuration);
         if let Some(handle) = handles.subject_routes.as_deref()
             && let Some(raw) = self.config_value(&extension_id, handle).await?
         {
@@ -191,9 +423,9 @@ impl GenericChannelOutboundTargetProvider {
         &self,
         extension_id: &ExtensionId,
         handle: &str,
-    ) -> Result<Option<String>, RebornServicesError> {
+    ) -> Result<Option<String>, OutboundError> {
         self.deps
-            .channel_config
+            .admin_configuration_resolver
             .non_secret_value(extension_id, handle)
             .await
             .map_err(|error| {
@@ -202,9 +434,9 @@ impl GenericChannelOutboundTargetProvider {
                     extension_id = %extension_id,
                     handle,
                     %error,
-                    "channel config unavailable while resolving outbound targets"
+                    "administrator configuration unavailable while resolving outbound targets"
                 );
-                target_backend_error()
+                OutboundError::Backend
             })
     }
 
@@ -240,14 +472,14 @@ impl GenericChannelOutboundTargetProvider {
         let reply_target_binding_ref = context
             .codec
             .encode_shared_conversation_target(self.encode_request(context, &conversation))?;
-        let target_id = RebornOutboundDeliveryTargetId::new(format!(
+        let target_id = OutboundDeliveryTargetId::new(format!(
             "{}:shared-channel:{}:{}",
             context.extension_id,
             context.space_id.as_deref().unwrap_or_default(),
             conversation_id
         ))
         .ok()?;
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             context.extension_id.as_str(),
             format!("{} channel {}", context.display_name, conversation_id),
@@ -262,7 +494,9 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            reply_target_binding_ref,
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            },
             owner: OutboundDeliveryTargetOwner::new(
                 self.deps.identity.tenant_id.clone(),
                 owner_user,
@@ -274,24 +508,25 @@ impl GenericChannelOutboundTargetProvider {
     fn dm_entry(
         &self,
         context: &ChannelTargetContext,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &OutboundDeliveryTargetScope,
         record: &ChannelDmTargetRecord,
     ) -> Option<OutboundDeliveryTargetEntry> {
-        let (space_id, conversation_id) = dm_record_conversation(record)?;
+        let (record_space_id, conversation_id) = dm_record_conversation(record)?;
+        let space_id = record_space_id.or_else(|| context.space_id.clone());
         let conversation =
             ExternalConversationRef::new(space_id.as_deref(), &conversation_id, None, None).ok()?;
         let reply_target_binding_ref = context.codec.encode_personal_direct_message_target(
             self.encode_request(context, &conversation),
             &record.external_actor_id,
         )?;
-        let target_id = RebornOutboundDeliveryTargetId::new(format!(
+        let target_id = OutboundDeliveryTargetId::new(format!(
             "{}:personal-dm:{}:{}",
             context.extension_id,
             space_id.as_deref().unwrap_or_default(),
             caller.user_id.as_str()
         ))
         .ok()?;
-        let summary = RebornOutboundDeliveryTargetSummary::new(
+        let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             context.extension_id.as_str(),
             format!("{} DM", context.display_name),
@@ -305,7 +540,9 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            reply_target_binding_ref,
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            },
             // The owner is the record's provisioned user (the resolved
             // resource), never echoed from the caller.
             owner: OutboundDeliveryTargetOwner::new(
@@ -319,8 +556,8 @@ impl GenericChannelOutboundTargetProvider {
     async fn dm_record(
         &self,
         context: &ChannelTargetContext,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Option<ChannelDmTargetRecord>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Option<ChannelDmTargetRecord>, OutboundError> {
         self.deps
             .dm_targets
             .load(&context.extension_id, &caller.user_id)
@@ -332,11 +569,11 @@ impl GenericChannelOutboundTargetProvider {
                     %error,
                     "channel DM-target store unavailable while resolving outbound targets"
                 );
-                target_backend_error()
+                OutboundError::Backend
             })
     }
 
-    fn caller_in_scope(&self, caller: &WebUiAuthenticatedCaller) -> bool {
+    fn caller_in_scope(&self, caller: &OutboundDeliveryTargetScope) -> bool {
         caller.tenant_id == self.deps.identity.tenant_id
     }
 
@@ -344,7 +581,7 @@ impl GenericChannelOutboundTargetProvider {
     fn conversation_routed_to_caller(
         context: &ChannelTargetContext,
         conversation_id: &str,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &OutboundDeliveryTargetScope,
     ) -> bool {
         context
             .subject_routes
@@ -357,13 +594,13 @@ impl GenericChannelOutboundTargetProvider {
 impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         if !self.caller_in_scope(caller) {
             return Ok(Vec::new());
         }
         let mut entries = Vec::new();
-        for context in self.contexts().await? {
+        for context in self.contexts(caller).await? {
             for (conversation_id, subject) in &context.subject_routes {
                 if subject != caller.user_id.as_str() {
                     continue;
@@ -383,13 +620,13 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
 
     async fn resolve_outbound_delivery_target(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-        target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
         if !self.caller_in_scope(caller) {
             return Ok(None);
         }
-        for context in self.contexts().await? {
+        for context in self.contexts(caller).await? {
             let space = context.space_id.as_deref().unwrap_or_default();
             let shared_prefix = format!("{}:shared-channel:{}:", context.extension_id, space);
             if let Some(conversation_id) = target_id
@@ -418,13 +655,13 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
 
     async fn resolve_reply_target_binding(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &OutboundDeliveryTargetScope,
         target: &ReplyTargetBindingRef,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
         if !self.caller_in_scope(caller) {
             return Ok(None);
         }
-        for context in self.contexts().await? {
+        for context in self.contexts(caller).await? {
             let Some(decoded) = context.codec.conversation_for_target(target) else {
                 continue;
             };
@@ -474,22 +711,13 @@ fn dm_record_conversation(record: &ChannelDmTargetRecord) -> Option<(Option<Stri
     Some((space_id, conversation_id))
 }
 
-fn full_capabilities() -> RebornOutboundDeliveryTargetCapabilities {
-    RebornOutboundDeliveryTargetCapabilities {
+fn full_capabilities() -> DeliveryTargetCapabilities {
+    DeliveryTargetCapabilities {
         final_replies: true,
+        progress: false,
         gate_prompts: true,
         auth_prompts: true,
-    }
-}
-
-fn target_backend_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
+        modalities: Vec::new(),
     }
 }
 
