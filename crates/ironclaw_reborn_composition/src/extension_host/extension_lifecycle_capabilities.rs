@@ -17,7 +17,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductWorkflowError,
+    ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use serde::Deserialize;
 
@@ -292,9 +292,11 @@ fn channel_connection_display_preview(
     })
 }
 
-/// Structured channel connection requirements carry render chrome for WebUI.
-/// Strip them from model-visible lifecycle output so static fallback copy is
-/// never mistaken for live connection state.
+/// OAuth and admin-managed connection requirements carry render chrome for
+/// WebUI. Strip them from model-visible lifecycle output so static fallback
+/// copy is never mistaken for live connection state. Web-generated-code
+/// guidance remains model-visible because it tells the model how the host-owned
+/// pairing flow works.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -305,7 +307,17 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                extension.summary.channel_connection = None;
+                let model_actionable =
+                    extension
+                        .summary
+                        .channel_connection
+                        .as_ref()
+                        .is_some_and(|connection| {
+                            connection.strategy == RebornChannelConnectStrategy::WebGeneratedCode
+                        });
+                if !model_actionable {
+                    extension.summary.channel_connection = None;
+                }
             }
         }
         _ => {}
