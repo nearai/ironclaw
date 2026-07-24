@@ -38,8 +38,8 @@ const toneClasses = {
 };
 
 const sizeClasses = {
-  sm: "h-6 gap-1.5 rounded-full px-2 text-[0.625rem]",
-  md: "h-7 gap-2 rounded-full px-2.5 text-[length:var(--v2-font-size-label)]",
+  sm: "h-5 gap-1 rounded-full px-1.5 text-[0.5625rem]",
+  md: "h-6 gap-1.5 rounded-full px-2 text-[0.625rem]",
 };
 
 export type BadgeTone = keyof typeof toneClasses;
@@ -73,7 +73,7 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
       {dot &&
         (<span
           className={cn(
-            "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
+            "h-[0.3125rem] w-[0.3125rem] shrink-0 rounded-full bg-current",
             isLive && "animate-[v2-breathe_2s_ease-in-out_infinite]"
           )}
         />)}

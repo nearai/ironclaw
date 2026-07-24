@@ -15,6 +15,7 @@ import { SelectMenu } from "../../src/select-menu";
 import { Separator } from "../../src/separator";
 import { Switch } from "../../src/switch";
 import { Tabs } from "../../src/tabs";
+import { ToolIcon } from "../../src/tool-icon";
 
 /**
  * Applied compositions — real product surfaces built purely from
@@ -190,6 +191,8 @@ const CONNECTIONS = [
   { name: "GitHub", status: "warning", label: "Token" },
 ] as const;
 
+const railTitle = "text-xs";
+
 export const WorkspacePage: Story = {
   name: "Workspace · Full page",
   render: () => (
@@ -198,7 +201,7 @@ export const WorkspacePage: Story = {
 
       {/* Thread column */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center justify-between border-b border-[var(--v2-panel-border)] px-6 py-3">
+        <div className="flex items-center justify-between border-b border-[var(--v2-panel-border)] px-5 py-2.5">
           <div className="flex items-center gap-2.5">
             <AgentAvatar />
             <div>
@@ -210,18 +213,18 @@ export const WorkspacePage: Story = {
           </div>
           <Badge tone="success" label="Online" size="sm" />
         </div>
-        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
+        <div className="flex-1 space-y-3.5 overflow-y-auto px-5 py-3.5">
           <ThreadMessages />
         </div>
-        <div className="border-t border-[var(--v2-panel-border)] px-6 py-3">
+        <div className="border-t border-[var(--v2-panel-border)] px-5 py-2.5">
           <Composer />
         </div>
       </div>
 
       {/* Context rail */}
-      <div className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
+      <div className="flex w-72 shrink-0 flex-col gap-3 overflow-y-auto border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
         <Card variant="flat" radius="sm" padding="none">
-          <CardHeader className="!py-3">
+          <CardHeader className="!py-2.5">
             <div className="flex items-center justify-between">
               <CardLabel>Today</CardLabel>
               <Badge tone="success" label="All reversible" size="sm" />
@@ -235,16 +238,14 @@ export const WorkspacePage: Story = {
                 truncateTitle={false}
                 align="start"
                 leading={
-                  <span className="mt-0.5 grid h-6 w-6 place-items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
-                    <Icon name={item.icon} className="h-3 w-3" />
-                  </span>
+                  <ToolIcon name={item.text} icon={item.icon} size="sm" shape="circle" className="mt-0.5" />
                 }
                 title={<span className="text-xs font-normal leading-5">{item.text}</span>}
                 meta={item.time}
               />
             ))}
           </div>
-          <CardFooter divider className="!py-2.5">
+          <CardFooter divider className="!py-2">
             <Button variant="ghost" size="sm" className="w-full">
               Open activity log
             </Button>
@@ -252,7 +253,7 @@ export const WorkspacePage: Story = {
         </Card>
 
         <Card variant="flat" radius="sm" padding="none">
-          <CardHeader className="!py-3">
+          <CardHeader className="!py-2.5">
             <CardLabel>Connections</CardLabel>
           </CardHeader>
           <div>
@@ -260,13 +261,14 @@ export const WorkspacePage: Story = {
               <ListRow
                 key={conn.name}
                 size="sm"
-                title={<span className="text-xs">{conn.name}</span>}
+                leading={<ToolIcon name={conn.name} size="sm" />}
+                title={<span className={railTitle}>{conn.name}</span>}
                 trailing={<Badge tone={conn.status} label={conn.label} size="sm" />}
                 onClick={() => {}}
               />
             ))}
           </div>
-          <CardFooter divider className="!py-2.5">
+          <CardFooter divider className="!py-2">
             <Button variant="ghost" size="sm" className="w-full">
               <Icon name="plus" className="mr-1.5 h-3.5 w-3.5" />
               Connect a tool
@@ -310,7 +312,7 @@ export const ChatThread: Story = {
           <Badge tone="success" label="Online" size="sm" />
         </div>
       </CardHeader>
-      <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 md:px-7">
+      <div className="flex-1 space-y-3.5 overflow-y-auto px-4 py-3.5 md:px-6">
         <ThreadMessages />
       </div>
       <CardFooter divider className="!py-3">
@@ -365,7 +367,7 @@ export const AutomationsPage: Story = {
 
         {/* Main column */}
         <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-          <div className="flex items-center justify-between border-b border-[var(--v2-panel-border)] px-6 py-4">
+          <div className="flex items-center justify-between border-b border-[var(--v2-panel-border)] px-5 py-3.5">
             <div>
               <h2 className="text-lg font-medium text-[var(--v2-text-strong)]">Automations</h2>
               <p className="text-xs text-[var(--v2-text-faint)]">
@@ -390,13 +392,13 @@ export const AutomationsPage: Story = {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4 px-6 pt-4">
+          <div className="grid grid-cols-3 gap-3.5 px-5 pt-3.5">
             <StatCard label="Active" value="8" tone="success" badgeLabel="Healthy" />
             <StatCard label="Runs today" value="128" tone="info" badgeLabel="Running" />
             <StatCard label="Failures" value="1" tone="danger" badgeLabel="Attention" />
           </div>
 
-          <div className="px-6 pb-6 pt-2">
+          <div className="px-5 pb-5 pt-2">
             <Card variant="flat" padding="none">
               <AutomationRows />
             </Card>
@@ -438,16 +440,12 @@ export const RunDetail: Story = {
             key={step.title}
             size="sm"
             leading={
-              <span
-                className={
-                  "grid h-7 w-7 shrink-0 place-items-center rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] " +
-                  (step.status === "danger"
-                    ? "text-[var(--v2-danger-text)]"
-                    : "text-[var(--v2-text-muted)]")
-                }
-              >
-                <Icon name={step.icon} className="h-3.5 w-3.5" />
-              </span>
+              <ToolIcon
+                name={step.title}
+                icon={step.icon}
+                size="md"
+                className={step.status === "danger" ? "text-[var(--v2-danger-text)]" : undefined}
+              />
             }
             title={<span className="font-normal">{step.title}</span>}
             trailing={
@@ -459,7 +457,7 @@ export const RunDetail: Story = {
           />
         ))}
       </div>
-      <div className="px-5 pb-5 pt-2 md:px-7">
+      <div className="px-4 pb-4 pt-2 md:px-6">
         <Card variant="inset" radius="sm" padding="sm">
           <div className="font-mono text-xs leading-5 text-[var(--v2-text-muted)]">
             SlackDeliveryError: token for #personal has expired.
@@ -538,9 +536,7 @@ export const ActivityFeed: Story = {
             align="start"
             truncateTitle={false}
             leading={
-              <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
-                <Icon name={item.icon} className="h-3.5 w-3.5" />
-              </span>
+              <ToolIcon name={item.text} icon={item.icon} size="md" shape="circle" className="mt-0.5" />
             }
             title={<span className="font-normal">{item.text}</span>}
             meta={item.time}

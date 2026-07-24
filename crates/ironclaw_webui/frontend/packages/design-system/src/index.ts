@@ -67,6 +67,8 @@ export { Spinner } from "./spinner";
 export { Switch } from "./switch";
 export { Tabs } from "./tabs";
 export type { TabItem } from "./tabs";
+export { ToolIcon } from "./tool-icon";
+export type { ToolIconProps } from "./tool-icon";
 export { useInterfaceTheme } from "./theme";
 export type { InterfaceTheme } from "./theme";
 export {

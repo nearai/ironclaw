@@ -37,7 +37,7 @@ export interface ListRowProps {
   className?: string;
 }
 
-const PAD = { sm: "py-3", md: "py-3.5" };
+const PAD = { sm: "py-2.5", md: "py-3" };
 
 export function ListRow({
   leading,
@@ -58,7 +58,7 @@ export function ListRow({
     <Element
       {...(interactive ? { type: "button" as const, onClick } : {})}
       className={cn(
-        "flex w-full gap-3 px-5 text-left",
+        "flex w-full gap-2.5 px-4 text-left",
         align === "start" ? "items-start" : "items-center",
         PAD[size] ?? PAD.md,
         divider && "border-b border-[var(--v2-panel-border)] last:border-b-0",

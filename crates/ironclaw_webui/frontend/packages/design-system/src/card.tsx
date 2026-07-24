@@ -114,7 +114,7 @@ export function CardHeader({ children, className = "", divider = false }: CardSe
   return (
     <div
       className={cn(
-        "px-5 py-4 md:px-7 md:py-5",
+        "px-4 py-3.5 md:px-6 md:py-4",
         divider && "border-b border-[var(--v2-panel-border)]",
         className
       )}
@@ -128,7 +128,7 @@ export function CardHeader({ children, className = "", divider = false }: CardSe
 
 export function CardBody({ children, className = "" }: Omit<CardSectionProps, "divider">) {
   return (
-    <div className={cn("px-5 py-4 md:px-7 md:py-5", className)}>
+    <div className={cn("px-4 py-3.5 md:px-6 md:py-4", className)}>
       {children}
     </div>
   );
@@ -140,7 +140,7 @@ export function CardFooter({ children, className = "", divider = true }: CardSec
   return (
     <div
       className={cn(
-        "px-5 py-4 md:px-7 md:py-5",
+        "px-4 py-3.5 md:px-6 md:py-4",
         divider && "border-t border-[var(--v2-panel-border)]",
         className
       )}

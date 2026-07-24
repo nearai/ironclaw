@@ -60,7 +60,7 @@ export function NavItem({
       {...(isButton ? { type: "button" } : {})}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-[var(--v2-radius-sm)] px-2.5 py-1.5 text-left text-sm",
+        "flex w-full items-center gap-2 rounded-[var(--v2-radius-sm)] px-2 py-1.5 text-left text-sm",
         "transition-colors duration-[var(--v2-duration-fast)] ease-[var(--v2-ease-standard)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/50",
         active

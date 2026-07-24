@@ -75,7 +75,7 @@ export function StatCard({
   return (
     <div
       className={cn(
-        "px-1 py-4",
+        "px-1 py-3.5",
         showDivider && "border-t border-[var(--v2-panel-border)]",
         className
       )}
@@ -89,7 +89,7 @@ export function StatCard({
           </div>
           <div
             className={cn(
-              "mt-3 truncate font-medium tracking-[-0.05em] text-[var(--v2-text-strong)]",
+              "mt-2 truncate font-medium tracking-[-0.05em] text-[var(--v2-text-strong)]",
               valueClassName
             )}
           >

@@ -3,8 +3,8 @@ import { Badge } from "../../src/badge";
 import { Button } from "../../src/button";
 import { Card } from "../../src/card";
 import { Checkbox } from "../../src/checkbox";
-import { Icon } from "../../src/icons";
 import { ListRow } from "../../src/list";
+import { ToolIcon } from "../../src/tool-icon";
 
 const meta = {
   title: "Components/ListRow",
@@ -70,9 +70,11 @@ export const ActivityReceipts: Story = {
     <Card variant="flat" padding="none" className="w-[36rem]">
       <ListRow
         leading={
-          <span className="grid h-8 w-8 place-items-center rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]">
-            <Icon name="check" className="h-4 w-4 text-[var(--v2-positive-text)]" />
-          </span>
+          <ToolIcon
+            name="Archived"
+            icon="check"
+            className="text-[var(--v2-positive-text)]"
+          />
         }
         title="Archived 12 newsletters"
         description="They matched your triage rules."
@@ -85,9 +87,11 @@ export const ActivityReceipts: Story = {
       />
       <ListRow
         leading={
-          <span className="grid h-8 w-8 place-items-center rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]">
-            <Icon name="bolt" className="h-4 w-4 text-[var(--v2-accent-text)]" />
-          </span>
+          <ToolIcon
+            name="Routine"
+            icon="bolt"
+            className="text-[var(--v2-accent-text)]"
+          />
         }
         title='Set up "Release notes watch"'
         description="3 repos publish releases you keep opening manually."

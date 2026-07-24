@@ -66,7 +66,7 @@ export function Callout({ tone = "info", title, icon, className = "", children }
     <aside
       role="note"
       className={cn(
-        "grid gap-3 rounded-[var(--v2-radius-lg)] border px-5 py-4",
+        "grid gap-2.5 rounded-[var(--v2-radius-lg)] border px-4 py-3.5",
         iconName ? "grid-cols-[1.25rem_minmax(0,1fr)]" : "grid-cols-1",
         TONE_CLASSES[resolvedTone],
         className
