@@ -311,23 +311,23 @@ def test_journey_evidence_rejects_a_vanished_symbol(
 
 
 @pytest.mark.parametrize(
-    ("label", "test_body"),
+    "test_body",
     [
-        ("uncalled", "    await _something_else(world)\n"),
+        pytest.param("    await _something_else(world)\n", id="uncalled"),
         # A text search for "_assert_readback(" is satisfied by both of these
         # while the helper never runs, which would re-admit exactly the
         # declaration-only evidence this gate exists to reject.
-        (
-            "commented out",
+        pytest.param(
             "    await _something_else(world)\n"
             "    # await _assert_readback(url)\n",
+            id="commented out",
         ),
-        ("inside a string", '    note = "_assert_readback(url)"\n'),
+        pytest.param(
+            '    note = "_assert_readback(url)"\n', id="inside a string"
+        ),
     ],
 )
-def test_journey_evidence_rejects_a_helper_that_never_runs(
-    label: str, test_body: str
-):
+def test_journey_evidence_rejects_a_helper_that_never_runs(test_body: str):
     """Both symbols present is not evidence; the test must invoke the readback."""
     source = (
         f"async def test_journey(world):\n{test_body}"
@@ -349,15 +349,18 @@ def test_journey_evidence_rejects_a_helper_that_never_runs(
 
 
 @pytest.mark.parametrize(
-    ("label", "call"),
+    "call",
     [
-        ("direct", "    await _assert_readback(world)\n"),
+        pytest.param("    await _assert_readback(world)\n", id="direct"),
         # Matched via ast.Attribute, which is receiver-agnostic on purpose:
         # a helper reached through a module or holder object still counts.
-        ("through a receiver", "    await helpers._assert_readback(world)\n"),
+        pytest.param(
+            "    await helpers._assert_readback(world)\n",
+            id="through a receiver",
+        ),
     ],
 )
-def test_journey_evidence_accepts_a_genuinely_invoked_helper(label: str, call: str):
+def test_journey_evidence_accepts_a_genuinely_invoked_helper(call: str):
     """The check must pass on real calls, direct or through a receiver.
 
     Guards the other direction: a detector that rejects everything would make
