@@ -70,6 +70,7 @@ pub mod surface;
 pub mod tool_adapter;
 pub mod trust;
 pub mod turn;
+pub mod user_identity;
 
 mod credential_redaction;
 pub mod model_result_preview;
@@ -120,6 +121,7 @@ pub use surface::*;
 pub use tool_adapter::*;
 pub use trust::*;
 pub use turn::*;
+pub use user_identity::*;
 
 /// Canonical timestamp type for host API wire contracts.
 pub type Timestamp = chrono::DateTime<chrono::Utc>;

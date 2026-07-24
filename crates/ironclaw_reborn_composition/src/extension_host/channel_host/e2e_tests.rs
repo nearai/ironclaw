@@ -424,8 +424,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
             operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
         },
-        identity_lookup: Some(Arc::clone(&identity_lookup)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>),
+        identity_lookup: Some(
+            Arc::clone(&identity_lookup) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>
+        ),
         delivery: Some(ChannelHostDeliveryDeps {
             coordinator: delivery_coordinator,
             outbound_store,
@@ -2102,15 +2103,14 @@ async fn shared_channel_admission_follows_saved_channel_config() {
     harness.drain().await;
     let scopes = harness.coordinator.submitted_scopes();
     assert_eq!(scopes.len(), 1, "the admitted channel submits one turn");
-    let expected_managed_subject =
-        crate::extension_host::channel_subject_routes::managed_channel_subject_user_id(
-            ADAPTER,
-            &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            &ironclaw_product::AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
-            Some(TEAM),
-            "C777",
-        )
-        .expect("managed subject derivation");
+    let expected_managed_subject = ironclaw_extension_host::managed_channel_subject_user_id(
+        ADAPTER,
+        &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        &ironclaw_product::AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
+        Some(TEAM),
+        "C777",
+    )
+    .expect("managed subject derivation");
     assert_eq!(
         scopes[0].thread_owner.explicit_owner_user_id(),
         Some(&expected_managed_subject),

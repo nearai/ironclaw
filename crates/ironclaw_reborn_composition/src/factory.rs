@@ -400,8 +400,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
-    pub(crate) channel_identity_store:
-        Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>,
+    pub(crate) channel_identity_store: Arc<ironclaw_extension_host::FilesystemChannelIdentityStore>,
     pub(crate) channel_dm_target_store:
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
@@ -597,7 +596,7 @@ impl RebornRuntimeStores {
         });
 
         let identity_lookup = Some(Arc::clone(&self.channel_identity_store)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>);
+            as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>);
         Some(
             crate::extension_host::channel_host::GenericChannelHostAssembly::start(
                 GenericChannelHostDeps {
@@ -4098,7 +4097,7 @@ async fn build_backend_production(
     channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
     let fold_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let channel_identity_store = Arc::new(
-        crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+        ironclaw_extension_host::FilesystemChannelIdentityStore::new(
             Arc::clone(&fold_filesystem),
             channel_egress_scope.tenant_id.clone(),
             channel_egress_scope.user_id.clone(),
@@ -4357,11 +4356,11 @@ async fn build_backend_production(
                             installation,
                             template_values,
                             identity_bind: Arc::clone(&channel_identity_store)
-                                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+                                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
                             identity_lookup: Arc::clone(&channel_identity_store)
-                                as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+                                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
                             identity_delete: Arc::clone(&channel_identity_store)
-                                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
                             continuation,
                             conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
                                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,

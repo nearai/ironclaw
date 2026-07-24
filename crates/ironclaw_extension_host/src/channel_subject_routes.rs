@@ -34,14 +34,14 @@ use ironclaw_product::{
 };
 use sha2::{Digest, Sha256};
 
-use ironclaw_extension_host::ChannelConfigService;
+use crate::ChannelConfigService;
 
 const ALLOWED_CHANNELS_FIELD: &str = "allowed_channels";
 const SUBJECT_ROUTES_FIELD: &str = "subject_routes";
 
 /// Handle-suffix convention shared with the connection-scoping claims:
 /// `{name}` or `*_{name}` declares the admission field.
-pub(crate) fn handle_declares_field(handle: &str, name: &str) -> bool {
+pub fn handle_declares_field(handle: &str, name: &str) -> bool {
     handle == name
         || handle
             .strip_suffix(name)
@@ -50,13 +50,13 @@ pub(crate) fn handle_declares_field(handle: &str, name: &str) -> bool {
 
 /// The admission config handles one extension's `[channel.config]` declares.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SharedChannelAdmissionHandles {
-    pub(crate) allowed_channels: Option<String>,
-    pub(crate) subject_routes: Option<String>,
+pub struct SharedChannelAdmissionHandles {
+    pub allowed_channels: Option<String>,
+    pub subject_routes: Option<String>,
 }
 
 impl SharedChannelAdmissionHandles {
-    pub(crate) fn declared(&self) -> bool {
+    pub fn declared(&self) -> bool {
         self.allowed_channels.is_some() || self.subject_routes.is_some()
     }
 }
@@ -64,7 +64,7 @@ impl SharedChannelAdmissionHandles {
 /// Scan the manifest's `[channel.config]` field descriptors for the
 /// admission handles (non-secret fields only — admission config is operator
 /// routing data, never secret material).
-pub(crate) fn shared_channel_admission_handles(
+pub fn shared_channel_admission_handles(
     fields: &[RecipeSecretField],
 ) -> SharedChannelAdmissionHandles {
     let find = |name: &str| {
@@ -85,7 +85,7 @@ pub(crate) fn shared_channel_admission_handles(
 /// `sha256(tenant \0 installation \0 space \0 conversation)` — ported
 /// unchanged from the retired lane's route store so folded deployments
 /// derive the same subject ids for the same channels.
-pub(crate) fn managed_channel_subject_user_id(
+pub fn managed_channel_subject_user_id(
     extension_id: &str,
     tenant_id: &TenantId,
     installation_id: &AdapterInstallationId,
@@ -114,7 +114,7 @@ pub(crate) fn managed_channel_subject_user_id(
 /// entries win; `*_allowed_channels` entries admit with the managed derived
 /// subject; everything else resolves to no route (which the assembly's
 /// require-configured-route policy fails closed).
-pub(crate) struct ChannelConfigSubjectRouteResolver {
+pub struct ChannelConfigSubjectRouteResolver {
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
     tenant_id: TenantId,
@@ -124,7 +124,7 @@ pub(crate) struct ChannelConfigSubjectRouteResolver {
 }
 
 impl ChannelConfigSubjectRouteResolver {
-    pub(crate) fn new(
+    pub fn new(
         adapter_id: ProductAdapterId,
         installation_id: AdapterInstallationId,
         tenant_id: TenantId,
@@ -237,12 +237,12 @@ mod tests {
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
-    use ironclaw_host_api::{InvocationId, ResourceScope};
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, VirtualPath};
     use ironclaw_product::ProductConversationRouteKey;
     use ironclaw_secrets::FilesystemSecretStore;
 
     use super::*;
-    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
     /// Invented channel extension declaring the admission fields by the
     /// handle-suffix convention.
@@ -299,17 +299,42 @@ supports_threads = false
     struct NoopReactivation;
 
     #[async_trait]
-    impl ironclaw_extension_host::ChannelConfigReactivation for NoopReactivation {
+    impl crate::ChannelConfigReactivation for NoopReactivation {
         async fn reactivate_if_active(
             &self,
             _extension_id: &ExtensionId,
-        ) -> Result<(), ironclaw_extension_host::ChannelConfigReactivationError> {
+        ) -> Result<(), crate::ChannelConfigReactivationError> {
             Ok(())
         }
     }
 
+    async fn filesystem_installation_store_for_test()
+    -> ironclaw_extensions::FilesystemExtensionInstallationStore {
+        ironclaw_extensions::FilesystemExtensionInstallationStore::load_at(
+            Arc::new(InMemoryBackend::new()),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
+            HostPortCatalog::empty(),
+            product_extension_host_api_contract_registry().expect("extension host API contracts"),
+        )
+        .await
+        .expect("filesystem extension installation store")
+    }
+
+    fn product_extension_host_api_contract_registry()
+    -> Result<ironclaw_extensions::HostApiContractRegistry, ironclaw_extensions::ManifestV2Error>
+    {
+        let mut registry = ironclaw_host_runtime::default_host_api_contract_registry()?;
+        ironclaw_product::adapter_registry::register_product_adapter_host_api_contract(
+            &mut registry,
+        )
+        .map_err(|error| ironclaw_extensions::ManifestV2Error::Invalid {
+            reason: format!("product adapter host API contract registration failed: {error}"),
+        })?;
+        Ok(registry)
+    }
+
     async fn fixture() -> Fixture {
-        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+        let store = Arc::new(filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             ADMISSION_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,

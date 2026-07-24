@@ -34,8 +34,8 @@ use crate::extension_host::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
     discover_channel_extensions,
 };
-use crate::provider_identity::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup};
 use ironclaw_extension_host::FilesystemChannelDmTargetStore;
+use ironclaw_host_api::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup};
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
 /// per-user channel disconnect can revoke the caller's personal vendor
@@ -522,7 +522,7 @@ mod tests {
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
-    use crate::provider_identity::{
+    use ironclaw_host_api::{
         RebornUserIdentityBindingError, RebornUserIdentityLookupError,
         installation_scoped_provider_user_id,
     };

@@ -24,16 +24,13 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    ScopedPath, TenantId, UserId, VirtualPath,
-};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-
-use crate::provider_identity::{
+    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
     RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError,
+    RebornUserIdentityLookupError, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
+    resource_scope_path_segment,
 };
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const CHANNEL_IDENTITY_ALIAS: &str = "/tenant-shared/channel-identities";
 const IDENTITY_ROOT: &str = "/tenant-shared/channel-identities/identities";
@@ -41,10 +38,8 @@ const IDENTITY_BY_USER_ROOT: &str = "/tenant-shared/channel-identities/identitie
 
 /// The per-scope mount view for the channel-identity subtree: one alias onto
 /// the tenant's shared `channel-identities` root.
-pub(crate) fn channel_identity_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, HostApiError> {
-    let tenant = crate::resource_scope_path_segment(scope.tenant_id.as_str());
+pub fn channel_identity_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant = resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(CHANNEL_IDENTITY_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-identities"))?,
@@ -53,7 +48,7 @@ pub(crate) fn channel_identity_mount_view(
 }
 
 /// The generic filesystem-backed channel-identity binding store.
-pub(crate) struct FilesystemChannelIdentityStore {
+pub struct FilesystemChannelIdentityStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
     locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
@@ -69,11 +64,7 @@ impl std::fmt::Debug for FilesystemChannelIdentityStore {
 }
 
 impl FilesystemChannelIdentityStore {
-    pub(crate) fn new(
-        filesystem: Arc<dyn RootFilesystem>,
-        tenant_id: TenantId,
-        user_id: UserId,
-    ) -> Self {
+    pub fn new(filesystem: Arc<dyn RootFilesystem>, tenant_id: TenantId, user_id: UserId) -> Self {
         let scoped = Arc::new(ScopedFilesystem::new(
             filesystem,
             channel_identity_mount_view,
@@ -98,7 +89,7 @@ impl FilesystemChannelIdentityStore {
     /// reopen probe reconstructs the store with the same scoping production
     /// composed (`build_runtime`' channel egress scope). Tests only.
     #[cfg(feature = "test-support")]
-    pub(crate) fn identity_scope_tenant_and_user(&self) -> (&TenantId, &UserId) {
+    pub fn identity_scope_tenant_and_user(&self) -> (&TenantId, &UserId) {
         (&self.scope.tenant_id, &self.scope.user_id)
     }
 
@@ -524,12 +515,12 @@ impl RebornUserIdentityBindingDeleteStore for FilesystemChannelIdentityStore {
 /// channel-lane records so migration H.4 copies them forward verbatim
 /// (modulo the installation-prefix rewrite).
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct StoredChannelUserIdentity {
-    pub(crate) provider: String,
-    pub(crate) provider_user_id: String,
-    pub(crate) user_id: String,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) updated_at: DateTime<Utc>,
+struct StoredChannelUserIdentity {
+    provider: String,
+    provider_user_id: String,
+    user_id: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 impl StoredChannelUserIdentity {
@@ -563,7 +554,7 @@ fn identity_record_matches_user_binding(
             .unwrap_or(true)
 }
 
-pub(crate) fn path_segment(value: &str) -> String {
+pub fn path_segment(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(value.as_bytes())
 }
 
@@ -586,7 +577,7 @@ fn map_binding_fs_error(error: FilesystemError) -> RebornUserIdentityBindingErro
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
 
-    use crate::provider_identity::{RebornIdentityProviderId, RebornIdentityProviderUserId};
+    use ironclaw_host_api::{RebornIdentityProviderId, RebornIdentityProviderUserId};
 
     use super::*;
 

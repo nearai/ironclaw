@@ -34,9 +34,6 @@ use ironclaw_product::{
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::extension_host::channel_host::GenericChannelHostAssembly;
-use crate::extension_host::channel_subject_routes::{
-    handle_declares_field, shared_channel_admission_handles,
-};
 use crate::outbound::{
     DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
@@ -47,6 +44,7 @@ use ironclaw_extension_host::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
 };
+use ironclaw_extension_host::{handle_declares_field, shared_channel_admission_handles};
 
 /// The deployment identity every encoded binding ref carries (the same
 /// identity the assembly binds per-extension workflows under).

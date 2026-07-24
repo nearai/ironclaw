@@ -44,7 +44,7 @@ use crate::extension_host::channel_identity::{
     ChannelIdentityBindingConfig, ChannelIdentityPostBindFactory,
     bind_channel_identities_for_callback,
 };
-use crate::provider_identity::RebornUserIdentityLookup;
+use ironclaw_host_api::RebornUserIdentityLookup;
 
 /// Identity inputs for [`build_channel_connection_for_test`]. Plain strings
 /// so harness callers outside this crate don't need the id newtypes;
@@ -113,7 +113,7 @@ pub fn build_channel_connection_for_test(
             Some(Arc::clone(&installation_store)),
             Arc::clone(&identity_store) as Arc<dyn RebornUserIdentityLookup>,
             Arc::clone(&identity_store)
-                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
             credential_cleanup,
             account_status_reader,
             Some(runtime.channel_dm_target_store.clone()),
@@ -151,9 +151,9 @@ pub fn build_channel_connection_for_test(
         installation_store: Some(installation_store),
         channel_config: Some(runtime.channel_config.clone()),
         binding_store: Arc::clone(&identity_store)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
         post_bind_factory,
         overrides: Vec::new(),
     };
@@ -302,7 +302,7 @@ impl ChannelConnectionTestBundle {
             .await
             .map_err(|error| error.to_string())?;
         let store = Arc::new(
-            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+            ironclaw_extension_host::FilesystemChannelIdentityStore::new(
                 filesystem,
                 self.identity_store_tenant_id.clone(),
                 self.identity_store_user_id.clone(),

@@ -109,7 +109,7 @@ pub(crate) fn default_channel_workflow_storage_roots(
     tenant_id: &TenantId,
     extension_id: &str,
 ) -> Result<ChannelWorkflowStorageRoots, String> {
-    let tenant = crate::resource_scope_path_segment(tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource_scope_path_segment(tenant_id.as_str());
     let base = format!("/tenants/{tenant}/shared/channel-extensions/{extension_id}");
     Ok(ChannelWorkflowStorageRoots {
         idempotency: VirtualPath::new(format!("{base}/product-workflow/idempotency"))
@@ -269,7 +269,7 @@ pub(crate) struct GenericChannelHostDeps {
     /// on auth-declaring channel extensions resolve through it. `None`
     /// (composition paths without the durable store) falls back to the
     /// operator-actor policy.
-    pub(crate) identity_lookup: Option<Arc<dyn crate::provider_identity::RebornUserIdentityLookup>>,
+    pub(crate) identity_lookup: Option<Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>>,
     pub(crate) delivery: Option<ChannelHostDeliveryDeps>,
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
@@ -807,23 +807,23 @@ impl GenericChannelHostAssembly {
                         .channel
                         .as_ref()
                         .map(|channel| {
-                            crate::extension_host::channel_subject_routes::
-                                shared_channel_admission_handles(&channel.config.fields)
+                            ironclaw_extension_host::shared_channel_admission_handles(
+                                &channel.config.fields,
+                            )
                         })
                         .unwrap_or_default();
                     if handles.declared() {
                         let extension_id = ExtensionId::new(source.extension_id())
                             .map_err(|error| format!("invalid extension id: {error}"))?;
                         Some(Arc::new(
-                            crate::extension_host::channel_subject_routes::
-                                ChannelConfigSubjectRouteResolver::new(
-                                    adapter_id.clone(),
-                                    installation_id.clone(),
-                                    identity.tenant_id.clone(),
-                                    extension_id,
-                                    handles,
-                                    Arc::clone(&self.deps.channel_config),
-                                ),
+                            ironclaw_extension_host::ChannelConfigSubjectRouteResolver::new(
+                                adapter_id.clone(),
+                                installation_id.clone(),
+                                identity.tenant_id.clone(),
+                                extension_id,
+                                handles,
+                                Arc::clone(&self.deps.channel_config),
+                            ),
                         ))
                     } else {
                         None

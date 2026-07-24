@@ -73,12 +73,12 @@ impl RebornUserIdentityBindingStore for InMemoryIdentity {
 }
 
 #[async_trait]
-impl crate::provider_identity::RebornUserIdentityLookup for InMemoryIdentity {
+impl ironclaw_host_api::RebornUserIdentityLookup for InMemoryIdentity {
     async fn resolve_user_identity(
         &self,
         provider: &str,
         provider_user_id: &str,
-    ) -> Result<Option<UserId>, crate::provider_identity::RebornUserIdentityLookupError> {
+    ) -> Result<Option<UserId>, ironclaw_host_api::RebornUserIdentityLookupError> {
         Ok(self
             .bindings
             .lock()
@@ -91,7 +91,7 @@ impl crate::provider_identity::RebornUserIdentityLookup for InMemoryIdentity {
         &self,
         provider: &str,
         user_id: &UserId,
-    ) -> Result<bool, crate::provider_identity::RebornUserIdentityLookupError> {
+    ) -> Result<bool, ironclaw_host_api::RebornUserIdentityLookupError> {
         Ok(self
             .bindings
             .lock()
@@ -249,7 +249,7 @@ fn fixture_with(
         template_values: Arc::new(StaticTemplateValues(template_values)),
         identity_bind: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
         identity_lookup: Arc::clone(&identity)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+            as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
         identity_delete: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
         continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
         conversation_actor_pairings: Arc::clone(&actor_pairings)

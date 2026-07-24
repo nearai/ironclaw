@@ -18,7 +18,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    ScopedPath, TenantId, UserId, VirtualPath,
+    ScopedPath, TenantId, UserId, VirtualPath, resource_scope_path_segment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,14 +77,6 @@ pub fn channel_dm_target_mount_view(scope: &ResourceScope) -> Result<MountView, 
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-dm-targets"))?,
         MountPermissions::read_write_list_delete(),
     )])
-}
-
-fn resource_scope_path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
-        "__system__"
-    } else {
-        value
-    }
 }
 
 fn path_segment(value: &str) -> String {

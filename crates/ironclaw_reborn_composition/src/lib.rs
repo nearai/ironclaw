@@ -227,16 +227,17 @@ pub use product_auth::api::auth::{
 // Product-auth WebUI route-mount builders, exposed so the host-owned
 // `ironclaw_webui::webui_v2_app` (moved up from this crate) can
 // compose the Reborn-native product-auth surface into the WebChat v2 router.
+pub use ironclaw_host_api::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    installation_scoped_provider_user_id,
+};
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use provider_identity::{
-    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
-};
+pub use provider_identity::ProviderIdentityActorResolver;
 pub use readiness::{
     RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
@@ -428,6 +429,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    resource_scope_path_segment,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
@@ -509,14 +511,6 @@ pub fn invocation_mount_view(
         resource_scope_path_segment(scope.tenant_id.as_str()),
         resource_scope_path_segment(scope.user_id.as_str()),
     )
-}
-
-pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
-        "__system__"
-    } else {
-        value
-    }
 }
 
 fn invocation_mount_view_for_segments(

@@ -42,9 +42,9 @@ use ironclaw_product::ChannelConnectionNoticePolicy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::extension_host::channel_identity_store::path_segment;
 use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
-use crate::provider_identity::{
+use ironclaw_extension_host::channel_identity_store::path_segment;
+use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, installation_scoped_provider_user_id,
@@ -357,7 +357,7 @@ impl std::fmt::Debug for FilesystemChannelPairingStore {
 }
 
 fn pairing_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
-    let tenant = crate::resource_scope_path_segment(scope.tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(PAIRING_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-pairing"))?,

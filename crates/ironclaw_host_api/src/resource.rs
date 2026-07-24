@@ -27,6 +27,19 @@ pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 /// caller-supplied identifier can ever collide with it.
 pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
+/// Filesystem path segment for trusted resource-scope identifiers.
+///
+/// The unforgeable system sentinel contains a control byte that is invalid in
+/// virtual paths; durable scoped stores use this stable escaped segment while
+/// preserving ordinary validated IDs unchanged.
+pub fn resource_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
 /// Reserved `user_id` for tenant-shared, admin-managed credentials (#5459 P3).
 ///
 /// A secret stored under this sentinel user (paired with the caller's REAL
