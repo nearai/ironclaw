@@ -54,11 +54,13 @@ async fn extension_search_projects_descriptor_declared_web_generated_code_guidan
         connection["strategy"], "web_generated_code",
         "extension_search must preserve the descriptor's WebGeneratedCode strategy: {connection}"
     );
+    assert_eq!(
+        connection["instructions"], "",
+        "model-visible extension_search must not expose manifest-authored connection guidance: {connection}"
+    );
     assert!(
-        connection["instructions"]
-            .as_str()
-            .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
-        "manifest-authored connection guidance must survive catalog projection: {connection}"
+        !connection.to_string().contains("IronClaw pairing panel"),
+        "manifest-authored connection guidance must stay out of model-visible lifecycle output: {connection}"
     );
 
     let rendered = connection.to_string().to_ascii_lowercase();

@@ -16,8 +16,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductWorkflowError,
+    ChannelConnectionRequirement, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
 };
 use serde::Deserialize;
 
@@ -293,8 +293,11 @@ fn channel_connection_display_preview(
 }
 
 /// Structured channel connection requirements carry render chrome for WebUI.
-/// Strip them from model-visible lifecycle output so static fallback copy is
-/// never mistaken for live connection state.
+/// Strip UI-authored copy from model-visible lifecycle output so static
+/// fallback copy is never mistaken for live connection state. Generated-code
+/// channels keep the typed strategy signal because the model needs to choose
+/// the pairing path, but manifest-authored presentation strings stay out of the
+/// tool result.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -305,15 +308,14 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                if !extension
-                    .summary
-                    .channel_connection
-                    .as_ref()
-                    .is_some_and(|connection| {
-                        connection.strategy
-                            == ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
-                    })
+                let Some(connection) = extension.summary.channel_connection.as_mut() else {
+                    continue;
+                };
+                if connection.strategy
+                    == ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
                 {
+                    *connection = model_visible_generated_code_connection(connection);
+                } else {
                     extension.summary.channel_connection = None;
                 }
             }
@@ -321,6 +323,20 @@ fn without_model_visible_connection_chrome(
         _ => {}
     }
     response
+}
+
+fn model_visible_generated_code_connection(
+    connection: &ChannelConnectionRequirement,
+) -> ChannelConnectionRequirement {
+    ChannelConnectionRequirement {
+        channel: connection.channel.clone(),
+        display_name: display_channel_name(&connection.channel),
+        strategy: connection.strategy,
+        instructions: String::new(),
+        input_placeholder: String::new(),
+        submit_label: String::new(),
+        error_message: String::new(),
+    }
 }
 
 fn display_channel_name(channel: &str) -> String {
