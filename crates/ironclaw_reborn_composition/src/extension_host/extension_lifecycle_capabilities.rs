@@ -17,7 +17,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductWorkflowError,
+    ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use serde::Deserialize;
 
@@ -292,9 +292,11 @@ fn channel_connection_display_preview(
     })
 }
 
-/// Structured channel connection requirements carry render chrome for WebUI.
-/// Strip them from model-visible lifecycle output so static fallback copy is
-/// never mistaken for live connection state.
+/// OAuth and admin-managed connection requirements carry render chrome for
+/// WebUI. Strip them from model-visible lifecycle output so static fallback
+/// copy is never mistaken for live connection state. Web-generated-code
+/// guidance remains model-visible because it tells the model how the host-owned
+/// pairing flow works.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -305,7 +307,17 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                extension.summary.channel_connection = None;
+                let model_actionable =
+                    extension
+                        .summary
+                        .channel_connection
+                        .as_ref()
+                        .is_some_and(|connection| {
+                            connection.strategy == RebornChannelConnectStrategy::WebGeneratedCode
+                        });
+                if !model_actionable {
+                    extension.summary.channel_connection = None;
+                }
             }
         }
         _ => {}
@@ -719,6 +731,42 @@ mod tests {
                 .expect("search response serializes")
                 .contains("Slack OAuth connection failed"),
             "static OAuth failure copy must not be presented as live model-visible state"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_visible_extension_search_preserves_web_generated_code_guidance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+            "extension-search-web-generated-code-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "telegram"}),
+        )
+        .await
+        .expect("Telegram search succeeds");
+        let telegram = search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array")
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "telegram")
+            .expect("Telegram search result");
+        let connection = telegram
+            .get("channel_connection")
+            .expect("WebGeneratedCode guidance remains model-visible");
+
+        assert_eq!(connection["strategy"], "web_generated_code");
+        assert!(
+            connection["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
+            "manifest-authored connection guidance must survive extension search: {connection}"
         );
     }
 

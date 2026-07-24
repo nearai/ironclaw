@@ -14,6 +14,7 @@ export function AutomationsList({
   onFilterChange,
   onRefresh,
   isRefreshing,
+  isFilterTransition,
   isMutating,
   selectedAutomationId,
   onSelectAutomation,
@@ -23,11 +24,13 @@ export function AutomationsList({
   onDeleteAutomation,
 }) {
   const t = useT();
-  const filtered = filterAutomations(automations, filter);
+  const filtered = isFilterTransition
+    ? automations
+    : filterAutomations(automations, filter);
   const hasAutomations = automations.length > 0;
   const selectedAutomation =
     filtered.find((automation) => automation.automation_id === selectedAutomationId) ||
-    filtered[0] ||
+    (isFilterTransition ? null : filtered[0]) ||
     null;
 
   return (
@@ -56,6 +59,8 @@ export function AutomationsList({
                 <button
                   key={item.value}
                   type="button"
+                  data-testid="automation-filter"
+                  data-filter={item.value}
                   aria-pressed={filter === item.value}
                   onClick={() => onFilterChange(item.value)}
                   className={cn(

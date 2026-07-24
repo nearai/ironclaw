@@ -1,10 +1,77 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { beforeEach, test, vi } from "vitest";
+
+const automationApi = vi.hoisted(() => ({
+  deleteAutomation: vi.fn(),
+  listAutomations: vi.fn(),
+  pauseAutomation: vi.fn(),
+  renameAutomation: vi.fn(),
+  resumeAutomation: vi.fn(),
+}));
+
+vi.mock("../../../lib/api", () => automationApi);
 
 import {
   createAutomationMutationConfig,
   createAutomationMutationLifecycle,
+  createAutomationsQueryOptions,
 } from "./useAutomations";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+test("automation filter changes retain the visible list while fetching", async () => {
+  const activePayload = {
+    automations: [{ automation_id: "active-automation" }],
+    scheduler_enabled: true,
+  };
+  const completedPayload = {
+    automations: [{ automation_id: "completed-automation" }],
+    scheduler_enabled: true,
+  };
+  let resolveCompleted!: (payload: typeof completedPayload) => void;
+  const completedRequest = new Promise<typeof completedPayload>((resolve) => {
+    resolveCompleted = resolve;
+  });
+  automationApi.listAutomations.mockImplementation(({ includeCompleted }) =>
+    includeCompleted ? completedRequest : Promise.resolve(activePayload)
+  );
+
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+    },
+  });
+  const observer = new QueryObserver(
+    queryClient,
+    createAutomationsQueryOptions(false)
+  );
+  const unsubscribe = observer.subscribe(() => {});
+
+  try {
+    await observer.refetch();
+    assert.equal(observer.getCurrentResult().data, activePayload);
+
+    observer.setOptions(createAutomationsQueryOptions(true));
+    const filteringResult = observer.getCurrentResult();
+
+    assert.equal(filteringResult.data, activePayload);
+    assert.equal(filteringResult.isLoading, false);
+    assert.equal(filteringResult.isFetching, true);
+    assert.equal(filteringResult.isPlaceholderData, true);
+
+    resolveCompleted(completedPayload);
+    await vi.waitFor(() => {
+      assert.equal(observer.getCurrentResult().data, completedPayload);
+      assert.equal(observer.getCurrentResult().isFetching, false);
+    });
+  } finally {
+    unsubscribe();
+    queryClient.clear();
+  }
+});
 
 test("automation mutation configs share an explicit latest-action lifecycle", async () => {
   const latestActionSequence = { current: 0 };

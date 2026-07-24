@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   type MutationFunction,
   type UseMutationOptions,
   useMutation,
@@ -112,22 +113,33 @@ export function createAutomationMutationConfig<TData, TVariables>(
   };
 }
 
-export function useAutomations(includeCompleted = false) {
-  const { t, lang } = useI18n();
-  const queryClient = useQueryClient();
-  const latestActionSequence = React.useRef(0);
-  const actionErrorToastId = React.useRef<string | null>(null);
-  const query = useQuery({
-    queryKey: ["automations", { includeCompleted }],
+/**
+ * Keeps the previous query payload visible while the completed-data query key
+ * changes. In product terms, `isPlaceholderData` therefore means a filter
+ * transition is in progress, not that the Automations page is initially
+ * loading.
+ */
+export function createAutomationsQueryOptions(includeCompleted = false) {
+  return {
+    queryKey: ["automations", { includeCompleted }] as const,
     queryFn: () =>
       listAutomations({
         limit: AUTOMATIONS_PAGE_LIMIT,
         runLimit: AUTOMATION_RUNS_LIMIT,
         includeCompleted,
       }),
+    placeholderData: keepPreviousData,
     refetchInterval: AUTOMATIONS_BASE_REFETCH_MS,
     refetchIntervalInBackground: false,
-  });
+  };
+}
+
+export function useAutomations(includeCompleted = false) {
+  const { t, lang } = useI18n();
+  const queryClient = useQueryClient();
+  const latestActionSequence = React.useRef(0);
+  const actionErrorToastId = React.useRef<string | null>(null);
+  const query = useQuery(createAutomationsQueryOptions(includeCompleted));
 
   // Schedule labels are localized in the presenter (`scheduleLabel`), so the
   // memo must re-run when the active language changes, not just the data.
@@ -211,6 +223,7 @@ export function useAutomations(includeCompleted = false) {
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
+    isFilterTransition: query.isPlaceholderData,
     isMutating:
       pauseMutation.isPending ||
       resumeMutation.isPending ||
