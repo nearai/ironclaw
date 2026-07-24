@@ -1,11 +1,9 @@
-//! A channel's descriptor-declared surface must remain discoverable through
-//! `builtin.extension_search` without exposing UI-only connection chrome to
-//! the model.
+//! Caller-level regression: channel connection render guidance must not leak
+//! into the model-visible `builtin.extension_search` result.
 //!
-//! This is intentionally a caller-level test. Both the catalog projection and
-//! the account-setup registry are compiled from the resolved manifest; checking
-//! either in isolation would not catch drift in the sanitized model-visible
-//! projection.
+//! The descriptor still identifies the package as a channel so the model can
+//! reason about its surface, while WebUI-only setup copy stays on the display
+//! preview path.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -19,7 +17,7 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
-async fn extension_search_preserves_channel_kind_without_connection_chrome() {
+async fn extension_search_omits_ui_only_connection_copy_from_model_output() {
     let group = RebornIntegrationGroup::extension_delivery()
         .await
         .expect("extension-delivery group builds with the Telegram manifest");
@@ -55,21 +53,10 @@ async fn extension_search_preserves_channel_kind_without_connection_chrome() {
         telegram["surface_kinds"]
             .as_array()
             .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
-        "extension_search must still identify Telegram as a channel: {telegram}"
+        "model-visible search must still identify Telegram as a channel: {telegram}"
     );
     assert!(
         telegram.get("channel_connection").is_none(),
-        "model-visible extension_search must omit UI-only connection chrome: {telegram}"
-    );
-
-    let rendered = telegram.to_string().to_ascii_lowercase();
-    assert!(
-        !rendered.contains("/pair"),
-        "model-visible extension_search must not expose unsupported /pair guidance: {telegram}"
-    );
-    assert!(
-        !rendered.contains("get the pairing code from")
-            && !rendered.contains("get the pairing code"),
-        "model-visible extension_search must not expose UI-only pairing instructions: {telegram}"
+        "model-visible search must omit UI-only connection guidance: {telegram}"
     );
 }

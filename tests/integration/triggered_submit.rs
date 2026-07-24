@@ -1,8 +1,8 @@
 //! E-TRIGGERED-SUBMIT: proves the trusted-trigger submission seam end-to-end —
 //! `TrustedTriggerFireSubmitter` propagates `TurnOriginKind::ScheduledTrigger`
 //! into persisted run state at `TurnCoordinator::get_run_state`. Contrast arm:
-//! C-TRIGGERED-ORIGIN. Delivery/push routing stays with the Slack
-//! services-shell spike (C-TRIGGERED-DELIVERY defer).
+//! C-TRIGGERED-ORIGIN. Scheduled delivery/push routing is covered by
+//! `trigger_poller_e2e.rs::scheduled_trigger_results_reach_exact_slack_targets_once_across_restart`.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -81,7 +81,8 @@ async fn interactive_submit_carries_inbound_origin_not_scheduled_trigger() {
 
 /// Int-tier delivery contract: a completed triggered run persists its reply in
 /// the trigger's own thread. No `OutboundDeliverySink` push happens at this
-/// tier — that's the Slack services-shell (C-TRIGGERED-DELIVERY defer).
+/// tier — the composition whole-runtime test named above covers the detached
+/// delivery hook and real Slack adapter.
 #[tokio::test]
 async fn triggered_run_completes_and_persists_reply_in_trigger_thread() {
     let harness = RebornIntegrationHarness::test_default()

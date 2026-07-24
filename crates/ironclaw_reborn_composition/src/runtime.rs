@@ -580,6 +580,8 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     #[cfg(any(test, feature = "test-support"))]
+    pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
@@ -1324,6 +1326,40 @@ impl RebornRuntime {
         Some(self.extension_management.installation_store_for_test())
     }
 
+    /// Test-only caller for the production lifecycle install path used by the
+    /// WebUI/product facade. This keeps whole-runtime channel tests on the real
+    /// catalog, installation store, and generic-host publication path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn install_extension_for_test(
+        &self,
+        package_ref: ironclaw_product::LifecyclePackageRef,
+    ) -> Result<ironclaw_product::LifecycleProductResponse, ironclaw_product::ProductWorkflowError>
+    {
+        self.extension_management
+            .install(package_ref, &self.actor_user_id)
+            .await
+    }
+
+    /// Test-only caller for the production static activation path with the
+    /// existing prechecked-credential gate. Whole-runtime channel tests use it
+    /// when the user-tool credential account is outside the scenario under
+    /// test; channel configuration and activation still run through their real
+    /// stores and generic-host publication.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn activate_extension_for_test(
+        &self,
+        package_ref: ironclaw_product::LifecyclePackageRef,
+    ) -> Result<ironclaw_product::LifecycleProductResponse, ironclaw_product::ProductWorkflowError>
+    {
+        self.extension_management
+            .activate_with_prechecked_credentials_for_test(
+                package_ref,
+                crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                &self.actor_user_id,
+            )
+            .await
+    }
+
     /// Test-support handles onto the approval/lease/gate stores the integration
     /// harness drives approve/deny flows through. All four stores are
     /// reconstructed fresh over the runtime's own composite root
@@ -1402,6 +1438,34 @@ impl RebornRuntime {
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
         ))
+    }
+
+    /// Test-only accessor for the same durable triggered-delivery outcome store
+    /// the composition-owned post-submit hook records into. Whole-path tests use
+    /// it to await detached delivery completion without observing task timing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn triggered_run_delivery_store_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>> {
+        Some(Arc::clone(&self.triggered_run_delivery))
+    }
+
+    /// Test-only readiness projection for the production generic channel-host
+    /// assembly. Activation publishes snapshots asynchronously; whole-runtime
+    /// delivery tests wait until the owning preference codec is routable before
+    /// firing a trigger.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_channel_preference_codec_ids_for_test(&self) -> Vec<String> {
+        self.channel_host_assembly
+            .as_ref()
+            .map(|assembly| {
+                assembly
+                    .active_preference_codecs()
+                    .into_iter()
+                    .map(|(extension_id, _)| extension_id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -4494,6 +4558,8 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
         outbound_state: services.outbound_state.clone(),
+        #[cfg(any(test, feature = "test-support"))]
+        triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]
         delivered_gate_routes: services.delivered_gate_routes.clone(),
         #[cfg(any(test, feature = "test-support"))]
