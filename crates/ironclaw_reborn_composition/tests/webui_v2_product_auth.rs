@@ -2086,7 +2086,7 @@ async fn product_auth_google_oauth_callback_missing_code_is_rejected_without_exc
     assert_eq!(status_response.status(), StatusCode::OK);
     let status_body = read_body_string(status_response).await;
     let status_json: serde_json::Value = serde_json::from_str(&status_body).expect("status json");
-    assert_eq!(status_json["status"], "pending");
+    assert_eq!(status_json["status"], "awaiting_user");
     assert!(!status_body.contains(&state));
 }
 

@@ -292,18 +292,23 @@ fn channel_connection_display_preview(
     })
 }
 
-/// The structured connect requirement carries render chrome for the in-chat
-/// connection panel and rides the display-preview side channel only. Strip it
-/// from the model-visible tool output so the model sees just activation prose.
+/// Structured channel connection requirements carry render chrome for WebUI.
+/// Strip them from model-visible lifecycle output so static fallback copy is
+/// never mistaken for live connection state.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
-    if let Some(LifecycleProductPayload::ExtensionInstall {
-        connection_required,
-        ..
-    }) = response.payload.as_mut()
-    {
-        *connection_required = None;
+    match response.payload.as_mut() {
+        Some(LifecycleProductPayload::ExtensionInstall {
+            connection_required,
+            ..
+        }) => *connection_required = None,
+        Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
+            for extension in extensions {
+                extension.summary.channel_connection = None;
+            }
+        }
+        _ => {}
     }
     response
 }
@@ -672,6 +677,48 @@ mod tests {
         assert!(
             install.effects.contains(&EffectKind::Network),
             "install readiness reconciliation needs runtime HTTP egress for hosted MCP discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_visible_extension_search_omits_channel_connection_failure_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+            "extension-search-model-output-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "slack"}),
+        )
+        .await
+        .expect("Slack search succeeds");
+        let slack = search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array")
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "slack")
+            .expect("Slack search result");
+
+        assert!(
+            slack["surface_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
+            "model-visible search must still identify Slack as a channel: {slack}"
+        );
+        assert!(
+            slack.get("channel_connection").is_none(),
+            "model-visible search must not expose UI-only connection failure copy: {slack}"
+        );
+        assert!(
+            !serde_json::to_string(&search)
+                .expect("search response serializes")
+                .contains("Slack OAuth connection failed"),
+            "static OAuth failure copy must not be presented as live model-visible state"
         );
     }
 
