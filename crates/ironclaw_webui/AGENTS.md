@@ -45,11 +45,11 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 - **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
   `ironclaw_product` / `ironclaw_reborn_composition`.
-- **A direct `ironclaw_product` dependency**, or any lower substrate /
-  runtime / DB crate. Reach that surface through composition's public facade
-  (e.g. `mark_bearer_token_verified_for_tenant` is re-exported from composition,
-  not imported from adapters). The architecture boundary test forbids the direct
-  edge.
+- **Product service or domain dependencies.** `ironclaw_product` is allowed here
+  only for wire DTOs and product command/view descriptors. Do not import product
+  workflow services, facades, lower substrates, runtime, or DB crates; reach
+  execution through `ProductSurface` supplied by host assembly. The architecture
+  boundary test enforces this DTO/descriptor-only edge.
 - **v1 anything** — no `src/` (monolith) import, no `ironclaw_engine`, no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
   surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
