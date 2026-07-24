@@ -177,7 +177,7 @@ Snapshot and cursor-resume projection behavior is pinned by:
 
 ```bash
 cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract
-cargo test -p ironclaw_reborn_composition projection::tests::nested_dispatch_stream
+cargo test -p ironclaw_reborn_composition --lib projection::tests::nested_dispatch_stream
 ```
 
 Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure.

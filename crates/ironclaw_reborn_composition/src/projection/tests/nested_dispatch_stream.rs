@@ -225,6 +225,20 @@ async fn product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run
         .await
         .unwrap();
 
+    assert!(
+        resumed.iter().any(|event| matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { .. }
+        )),
+        "cursor resume should emit at least one incremental projection update"
+    );
+    assert!(
+        resumed.iter().all(|event| !matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionSnapshot { .. }
+        )),
+        "a valid cursor must not fall back to a projection snapshot"
+    );
     assert!(contains_run_status(
         &resumed,
         parent_invocation_id,

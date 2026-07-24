@@ -26,9 +26,9 @@ run_test() {
 run_lib_test() {
   local package="$1"
   local test_filter="$2"
-  echo "::group::cargo test -p ${package} ${test_filter}"
+  echo "::group::cargo test -p ${package} --lib ${test_filter}"
   # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
-  cargo test -p "${package}" "${test_filter}" ${extra_args}
+  cargo test -p "${package}" --lib "${test_filter}" ${extra_args}
   echo "::endgroup::"
 }
 
