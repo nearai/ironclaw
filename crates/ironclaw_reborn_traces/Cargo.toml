@@ -12,7 +12,7 @@ layer = "substrates"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22.1"
+base64 = "0.23.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 ed25519-dalek = { version = "2.2.0", features = ["std", "rand_core", "zeroize"] }
@@ -21,7 +21,7 @@ ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 rand = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 regex = "1"

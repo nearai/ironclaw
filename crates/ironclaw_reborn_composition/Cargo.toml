@@ -30,7 +30,7 @@ test-support = [
 ]
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = "0.4"
 deadpool-postgres = "0.14"
 futures = "0.3"
@@ -82,7 +82,7 @@ ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-nix = { version = "0.30", default-features = false, features = ["process"] }
+nix = { version = "0.31", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # WebUI v2 route surface + static SPA bundle merged up into
