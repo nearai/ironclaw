@@ -224,7 +224,7 @@ impl CurrentDeliveryTargetResolver for ComposedCurrentDeliveryTargetResolver {
             }
             let conversation = codec.conversation_for_target(reply_target_binding_ref)?;
             same_channel_destination(&conversation, &stored.external_conversation_ref)
-                .then(|| entry.summary.target_id)
+                .then_some(entry.summary.target_id)
         }))
     }
 }
@@ -233,7 +233,7 @@ fn same_channel_destination(
     left: &ExternalConversationRef,
     right: &ExternalConversationRef,
 ) -> bool {
-    left.space_id() == right.space_id() && left.conversation_id() == right.conversation_id()
+    left == right
 }
 
 fn map_current_target_error(error: OutboundError) -> ProductWorkflowError {

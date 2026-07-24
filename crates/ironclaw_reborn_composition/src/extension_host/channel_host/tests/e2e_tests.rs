@@ -5357,6 +5357,33 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
             provider as Arc<dyn OutboundDeliveryTargetProvider>,
         )
         .expect("register target provider");
+    registry
+        .register_provider(
+            "telegram-topicless-parent",
+            Arc::new(
+                ironclaw_outbound::HostOwnedOutboundDeliveryTargetProvider::new(
+                    ironclaw_outbound::OutboundDeliveryTargetSummary::new(
+                        ironclaw_outbound::OutboundDeliveryTargetId::new(
+                            "telegram:shared-channel:-100123",
+                        )
+                        .expect("target id"),
+                        "telegram",
+                        "Telegram parent chat",
+                        None,
+                    )
+                    .expect("target summary"),
+                    ironclaw_outbound::DeliveryTargetCapabilities {
+                        final_replies: true,
+                        ..Default::default()
+                    },
+                    ironclaw_outbound::RunFinalReplyDestination::External {
+                        reply_target_binding_ref: ReplyTargetBindingRef::new("tg:-100123:_:_")
+                            .expect("topicless Telegram parent target"),
+                    },
+                ),
+            ),
+        )
+        .expect("register topicless Telegram parent target");
     let current_targets = current_target_resolver(&harness.assembly, Arc::clone(&registry));
 
     let binding_service = harness
@@ -5372,6 +5399,53 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
         },
         installation_id.as_str(),
     );
+    let topic_context = TrustedInboundContext::from_verified_evidence(
+        adapter_id.clone(),
+        installation_id.clone(),
+        chrono::Utc::now(),
+        &evidence,
+    )
+    .expect("trusted Telegram topic context");
+    let topic_parsed = ParsedProductInbound::new(
+        ExternalEventId::new("telegram:event:implicit-topic-target").expect("event id"),
+        ExternalActorRef::new("telegram_user", TELEGRAM_USER, None::<String>)
+            .expect("Telegram actor"),
+        ExternalConversationRef::new(None, "-100123", Some("77"), None)
+            .expect("Telegram topic conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "send me a random number every minute",
+                Vec::new(),
+                ProductTriggerReason::BotMention,
+            )
+            .expect("Telegram topic message"),
+        ),
+    )
+    .expect("parsed Telegram topic inbound");
+    let topic_envelope = ProductInboundEnvelope::from_trusted_parse(topic_context, topic_parsed)
+        .expect("Telegram topic envelope");
+    let topic_binding = binding_service
+        .resolve_binding(ResolveBindingRequest::from_envelope(&topic_envelope))
+        .await
+        .expect("Telegram topic binds");
+    let topic_scope = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: user.clone(),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+        mission_id: None,
+        thread_id: Some(topic_binding.thread_id),
+        invocation_id: InvocationId::new(),
+    };
+    assert!(
+        current_targets
+            .resolve_current_target_id(&topic_scope, &topic_binding.reply_target_binding_ref)
+            .await
+            .expect("implicit topic target lookup")
+            .is_none(),
+        "a topic-scoped source must not downgrade to the topicless parent chat"
+    );
+
     let context = TrustedInboundContext::from_verified_evidence(
         adapter_id,
         installation_id,
