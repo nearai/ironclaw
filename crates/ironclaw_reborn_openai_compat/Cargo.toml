@@ -19,7 +19,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
 hex = "0.4"
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0" }

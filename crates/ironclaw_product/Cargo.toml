@@ -26,7 +26,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 rand = "0.10"
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }

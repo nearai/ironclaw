@@ -25,7 +25,7 @@ test-support = []
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 # Compile-time Mozilla Public Suffix List: DCR issuer/resource origin binding
