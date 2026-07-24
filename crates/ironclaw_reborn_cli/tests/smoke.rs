@@ -1011,6 +1011,16 @@ fn help_mentions_reborn_commands() {
 }
 
 #[test]
+fn workspace_default_cargo_run_targets_reborn_cli() {
+    let manifest =
+        std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("workspace Cargo.toml");
+    assert!(
+        manifest.contains("default-members = [\"crates/ironclaw_reborn_cli\"]"),
+        "workspace `cargo run` must target the shipping Reborn CLI package: {manifest}"
+    );
+}
+
+#[test]
 fn service_help_lists_all_verbs() {
     let output = Command::new(reborn_bin())
         .arg("service")
@@ -3052,6 +3062,33 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     assert!(
         !v1_base_dir.exists(),
         "minimal runtime shell should not create explicit v1 base directories"
+    );
+}
+
+#[test]
+fn no_subcommand_defaults_to_serve_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home_dir = temp.path().join("home");
+
+    let output = reborn_command()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home_dir)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
+        .output()
+        .expect("ironclaw-reborn should default to serve");
+
+    assert!(
+        !output.status.success(),
+        "default serve must fail closed without a WebUI token; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "stderr should match the `serve` auth gate: {stderr}"
     );
 }
 

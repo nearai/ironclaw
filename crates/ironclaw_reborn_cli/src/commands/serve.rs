@@ -86,7 +86,7 @@ impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMint
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(crate) struct ServeCommand {
     /// Host interface for the Reborn WebChat v2 HTTP listener.
     /// Overrides `[webui].listen_host` from the boot config file.

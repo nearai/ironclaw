@@ -5,8 +5,11 @@ use crate::commands::Command;
 #[derive(Debug, Parser)]
 #[command(name = "ironclaw", about = "IronClaw agent runtime", version)]
 pub(crate) struct Cli {
+    #[command(flatten)]
+    pub(crate) serve: crate::commands::serve::ServeCommand,
+
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: Option<Command>,
 }
 
 pub(crate) fn command() -> clap::Command {
@@ -14,5 +17,6 @@ pub(crate) fn command() -> clap::Command {
 }
 
 pub(crate) fn run() -> anyhow::Result<()> {
-    Cli::parse().command.execute()
+    let cli = Cli::parse();
+    cli.command.unwrap_or(Command::Serve(cli.serve)).execute()
 }
