@@ -33,7 +33,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_reborn_composition::{
     AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    RebornRuntimeInput, build_reborn_runtime,
 };
 use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
@@ -147,7 +147,7 @@ async fn build_admin_harness() -> AdminHarness {
 /// Assemble the full admin HTTP harness over a caller-supplied
 /// `RebornHostBindings` (already carrying its profile, policy, trust, and process
 /// binding). Everything above the substrate — the shared signed session store /
-/// minter / authenticator, the WebUI bundle, and the composed router — is
+/// minter / authenticator, the product surface, and the composed router — is
 /// profile-agnostic, so the local-dev and production-shaped runs share it and
 /// only differ in the build input.
 async fn build_admin_harness_from(
@@ -180,7 +180,7 @@ async fn build_admin_harness_from(
         .with_admin_api_token_minter(minter);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
 
     let env =
         EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
@@ -194,7 +194,7 @@ async fn build_admin_harness_from(
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
     AdminHarness {
         router,

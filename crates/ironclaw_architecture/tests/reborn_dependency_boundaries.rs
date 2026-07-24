@@ -3602,13 +3602,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
-    LayerMatrixException {
-        crate_name: "ironclaw_webui",
-        dependency_name: "ironclaw_reborn_composition",
-        introduced: "2026-07-09",
-        removes_in: "W3.6",
-        reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
-    },
 ];
 
 fn layer_matrix_exception(

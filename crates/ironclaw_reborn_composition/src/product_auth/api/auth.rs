@@ -7,6 +7,8 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+#[cfg(test)]
+use ironclaw_auth::InMemoryAuthProductServices;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
     AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource,
@@ -17,13 +19,12 @@ use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountService, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
     CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
-    InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OAuthProviderIdentity,
-    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
-    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef,
-    scope_matches,
+    ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
+    OAuthProviderExchangeContext, OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
+    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
+    TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product::AuthPromptChallengeKind;
@@ -1292,10 +1293,6 @@ impl RebornProductAuthServices {
     /// remap to the same not-found signal as an unknown flow so the read cannot
     /// be used as a cross-user existence oracle. The returned value is the
     /// status enum only — no tokens, PKCE verifiers, codes, or opaque state.
-    #[allow(
-        dead_code,
-        reason = "used by the webui-v2-beta OAuth flow-status poll route"
-    )]
     pub(crate) async fn flow_status(
         &self,
         scope: &AuthProductScope,
@@ -1345,10 +1342,6 @@ impl RebornProductAuthServices {
         Ok(record.status)
     }
 
-    #[allow(
-        dead_code,
-        reason = "used by the WebUI v2 OAuth callback route when DCR fallback PKCE storage is enabled"
-    )]
     pub(crate) async fn oauth_pkce_verifier_for_flow(
         &self,
         scope: &AuthProductScope,
@@ -1375,10 +1368,6 @@ impl RebornProductAuthServices {
             .map_err(RebornOAuthCallbackError::from)
     }
 
-    #[allow(
-        dead_code,
-        reason = "used by the feature-scoped webui-v2-beta OAuth setup routes"
-    )]
     pub(crate) async fn start_setup_oauth_flow(
         &self,
         request: RebornOAuthStartFlowRequest,
@@ -1809,10 +1798,7 @@ impl RebornProductAuthServices {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "used by feature-scoped product-auth route tests that do not compile in every lib-test target"
-    )]
+    #[cfg(test)]
     pub(crate) fn local_dev_in_memory(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {

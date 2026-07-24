@@ -20,8 +20,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     ActivityId, Blocked, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant,
-    MountPermissions, MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId,
-    UserId, VirtualPath,
+    MountPermissions, MountView, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    Resolution, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
@@ -342,7 +342,7 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
 }
 
 #[tokio::test]
-async fn build_webui_services_wires_lifecycle_owner_identity() {
+async fn runtime_product_surface_wires_lifecycle_owner_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input = crate::RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input("runtime-owner", dir.path().join("local-dev"))
@@ -359,10 +359,11 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
     let runtime = crate::build_reborn_runtime(input)
         .await
         .expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui services build");
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface build");
 
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), caller("bob"));
+    let surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), caller("bob"));
     let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
         .invoke_on(
             &surface,
@@ -397,7 +398,9 @@ async fn product_surface_extension_lifecycle_remove_succeeds_after_activation() 
     let runtime = crate::build_reborn_runtime(input)
         .await
         .expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui services build");
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface build");
     let caller = caller("product-surface-extension-owner");
 
     let absent_remove = invoke_lifecycle_product_capability(
@@ -721,13 +724,12 @@ fn caller(user_id: &str) -> ProductSurfaceCaller {
 }
 
 async fn invoke_lifecycle_product_capability(
-    bundle: &RebornWebuiBundle,
+    bundle: &Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
     capability: ProductCapabilityDescriptor,
     input: serde_json::Value,
 ) -> Result<Resolution, ProductSurfaceError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(Arc::clone(&bundle.product_surface), caller);
+    let surface = ironclaw_host_api::BoundProductSurface::new(Arc::clone(bundle), caller);
     capability
         .invoke_on(&surface, input, ActivityId::new())
         .await
@@ -844,7 +846,9 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     let runtime = crate::build_reborn_runtime(input)
         .await
         .expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui services build");
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface build");
     let caller = caller("channel-remove-owner");
 
     let install = invoke_lifecycle_product_capability(
@@ -880,10 +884,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
-                &ironclaw_host_api::BoundProductSurface::new(
-                    Arc::clone(&bundle.product_surface),
-                    caller.clone(),
-                ),
+                &ironclaw_host_api::BoundProductSurface::new(Arc::clone(&bundle), caller.clone()),
                 serde_json::json!({}),
                 None,
             )
@@ -900,7 +901,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
                 &ironclaw_host_api::BoundProductSurface::new(
-                    Arc::clone(&bundle.product_surface),
+                    Arc::clone(&bundle),
                     caller_in_tenant("tenant-alpha", "channel-remove-bystander"),
                 ),
                 serde_json::json!({}),

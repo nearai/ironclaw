@@ -1,7 +1,7 @@
 //! Caller-level contract for static security headers and sanitized
 //! errors on the WebChat v2 surface.
 //!
-//! The composition crate's `webui_v2_serve.rs` already asserts that a
+//! The broader WebUI serve tests already assert that a
 //! successful (200) response carries `X-Content-Type-Options: nosniff`,
 //! `X-Frame-Options: DENY`, and a `content-security-policy` header
 //! (presence only). This file covers what that test does NOT:
@@ -33,7 +33,6 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::EnvBearerAuthenticator;
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
 use secrecy::SecretString;
@@ -60,11 +59,6 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
         )
         .expect("env bearer authenticator"),
     );
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -73,7 +67,7 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     (
-        webui_v2_app(bundle, config).expect("webui v2 app"),
+        webui_v2_app(services.clone(), config).expect("webui v2 app"),
         services,
     )
 }

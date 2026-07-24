@@ -41,7 +41,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `webui_v2_routes() -> Vec<IngressRouteDescriptor>` | The route descriptor table (id, method, pattern, auth, rate/body limit, streaming). Locked by `tests/webui_v2_descriptors_contract.rs`. |
 | `WebUiV2State` | Handler state: the `ProductSurface` facade + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
-| `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
+| `webui_v2_app(product_surface, config) -> WebuiV2App` | Compose a host-supplied `ProductSurface` + `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
 | `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 

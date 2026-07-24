@@ -31,13 +31,13 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::PublicRouteMount;
 use ironclaw_host_api::TenantId;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_reborn_composition::PublicRouteMount;
 use parking_lot::Mutex;
 use rand::RngExt as _;
 use secrecy::{ExposeSecret, SecretString};

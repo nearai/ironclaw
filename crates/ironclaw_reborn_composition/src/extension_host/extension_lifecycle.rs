@@ -700,11 +700,6 @@ impl ExtensionManagementPort {
         self
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn account_setup_registry(&self) -> ExtensionAccountSetupRegistry {
-        self.account_setups.clone()
-    }
-
     pub(crate) fn with_removal_cleanup_registry(
         mut self,
         removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,

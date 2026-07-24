@@ -24,6 +24,7 @@ host-auth-mint = []
 
 [dependencies]
 async-trait = "0.1"
+axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }

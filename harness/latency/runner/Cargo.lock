@@ -2772,6 +2772,7 @@ name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "rust_decimal",
  "serde",
@@ -2812,6 +2813,7 @@ dependencies = [
  "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_observability",
+ "ironclaw_outbound",
  "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",
@@ -2955,6 +2957,7 @@ dependencies = [
  "ironclaw_resources",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3085,7 +3088,9 @@ dependencies = [
  "ironclaw_reborn_traces",
  "ironclaw_run_state",
  "ironclaw_threads",
+ "ironclaw_triggers",
  "ironclaw_turns",
+ "rand 0.10.2",
  "secrecy",
  "serde",
  "serde_json",
@@ -3571,7 +3576,6 @@ dependencies = [
  "hmac 0.13.0",
  "ironclaw_host_api",
  "ironclaw_product",
- "ironclaw_reborn_composition",
  "ironclaw_reborn_openai_compat",
  "jsonwebtoken",
  "lru",

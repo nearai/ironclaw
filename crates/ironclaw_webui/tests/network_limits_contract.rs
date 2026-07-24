@@ -1,5 +1,5 @@
 //! Caller-level network-control contract for the WebChat v2 surface,
-//! focused on the gaps that the composition crate's `webui_v2_serve.rs`
+//! focused on the gaps that WebUI's `webui_serve.rs`
 //! and the OAuth-route tests do NOT already cover — the rules that ride
 //! on the **host-owned public SSO mount** (`webui_v2_auth_router`) plus
 //! the CORS fail-closed default.
@@ -46,7 +46,6 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
     EmailUserDirectory, OAuthError, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
     OAuthUserProfile, SessionAuthenticator, signed_session_store, webui_v2_auth_router,
@@ -120,11 +119,7 @@ fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
         "https://gateway.example",
     ));
 
-    let bundle = RebornWebuiBundle {
-        product_surface: Arc::new(StubServices::default()),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(StubServices::default());
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -133,7 +128,7 @@ fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(oauth_mount);
-    webui_v2_app(bundle, config).expect("webui v2 app")
+    webui_v2_app(product_surface, config).expect("webui v2 app")
 }
 
 fn default_origins() -> Vec<HeaderValue> {

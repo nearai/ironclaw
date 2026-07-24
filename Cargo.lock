@@ -3743,6 +3743,7 @@ name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "rust_decimal",
  "rust_decimal_macros",
@@ -4796,7 +4797,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_loop_host",
  "ironclaw_product",
- "ironclaw_reborn_composition",
  "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",

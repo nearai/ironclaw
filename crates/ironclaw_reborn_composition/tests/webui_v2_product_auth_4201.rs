@@ -25,7 +25,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::rejecting_product_surface_error;
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
+    ProductAuthRouteState, RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    product_auth_route_mount,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
@@ -109,19 +110,25 @@ fn build_fixture() -> AppFixture {
         shared.clone(),
         Arc::new(NoopAuthDispatcher::default()),
     ));
-    let bundle = RebornWebuiBundle {
-        product_surface: Arc::new(UnusedServices),
-        product_auth: Some(product_auth),
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(UnusedServices);
+    let product_auth_mount = product_auth_route_mount(
+        ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new(TENANT).expect("tenant"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
+        )
+        .with_product_surface(product_surface.clone()),
+    );
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_split_route_mount(product_auth_mount);
+    let app = webui_v2_app(product_surface, config).expect("webui v2 app");
     AppFixture { app, shared }
 }
 

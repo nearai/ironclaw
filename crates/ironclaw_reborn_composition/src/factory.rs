@@ -374,7 +374,7 @@ where
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
@@ -401,10 +401,12 @@ pub(crate) struct RebornRuntimeStores {
     /// (`crate::turn_run_snapshot`). Production points it at this runtime's own
     /// turn-state store; a `test-support` harness can repoint it at its own
     /// store so its runs are visible to the trigger subsystem.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) trigger_source_turn_state:
         Arc<std::sync::RwLock<Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>>>,
     /// Sibling rebindable slot, `TurnStateStore`-typed, read by the trigger
     /// delivery-target service; repointed together with the snapshot slot.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) trigger_source_turn_state_store:
         Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::TurnStateStore>>>,
     pub(crate) extension_management: Arc<ExtensionManagementPort>,
@@ -461,8 +463,7 @@ pub(crate) struct RebornRuntimeStores {
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
@@ -496,15 +497,12 @@ pub(crate) struct RebornRuntimeStores {
     /// The deployment-first channel delivery resolver behind the coordinator,
     /// exposed separately for host flows (e.g. DM target provisioning) that
     /// need one stable adapter + egress read outside a delivery.
-    // Consumed by the DM-provisioning re-point in the deletion slice.
-    #[allow(dead_code)]
     pub(crate) channel_delivery_resolver:
         Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
     /// Registry of beta-era channel credential bridges (§11 compatibility):
     /// channel hosts whose secrets predate the extension-config store
     /// register resolution ports here.
     #[cfg(feature = "test-support")]
-    #[allow(dead_code)]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
 }
@@ -662,7 +660,7 @@ impl std::fmt::Debug for RebornRuntimeStores {
         let mut debug = formatter.debug_struct("RebornRuntimeStores");
         debug
             .field("host_runtime", &"Arc<dyn HostRuntime>")
-            .field("turn_coordinator", &"Arc<dyn TurnCoordinator>")
+            .field("turn_coordinator", &cfg!(test))
             .field("product_auth", &"Arc<RebornProductAuthServices>")
             .field("readiness", &self.readiness)
             .field("extension_management", &true)
@@ -4687,7 +4685,7 @@ async fn build_backend_production(
     };
     let shared_extension_registry = services.shared_extension_registry();
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     let local_dev_wasm_runtime_credential_provider_captured =
         services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> = if uses_local_host_runtime {
@@ -4698,6 +4696,7 @@ async fn build_backend_production(
 
     Ok(RebornRuntimeStores {
         host_runtime,
+        #[cfg(test)]
         turn_coordinator,
         readiness: readiness_for(profile, true, true, product_auth_ready),
         product_auth: product_auth_services,
@@ -4719,7 +4718,9 @@ async fn build_backend_production(
         outbound_state: outbound_stores.outbound_state,
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
+        #[cfg(any(test, feature = "test-support"))]
         trigger_source_turn_state,
+        #[cfg(any(test, feature = "test-support"))]
         trigger_source_turn_state_store,
         extension_management,
         admin_configuration_resolver,
@@ -4759,7 +4760,7 @@ async fn build_backend_production(
         trigger_conversation_services,
         production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         local_dev_wasm_runtime_credential_provider_captured,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The

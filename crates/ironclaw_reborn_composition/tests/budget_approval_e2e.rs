@@ -10,7 +10,7 @@
 //!   user's first model call;
 //! * the pause is observed through `send_user_message_until_gate`, which
 //!   surfaces the same `RebornTurnDriveOutcome::BlockedOnGate { gate_ref, .. }`
-//!   a real caller (the WebUI facade) sees when a run parks on a gate;
+//!   a real caller (the WebUI product surface) sees when a run parks on a gate;
 //! * the `BudgetEvent::GateOpened` carrying the real persisted gate id is
 //!   observed through the public
 //!   [`RebornRuntime::broadcast_budget_event_sink`] subscription — the same

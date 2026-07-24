@@ -34,7 +34,8 @@ use ironclaw_product::{
     rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
+    ProductAuthRouteState, RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    product_auth_route_mount,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::json;
@@ -443,21 +444,27 @@ fn build_app_with_product_auth_service_config_and_extensions(
     product_auth: Arc<RebornProductAuthServices>,
     installed_package_ids: &[&str],
 ) -> axum::Router {
-    let bundle = RebornWebuiBundle {
-        product_surface: Arc::new(UnusedServices::with_installed_extensions(
-            installed_package_ids,
-        )),
-        product_auth: Some(product_auth),
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(UnusedServices::with_installed_extensions(
+        installed_package_ids,
+    ));
+    let product_auth_mount = product_auth_route_mount(
+        ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new(TENANT).expect("tenant"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
+        )
+        .with_product_surface(product_surface.clone()),
+    );
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    webui_v2_app(bundle, config).expect("webui v2 app")
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_split_route_mount(product_auth_mount);
+    webui_v2_app(product_surface, config).expect("webui v2 app")
 }
 
 /// Deployment client material for the synthetic test recipes, keyed by

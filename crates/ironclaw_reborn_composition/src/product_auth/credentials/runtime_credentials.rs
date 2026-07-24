@@ -68,7 +68,6 @@ pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
     /// Required (no default): an unwired binding path must fail at the type
     /// level, not silently no-op. Test doubles that do not exercise binding
     /// return `CredentialMissing` explicitly.
-    #[allow(dead_code)]
     async fn select_configured_account_for_binding(
         &self,
         lookup: CredentialAccountSelectionRequest,
@@ -293,7 +292,6 @@ enum AccountSelectionPurpose<'a> {
     },
     /// OAuth bind — match the owner's existing account regardless of scopes,
     /// but only within the flow's own `session_id` (see the filter below).
-    #[allow(dead_code)]
     Binding,
 }
 
