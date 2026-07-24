@@ -1672,7 +1672,7 @@ async fn migration_dry_run_validates_libsql_shape() {
     };
     assert!(
         reason.contains("profile=migration-dry-run")
-            && reason.contains("must not start live Reborn runtime traffic"),
+            && reason.contains("must not start live IronClaw runtime traffic"),
         "migration dry-run must validate only through the substrate seam, not start a live runtime: {reason}"
     );
 }
@@ -1713,7 +1713,7 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
     };
     assert!(
         reason.contains("profile=migration-dry-run")
-            && reason.contains("must not start live Reborn runtime traffic"),
+            && reason.contains("must not start live IronClaw runtime traffic"),
         "migration dry-run must reject live runtime startup before serving: {reason}"
     );
 }
@@ -1746,7 +1746,7 @@ async fn migration_dry_run_requires_postgres_process_port_for_first_party_runtim
     };
     assert!(
         reason.contains("profile=migration-dry-run")
-            && reason.contains("must not start live Reborn runtime traffic"),
+            && reason.contains("must not start live IronClaw runtime traffic"),
         "postgres migration dry-run must reject live runtime startup before serving: {reason}"
     );
 }
