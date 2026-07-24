@@ -23,7 +23,7 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }

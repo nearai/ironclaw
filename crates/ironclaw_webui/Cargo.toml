@@ -23,7 +23,7 @@ test-support = []
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 futures = "0.3"
 hex = "0.4.3"
@@ -43,7 +43,7 @@ ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 lru = "0.18"
 # axum/tower-http middleware stack used by `webui_serve` (moved from composition).
 tower-http = { version = "0.6", features = ["cors", "set-header", "limit", "catch-panic"] }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 parking_lot = "0.12"
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -82,7 +82,7 @@ ironclaw_turns = { path = "../ironclaw_turns" }
 rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
-base64 = "0.22"
+base64 = "0.23"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util", "sync", "test-util"] }
