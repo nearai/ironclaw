@@ -1,0 +1,95 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+import { DocCallout } from "./doc-callout";
+
+<Meta title="Docs/Brand principles" />
+
+# Brand principles
+
+What IronClaw believes, in order. Everything downstream — UI copy, motion,
+feature defaults, marketing — should be checkable against these. The
+sibling page, **Voice & copy**, is these principles cascaded into concrete
+UI-copy rules.
+
+<DocCallout title="Suggested starting points, not settled law">
+  These principles are written to be as correct and thorough as we can
+  make them today, so they're usable as-is for real product decisions.
+  They are still proposals: the brand jam can overrule any of them. If
+  one is wrong, change it here first — then propagate to Voice & copy
+  and the components.
+</DocCallout>
+
+## 1. Wow — impress out of the gate
+
+The first session has to feel like the future arrived. Not a tour, not a
+setup wizard — a real result the user didn't ask for yet.
+
+- **The demo is the product.** Within minutes of connecting a tool, the
+  agent should have derived something true and useful from the user's
+  actual world ("34 newsletter threads are burying your real mail") and
+  acted on it. Show, don't claim.
+- **No value behind a gate.** Sign-up, payment, and configuration are
+  deferred until the user has already seen the agent work.
+- **Craft is part of the wow.** Motion, typography, and finish signal
+  "this was built by people who care" before a single word is read.
+- **One magic moment beats ten features.** First-run flows optimize for
+  a single unforgettable proof, not coverage.
+
+## 2. Trust — credible at first glance, compounding over time
+
+Trust runs on two clocks, and we design for both.
+
+- **Instant credibility.** Plain language, visible security posture
+  (encrypted enclaves, the vault, network allowlisting), calm status
+  colors, no dark patterns. A first-time visitor should be able to see
+  *why* it's safe, not just be told.
+- **Compounding trust.** Every action leaves a receipt: an activity
+  feed, run logs, previews of anything that leaves the system, one-click
+  undo. The agent narrates what it did and why. Failures are stated
+  plainly, with the fix — never hidden, never dramatized.
+- **The trust envelope grows.** As receipts accumulate, users grant the
+  agent more autonomy. Trust isn't asked for; it's earned and then
+  spent carefully.
+
+## 3. Automate — do the AI thing
+
+IronClaw is proactive. It derives routines from the user's world —
+inbox, calendar, repos, chats — and sets them up without waiting to be
+asked. It does not nag for permission; the user's core principles
+(productivity, security, privacy) are baked into what it chooses to
+automate and how.
+
+- **Act, then show your work.** The default posture is "I did this, and
+  here's why" — not "may I?". Asking permission for routine work is a
+  product failure: it hands the busywork back to the user.
+- **Guardrails, not permission prompts.** Everything the agent does is
+  visible, reversible, and tunable — *Review*, *Adjust*, *Pause*,
+  *Undo*. Safety lives in the receipts and the undo, not in
+  confirmation dialogs.
+- **Principles baked in.** Derived routines optimize for the user's
+  time and attention, and respect the security boundary by
+  construction: credentials stay sealed in the vault, data goes only to
+  allowlisted endpoints.
+- **The boundary that remains.** Irreversible external actions — money
+  leaving, sending as the user to someone new, sharing data with a new
+  party — still get explicit consent. Autonomy applies inside the trust
+  envelope the user has granted (see #2); the envelope grows, the
+  consent moments shrink.
+
+## 4. Human, plain-spoken
+
+The tone is soft and human — closer to how Claude's product copy reads
+than to edgy tech branding. Confident without being loud; technical
+truth in the user's words. No exclamation-mark enthusiasm, no
+alarm-speak, no jargon where a plain word exists.
+
+## How they cascade
+
+| Principle | Product behavior | Copy behavior |
+|---|---|---|
+| Wow | Real derived result in the first session | Lead with the specific finding, not the feature name |
+| Trust | Receipts: feed, logs, previews, undo | Narrate actions in past tense with the reason; state failures plainly |
+| Automate | Routines set up proactively, guardrails on | "I set this up — adjust or undo", never "approval required" for routine work |
+| Human | Calm defaults, no dark patterns | Sentence case, short verbs, the user's vocabulary |
+
+The concrete UI-copy rules that fall out of this table live in
+**Docs → Voice & copy**.

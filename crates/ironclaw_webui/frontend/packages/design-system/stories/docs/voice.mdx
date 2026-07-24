@@ -1,21 +1,35 @@
 import { Meta } from "@storybook/addon-docs/blocks";
+import { DocCallout } from "./doc-callout";
 
 <Meta title="Docs/Voice & copy" />
 
 # Voice & copy
 
-We're moving toward a softer tone — human, plain-spoken, closer to how
-Claude's product copy reads than to edgy tech branding. None of this is
-final brand language; it's the working guidance until the brand jam
-settles things.
+The **Brand principles** page holds what IronClaw believes; this page is
+those beliefs cascaded into UI-copy rules — the words on buttons, cards,
+statuses, and empty states. Tone in one line: human and plain-spoken,
+closer to how Claude's product copy reads than to edgy tech branding.
 
-## Principles
+<DocCallout title="Suggested starting points, not settled law">
+  These rules are written to be as correct and thorough as we can make
+  them today — apply them as-is when writing product copy. They remain
+  proposals until the brand jam ratifies them; if one fights a real
+  surface, flag it rather than working around it.
+</DocCallout>
+
+## UI copy principles
 
 1. **Say what happens, in the user's words.** "Drafts replies for routine
    email" — not "leverages LLM inference for message synthesis."
-2. **The agent proposes; the user decides.** Copy around automations keeps
-   agency with the user: *Suggest*, *Review*, *Approve*. Don't imply the
-   system acted on its own when it didn't.
+2. **The agent acts; the user steers.** IronClaw derives routines and
+   sets them up unprompted, with the user's principles (productivity,
+   security, privacy) baked in. Copy narrates what it did and why it
+   helps — "I set up a morning digest — 34 newsletter threads were
+   burying your real mail" — and always ships with the steering verbs:
+   *Review*, *Adjust*, *Pause*, *Undo*. Don't ask permission for routine
+   work, and never hide that the agent acted. The exception: irreversible
+   external actions (money, first-time sends as the user, sharing data
+   with a new party) do ask first — see Brand principles §3.
 3. **Calm status language.** `Success`, `Running`, `Warning`, `Failed`,
    `Paused`. No exclamation marks, no alarm-speak. A failed run is a fact,
    not an emergency.
@@ -26,10 +40,14 @@ settles things.
    `Delete`. Destructive confirms restate the object ("Delete this
    automation?") and the button repeats the verb. Never "OK" or "Yes".
 6. **Empty states teach.** Name the value and the next step ("Connect a
-   tool and the agent will start suggesting automations"), not just
+   tool and the agent will start setting up routines"), not just
    "No data".
 7. **Numbers are content.** Stats, durations, and schedules stay exact and
    render in mono/tabular contexts — "128 runs", "every weekday at 8:00am".
+8. **Receipts read as receipts.** When the agent narrates its own actions
+   (activity feed, run summaries), use past tense + the reason + the
+   escape hatch: "Archived 12 newsletters — they matched your triage
+   rules. Undo". This is the Trust principle wearing words.
 
 ## Built-in component strings
 
@@ -43,6 +61,7 @@ default to English. Localized hosts bridge their translator via
 | Surface | Pattern | Example |
 |---|---|---|
 | Primary CTA | verb + object | `Create automation` |
+| Agent receipt | past tense + reason + escape hatch | `Set up "Morning digest" — 34 newsletters matched. Adjust · Undo` |
 | Confirmation title | question restating the object | `Delete this automation?` |
 | Confirmation body | the consequence, plainly | `"Morning digest" will stop running immediately. This cannot be undone.` |
 | Hint text | why it matters, one sentence | `Shown in the sidebar and page titles.` |
