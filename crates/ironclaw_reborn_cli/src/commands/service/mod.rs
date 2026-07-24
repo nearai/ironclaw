@@ -22,7 +22,7 @@
 //! [`SERVICE_LABEL`] and [`SYSTEMD_UNIT`] name the **one** OS service
 //! identity for the IronClaw binary. Two surfaces install and
 //! manage it today: this CLI (`ironclaw service install`), and the
-//! WebUI operator facade (`RebornLocalServiceLifecycle` in
+//! WebUI operator facade (`OperatorServiceLifecycle` in
 //! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
 //! behind `POST /api/webchat/v2/operator/service`). Both target the same
 //! plist/unit path, so an install from either surface atomically replaces
@@ -54,7 +54,7 @@ mod launchd;
 mod systemd;
 
 /// launchd label / systemd unit name for the canonical Reborn service
-/// identity. Shared, deliberately, with `RebornLocalServiceLifecycle` in
+/// identity. Shared, deliberately, with `OperatorServiceLifecycle` in
 /// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
 /// (the WebUI operator-service facade) — see the module doc above. An
 /// install from either surface atomically replaces the other's file at
@@ -445,7 +445,7 @@ fn status_label(installed: bool, running: bool) -> &'static str {
 /// advise. Shared by both platforms so the wording (and the "must
 /// `service restart`" guidance) can't drift between them. Covers both a
 /// prior install by this same CLI and one by the WebUI operator facade
-/// (`RebornLocalServiceLifecycle`, see the module doc).
+/// (`OperatorServiceLifecycle`, see the module doc).
 ///
 /// Callers decide whether the "keeps the OLD definition" claim is true
 /// for their platform and pass that pre-resolved bool in: systemd never
@@ -921,7 +921,7 @@ mod tests {
 
         // Idempotent reinstall: overwrites cleanly, no fail or duplicate —
         // and, per the shared-identity contract with the WebUI operator
-        // facade (`RebornLocalServiceLifecycle`), must now report that it
+        // facade (`OperatorServiceLifecycle`), must now report that it
         // replaced an existing unit (this reinstall stands in for the
         // facade's unit being atomically replaced by the CLI's).
         let reinstall_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)

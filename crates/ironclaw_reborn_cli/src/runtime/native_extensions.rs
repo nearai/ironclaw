@@ -11,7 +11,7 @@ use ironclaw_extension_host::{
     NativeExtensionFactory,
 };
 use ironclaw_reborn_composition::ChannelExtensionBinding;
-use ironclaw_telegram_extension::TelegramChannelAdapter;
+use ironclaw_telegram_extension::{TelegramChannelAdapter, TelegramPreferenceTargetCodec};
 
 /// Every native factory the binary assembles (`first_party`-runtime
 /// extensions bind their adapters through these).
@@ -28,12 +28,6 @@ pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBindin
         ChannelExtensionBinding {
             extension_id: "slack".to_string(),
             adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-            inbound_payload_classifier: Some(Arc::new(|message| {
-                ironclaw_slack_extension::classify_channel_interaction_resolution(
-                    &message.text,
-                    message.trigger,
-                )
-            })),
             preference_target_codec: Some(Arc::new(
                 ironclaw_slack_extension::SlackPreferenceTargetCodec,
             )),
@@ -41,8 +35,7 @@ pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBindin
         ChannelExtensionBinding {
             extension_id: "telegram".to_string(),
             adapter: Arc::new(TelegramChannelAdapter::default()),
-            inbound_payload_classifier: None,
-            preference_target_codec: None,
+            preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
         },
     ]
 }
@@ -88,18 +81,20 @@ mod tests {
     }
 
     #[test]
-    fn slack_channel_binding_carries_adapter_classifier_and_codec() {
+    fn bundled_channel_bindings_carry_their_production_extras() {
         let bindings = bundled_channel_extension_bindings();
         let slack = bindings
             .iter()
             .find(|binding| binding.extension_id == "slack")
             .expect("the binary supplies the slack channel binding");
-        assert!(slack.inbound_payload_classifier.is_some());
         assert!(slack.preference_target_codec.is_some());
         let telegram = bindings
             .iter()
             .find(|binding| binding.extension_id == "telegram")
             .expect("the binary supplies the telegram deployment channel binding");
-        assert!(telegram.inbound_payload_classifier.is_none());
+        assert!(
+            telegram.preference_target_codec.is_some(),
+            "the shipping Telegram binding must expose outbound preference targets"
+        );
     }
 }

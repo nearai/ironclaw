@@ -1,3 +1,4 @@
+// arch-exempt: large_file, operator service backend awaits composition helper extraction, plan #4471
 //! Local OS service lifecycle backend for the Reborn operator facade.
 //!
 //! This is the concrete implementation behind
@@ -21,11 +22,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    TenantId, UserId,
+};
+use ironclaw_product::{
     OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
 };
 
 const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";
@@ -234,7 +237,7 @@ fn read_command_stdout(
 
 /// Platform-backed local service lifecycle manager.
 #[derive(Clone)]
-pub(crate) struct RebornLocalServiceLifecycle {
+pub(crate) struct OperatorServiceLifecycle {
     platform: ServicePlatform,
     home_dir: Option<PathBuf>,
     executable: Result<PathBuf, String>,
@@ -258,10 +261,10 @@ struct WebuiBootEnv {
     user_id: UserId,
 }
 
-impl std::fmt::Debug for RebornLocalServiceLifecycle {
+impl std::fmt::Debug for OperatorServiceLifecycle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornLocalServiceLifecycle")
+            .debug_struct("OperatorServiceLifecycle")
             .field("platform", &self.platform)
             .field("home_dir", &self.home_dir.is_some())
             .field("executable", &"<redacted>")
@@ -271,7 +274,7 @@ impl std::fmt::Debug for RebornLocalServiceLifecycle {
     }
 }
 
-impl RebornLocalServiceLifecycle {
+impl OperatorServiceLifecycle {
     pub(crate) fn new() -> Self {
         Self {
             platform: ServicePlatform::current(),
@@ -793,16 +796,16 @@ impl RebornLocalServiceLifecycle {
 
     fn ensure_authorized_operator(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<(), RebornServicesError> {
+        caller: &ProductSurfaceCaller,
+    ) -> Result<(), ProductSurfaceError> {
         if self.operator_identity.as_ref().is_some_and(|operator| {
             caller.tenant_id == operator.tenant_id && caller.user_id == operator.user_id
         }) {
             return Ok(());
         }
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Forbidden,
-            kind: RebornServicesErrorKind::ParticipantDenied,
+        Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Forbidden,
+            kind: ProductSurfaceErrorKind::ParticipantDenied,
             status_code: 403,
             retryable: false,
             field: None,
@@ -811,26 +814,26 @@ impl RebornLocalServiceLifecycle {
     }
 }
 
-impl Default for RebornLocalServiceLifecycle {
+impl Default for OperatorServiceLifecycle {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
+impl OperatorServiceLifecycleService for OperatorServiceLifecycle {
     async fn control_service(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+    ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError> {
         self.ensure_authorized_operator(&caller)?;
         let permit = self
             .operation_permits
             .clone()
             .acquire_owned()
             .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
         let service = self.clone();
         let action = request.action;
         tokio::task::spawn_blocking(move || {
@@ -845,7 +848,7 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
         .await
         .map_err(|error| {
             tracing::debug!(%error, "service lifecycle task failed");
-            RebornServicesError::internal_from("service lifecycle task failed")
+            ProductSurfaceError::internal_from("service lifecycle task failed")
         })
     }
 }
@@ -1147,8 +1150,8 @@ mod tests {
         }
     }
 
-    fn macos_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> RebornLocalServiceLifecycle {
-        RebornLocalServiceLifecycle::for_test(
+    fn macos_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> OperatorServiceLifecycle {
+        OperatorServiceLifecycle::for_test(
             ServicePlatform::Macos,
             Some(temp.path().to_path_buf()),
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1156,8 +1159,8 @@ mod tests {
         )
     }
 
-    fn linux_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> RebornLocalServiceLifecycle {
-        RebornLocalServiceLifecycle::for_test(
+    fn linux_service(temp: &TempDir, runner: Arc<RecordingRunner>) -> OperatorServiceLifecycle {
+        OperatorServiceLifecycle::for_test(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1313,7 +1316,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
     async fn linux_install_escapes_systemd_special_characters_in_executable_path() {
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new("inactive"));
-        let service = RebornLocalServiceLifecycle::for_test(
+        let service = OperatorServiceLifecycle::for_test(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
             PathBuf::from("/usr/local/bin/iron%claw-$reborn"),
@@ -1519,7 +1522,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
     #[tokio::test]
     async fn install_without_home_reports_failed_resolution() {
-        let service = RebornLocalServiceLifecycle::for_test(
+        let service = OperatorServiceLifecycle::for_test(
             ServicePlatform::Linux,
             None,
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1543,7 +1546,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
     #[tokio::test]
     async fn install_without_executable_path_fails_before_writing_unit() {
         let temp = TempDir::new().expect("tempdir");
-        let service = RebornLocalServiceLifecycle::for_test_with_executable_error(
+        let service = OperatorServiceLifecycle::for_test_with_executable_error(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
             "current executable path could not be resolved: denied".to_string(),
@@ -1851,7 +1854,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .await
             .expect_err("non-operator rejected");
 
-        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
     }
 
@@ -1874,13 +1877,13 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
             .await
             .expect_err("cross-tenant caller rejected");
 
-        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
         assert!(runner.calls().is_empty());
     }
 
     #[tokio::test]
     async fn unsupported_platform_reports_unsupported() {
-        let service = RebornLocalServiceLifecycle::for_test(
+        let service = OperatorServiceLifecycle::for_test(
             ServicePlatform::Unsupported,
             None,
             PathBuf::from("/usr/local/bin/ironclaw-reborn"),
@@ -1901,8 +1904,8 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         assert!(response.remediation.is_some());
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             ironclaw_host_api::TenantId::new("tenant-test").expect("tenant"),
             ironclaw_host_api::UserId::new("user-test").expect("user"),
             Some(ironclaw_host_api::AgentId::new("agent-test").expect("agent")),

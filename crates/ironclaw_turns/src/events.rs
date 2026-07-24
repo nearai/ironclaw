@@ -339,6 +339,21 @@ pub trait TurnEventProjectionSource: Send + Sync {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError>;
+
+    /// Read the authoritative lifecycle log in global cursor order for a
+    /// host-owned durable projection consumer.
+    ///
+    /// Implementations must use an indexed, bounded read and fail explicitly
+    /// rather than fall back to an unbounded directory scan. The consumer owns
+    /// its durable cursor and advances it only after derived state commits. A
+    /// retention gap is surfaced through [`TurnEventPage::rebase_required`]
+    /// and must never be silently skipped.
+    #[doc(hidden)]
+    async fn read_turn_event_log_after(
+        &self,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError>;
 }
 
 pub struct TurnEventProjectionService<S>
@@ -625,6 +640,32 @@ mod tests {
                 limit,
                 EventCursor::default(),
             ))
+        }
+
+        async fn read_turn_event_log_after(
+            &self,
+            after: Option<EventCursor>,
+            limit: usize,
+        ) -> Result<TurnEventPage, TurnError> {
+            let after = after.unwrap_or_default();
+            let mut entries = self
+                .events
+                .iter()
+                .filter(|event| event.cursor > after)
+                .cloned()
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|event| event.cursor);
+            let truncated = entries.len() > limit;
+            if truncated {
+                entries.truncate(limit);
+            }
+            let next_cursor = entries.last().map_or(after, |event| event.cursor);
+            Ok(TurnEventPage {
+                entries,
+                next_cursor,
+                truncated,
+                rebase_required: None,
+            })
         }
     }
 

@@ -74,7 +74,7 @@ middleware with v1's `src/channels/web/`.
 
 | Symbol | Role |
 |---|---|
-| `RebornWebuiBundle` (in [`src/webui/facade.rs`](src/webui/facade.rs)) | `{ api: Arc<dyn ProductSurface>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 product surface, optional product-auth route service, plus readiness snapshot |
+| `RebornWebuiBundle` (in [`src/webui/facade.rs`](src/webui/facade.rs)) | `{ product_surface: Arc<dyn ProductSurface>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 product surface, optional product-auth route service, plus readiness snapshot |
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
@@ -124,7 +124,7 @@ Inbound order (outer → inner → handler):
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
    the browser's `EventSource` cannot set headers. Mutations and
    timeline reads stay bearer-only. On success the middleware inserts
-   a `WebUiAuthenticatedCaller` extension built from
+   a `ProductSurfaceCaller` extension built from
    `config.tenant_id` plus the authentication result's `UserId`, and a
    request-scoped `WebUiV2Capabilities` extension from the same
    authentication result.
@@ -142,7 +142,7 @@ Inbound order (outer → inner → handler):
    `ConnectInfo<SocketAddr>`, never `X-Forwarded-For` / `X-Real-IP`.
    Composition fails closed if a future descriptor declares an unsupported
    scope.
-9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
+9. `webui_v2_router(WebUiV2State::new(bundle.product_surface))` — the v2
    handlers from `ironclaw_webui` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list/rename automations).
@@ -162,7 +162,7 @@ Reborn-native product-auth surface:
 
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
-  `WebUiAuthenticatedCaller` inserted by host composition, hashes raw
+  `ProductSurfaceCaller` inserted by host composition, hashes raw
   state/PKCE once, rejects caller-supplied expiry beyond the route TTL,
   and creates an `AuthFlowRecord` through `AuthFlowManager::create_flow`.
   The response authorization URL is composed after flow creation so it can
@@ -171,6 +171,12 @@ Reborn-native product-auth surface:
   to the gateway-wide fallback cap. The browser cannot choose `AuthFlowKind` or
   `AuthContinuationRef`; this first route creates integration-credential
   setup flows with `AuthContinuationRef::SetupOnly`.
+- `POST /api/webchat/v2/extensions/{package_id}/setup/oauth/start` accepts only
+  the installed manifest credential requirement name plus expiry/invocation
+  context. Production resolves provider, account label, and OAuth scopes from
+  the lifecycle setup projection; raw browser provider/scope fields are not
+  accepted, and the global recipe registry is not extension authority. The
+  route emits a server-owned `LifecycleActivation` continuation.
 - `GET /api/reborn/product-auth/oauth/callback/{flow_id}` is a hosted
   callback route and is intentionally not behind WebUI bearer auth. It
   bounds the raw query string, reconstructs the scoped callback owner from
@@ -181,7 +187,7 @@ Reborn-native product-auth surface:
   transport-peer-IP public callback rate limit.
 - `POST /api/reborn/product-auth/manual-token/submit` is inside the
   same bearer-auth layer as OAuth start. It derives `AuthProductScope`
-  from `WebUiAuthenticatedCaller`, validates the provider/account/token
+  from `ProductSurfaceCaller`, validates the provider/account/token
   fields, creates a short-lived manual-token interaction with a
   `TurnGateResume` continuation, submits the raw token only to
   `RebornProductAuthServices`, and returns the resulting
@@ -311,7 +317,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
+| Extensions registry/list/install/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{remove,setup}` | Mapped to lifecycle package refs and registry projections. Install establishes membership and host-owned reconciliation derives `setup_needed` or `active`; there is no public activation endpoint. Setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface. |
 | Extension import from zip (#5459) | (none — v2-only surface) | `POST /api/webchat/v2/extensions/import` | Admin-only (`operator_webui_config` capability on the matched bearer): uploads a standalone WASM tool bundle (zip with `manifest.toml` + `wasm/` + `schemas/` + `prompts/`). Validated as `ManifestSource::InstalledLocal` (never first-party/system trust or runtime, wasm runtime only, all manifest-declared assets required, duplicate zip entries rejected), then materialized under `/system/extensions/<id>/` and added to the catalog under the catalog-write + operation locks; duplicate installed/catalog ids are rejected. Restart-safe: startup filesystem discovery stamps everything it finds `InstalledLocal` (`HostBundled` is reserved for binary-compiled extensions), so a restart cannot relabel an upload into the first-party trust tier. 8 MiB body cap, mutation rate limit |
 | LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product facade; left unmounted with other operator routes for multi-user authenticators |
@@ -360,11 +366,11 @@ rows are inventoried here, not implemented in the current PR.
 - **Connection limit (SSE)** — bounded by `ironclaw_webui`'s own
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
   lifetime). No WS surface to bound.
-- **Caller construction** — `WebUiAuthenticatedCaller` is built from
+- **Caller construction** — `ProductSurfaceCaller` is built from
   `config.tenant_id` (trusted host installation) plus the
   authenticator's verified `UserId`. The browser body cannot influence
   either field; matches the rule in
-  `crates/ironclaw_product_workflow/CLAUDE.md`.
+  `crates/ironclaw_product/CLAUDE.md`.
 
 ### What this composition deliberately does NOT do
 
@@ -403,7 +409,7 @@ the projection-services epoch. On an epoch mismatch, resume preserves durable
 runtime and turn positions but clears the volatile live position so a browser
 cursor retained across a deployment cannot suppress the restarted process's
 interim updates. This is enforced by
-`WebuiRuntimeProjectionStream::runtime_subscription` in `src/projection.rs`.
+`ProductRuntimeProjectionStream::runtime_subscription` in `src/projection.rs`.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —
@@ -426,12 +432,12 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 - `src/runtime.rs::tests::local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades`
   — regression guard that the WebUI bundle reuses the runtime turn/thread
   facades.
-- `src/projection.rs::tests::webui_event_stream_drains_run_status_projection_from_event_stream_manager`
-  — regression guard that the WebUI projection stream drains the current
+- `src/projection.rs::tests::product_event_stream_drains_run_status_projection_from_event_stream_manager`
+  — regression guard that the product event stream drains the current
   run-status projection slice from a real `EventStreamManager` snapshot
   into product outbound envelopes.
-- `src/projection.rs::tests::webui_event_stream_uses_request_actor_for_projection_scope`
-  — regression guard that the WebUI projection adapter uses the facade
+- `src/projection.rs::tests::product_event_stream_uses_request_actor_for_projection_scope`
+  — regression guard that the product projection adapter uses the facade
   request actor when selecting the runtime event stream, rather than a
   hidden runtime owner actor.
 - `src/projection/tests/live_progress_stream.rs::live_assistant_text_coalescer_flushes_latest_update_on_timer`

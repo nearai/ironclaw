@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
-mod account_setups;
 mod native_extensions;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
@@ -624,7 +623,6 @@ fn with_binary_host_extension_bindings_from_bundles(
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
-        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors())
         .with_first_party_bundles(first_party_bundles)
         .with_first_party_registrars(crate::first_party::bundled_first_party_registrars())
         .with_credential_account_visibility_policy(
@@ -1203,7 +1201,7 @@ fn reject_unsupported_runtime_sections(
     // `[identity].default_project` is parsed but not yet wired into the
     // generic runtime slice — `run` / `repl` would silently drop the value,
     // so we fail-loud. The `serve` subcommand DOES consume it (stamped onto
-    // every `WebUiAuthenticatedCaller`), so for that caller the field is
+    // every `ProductSurfaceCaller`), so for that caller the field is
     // supported, not "parsed but not wired".
     if let Some(identity) = file.identity.as_ref()
         && identity.default_project.is_some()

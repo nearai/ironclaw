@@ -156,7 +156,7 @@ impl RebornProviderAdmin {
             api_key_required: provider_def.is_some_and(|def| def.api_key_required),
             missing_api_key: provider_def.is_some_and(|def| {
                 def.api_key_env.as_deref().is_some_and(|api_key_env| {
-                    def.api_key_required && std::env::var_os(api_key_env).is_none()
+                    def.api_key_required && !runtime_env_has_nonempty_value(api_key_env)
                 })
             }),
             config_file: config_path,
@@ -265,7 +265,7 @@ impl RebornProviderAdmin {
             api_key_env: def.api_key_env.clone(),
             api_key_required: def.api_key_required,
             missing_api_key: def.api_key_env.as_deref().is_some_and(|api_key_env| {
-                def.api_key_required && std::env::var_os(api_key_env).is_none()
+                def.api_key_required && !runtime_env_has_nonempty_value(api_key_env)
             }),
             config_file: config_path,
             v1_state: RebornV1State::NotUsed,
@@ -421,7 +421,7 @@ impl RebornProviderAdmin {
             }
         })?;
         let base_url = candidate_probe_base_url(definition);
-        let request = ironclaw_product_workflow::LlmProbeRequest {
+        let request = ironclaw_product::LlmProbeRequest {
             adapter: provider_protocol_wire_name(definition.protocol),
             base_url,
             provider_id: provider_id.to_string(),
@@ -759,6 +759,11 @@ fn known_provider_ids(registry: &ironclaw_llm::ProviderRegistry) -> Vec<String> 
         .collect()
 }
 
+fn runtime_env_has_nonempty_value(name: &str) -> bool {
+    ironclaw_common::env_helpers::env_or_override(name)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 fn provider_info(
     def: &ironclaw_llm::registry::ProviderDefinition,
     active: Option<&ActiveLlmSelection>,
@@ -837,6 +842,7 @@ mod tests {
     use ironclaw_llm::{
         ProviderProtocol, ProviderRegistry, ResolvedDedicatedProviderConfig, ResolvedProviderConfig,
     };
+    use std::collections::BTreeSet;
 
     fn dedicated(provider_id: &str, model: &str, base_url: &str) -> ResolvedProviderConfig {
         ResolvedProviderConfig::Dedicated(ResolvedDedicatedProviderConfig {
@@ -1091,13 +1097,59 @@ mod tests {
         &INIT_RS[start..start + end]
     }
 
+    struct RuntimeEnvMaskGuard {
+        snapshots: Vec<ironclaw_common::env_helpers::RuntimeEnvSnapshot>,
+    }
+
+    impl Drop for RuntimeEnvMaskGuard {
+        fn drop(&mut self) {
+            for snapshot in self.snapshots.drain(..).rev() {
+                ironclaw_common::env_helpers::restore_runtime_env(snapshot);
+            }
+        }
+    }
+
+    fn mask_llm_env_for_test() -> RuntimeEnvMaskGuard {
+        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+        let mut keys = BTreeSet::from([
+            "LLM_BACKEND".to_string(),
+            "LLM_MODEL".to_string(),
+            "LLM_CHEAP_MODEL".to_string(),
+            "LLM_USE_CODEX_AUTH".to_string(),
+            "CODEX_AUTH_PATH".to_string(),
+            "SMART_ROUTING_CASCADE".to_string(),
+        ]);
+        for provider in registry.all() {
+            keys.insert(provider.model_env.clone());
+            if let Some(name) = &provider.api_key_env {
+                keys.insert(name.clone());
+            }
+            if let Some(name) = &provider.base_url_env {
+                keys.insert(name.clone());
+            }
+            if let Some(name) = &provider.extra_headers_env {
+                keys.insert(name.clone());
+            }
+        }
+
+        let snapshots = keys
+            .iter()
+            .map(|key| ironclaw_common::env_helpers::snapshot_runtime_env(key))
+            .collect();
+        for key in keys {
+            ironclaw_common::env_helpers::mask_runtime_env(&key);
+        }
+        RuntimeEnvMaskGuard { snapshots }
+    }
+
     /// `detect_env_llm` must return `Ok(None)` with no LLM env vars set —
     /// the fresh-onboard case that must fall through to the full menu.
-    /// The `Ok(Some(_))`/`Err(_)` branches can't be covered in-process
-    /// (`forbid(unsafe_code)` blocks `set_var`); covered at the CLI smoke
-    /// tier instead via `Command::env` on a real child process.
+    /// Env absence is modeled with the runtime env mask so exported developer
+    /// shell variables cannot leak into this in-process test.
     #[test]
     fn detect_env_llm_is_none_with_no_llm_env_vars_set() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let _env_mask = mask_llm_env_for_test();
         let admin = test_admin();
         let detected = admin
             .detect_env_llm()

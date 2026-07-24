@@ -251,7 +251,7 @@ impl SurfaceTrackingLoopCapabilityPort {
 fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
     matches!(
         capability_id.as_str(),
-        "builtin.extension_activate" | "builtin.extension_remove"
+        "builtin.extension_install" | "builtin.extension_remove"
     )
 }
 

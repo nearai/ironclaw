@@ -12,9 +12,10 @@ excluded, so it does not creep back in.
 ## 1. Goal
 
 Every integration (Slack, Gmail, GitHub, Telegram, …) is an ordinary installable
-extension package. The generic runtime installs, activates, dispatches, and
-removes extensions using only their manifest and two narrow adapter seams (plus
-one recipe-driven host engine for auth). No generic crate contains a concrete
+extension package. The generic runtime manages caller membership, derives
+readiness, dispatches, and removes extensions using only their manifest and two
+narrow adapter seams (plus one recipe-driven host engine for auth). There is no
+separate user-facing activation operation. No generic crate contains a concrete
 product name, protocol type, route, or behavior branch.
 
 Acceptance is three concrete tests:
@@ -93,6 +94,17 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "slack.extension/v1"   # looked up in the native factory registry; data, not code
 
+[admin_configuration]            # tenant/deployment setup, independent of user installs
+group_id = "extension.slack"
+display_name = "Slack deployment configuration"
+description = "Deployment credentials and routing configuration for Slack."
+fields = [
+  { handle = "slack_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "slack_signing_secret", label = "Signing secret", secret = true, required = true },
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true },
+]
+
 # ---- tool surfaces ---------------------------------------------------------
 
 [[tools]]
@@ -159,12 +171,6 @@ signed_payload = [
   { body = true },
 ]
 
-[channel.config]                  # operator setup; host renders the generic form
-fields = [
-  { handle = "slack_bot_token", label = "Bot token", secret = true },
-  { handle = "slack_signing_secret", label = "Signing secret", secret = true },
-]
-
 [[channel.egress]]
 scheme = "https"
 host = "slack.com"
@@ -222,9 +228,13 @@ Notes on the sections:
   Conversation binding and presentation policy consume the declared value, and
   the host's own WebUI channel uses the same enum internally — the workflow
   reasons about every channel one way, with no per-channel special cases.
-- **`[channel.config]`** replaces bespoke setup panels. The host renders the
-  form, validates, and stores secret fields under the named handles. Vendor-side
-  validation of the config happens in the adapter's `activate()` hook.
+- **`[admin_configuration]`** declares deployment-owned setup independently of
+  channel or tool surfaces. The admin UI groups equal `group_id` descriptors,
+  renders the form generically, and stores values once per tenant; it does not
+  install the extension for the operator or any other user. Secret values are
+  write-only and only their presence is projected. Extensions that share a
+  deployment credential set (for example the Google family) use the same group
+  id and exactly matching descriptors.
 - **`[auth.*]`** is one recipe per vendor the extension needs. See section 4.3.
 
 ### 3.1 MCP extensions
@@ -269,8 +279,9 @@ Rules that keep the boundary easy to reason about:
   The presence of `[mcp]` selects the MCP loader; internally it resolves to
   the same runtime-kind descriptor, so "runtime is a loading detail, never
   taxonomy" holds unchanged.
-- Discovery is **host-owned**: the MCP loader calls `tools/list` at activation
-  (and on explicit refresh), validates every result against the declared
+- Discovery is **host-owned**: the MCP loader calls `tools/list` while
+  reconciling an eligible member to readiness (and on explicit refresh),
+  validates every result against the declared
   ceiling — namespace, count, bounded schema size, effects — and publishes the
   set atomically as ordinary tool surfaces. A refresh replaces the whole set
   or changes nothing.
@@ -278,7 +289,8 @@ Rules that keep the boundary easy to reason about:
   `[mcp]` connection credential is injected on every server call, and egress
   is restricted to the server's host. Nothing a server returns can widen
   authority.
-- **Past activation there is no "MCP" anywhere in the dispatch path.** A
+- **Past readiness reconciliation there is no "MCP" anywhere in the dispatch
+  path.** A
   discovered tool is an ordinary tool surface: same dispatcher pipeline, same
   policy and approvals, same UI. The distinction exists only in the manifest
   and the MCP loader.
@@ -286,12 +298,13 @@ Rules that keep the boundary easy to reason about:
 ### 3.2 Shared vendors
 
 Extensions that use the same `VendorId` each carry the recipe (gmail, drive,
-calendar all embed the `[auth.google]` recipe). At activation the host unifies
-them: recipes for one vendor must be **identical except `scopes` and
-`display_name`**, or activation fails with a conflict. Scope ceilings union
-across active extensions exactly as the system does today; a new extension needing
-more scopes triggers incremental re-consent. Accounts and grants are stored per
-vendor and shared — connecting Google once serves gmail and drive.
+calendar all embed the `[auth.google]` recipe). During internal publication the
+host unifies them: recipes for one vendor must be **identical except `scopes`
+and `display_name`**, or publication fails with a conflict. Scope ceilings union
+across extensions available to the caller exactly as the system does today; a
+new extension needing more scopes triggers incremental re-consent. Accounts and
+grants are stored per user and vendor and shared — connecting Google once serves
+that user's gmail and drive memberships, never another user's.
 
 This replaces any notion of installable/shared "vendor implementation
 packages": ~20 duplicated TOML lines per Google extension, one 5-line conflict
@@ -334,19 +347,19 @@ pub struct ExtensionBindings {
 ```
 
 `bind` is side-effect-free and receives no network/secret/store ports — only
-the installation context, the resolved contract, and the extension's
-**non-secret** config values (adapters are parameterized at bind time; secrets
-exist only behind host injection). The binding rule is a direct check, not a
+the runtime context, the resolved contract, and resolved **non-secret tenant
+configuration** values (adapters are parameterized at bind time; secrets exist
+only behind host injection). The binding rule is a direct check, not a
 framework:
 
 - manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
 - manifest declares `[channel]` → `channel` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
-- activation requires an operational surface: a tool, channel, or hook. The
+- internal publication requires an operational surface: a tool, channel, or hook. The
   host-internal `[mcp]` connection template is discovery authority, not a
-  callable tool, so an empty discovered catalog cannot activate by itself;
+  callable tool, so an empty discovered catalog cannot publish by itself;
   channel-only and hook-only contracts remain valid;
-- violations fail activation with a typed error. No partial extension activates.
+- violations fail publication with a typed error. No partial surface publishes.
 
 Loaders by runtime kind:
 
@@ -415,7 +428,7 @@ maps to the generic re-auth gate. **Discovery is never the adapter's job:**
 | | Static `[[tools]]` | `[mcp]` |
 | --- | --- | --- |
 | Source of truth | the manifest | the server's `tools/list` |
-| When discovered | manifest compile/resolve | activation + explicit refresh (loader-run, ceiling-validated, atomic) |
+| When discovered | manifest compile/resolve | readiness reconciliation + explicit refresh (loader-run, ceiling-validated, atomic) |
 | Published as | tool surfaces in the active snapshot | tool surfaces in the active snapshot |
 | Downstream difference | none | none |
 
@@ -424,14 +437,14 @@ maps to the generic re-auth gate. **Discovery is never the adapter's job:**
 ```rust
 #[async_trait]
 pub trait ChannelAdapter: Send + Sync {
-    /// Idempotent; runs during activation. Vendor-side wiring and config
-    /// validation live here (Telegram `setWebhook`, Slack `auth.test`).
-    /// Failure fails activation.
+    /// Idempotent; runs during internal publication. Vendor-side wiring and
+    /// configuration validation live here (Telegram `setWebhook`, Slack
+    /// `auth.test`). Failure aborts publication.
     async fn activate(&self, ctx: &ChannelContext<'_>, egress: &dyn RestrictedEgress) -> Result<(), ChannelError> {
         Ok(())
     }
 
-    /// Idempotent, best-effort; runs during deactivation/removal. Vendor-side
+    /// Idempotent, best-effort; runs during unpublication/removal. Vendor-side
     /// unwiring (Telegram `deleteWebhook`). Failure is recorded and retryable;
     /// it does not block removal forever.
     async fn cleanup(&self, ctx: &ChannelContext<'_>, egress: &dyn RestrictedEgress) -> Result<(), ChannelError> {
@@ -528,8 +541,9 @@ If a future vendor genuinely defeats the descriptor, add a narrow quirk hook
 | Ingress | route table, body/rate/deadline limits, signature recipes, replay, durable admission, ack | payload parsing → normalized outcome |
 | Outbound | intent envelope, target policy, attempt persistence, retry/dedupe, drain | rendering, vendor API calls, part outcomes |
 | Auth | everything (engine + recipes) | recipe data in manifest |
-| Connection/setup | config form, secret storage, connect/disconnect state | `activate`/`cleanup` vendor wiring |
-| Lifecycle | staging, binding checks, atomic publish, generic cleanup | idempotent hooks |
+| Admin setup | manifest form, tenant-scoped storage, completeness | opaque handles only |
+| User readiness | membership, personal auth/pairing, derived public state | idempotent internal publish/cleanup hooks |
+| Lifecycle | membership changes, binding checks, atomic publication, generic cleanup | idempotent hooks |
 | Secrets | storage, encryption, injection | opaque handles only |
 
 ## 5. Core flows
@@ -545,18 +559,28 @@ one narrow call — or nothing:
 | Outbound message | delivery coordinator (§5.4) | `ChannelAdapter::deliver` |
 | Auth | auth engine (§5.5) | recipe data only |
 
-### 5.1 Activation
+### 5.1 Install and readiness reconciliation
 
-1. Load the persisted resolved record (compile the manifest if new/changed).
-2. Loader produces the entrypoint; `bind` returns adapters; the binding rule is
-   checked; global conflicts (duplicate capability id, duplicate route) are
-   checked against the staged next snapshot. MCP loaders run bounded discovery
-   here (§3.1).
-3. `channel.activate()` hook runs (vendor wiring). Failure aborts with nothing
-   published.
-4. Enabled state is persisted, then one immutable `Arc<ActiveSnapshot>` swap
-   publishes the generation. Readers resolve through snapshot views; in-flight
-   work keeps the `Arc` it started with.
+1. Install adds the authenticated caller to the extension's membership set. It
+   does not create a tenant-wide user installation and it does not expose a
+   second Activate action.
+2. Load the persisted resolved record (compile the manifest if new/changed),
+   then derive readiness from three independent inputs: tenant-scoped required
+   `[admin_configuration]` values, this caller's membership, and this caller's
+   required auth/pairing state.
+3. Missing tenant setup or personal auth/pairing projects `setup_needed` and
+   returns the appropriate generic admin/configure/connect affordance. No
+   callable surface is published for that caller.
+4. Once those requirements are satisfied, the loader produces the entrypoint;
+   `bind` returns adapters; the binding rule and global conflicts are checked.
+   MCP loaders run bounded discovery here (§3.1), and channel provisioning hooks
+   run as an internal host step.
+5. One immutable `Arc<ActiveSnapshot>` swap publishes the generation. The
+   caller now projects `active`; in-flight work keeps the `Arc` it started with.
+
+The internal host may still call this last publication step "activation" in
+implementation APIs. That is not a fourth public state, a user action, or a
+durable per-user activation toggle.
 
 ### 5.2 Tool call
 
@@ -583,7 +607,7 @@ End to end:
 Host **built-in capabilities** (memory, workspace, …) are not extensions:
 they live in the host's built-in registry, resolve through the same lookup,
 and run the identical pipeline. An extension capability id that collides with
-a built-in fails activation.
+a built-in fails internal publication.
 
 `slack.send_message` stays an explicit delegated side-effect tool; final
 replies never go through it.
@@ -666,9 +690,9 @@ envelope in, report out.
 
 Boundary notes: `slack.send_message` (the tool) is the *model* acting as the
 user — a job side effect through the tool pipeline — never how the
-assistant's replies are delivered. The WebUI is not a delivery target: it
-renders run state directly; the coordinator exists for external channels
-reached through vendor APIs.
+assistant's replies are delivered. `web_app` is the explicit no-external-egress
+run target: the answer remains in canonical run/thread state for the WebUI to
+render. External targets pass through the coordinator and vendor adapter.
 
 This is a promotion, not an invention: the lower layer already exists
 (`ironclaw_outbound`: target policy, preferences, attempt types, stores; plus
@@ -691,68 +715,59 @@ validation probe → store.
 
 ## 6. Lifecycle and standard state machines
 
-`ExtensionHost` (new crate) is the **only** active-set writer. Operations:
-install, activate, deactivate, upgrade, remove. Every
-extension moves through the **same pipeline and the same states** — the only
-extension-specific participation is manifest data and the two idempotent
-adapter hooks. No extension may introduce a state, a cleanup path, or a
-lifecycle branch of its own; that is enforced by where the enums live (generic
-crates) and by the architecture gates.
+The product model separates lifecycle authority from readiness prerequisites:
 
-### 6.1 Installation state machine (one enum, every extension)
+- caller membership is the only installation-lifecycle authority;
+- tenant-scoped `[admin_configuration]` and caller-scoped personal auth/pairing
+  are readiness prerequisites, not lifecycle owners; and
+- the public state derived from those facts.
 
-The installation state is an **honest projection**, not a persisted multi-step
-machine. The durable intent is `ironclaw_extensions::ExtensionActivationState`
-(`{Installed, Disabled, Enabled}`); the wire/UI enum below is projected from that
-intent plus active-set membership, the record's `last_error`, credential
-completeness, and runtime support.
+An admin saving deployment configuration never installs the extension for
+themself or anyone else. Each user independently joins or leaves membership,
+and personal grants, pairings, and bindings remain isolated by user. Generic
+host internals own publication and cleanup; no extension may introduce a
+state, cleanup path, or lifecycle branch of its own.
+
+### 6.1 Public extension state (one projection, every extension)
+
+The wire/UI state is exactly:
 
 ```text
-              activate ok
-  Installed ───────────────▶ Active
-     │  ▲                      │
-     │  └─────── deactivate ───┘
-     │                         │
-     │ activate fails          │ re-activate fails
-     ▼ (non-auth)              ▼ (non-auth)
-    Failed ◀──────────────────┘   (carries last_error; no auto-retry)
+not a member                         -> uninstalled
+member + missing tenant setup,
+         personal auth, or pairing  -> setup_needed
+member + every requirement ready    -> active
 ```
 
-- One enum, snake_case on the wire: `installed | configured | active | disabled
-  | failed | unsupported`. The host persists only the working subset it can
-  prove — `Installed` (staged), `Active` (serving), `Failed` (activation failed,
-  carries a typed redacted `last_error`). `Configured` (required credentials
-  present, not yet active), `Disabled` (user turned it off), and `Unsupported`
-  (runtime cannot serve) are **derived at projection time**. `Removed` is an
-  action-response signal only — removal drops the record; it is never a resting
-  state.
-- `Failed` is the terminal **non-auth** activation failure (capability/route
-  conflict, bad bind, unsupported runtime); it does not auto-retry and is
-  distinct from a pristine `Installed`. **Auth**-rejection failures are
-  represented by the auth-account axis (§6.3), not here.
-- There is no transient `Activating`/`Deactivating`/`Removing`/`RemovalPending`
-  state: under the single-serving-process model those windows are internal to a
-  mutex-held operation, never observed on the wire, and the durable intent plus
-  `last_error` already reconstruct the resting state after a restart. Activation
-  and removal are **operations**, not persisted intermediate states.
-- The wire exposes exactly this enum; the UI renders it identically for every
-  extension.
+- Install means "join membership." The result is immediately `active` when the
+  manifest declares no unmet setup, or `setup_needed` otherwise.
+- There is no public `installed`, `configured`, `disabled`, `failed`,
+  `unsupported`, `activating`, or `deactivating` state and no Activate/Disable
+  action. A user who wants to stop using an extension removes their membership.
+- Internal loader, discovery, provisioning, conflict, and publication failures
+  remain redacted diagnostics attached to `setup_needed`; they never create a
+  fourth product state.
+- Internal host checkpoint enums and `activate`/`cleanup` hook names are
+  implementation vocabulary only. They must collapse onto this projection at
+  every product boundary.
 
 ### 6.2 Removal (host-owned operation)
 
 Removal is a single host-owned operation, not a persisted state sequence. The
 fixed order is:
 
-1. Deactivate: unpublish from the active snapshot (new work rejected) and drain
-   in-flight work under a bounded deadline (in-flight holds its generation `Arc`).
-2. `channel.cleanup()` — vendor-side unwiring, idempotent, best-effort.
-3. Auth engine (`cleanup_for_lifecycle`): best-effort remote revoke per recipe
-   and cancellation of pending auth flows; **always** delete local grants/
-   accounts scoped to this extension's vendors — unless another active extension
-   shares the vendor, in which case its grants survive. Ownership-aware and
-   idempotent.
-4. Delete channel config/secrets, identity bindings, and route registrations.
-5. Drop the installation record.
+1. Remove the caller from membership and reject new work for that caller; drain
+   their in-flight work under a bounded deadline.
+2. Cancel that caller's pending auth flows and delete only their grants,
+   accounts, identity bindings, and routes that no remaining membership
+   requires. Another user and another extension using the same vendor are
+   unaffected.
+3. If members remain, keep the shared runtime publication and vendor wiring.
+4. Only when the last member leaves, unpublish and drain the shared runtime,
+   run the idempotent `channel.cleanup()` vendor-unwiring hook, then drop the
+   shared runtime row.
+5. Tenant admin configuration remains until an admin replaces or removes it;
+   user removal never deletes deployment credentials.
 
 Failure in 2–4 fails the operation loud with a typed, redacted quarantine
 reason; the caller retries removal. There is no dormant "removal-pending" state
@@ -791,11 +806,12 @@ Disconnected ──start flow──▶ Authenticating ──callback ok──▶
 
 ### 6.4 Derived connection status
 
-"Is this extension connected?" is **derived, not stored**: installation state
-(`Active`) + required `[channel.config]` fields present + auth account state
-(`connected`) for required vendors. The UI computes affordances (Configure /
-Connect / Reconnect / Remove) from those two enums plus config completeness —
-no third state machine, no per-extension logic.
+"Is this extension ready for this user?" is **derived, not stored**: caller
+membership + required tenant `[admin_configuration]` fields present + that
+caller's required auth account/pairing state + successful internal publication.
+The admin UI computes deployment completeness from manifest groups. The user UI
+computes Connect/Reconnect/Remove affordances from the derived state and recipe
+or pairing descriptor — no third state machine and no per-extension logic.
 
 The wire models a vendor's auth as a **list of accounts** (each carrying the
 §6.3 state and a default marker) plus each surface's resolved account, even
@@ -805,17 +821,18 @@ behavior without a wire break.
 
 ### 6.5 Other lifecycle rules
 
-- Startup re-activates every extension whose durable intent
-  (`ExtensionActivationState::Enabled`) says so, publishing one generation —
-  it re-derives `Active` from the durable intent, not by resuming any
-  persisted transient state (none exists); an invalid extension is skipped
-  with a typed error and does not block valid ones.
+- Startup rebuilds publication from durable memberships, tenant admin
+  configuration, and caller-scoped auth/pairing facts. It does not restore a
+  separate per-user activation toggle; an invalid extension is skipped with a
+  typed error and does not block valid ones.
 - Upgrade — boot-time adoption of a changed host-bundled contract — swaps the
   new generation atomically; the old generation drains via its `Arc`. A
   widening consent gate is deliberately not built (§3.3, §7).
-- Editing `[channel.config]` while `Active` runs an automatic deactivate →
-  reactivate cycle: adapters are rebuilt with the new values and `activate()`
-  revalidates them. There is no separate `Reconfiguring` state.
+- Saving `[admin_configuration]` refreshes every runtime consumer of that
+  tenant-scoped group through the generic reconciliation path. Users whose
+  memberships become ready project `active`; failures remain `setup_needed`
+  with a redacted diagnostic. There is no per-installation configuration copy
+  and no separate `Reconfiguring` state.
 - Deployment assumption, documented not engineered: **one serving process per
   deployment** owns the active set. Multi-replica serving needs its own ADR.
 
@@ -834,9 +851,9 @@ reintroduced without one.
 | Digest-pinned shared vendor implementation packages | shared vendor = identical-recipe rule (§3.2); native code shares via crate deps | third-party binary vendor-implementation sharing exists |
 | Per-vendor auth adapters, manual-validator trait | recipes cover all five current vendors; no code in auth flows | a vendor defeats the descriptor (add a narrow hook) |
 | Generic "dynamic tools" abstraction | MCP is the only dynamic source; one `[mcp]` section, owned by the MCP loader | a second, non-MCP discovery source is real |
-| Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[channel.config]` | a real action that config + hooks cannot express |
+| Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[admin_configuration]` | a real action that config + hooks cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
-| Installation-scoped OAuth grants (bot-install flows) | manual `[channel.config]` fields cover today's operator setup | a vendor requires OAuth-based operator install (recipes gain an `owner` field) |
+| Per-installation admin setup | manifest `[admin_configuration]` is stored once per tenant and shared by every member | a deployment genuinely needs multiple administrator-selected instances (new ADR) |
 | Multiple accounts per vendor per user | one account per vendor per user matches current behavior | **triggered 2026-07-13** (work + personal Google accounts; two Notion accounts) — accepted as a dedicated post-P7 PR, `adr/0001-multiple-accounts-per-vendor.md`; the train ships only the list-shaped wire (§6.4) |
 | Trigger/file runtime | reserved kinds, no implementation exists | a production trigger/file use case (fourth adapter, additive) |
 | Multi-digest canonicalization, golden canonical JSON | one source digest + resolved-contract diff suffices | never, absent a concrete need |
@@ -849,14 +866,15 @@ The abstraction pays for itself here:
 
 - **One conformance suite per adapter.** `ironclaw_product_adapters` exports a
   reusable channel-adapter conformance suite (inbound outcomes, deliver report
-  shape, activate/cleanup idempotency against a scripted vendor server); each
+  shape, internal publish/cleanup idempotency against a scripted vendor server); each
   extension crate runs it in its tests. Tool adapters get the same treatment.
 - **One auth-engine suite.** State/PKCE/replay/exchange/refresh/revoke/identity
   tested once against a scripted vendor server; each vendor recipe is a table
   row, not a suite.
 - **One fixture extension** (`acme-messenger`: invented vendor, tools + channel
   + oauth recipe) drives every generic end-to-end path in the integration
-  harness: install → activate → connect → inbound → turn → outbound → remove.
+  harness: admin configure → install → `setup_needed` → connect → `active` →
+  inbound → turn → outbound → remove.
   It is the proof that no generic path needs a real product.
 - **Real extensions** keep protocol unit tests (parse/render fixtures) inside
   their crates plus **one** end-to-end integration proof each (Slack, Telegram).

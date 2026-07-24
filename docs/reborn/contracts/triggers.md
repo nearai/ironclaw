@@ -486,8 +486,9 @@ selection. Local-dev Reborn exposes model-visible outbound target
 discovery/selection capabilities that write the caller's final-reply
 preference. A trigger may also persist an optional opaque `delivery_target` id
 selected from that creator-scoped registry; the fire carries the id without
-placing it in `TriggerFireIdentity`. At fire time, composition re-resolves the
-id for the creator, obtains the current typed reply-target binding, and sends
+placing it in `TriggerFireIdentity`. At fire time, the product run-delivery
+workflow re-resolves the id for the creator through an assembled provider,
+obtains the current typed reply-target binding, and sends
 ordinary results through the outbound delivery-resolution path. Missing,
 foreign, disconnected, or removed targets fail closed. Triggers without an
 explicit target retain the user-wide preference fallback.
@@ -504,7 +505,14 @@ and select an outbound delivery target before calling `trigger_create`.
 - Delivery flows through the delivery-resolution/outbound contract track, not
   through trigger ingress identity.
 
-V1 acceptance does not require external delivery. A valid V1 trigger fire is one that submits a cron-backed synthetic inbound turn and persists through the normal Reborn turn path.
+The historical V1 acceptance milestone did not require external delivery. The
+shipping product contract does: a fire persists its typed, creator-scoped
+delivery selection and the ordinary run-delivery path consumes that authority
+after completion. An omitted selection inherits the sealed source route; an
+explicit target is re-resolved at send time and fails closed if it is removed,
+unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
+persists the result without external egress. Trigger execution itself still
+does not choose, parse, or infer a destination.
 
 ---
 

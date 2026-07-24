@@ -22,19 +22,18 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
-use serde::Serialize;
-
-use crate::extension_host::channel_pairing::{
+use ironclaw_host_api::{NetworkMethod, ProductSurfaceCaller};
+use ironclaw_product::{
     ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
     ChannelPairingStatus,
 };
+use serde::Serialize;
+
 use crate::webui::route_mounts::ProtectedRouteMount;
 
 const MINT_PATH: &str = "/api/webchat/v2/extensions/{extension_id}/pairing/mint";
@@ -227,7 +226,7 @@ fn unknown_extension() -> Response {
 async fn mint(
     State(state): State<PairingRouteState>,
     Path(extension_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Response {
     let Some(service) = service_for(&state, &extension_id) else {
         return unknown_extension();
@@ -241,7 +240,7 @@ async fn mint(
 async fn status(
     State(state): State<PairingRouteState>,
     Path(extension_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Response {
     let Some(service) = service_for(&state, &extension_id) else {
         return unknown_extension();
@@ -255,7 +254,7 @@ async fn status(
 async fn unpair(
     State(state): State<PairingRouteState>,
     Path(extension_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Response {
     let Some(service) = service_for(&state, &extension_id) else {
         return unknown_extension();

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, this change removes activation-era disclosure text without adding a new responsibility, plan #6175
 //! Pure progressive tool-disclosure catalog and selector.
 //!
 use std::{
@@ -39,11 +40,10 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "http",
     "web_search",
     // onboarding entry points — the full extension lifecycle is core so a weak
-    // model can run search -> install -> activate -> remove directly, without
+    // model can run search -> install -> remove directly, without
     // routing the install/remove steps through tool_search.
     "extension_search",
     "extension_install",
-    "extension_activate",
     "extension_remove",
     // routine / scheduled-trigger lifecycle — core so the model can list and
     // create routines directly with the full schema in context. trigger_create's
@@ -919,7 +919,6 @@ mod tests {
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
             ("extension_install", "builtin.extension_install"),
-            ("extension_activate", "builtin.extension_activate"),
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),
             ("trigger_create", "builtin.trigger_create"),
@@ -1626,7 +1625,7 @@ mod tests {
             "http",
             "web_search",
             "extension_search",
-            "extension_activate",
+            "extension_install",
             "skill_list",
             "time",
         ];

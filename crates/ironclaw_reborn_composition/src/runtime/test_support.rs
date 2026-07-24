@@ -36,9 +36,24 @@ fn build_approval_interaction_service_with_parts(
                 parts.skill_mounts.clone(),
                 parts.memory_mounts.clone(),
                 parts.system_extensions_lifecycle_mounts.clone(),
-                local_dev::extension_surface::ExtensionCapabilitySurfaceSource::new(Some(
-                    Arc::clone(&parts.extension_management),
-                )),
+                extension_surface::ExtensionCapabilitySurfaceSource::new(Some({
+                    let mut facade = crate::extension_host::lifecycle::LifecycleFacade::new(
+                        Arc::clone(&parts.skill_management),
+                    )
+                    .with_extension_management(Arc::clone(&parts.extension_management))
+                    .with_admin_configuration_resolver(Arc::clone(
+                        &parts.admin_configuration_resolver,
+                    ))
+                    .with_runtime_credential_accounts(
+                        parts
+                            .product_auth
+                            .runtime_credential_account_selection_service(),
+                    );
+                    if let Some(egress) = parts.runtime_http_egress.as_ref() {
+                        facade = facade.with_runtime_http_egress(Arc::clone(egress));
+                    }
+                    Arc::new(facade)
+                })),
             )),
             approval_resolver,
             turn_coordinator,

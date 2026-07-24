@@ -53,7 +53,7 @@ pub fn extension_registry() -> GithubSupportResult<ExtensionRegistry> {
 
 /// The parsed github `ExtensionPackage` alone (no registry wrapper); C-JOURNEY
 /// feeds it into `publish_bundled_extension_for_test` for github.* dispatch
-/// without a scripted install/activate handshake.
+/// without a scripted install/setup handshake.
 pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
     // Parse through the single record entry point (the bundled assets are
     // manifest v3 documents since the first-party rewrite).

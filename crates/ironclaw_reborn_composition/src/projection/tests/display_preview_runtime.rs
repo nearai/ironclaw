@@ -1,5 +1,5 @@
 use super::*;
-use ironclaw_product_adapters::ProductOutboundPayload;
+use ironclaw_product::ProductOutboundPayload;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
@@ -292,7 +292,7 @@ async fn webui_projection_holds_cursor_when_completed_preview_is_pending() {
     assert_eq!(pending_resume.total, 3);
     assert!(pending_resume.payloads.is_empty());
 
-    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor {
+    let mut batch = ProductSurfaceProjectionBatch::new(ProductSurfaceProjectionCursor {
         runtime_item: Some(first.item_cursor.runtime),
         runtime_payloads_delivered: first.payloads[1].delivered,
         ..Default::default()
@@ -370,7 +370,7 @@ async fn webui_projection_advances_stale_completed_activity_without_preview_reco
         ProductOutboundPayload::CapabilityActivity(_)
     ));
 
-    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor::default());
+    let mut batch = ProductSurfaceProjectionBatch::new(ProductSurfaceProjectionCursor::default());
     let advanced = batch
         .push_durable_runtime_payloads(
             item.final_cursor,
@@ -422,7 +422,7 @@ async fn webui_projection_advances_held_cursor_when_pending_preview_times_out() 
     assert_eq!(timed_out.total, 2);
     assert!(timed_out.payloads.is_empty());
 
-    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor {
+    let mut batch = ProductSurfaceProjectionBatch::new(ProductSurfaceProjectionCursor {
         runtime_item: Some(first.item_cursor.runtime),
         runtime_payloads_delivered: first.payloads[1].delivered,
         ..Default::default()

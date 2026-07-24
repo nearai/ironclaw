@@ -11,13 +11,13 @@
 //! anything delivered.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
-};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef,
     ImmediateResponse, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    TargetCandidate, TargetQuery, VerifiedInbound,
+    TargetCandidate, TargetQuery, VerifiedInbound, render_channel_auth_prompt,
+};
+use ironclaw_host_api::{
+    NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
 };
 use serde::Deserialize;
 
@@ -27,7 +27,7 @@ use crate::payload::{
     SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError, normalize_slack_event,
 };
 
-/// The `[channel.config]` handle carrying the bot token (manifest data; the
+/// The administrator-configuration handle carrying the bot token (manifest data; the
 /// host injects the secret at egress time).
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 
@@ -101,6 +101,28 @@ impl ChannelAdapter for SlackChannelAdapter {
                             // The report describes exactly what the vendor
                             // accepted; the coordinator owns retry semantics
                             // (a partial multipart is terminal there).
+                            break 'parts;
+                        }
+                    }
+                }
+                OutboundPart::AuthPrompt {
+                    view,
+                    direct_message,
+                } => {
+                    let markdown = render_channel_auth_prompt(view, *direct_message);
+                    let rendered = render_slack_mrkdwn(&markdown);
+                    for chunk in slack_text_chunks(&rendered) {
+                        let outcome = post_slack_chunk(
+                            egress,
+                            &credential,
+                            &channel,
+                            thread_ts.as_deref(),
+                            &chunk,
+                        )
+                        .await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
                             break 'parts;
                         }
                     }
@@ -376,7 +398,7 @@ fn parse_error(error: SlackPayloadParseError) -> ChannelError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductTriggerReason;
+    use ironclaw_host_api::product_adapter::ProductTriggerReason;
 
     use super::*;
 
@@ -462,8 +484,8 @@ mod tests {
 
     #[test]
     fn gate_resolution_text_stays_a_plain_message_for_host_reclassification() {
-        // The adapter must NOT classify gate resolutions — the host sink
-        // does, via `classify_interaction_resolution`.
+        // The adapter must NOT classify gate resolutions — the shared host
+        // sink applies the channel-neutral interaction grammar.
         let outcome = inbound(
             br#"{
                 "type": "event_callback",
@@ -545,10 +567,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    use ironclaw_host_api::product_adapter::{OutboundPart, PartDeliveryOutcome};
     use ironclaw_host_api::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
-    use ironclaw_product_adapters::{OutboundPart, PartDeliveryOutcome};
 
     struct ScriptedEgress {
         requests: Mutex<Vec<RestrictedEgressRequest>>,
@@ -595,8 +617,8 @@ mod tests {
             extension_id: "slack".to_string(),
             installation_id: "install_alpha".to_string(),
             delivery_attempt_id: "attempt-1".to_string(),
-            target: ironclaw_product_adapters::OutboundTarget {
-                conversation: ironclaw_product_adapters::ExternalConversationRef::new(
+            target: ironclaw_host_api::product_adapter::OutboundTarget {
+                conversation: ironclaw_host_api::product_adapter::ExternalConversationRef::new(
                     Some("T-A"),
                     "D123",
                     Some("1710000000.000100"),
@@ -656,7 +678,7 @@ mod tests {
         )]);
         let candidates = SlackChannelAdapter
             .list_targets(
-                ironclaw_product_adapters::TargetQuery {
+                ironclaw_host_api::product_adapter::TargetQuery {
                     extension_id: "slack".to_string(),
                     installation_id: "install_alpha".to_string(),
                     query: Some("im:U123".to_string()),
@@ -684,7 +706,7 @@ mod tests {
         let egress = ScriptedEgress::new(Vec::new());
         let error = SlackChannelAdapter
             .list_targets(
-                ironclaw_product_adapters::TargetQuery {
+                ironclaw_host_api::product_adapter::TargetQuery {
                     extension_id: "slack".to_string(),
                     installation_id: "install_alpha".to_string(),
                     query: None,

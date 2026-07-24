@@ -4,9 +4,8 @@ import { channelSetupError } from "./channel-setup-api";
 
 // Generic WebGeneratedCode pairing endpoints (extension-runtime §5.5): the
 // backend registers a pairing service per extension whose account-setup
-// descriptor declares the `web_generated_code` connect strategy; every other
-// extension 404s here, which the Configure surface uses to route between the
-// minted-code panel and the proof-code paste box.
+// descriptor declares the `web_generated_code` connect strategy. Presentation
+// routes directly from the manifest strategy; these calls never probe support.
 export function extensionPairingPath(extensionId, action) {
   return `/api/webchat/v2/extensions/${encodeURIComponent(extensionId)}/pairing/${action}`;
 }

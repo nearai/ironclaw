@@ -636,7 +636,7 @@ impl HostRuntime for DefaultHostRuntime {
         // Trust classification and the persistent-approval re-application on
         // auth-resume now live in the kernel's `authorize_resumed` fold
         // (§5.2.7/§5.3.2): a capability authorized only by a persistent grant
-        // (e.g. `extension_activate` under admin-config FirstParty trust) is
+        // (e.g. `extension_install` under admin-config FirstParty trust) is
         // re-authorized by the kernel injecting the candidate grant after the
         // credential gate, and a trust rejection fails the blocked run there —
         // replacing the former host_runtime pre-authorization + `context.trust`
@@ -678,6 +678,34 @@ impl HostRuntime for DefaultHostRuntime {
                     ))),
                 }
             }
+        }
+    }
+
+    async fn decline_auth_capability(
+        &self,
+        request: crate::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let (context, capability_id) = request;
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        match host.decline_auth_json(context, capability_id.clone()).await {
+            Ok(()) => Ok(RuntimeCapabilityOutcome::Failed(
+                RuntimeCapabilityFailure::new(
+                    capability_id,
+                    RuntimeFailureKind::GateDeclined,
+                    Some("auth gate denied by user".to_string()),
+                ),
+            )),
+            Err(CapabilityInvocationError::RunState(error)) => {
+                Err(unavailable_from_run_state(*error))
+            }
+            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => {
+                Err(HostRuntimeError::unavailable("run-state store unavailable"))
+            }
+            Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                error,
+                capability_id,
+            ))),
         }
     }
 

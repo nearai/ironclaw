@@ -78,7 +78,6 @@ pub struct ExecutionContext {
     /// an ingress either knows its true origin or leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<InvocationOrigin>,
-
     pub extension_id: ExtensionId,
     pub runtime: RuntimeKind,
     pub trust: TrustClass,
@@ -137,6 +136,27 @@ impl ExecutionContext {
     /// "`run_id` implies a `LoopRun` origin" rule — the capability seal and the
     /// authorization gate both resolve origin through here rather than
     /// re-deriving it.
+    ///
+    /// # Scheduled runs never downgrade here
+    ///
+    /// The `run_id` fallback reconstructs [`InvocationOrigin::LoopRun`] **only** —
+    /// the mutation-permissive interactive origin. It can never fabricate a
+    /// scheduled origin, so the safety of the trigger self-mutation policy
+    /// (which denies [`InvocationOrigin::ScheduledLoopRun`]) rests on a single
+    /// upstream invariant: **a scheduled ingress must stamp its `origin`
+    /// explicitly.** Loop orchestration already does this — `ironclaw_loop_host`'s
+    /// `invocation_context_from_visible` stamps `ScheduledLoopRun` for a
+    /// `ScheduledTrigger` product context — so a scheduled run always arrives with
+    /// `origin = Some(ScheduledLoopRun(..))` and never reaches the fallback below.
+    ///
+    /// The fallback is deliberately *not* guarded (no `debug_assert!`, no
+    /// fail-closed): the `origin = None, run_id = Some` shape is a pinned
+    /// transitional-compat contract for legacy interactive contexts (see
+    /// `ironclaw_capabilities::host` `authorize_seals_..._real_origin_across_ingresses`),
+    /// and it must keep resolving to `LoopRun`. Because a scheduled run is never
+    /// un-stamped, tightening this fallback would only reject the safe legacy path
+    /// while doing nothing about the (non-occurring) scheduled case. The guard
+    /// that matters lives at the ingress that stamps `origin`, not here.
     pub fn resolved_origin(&self) -> Option<InvocationOrigin> {
         self.origin
             .clone()
@@ -186,6 +206,69 @@ impl ExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scheduled_context() -> ExecutionContext {
+        ExecutionContext::local_default(
+            UserId::new("scheduled-subject").unwrap(),
+            ExtensionId::new("demo").unwrap(),
+            RuntimeKind::Script,
+            TrustClass::Sandbox,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolved_origin_preserves_explicit_scheduled_origin_without_downgrade() {
+        // The core Item-4 guarantee: a scheduled run resolves to
+        // ScheduledLoopRun (which the trigger self-mutation policy denies), never
+        // the mutation-permissive LoopRun the run_id fallback would guess.
+        let mut context = scheduled_context();
+        let run_id = RunId::new();
+        context.run_id = Some(run_id);
+        context.origin = Some(InvocationOrigin::ScheduledLoopRun(run_id));
+        assert_eq!(
+            context.resolved_origin(),
+            Some(InvocationOrigin::ScheduledLoopRun(run_id)),
+        );
+    }
+
+    #[test]
+    fn resolved_origin_returns_stamped_loop_run() {
+        let mut context = scheduled_context();
+        let run_id = RunId::new();
+        context.run_id = Some(run_id);
+        context.origin = Some(InvocationOrigin::LoopRun(run_id));
+        assert_eq!(
+            context.resolved_origin(),
+            Some(InvocationOrigin::LoopRun(run_id)),
+        );
+    }
+
+    #[test]
+    fn resolved_origin_is_none_without_run_or_origin() {
+        // A host-internal / one-shot context carries neither: never guessed.
+        assert_eq!(scheduled_context().resolved_origin(), None);
+    }
+
+    #[test]
+    fn resolved_origin_fallback_is_loop_run_only_never_scheduled() {
+        // Transitional-compat contract (pinned by `ironclaw_capabilities::host`):
+        // an un-stamped context carrying only a run_id resolves to LoopRun. The
+        // load-bearing safety property is that this fallback can ONLY ever be the
+        // mutation-permissive LoopRun — it never fabricates a ScheduledLoopRun —
+        // so a scheduled run, which always stamps its origin upstream, cannot be
+        // recovered (or downgraded) through this path.
+        let mut context = scheduled_context();
+        let run_id = RunId::new();
+        context.run_id = Some(run_id);
+        // origin intentionally left unset.
+        assert_eq!(
+            context.resolved_origin(),
+            Some(InvocationOrigin::LoopRun(run_id)),
+        );
+    }
 
     #[test]
     fn legacy_execution_context_without_optional_identity_fields_deserializes() {

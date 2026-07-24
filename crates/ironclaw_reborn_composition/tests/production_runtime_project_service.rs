@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
     AgentId, TenantId, UserId,
     runtime_policy::{
@@ -31,9 +32,8 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort,
 };
-use ironclaw_product_workflow::{
-    PROJECT_CREATE_OPERATION, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
-    WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    PROJECT_CREATE_COMMAND, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -128,7 +128,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         .expect("production runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
 
-    let owner = WebUiAuthenticatedCaller::new(
+    let owner = ProductSurfaceCaller::new(
         TenantId::new(RUNTIME_TENANT).unwrap(),
         UserId::new(OWNER).unwrap(),
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
@@ -139,11 +139,13 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let created = PROJECT_CREATE_OPERATION
-        .execute_on(
-            bundle.api.as_ref(),
-            owner.clone(),
+    let owner_surface =
+        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), owner.clone());
+    let created = PROJECT_CREATE_COMMAND
+        .invoke_on(
+            &owner_surface,
             create_request("Prod Project"),
+            ironclaw_host_api::ActivityId::new(),
         )
         .await
         .expect("production project facade must be reachable (not service_unavailable)");
@@ -154,8 +156,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // lists back for its owner.
     let listed = PROJECTS_VIEW
         .query_on(
-            bundle.api.as_ref(),
-            owner.clone(),
+            &owner_surface,
             RebornListProjectsRequest { limit: None },
             None,
         )
@@ -168,16 +169,17 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
 
     // (3) TENANT SCOPING. A caller in a different tenant must not observe the
     // owner's project — the repository partitions by the per-call tenant.
-    let other_tenant = WebUiAuthenticatedCaller::new(
+    let other_tenant = ProductSurfaceCaller::new(
         TenantId::new("prod-projects-other-tenant").unwrap(),
         UserId::new("prod-projects-other-user").unwrap(),
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
+    let other_surface =
+        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), other_tenant);
     let other_listed = PROJECTS_VIEW
         .query_on(
-            bundle.api.as_ref(),
-            other_tenant,
+            &other_surface,
             RebornListProjectsRequest { limit: None },
             None,
         )

@@ -7,7 +7,7 @@
 > manifest-driven extension runtime. Telegram now ships as an ordinary
 > extension package (`crates/ironclaw_first_party_extensions/assets/telegram/`
 > plus its `ChannelAdapter` in `crates/ironclaw_telegram_extension`), installed,
-> activated, and dispatched by the generic runtime; see
+> readiness-derived, and dispatched by the generic runtime; see
 > `docs/reborn/extension-runtime/overview.md`. This document is retained as the
 > historical design record of the pre-runtime Telegram host; read it for the
 > shape of the flows, not for current crate or type names.
@@ -88,10 +88,11 @@ Operator-managed, one bot per deployment
   4. Secrets persist under revision-suffixed, attempt-salted handles in the
      shared `SecretStore`; the setup record publishes through bounded CAS.
      Concurrent losers clean up only their own attempt's handles.
-  5. The `telegram` extension is tenant-activated; **activation failure
-     rolls the record back** to the previous save
-     (`rollback_failed_activation_save`) so store state and runtime never
-     split-brain.
+  5. The deployment channel host reconciles the new configured revision. A
+     reconciliation failure rolls the record back to the previous save so
+     stored administrator configuration and the mounted ingress never
+     split-brain. This does not install Telegram for the administrator or any
+     member; user membership remains independent.
   - Invalid token, rejected `setWebhook`, or missing public base URL all
     fail closed with a precise admin error; nothing is half-configured.
 - **`GET`** returns a redacted status only
@@ -143,7 +144,7 @@ Operator-managed, one bot per deployment
   |---|---|
   | non-private chat (group/supergroup), `channel_post`, `edited_message`, sender is a bot | ignored — no turn, no reply |
   | private DM from an **unpaired** sender | fail closed, no turn; the bot replies with a **static** throttled pairing hint (never LLM-generated, at most once per chat per throttle window) |
-  | private `/start <CODE>` or a bare message exactly matching a live code | pairing consume (below) |
+  | private `/start <CODE>` or a bare message exactly matching a live code | pairing consume (below); `/start` is authorized by the Telegram manifest rather than built into the generic parser |
   | private bare `/start` (no payload) | paired sender: silent ack — no turn, no reply (re-opening the chat must not pitch pairing); unpaired sender: the static throttled pairing hint; pairedness-lookup outage: silent ack |
   | private text from a **paired** sender | workflow turn (continuous conversation) |
 
@@ -169,30 +170,41 @@ Direction is web→Telegram: IronClaw issues the code; the bot never does
   renders the link, a QR of the same link, and the copyable code/username.
 - **Status** (`GET`): `{ connected, pending? }` for the caller.
 - **Consume** (over the verified webhook, private chat only): `/start
-  <CODE>` or a bare live code, case-insensitive (uppercase-normalized).
+  <CODE>` (because Telegram declares `inbound_code_prefixes = ["/start"]`)
+  or a bare live code, case-insensitive (uppercase-normalized). Undeclared
+  command prefixes remain ordinary inbound text.
   Valid + live + unconsumed ⇒ bind
   `tg-bot-<bot_id>:<telegram_user_id>` → the code's user (**bind, never
   mint** — channel actors are not mintable), record the DM `chat_id` as the
   user's delivery target, mark the code consumed, confirm in-chat, and
   dispatch the auth continuation.
   - Telegram account already bound to a **different** user ⇒ explicit
-    `AlreadyBoundToOtherUser` refusal; no silent re-bind.
+    `AlreadyBoundToOtherUser` refusal; no silent re-bind and the rightful
+    user's code remains live.
+  - The code claim is atomic: concurrent webhook consumers produce exactly
+    one pairing winner. A code presented under a foreign authenticated
+    installation is indistinguishable from an unknown code and cannot burn it.
   - Same user re-pairing ⇒ idempotent success, binding unchanged.
   - Expired/consumed/unknown/malformed ⇒ `ExpiredOrUnknown`; no binding,
     no continuation dispatch; failed attempts are rate-limited per chat.
 - **Disconnect** (`DELETE`, or extension remove): removes the caller's
   binding + DM target and invalidates any live code; only that user is
-  affected; history retained.
-- **Blocked-run resume:** consume dispatches an `AuthContinuationEvent`
-  with `provider = telegram` and `AuthContinuationRef::SetupOnly`; the
-  standard `BlockedAuthResumeFanout` resumes every `BlockedAuth` run parked
-  for that tenant+user on provider `telegram`. **Codes expire; gates
+  affected; history retained. It also removes the external actor's current
+  conversation pairing, so the same chat receives a fresh thread if the user
+  later pairs it again.
+- **Blocked-run resume:** consume durably records and dispatches an
+  `AuthContinuationEvent` with `provider = telegram` and
+  `AuthContinuationRef::LifecycleActivation`; the lifecycle continuation slot
+  reconciles activation, then the standard `BlockedAuthResumeFanout` resumes
+  every `BlockedAuth` run parked for that tenant+user on provider `telegram`.
+  **Codes expire; gates
   don't** — the parked run is provider-keyed, not code-keyed, so pairing
   with the n-th rotated code still resumes it.
 
 ## The in-chat gate
 
-In-chat `builtin.extension_activate` with an unpaired caller parks the run
+In-chat `builtin.extension_install` with an unpaired caller joins membership
+and parks the run
 (`extension_host/extension_lifecycle.rs`):
 
 - Telegram declares a provider-neutral account-setup descriptor with
@@ -207,7 +219,8 @@ In-chat `builtin.extension_activate` with an unpaired caller parks the run
   the Extensions card uses (dual-surface parity). Bot credentials are
   **never requested in chat** — admin setup is a WebUI-only surface.
 - The resumed run recomputes the requirement list; a paired caller yields
-  none and activation completes (the self-correcting `BlockedAuth` shape).
+  none and the derived public state becomes `active` (the self-correcting
+  `BlockedAuth` shape). There is no separate activation command or state.
 - The connectable-channels facade (`telegram_connectable_channel.rs`)
   shows the operator an `admin_managed_channels` bot-setup card and every
   same-tenant member a `web_generated_code` pairing row once the bot is

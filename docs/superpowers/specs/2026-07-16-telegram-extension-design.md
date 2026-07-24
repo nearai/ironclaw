@@ -1,7 +1,14 @@
 # Telegram Extension — Design Spec
 
+> **SUPERSEDED by the unified manifest-driven extension runtime.** This file is
+> retained as the pre-unification design record. The shipping public lifecycle
+> is `uninstalled -> setup_needed -> active`, derived from membership plus the
+> manifest-declared connection recipe. There is no public Activate command,
+> endpoint, or durable per-user activation toggle; references below use current
+> install/setup terminology where they describe user-visible behavior.
+
 - **Date:** 2026-07-16
-- **Status:** Approved by Ben (design review 2026-07-16); pending spec-file review
+- **Status:** Superseded — see `docs/reborn/extension-runtime/overview.md`
 - **Target:** Reborn stack on `main`, shippable before PR #6116 merges, portable onto #6116 with zero behavior change
 
 ## Summary
@@ -9,7 +16,11 @@
 Ship Telegram as a first-class IronClaw entrypoint on the Reborn stack:
 
 - **Admins** configure one Telegram bot per deployment (bot token, Channels tab), exactly parallel to the Slack bot setup.
-- **Users** install the single `telegram` extension (registry tab or in-chat `extension_activate`), which blocks on a **pairing gate**: IronClaw issues a short-lived code, presented as a deep link `https://t.me/<bot_username>?start=<CODE>`; tapping Start pairs automatically and blocked threads auto-resume.
+- **Users** install the single `telegram` extension (registry tab or in-chat
+  install). Membership immediately derives `setup_needed` while the caller is
+  unpaired, and the pairing gate issues a short-lived code presented as a deep
+  link `https://t.me/<bot_username>?start=<CODE>`; tapping Start pairs
+  automatically, resumes blocked threads, and makes the derived state `active`.
 - Once paired, DMs to the bot are a full IronClaw entrypoint (continuous conversation, proactive delivery in). **No `telegram.*` tools; IronClaw cannot act on the user's behalf** — that is the future link-device flow under the same `telegram` extension identity.
 
 The implementation clones the proven `crates/ironclaw_reborn_composition/src/slack/**` host-module shape (as `telegram/**`, cargo feature `telegram-v2-host-beta`), reuses the existing, unwired `crates/ironclaw_telegram_v2_adapter` untouched, and pins every externally observable name/route/semantic to the shapes PR #6116 already ships for its reference Telegram extension — so porting later means deleting the composition module while the behavior contract (and this QA suite) carries over 1:1.
@@ -58,16 +69,16 @@ Mirror of Slack's operator flow (`slack_channel_routes/*`, `slack_setup.rs`, `sl
 - The Extensions page **Channels tab** (`pages/extensions/components/channels-tab.tsx`) shows a Telegram card for the operator: the telegram connectable-channels facade returns an `admin_managed_channels` action only when the caller is the operator (same rule as `slack_admin_managed_channel_connectable_channel()`).
 - New `telegram-setup-panel.tsx` + `lib/telegram-setup-api.ts`. Fields: **bot token** (secret, required), **public webhook URL override** (non-secret, optional; default derived from the deployment's configured public base — the same source Slack personal OAuth uses for its hosted callback). Blank secret on save means "keep existing" (Slack convention).
 - Backend: `GET/PUT /api/webchat/v2/channels/telegram/setup`, mounted composition-side via a `WebuiServeConfig::with_telegram_channel_routes(...)` analog, gated by the same `ensure_authorized_operator` (cross-tenant → 404 anti-enumeration, non-operator → 403), each field passed through the safety-layer scan (`scan_route_admin_field`).
-- **Save pipeline** (persist-then-activate with rollback, per `setup.rs::save_handler` + `rollback_failed_activation_save`):
+- **Save pipeline** (persist-then-reconcile with rollback, per the setup service):
   1. `getMe` — validates the token; captures `bot_username` + `bot_id` (persisted non-secret in the setup record; deep links need the username, identity scoping needs the id).
   2. Generate a fresh random `telegram_webhook_secret`.
   3. `setWebhook(url = <public-base>/webhooks/extensions/telegram/updates, secret_token = <generated>, allowed_updates = ["message"])`.
   4. Secrets into `SecretStore` under `telegram_bot_token*` / `telegram_webhook_secret*` handles (revision-suffixed like Slack), operator/tenant `ResourceScope`; record into telegram host state (`/tenant-shared/telegram-setup/`, a `FilesystemSlackHostState` analog).
-  5. Tenant-activate the `telegram` extension via `RebornLocalExtensionManagementPort` (Static mode).
+  5. Reconcile the deployment channel host against the newly configured revision.
   - Any step failing ⇒ roll back to the previous saved state and return a precise admin error. Invalid token / unreachable `api.telegram.org` / missing public base URL all **fail closed**; nothing half-configured.
 - `GET /setup` returns a **redacted status** (`bot_token_configured: bool`, `bot_username`, webhook state) — raw secrets are never echoed anywhere (UI, logs, API responses).
 - **Reconfigure** re-runs the pipeline (token rotation of the same bot preserves pairings; a different bot's token re-scopes `bot_id` and orphans them by design).
-- **Clear/remove setup**: `deleteWebhook` (best-effort — if the token is already revoked provider-side, proceed), deactivate the tenant extension, purge the secret handles. Pairing records and all history are **retained** (ingress simply fails closed until reconfigured; if the same bot returns, pairings work again).
+- **Clear/remove setup**: `deleteWebhook` (best-effort — if the token is already revoked provider-side, proceed), make the deployment channel unavailable, and purge the secret handles. Pairing records and all history are **retained** (ingress simply fails closed until reconfigured; if the same bot returns, pairings work again).
 
 ## 3. Ingress & message flow
 
@@ -85,7 +96,7 @@ Mirror of Slack's operator flow (`slack_channel_routes/*`, `slack_setup.rs`, `sl
 
 All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). The code store is Reborn-side and new — v1's `pairing_requests`/`channel_identities` machinery is **not** reused (wrong direction, wrong identity store), but its conventions carry over where noted.
 
-1. **Issue.** Triggered by Connect on the Extensions card or by in-chat `builtin.extension_activate`. Preconditions: tenant bot configured, else fail closed with "an administrator must configure the Telegram bot first" (no code minted). Mint: 8 chars from the v1 unambiguous alphabet (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`), OS CSPRNG, **15-minute TTL**, **single-use**, **one live code per user per installation** — re-request rotates the code and invalidates the prior one (v1 `upsert_pairing_request` semantics). Codes are bound to `(tenant, ironclaw_user_id, bot_id)`.
+1. **Issue.** Triggered by Connect on the Extensions card or by an in-chat install that derives `setup_needed`. Preconditions: tenant bot configured, else fail closed with "an administrator must configure the Telegram bot first" (no code minted). Mint: 8 chars from the v1 unambiguous alphabet (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`), OS CSPRNG, **15-minute TTL**, **single-use**, **one live code per user per installation** — re-request rotates the code and invalidates the prior one (v1 `upsert_pairing_request` semantics). Codes are bound to `(tenant, ironclaw_user_id, bot_id)`.
 2. **Present.** One shared panel contract for both surfaces (in-chat blocked card and Extensions card — RC-10 parity), offering a **three-rung fallback ladder** so pairing works regardless of where Telegram lives:
    1. **Deep link** `https://t.me/<bot_username>?start=<CODE>` (8-char code is valid `start` payload) — same-device happy path.
    2. **QR code of that same deep link**, rendered client-side in the panel (presentation only: same URL, same code — no new backend, not the separate QR strategy) — the cross-device path: IronClaw in a desktop browser, Telegram on the phone.
@@ -97,7 +108,7 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
    - record the DM `chat_id` as the user's Telegram delivery target;
    - mark the code consumed;
    - reply "✅ Paired to <display name>. You can talk to IronClaw right here.";
-   - dispatch the auth-continuation completion event (provider `telegram`) — the existing `BlockedAuthResumeFanout` resumes every `BlockedAuth` run for that tenant+user whose requirements include provider `telegram` (self-correcting re-run of `extension_activate`, which now finds the caller paired and completes activation);
+   - dispatch the auth-continuation completion event (provider `telegram`) — the existing `BlockedAuthResumeFanout` resumes every `BlockedAuth` run for that tenant+user whose requirements include provider `telegram`; membership plus the now-satisfied pairing requirement derives `active` without a second lifecycle command;
    - the panel flips to Connected via its status mechanism.
 4. **Refuse.**
    - Expired/consumed/unknown code ⇒ static "that code has expired — get a fresh link from IronClaw" reply; no binding; invalid-code attempts rate-limited per chat.
@@ -109,11 +120,11 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
 ## 5. Extension lifecycle & the two install surfaces
 
 - `telegram` is **visible** in the user catalog (`available_extensions.rs` entry behind the `telegram-v2-host-beta` feature; **not** in `is_internal_extension_package_ref` — that hidden-companion pattern is the retired `slack_bot` taxonomy).
-- Admin setup tenant-activates the extension (§2). Per-user state is the **connection** (pairing), surfacing through the existing onboarding derivation: channel extension + caller not personally connected ⇒ `SetupRequired`; paired ⇒ connected/active for that caller.
+- Admin setup configures the deployment channel (§2) without installing it for any user. Per-user state is derived from membership plus the **connection** (pairing): member + caller not personally connected ⇒ `setup_needed`; paired member ⇒ `active`.
 - **Registry tab**: the card's Connect/Configure action opens the pairing panel (§4.2). Install before admin config fails closed with the admin-config message.
-- **In-chat**: the existing `builtin.extension_search/install/activate` tools; `extension_activate` with an unpaired caller parks the run and renders the pairing card. Bot credentials are **never requested in chat** — admin-only surface. (This supersedes the old QA expectation `qa-install:A-4b` of an in-chat bot-token panel.)
+- **In-chat**: search and install establish membership; installing as an unpaired caller parks the run and renders the manifest-driven pairing card. Bot credentials are **never requested in chat** — admin-only surface. (This supersedes the old QA expectation `qa-install:A-4b` of an in-chat bot-token panel.)
 - **No tools**: zero tool capabilities declared. "Read my Telegram / send as me" ⇒ honest not-supported answer; a negative test pins the empty tool surface so nothing grows one accidentally before link-device.
-- **Remove semantics**: user remove = unpair (§4.5), others unaffected. Admin clears setup = channel stops for everyone (fail-closed ingress), tenant extension deactivates, secrets purged, pairings + history retained. Removal during a pending pairing invalidates the code (RA-1 analog); removal mid-inbound must not resurrect the channel (RM-H8's in-flight rule).
+- **Remove semantics**: user remove = leave membership and unpair (§4.5), others unaffected. Admin clears setup = channel stops for everyone (fail-closed ingress) and deployment secrets are purged; user memberships, pairings, and history are retained. Removal during a pending pairing invalidates the code (RA-1 analog); removal mid-inbound must not resurrect the channel (RM-H8's in-flight rule).
 
 ## 6. Security invariants
 
@@ -133,7 +144,7 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
 - Main-schema manifest (`[[product_adapter.inbound.host_ingress]]` shape) → replaced by the v3 manifest that already exists at `f8e7c72c3:crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml` (same id, same handles, same route suffix, same presentation).
 - `ironclaw_telegram_v2_adapter` diffs against its #6116 descendant `ironclaw_telegram_extension` (the reconciliation already contains that port); keep main-side adapter changes at zero or near-zero.
 
-**#6116-side follow-up (for the fold, not built now):** `channel_connect_strategy()` in the target derives only OAuth-vs-`InboundProofCode`; it must derive `WebGeneratedCode` for Telegram from manifest data (a small generic-side change, no per-extension branch — e.g. a manifest connect hint or channel-config-derived rule). The `WebGeneratedCode` panel/frontend built now is the same one the target strategy will drive.
+**#6116-side follow-up (completed in the fold):** the target derives `WebGeneratedCode` directly from manifest data, with no per-extension branch. Unsupported pasted-proof and QR-only strategies were removed from the public vocabulary rather than retained as unimplemented promises.
 
 **Gates to respect now** (so the fold is mechanical): no retired-taxonomy names in anything new; no `telegram` strings outside the telegram module/crates/inventory (mirror the specificity-gate exemption boundaries even though the gate itself isn't on main).
 
@@ -171,7 +182,7 @@ After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `
 
 1. `before-telegram-is-connected` — bot unconfigured; configured-but-unpaired DM fails closed + static hint; forged/missing secret header pre/post config; `/start` with no code; group message ignored.
 2. `configure-and-connect-telegram` — admin happy path (save → `getMe` → `setWebhook` → first paired inbound answers, no restart); invalid token fail-closed; `setWebhook` failure rollback; token rotation (same bot: pairings survive); bot swap (different bot: pairings orphaned by design); missing public base URL.
-3. `install-and-activate-telegram` — registry-tab install→pair; in-chat "set up Telegram" → search/install/activate → blocked pairing card (supersedes old A-4b); dual-surface parity (RC-10 analog); install before admin config fails closed.
+3. `install-and-connect-telegram` — registry-tab install→pair; in-chat "set up Telegram" → search/install → blocked pairing card (supersedes old A-4b); dual-surface parity (RC-10 analog); install before admin config fails closed.
 4. `pair-a-personal-telegram-account` — deep-link happy path + thread auto-resume; typed-code fallback; expired code; consumed-code reuse; re-request rotates; already-bound-to-other-user refusal; same-user idempotent re-pair; abandon panel and retry cleanly; disconnect/unpair.
 5. `messages-and-continuity` — DM happy path; multi-message continuity; long response chunking (>4096); formatting (plain text); inbound media/attachment handled gracefully; `/start` when already paired; unicode/control chars; edited message ignored.
 6. `multiple-users-and-isolation` — two users pair to the same bot, no bleed; unknown user fail-closed; per-message binding re-read (revoked mid-flight rejected); same Telegram account cannot bind to two IronClaw users; one user's unpair leaves others untouched.
@@ -182,7 +193,7 @@ After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `
 
 Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/telegram.md` (old per-user bot-token model): `qa-install:A-4b` → pairing-card flow; `qa-remove-reconfigure:RM-H8` → split admin-clear vs user-unpair semantics; functional smoke stays, procedure updated.
 
-**Repo-side (implementation phase, test-first per `.claude/rules/testing.md`):** red-first `tests/integration/` coverage driven through the harness at real seams — webhook → verified ingress → turn; pairing consume → binding → `BlockedAuth` resume; unpaired fail-closed; honest delivery statuses; restart survival through reopened stores; admin save rollback on activation failure. Consolidate into the channel-lifecycle test shapes from #6105/#6113 rather than proliferating new files. Crate-tier only where the integration tier can't reach (justify in the PR).
+**Repo-side (implementation phase, test-first per `.claude/rules/testing.md`):** red-first `tests/integration/` coverage driven through the harness at real seams — webhook → verified ingress → turn; pairing consume → binding → `BlockedAuth` resume; unpaired fail-closed; honest delivery statuses; restart survival through reopened stores; admin save rollback on reconciliation failure. Consolidate into the channel-lifecycle test shapes from #6105/#6113 rather than proliferating new files. Crate-tier only where the integration tier can't reach (justify in the PR).
 
 ## 11. Implementation map
 
@@ -193,7 +204,7 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 | `crates/ironclaw_reborn_composition/src/telegram/mod.rs` (+ submodules below) | `src/slack/mod.rs` |
 | `telegram_setup.rs` — setup service, `getMe`/`setWebhook` client, secret handles | `slack_setup.rs` |
 | `telegram_host_state.rs` — setup/pairing/binding/target stores under `/tenant-shared/telegram-*` | `slack_host_state.rs` |
-| `telegram_channel_routes/` — admin `GET/PUT /setup`, operator auth, safety scan, activation-with-rollback | `slack_channel_routes/*` |
+| `telegram_channel_routes/` — admin `GET/PUT /setup`, operator auth, safety scan, reconcile-with-rollback | `slack_channel_routes/*` |
 | `telegram_serve.rs` — public webhook mount, installation resolver, immediate-ack dispatch | `slack_serve.rs` |
 | `telegram_actor_identity.rs` — per-message user resolution, provider `telegram` | `slack_actor_identity.rs` |
 | `telegram_pairing.rs` — code store, issue/rotate/consume, continuation dispatch | new (v1 `src/pairing/` conventions, Reborn stores) |
@@ -210,9 +221,9 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 ## 12. Planning-time verifications (pin before building)
 
-1. **Gate seam for channel connection**: confirm how in-chat `extension_activate` should park the run for an unpaired channel caller — extend `activation_credential_requirements` to include the channel-connection requirement (provider `telegram`) vs a parallel connection gate. Must end as `TurnStatus::BlockedAuth` + fanout-resumable. (Today Slack surfaces `connection_required` on activate results; the credential gate is a separate error path.)
+1. **Gate seam for channel connection**: an in-chat install by an unpaired channel caller must park the run through the manifest-declared channel-connection requirement (provider `telegram`). It ends as `TurnStatus::BlockedAuth` + fanout-resumable; satisfying the gate derives `active` without a public activation action.
 2. **Continuation event for pairing**: confirm `AuthContinuationEvent` (or the dispatcher entry point) can be emitted by a non-OAuth completion with provider `telegram` and `AuthContinuationRef::SetupOnly`/`LifecycleActivation` — the fanout itself is provider-keyed and agnostic.
-3. **Frontend `web_generated_code` handling**: does `channels-tab.tsx`/the connection panel already render this strategy (it handles `inbound_proof_code` and `admin_managed_channels`)? Pin the completion signal (poll vs SSE) to the existing panel mechanism.
+3. **Frontend `web_generated_code` handling**: route this strategy directly from the manifest to the host-generated code/deep-link/QR panel. Pin the completion signal (poll vs SSE) to the existing panel mechanism.
 4. **Single-manifest feasibility**: confirm main's manifest schema accepts a visible extension that declares `[[product_adapter.inbound.host_ingress]]` (visibility is only the `is_internal_extension_package_ref` code list — expected yes).
 5. **Idempotency seam** for duplicate `update_id` (what exactly dedups Slack retries today — workflow-level accepted-message idempotency vs runner-level).
 6. **Existing `telegram` references** in composition (`extension_removal_cleanup.rs`, `slack_actor_identity.rs`, `outbound_preferences.rs`, `communication_context.rs`) — reconcile rather than duplicate.
@@ -222,4 +233,4 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 ## Appendix: exploration provenance
 
-Grounded in four exploration reports (2026-07-16) over main + `f8e7c72c3` (PR #6116 head): Slack admin/ingress/lifecycle map, extension install/activate/gate map, Telegram + pairing prior art (three generations), and the #6116 target characterization (v3 manifest, recipes, retired-taxonomy + specificity gates, reference Telegram extension). Key upstream facts: main's `RebornChannelConnectStrategy` already includes `WebGeneratedCode`; `ironclaw_telegram_v2_adapter` is complete but unwired; v1 pairing flows the opposite direction and is not reused; #6116 ships `ironclaw_telegram_extension` as the "addition test" (DEL-10).
+Grounded in four exploration reports (2026-07-16) over main + `f8e7c72c3` (PR #6116 head): Slack admin/ingress/lifecycle map, the then-current extension install/activation/gate map, Telegram + pairing prior art (three generations), and the #6116 target characterization (v3 manifest, recipes, retired-taxonomy + specificity gates, reference Telegram extension). The public activation terminology in those source snapshots is historical; the superseding contract is the manifest-driven derived lifecycle linked above.

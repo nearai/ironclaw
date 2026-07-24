@@ -95,7 +95,7 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
 // fix, `auth_resume_capability` skipped `apply_persistent_approval_policy`, so the
 // resume re-authorized a grant-less context and was denied — the credential gate
 // resumed only to fail authorization (observed when connecting Gmail: OAuth
-// completed, but the `extension_activate` auth-resume failed `authorization`,
+// completed, but the `extension_install` auth-resume failed `authorization`,
 // while a later fresh dispatch succeeded). With `approval_request_id = None`
 // there is no approval lease to carry the grant, so the persistent policy is the
 // only authority and must be re-applied.

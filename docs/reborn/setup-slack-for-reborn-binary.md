@@ -40,11 +40,11 @@ Slack Events API must reach the Reborn listener over a public HTTPS URL:
 https://<public-host>/webhooks/extensions/slack/events
 ```
 
-Slack personal OAuth must also redirect back to the Reborn product-auth
+Slack user OAuth must also redirect back to the Reborn product-auth
 callback:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+https://<public-host>/api/reborn/product-auth/oauth/slack/callback
 ```
 
 For local development, expose the local listener through a tunnel and use the
@@ -106,26 +106,34 @@ enabled = true
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
-Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes Slack channel
-setup in WebUI, and makes personal Slack connection available through the Slack
-extension's OAuth configuration flow.
+Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes the
+manifest-declared Slack deployment fields in Admin Configuration, and makes a
+personal Slack connection available through the Slack extension's user OAuth
+flow.
 Slack installation ids, team/app ids, the bot token, the signing secret,
-and channel mappings are configured after startup from WebUI channel setup.
+OAuth client credentials, and channel mappings are configured after startup
+from Admin Configuration. These deployment values are never shown in a user's
+extension setup flow.
 
-In WebUI, open Extensions, Slack, then Slack workspace setup. Save:
+As an operator, open Admin, Configuration, then Slack deployment configuration.
+Save:
 
 | Field | Purpose |
 | --- | --- |
 | Installation ID | Stable local id for this Slack app/workspace installation. Choose a durable operator-owned string. |
 | Team ID | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
 | App ID | Slack app id, visible as `api_app_id` in Events API payloads. |
-| Bot user | Optional Reborn user id for Slack host-mediated egress. Defaults to the WebUI operator. |
+| Bot user ID | Slack member id for the app's bot user (for example, the `U…` id returned at installation). |
 | Shared subject | Optional Reborn user scope available for shared-channel routing. |
 | Bot token | Slack bot token. Stored in the Reborn secret store; never returned by the API. |
 | Signing secret | Slack signing secret. Stored in the Reborn secret store; never returned by the API. |
+| OAuth client ID | Client id for the Slack app's user OAuth flow. |
+| OAuth client secret | Client secret for the Slack app's user OAuth flow. Stored in the Reborn secret store. |
 
-After Slack setup is configured, use the same Slack channel setup section to
-map Slack channel ids to team agents.
+After Slack deployment configuration is saved, use its allowed-channel and
+subject-route fields to map Slack channel ids to team agents. Users separately
+install Slack from Extensions and complete their own OAuth flow; that personal
+membership and credential state does not mutate the operator configuration.
 
 Unrouted shared Slack channels fail closed instead of silently inheriting a
 personal/default user scope.
@@ -136,15 +144,15 @@ Create or edit a Slack app at `api.slack.com/apps`.
 
 Basic Information:
 
-- Copy `Signing Secret` into WebUI Slack workspace setup.
-- Copy `App ID` into WebUI Slack workspace setup.
+- Copy `Signing Secret` into Admin Configuration for Slack.
+- Copy `App ID` into Admin Configuration for Slack.
 
 OAuth & Permissions:
 
 - Add the redirect URL:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+https://<public-host>/api/reborn/product-auth/oauth/slack/callback
 ```
 
 - Add bot token scopes:
@@ -198,7 +206,7 @@ features:
     always_online: false
 oauth_config:
   redirect_urls:
-    - https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+    - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
   scopes:
     bot:
       - chat:write
@@ -254,7 +262,8 @@ Verification checklist:
 - Slack Event Subscriptions shows the Request URL as verified.
 - `POST /webhooks/extensions/slack/events` returns the Slack URL-verification challenge
   during setup.
-- After the user installs and configures the Slack extension, the OAuth callback
+- After the operator saves deployment configuration and the user installs and
+  connects the Slack extension, the OAuth callback
   binds that Slack user to the authenticated Reborn user.
 - A DM to the app routes through the OAuth-connected Reborn user.
 - A channel `@app` mention replies in the same channel thread.
@@ -272,19 +281,19 @@ Confirm the Slack Request URL is exactly https://<public-host>/webhooks/extensio
 
 ### Slack URL verification fails
 
-Confirm the WebUI Slack setup signing secret matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.
+Confirm the Admin Configuration Slack signing secret matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.
 
 ### Slack replies fail with missing_scope
 
-Add or confirm chat:write, reinstall the Slack app, and update the bot token in WebUI Slack setup if Slack issued a new token.
+Add or confirm chat:write, reinstall the Slack app, and update the bot token in Admin Configuration if Slack issued a new token.
 
 ### Slack OAuth callback fails
 
-Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the WebUI Slack setup client id/client secret match the Slack app.
+Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the Admin Configuration Slack client id/client secret match the Slack app.
 
 ### Channel mention does not reach Reborn
 
-Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in WebUI Slack setup match the Slack app that emitted the event.
+Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in Admin Configuration match the Slack app that emitted the event.
 
 ### Shared-channel turns are rejected
 

@@ -2,7 +2,7 @@
 //! deployment-first channel resolver (with an active-snapshot compatibility
 //! fallback) and the ingress `reply_context` read half
 //! (ING-11). All delivery semantics live in
-//! `ironclaw_product_workflow::DeliveryCoordinator`; this module only
+//! `ironclaw_product::DeliveryCoordinator`; this module only
 //! implements its ports over the extension host.
 
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use ironclaw_extension_host::egress::{
 };
 use ironclaw_extension_host::ingress::{ReplyContextKey, ReplyContextStore};
 use ironclaw_extension_host::{DeploymentChannelRegistry, SnapshotWatch};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
 

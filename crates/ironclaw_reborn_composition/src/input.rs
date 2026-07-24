@@ -223,19 +223,15 @@ pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
-    /// Protocol-specific inbound payload reclassification (gate-resolution
-    /// replies), registered on the channel host assembly.
-    pub inbound_payload_classifier:
-        Option<std::sync::Arc<crate::extension_host::extension_ingress::InboundPayloadClassifier>>,
+    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec:
-        Option<std::sync::Arc<dyn ironclaw_product_workflow::PreferenceTargetCodec>>,
+        Option<std::sync::Arc<dyn ironclaw_product::PreferenceTargetCodec>>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RebornLocalRuntimeIdentity {
+pub(crate) struct RuntimeOwnerIdentity {
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
 }
@@ -367,7 +363,7 @@ impl RebornHostBindings {
     /// Override the local runtime tenant/agent identity used by command-style
     /// facades that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
-        self.deployment.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+        self.deployment.local_runtime_identity = Some(RuntimeOwnerIdentity {
             tenant_id,
             agent_id,
         });
@@ -749,7 +745,7 @@ impl RebornHostBindings {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     ) -> Self {
         self.deployment.account_setup_descriptors = descriptors;
         self

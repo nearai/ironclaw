@@ -1586,6 +1586,21 @@ impl McpExecutor for ClientErrorMcpExecutor {
     }
 }
 
+pub(crate) struct InvalidToolCatalogMcpExecutor;
+
+#[async_trait]
+impl McpExecutor for InvalidToolCatalogMcpExecutor {
+    async fn execute_extension_json(
+        &self,
+        _governor: &dyn ResourceGovernor,
+        _request: McpExecutionRequest<'_>,
+    ) -> Result<McpExecutionResult, McpError> {
+        Err(McpError::InvalidToolCatalog {
+            reason: "simulated invalid MCP tools/list catalog".to_string(),
+        })
+    }
+}
+
 pub(crate) struct PanicMcpExecutor;
 
 #[async_trait]

@@ -31,7 +31,7 @@ const CHANNEL_EGRESS_CAPABILITY_ID: &str = "channel.egress";
 /// Resolves secret material for a channel-declared credential handle.
 ///
 /// The generic implementation reads the scoped secret store (where
-/// `[channel.config]` secret fields are stored under their handles); bridges
+/// administrator secret fields are stored under their handles); bridges
 /// for legacy per-vendor setup storage implement the same port until their
 /// storage migrates (P6).
 #[async_trait]
@@ -90,20 +90,26 @@ impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
 
 /// Production credential bridge over the same effective configuration
 /// resolver used by setup, OAuth, activation, pairing, and ingress.
-pub(crate) struct ChannelConfigEgressCredentials {
-    channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+pub(crate) struct AdminConfigurationEgressCredentials {
+    admin_configuration_resolver: Arc<
+        crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+    >,
 }
 
-impl ChannelConfigEgressCredentials {
+impl AdminConfigurationEgressCredentials {
     pub(crate) fn new(
-        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+        admin_configuration_resolver: Arc<
+            crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+        >,
     ) -> Self {
-        Self { channel_config }
+        Self {
+            admin_configuration_resolver,
+        }
     }
 }
 
 #[async_trait]
-impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
+impl ChannelEgressCredentialsPort for AdminConfigurationEgressCredentials {
     async fn channel_secret(
         &self,
         extension_id: &str,
@@ -112,7 +118,7 @@ impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
     ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError> {
         let extension_id = ExtensionId::new(extension_id)
             .map_err(|_| ChannelEgressCredentialError::Unavailable)?;
-        self.channel_config
+        self.admin_configuration_resolver
             .secret_material(&extension_id, handle)
             .await
             .map_err(|error| {
@@ -124,7 +130,8 @@ impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
 
 /// Wraps the generic scoped-store credentials port with a registration seam
 /// that integration proofs use to inject a static `(extension, handle) →
-/// material` mapping ahead of the store — standing in for `[channel.config]`
+/// material` mapping ahead of the store — standing in for administrator
+/// configuration
 /// secret storage until the configure surface lands (P6/H). The registration
 /// mechanism (`bridges` + [`register`](Self::register)) is `test-support`
 /// only; a production build never registers a bridge and resolves straight
@@ -182,7 +189,7 @@ impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
 }
 
 /// Fixed `(extension_id, handle) → material` mapping, registered as a bridge
-/// by integration proofs standing in for `[channel.config]` secret storage
+/// by integration proofs standing in for administrator secret storage
 /// until the configure surface lands (P6/H). Test-support only.
 #[cfg(feature = "test-support")]
 #[allow(dead_code)]

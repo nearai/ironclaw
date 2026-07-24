@@ -13,9 +13,10 @@ use serde::de::DeserializeOwned;
 
 use crate::filesystem_store::{io as legacy_blob_io, projection};
 use crate::{
-    EventCursor, GetLoopCheckpointRequest, GetRunStateRequest, LoopCheckpointRecord, TurnError,
-    TurnEventPage, TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunRecord,
-    TurnRunState, TurnScope, events::project_turn_events,
+    EventCursor, GetLoopCheckpointRequest, GetRunStateRequest, LoopCheckpointRecord,
+    MAX_TURN_EVENT_PROJECTION_LIMIT, TurnError, TurnEventPage, TurnLifecycleEvent,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnRunState, TurnScope,
+    events::project_turn_events,
 };
 
 use super::{
@@ -378,6 +379,92 @@ where
         // backend): the legacy directory scan, unchanged.
         self.read_turn_events_via_scan(scope, owner_user_id, after, limit, retention_floor)
             .await
+    }
+
+    /// Read one bounded page from the authoritative lifecycle log across all
+    /// turn scopes in this store's already tenant/backend-scoped mount.
+    ///
+    /// This host-internal replay path deliberately has no directory-scan
+    /// fallback. Startup catch-up must remain an indexed range query on
+    /// libSQL/Postgres; a byte-only backend fails explicitly instead of
+    /// turning process start into an unbounded full-table scan.
+    pub(super) async fn read_turn_event_log_from_durable_rows(
+        &self,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        if limit == 0 || limit > MAX_TURN_EVENT_PROJECTION_LIMIT {
+            return Err(TurnError::InvalidRequest {
+                reason: format!(
+                    "turn event log replay limit must be in 1..={MAX_TURN_EVENT_PROJECTION_LIMIT}"
+                ),
+            });
+        }
+        self.flush_pending_write_behind_for_read().await?;
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
+        self.ensure_legacy_blob_migrated_for_direct_row_read()
+            .await?;
+        let retention_floor = self.read_meta().await?.event_retention_floor;
+        let after_cursor = after.unwrap_or_default();
+        if retention_floor > EventCursor::default() && after_cursor < retention_floor {
+            return Ok(TurnEventPage {
+                entries: Vec::new(),
+                next_cursor: retention_floor,
+                truncated: false,
+                rebase_required: Some(retention_floor),
+            });
+        }
+        if !self.ensure_events_index_ready().await? {
+            return Err(TurnError::Unavailable {
+                reason: "durable turn event log replay requires indexed filesystem queries"
+                    .to_string(),
+            });
+        }
+
+        let dir = row_dir(RowCollection::Events.as_str())?;
+        let filter = events_index::event_log_query_filter(after)?;
+        // Fetch one extra row so `truncated` is exact while keeping every
+        // backend request bounded. The public maximum (1000) fits below the
+        // filesystem page cap (1024), including this lookahead row.
+        let fetch_limit =
+            u32::try_from(limit.saturating_add(1)).map_err(|_| TurnError::InvalidRequest {
+                reason: "turn event log replay limit is invalid".to_string(),
+            })?;
+        let entries = self
+            .filesystem
+            .query(
+                &ResourceScope::system(),
+                &dir,
+                &filter,
+                Page::first(fetch_limit),
+            )
+            .await
+            .map_err(fs_error)?;
+        let mut events = Vec::with_capacity(entries.len().min(limit));
+        for versioned in entries {
+            if let Some(event) = deserialize_materialized_row::<TurnLifecycleEvent>(
+                &versioned.entry.body,
+                RowCollection::Events.as_str(),
+            )? && event.cursor > after_cursor
+            {
+                events.push(event);
+            }
+        }
+        events.sort_by_key(|event| event.cursor);
+        let truncated = events.len() > limit;
+        if truncated {
+            events.truncate(limit);
+        }
+        let next_cursor = events
+            .last()
+            .map(|event| event.cursor)
+            .unwrap_or(after_cursor);
+        Ok(TurnEventPage {
+            entries: events,
+            next_cursor,
+            truncated,
+            rebase_required: None,
+        })
     }
 
     /// Legacy directory-scan read path, retained as a fallback for mounts that

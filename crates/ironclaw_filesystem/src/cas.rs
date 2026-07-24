@@ -26,11 +26,16 @@
 //!    caller's `decode`, or treating an absent record as `None`).
 //! 2. Run the caller's `apply` closure, which computes the next snapshot plus a
 //!    caller-defined outcome (`T`) or returns the caller's error (`E`).
-//! 3. If the snapshot is unchanged, return the outcome without writing.
-//! 4. Otherwise `put` the encoded snapshot back with the read version as the
-//!    CAS precondition (`CasExpectation::Absent` for a first write).
+//! 3. If the snapshot is unchanged (or the caller explicitly returns a no-op),
+//!    return the outcome without writing.
+//! 4. Otherwise either `put` the encoded snapshot back with the read version as
+//!    the CAS precondition (`CasExpectation::Absent` for a first write), or
+//!    conditionally delete it when the caller returns [`CasApply::delete`].
 //! 5. On [`FilesystemError::VersionMismatch`] re-read and retry, sleeping with
-//!    jittered exponential backoff between attempts.
+//!    jittered exponential backoff between attempts. A successful conditional
+//!    delete is also re-read and re-applied before returning, so a delete +
+//!    recreate ABA cycle cannot satisfy the caller's postcondition
+//!    prematurely.
 //!
 //! The whole loop is wrapped in a [`FILESYSTEM_APPLY_TIMEOUT`] timeout so one
 //! wedged backend operation consumes only this caller's attempt rather than
@@ -40,17 +45,18 @@
 //!
 //! ## Constants (ported verbatim from the `ironclaw_turns` reference)
 //!
-//! - [`FILESYSTEM_CAS_RETRIES`] = 32 — retry cap on `VersionMismatch`.
+//! - [`FILESYSTEM_CAS_RETRIES`] = 32 — mutation-attempt cap under contention.
 //! - [`FILESYSTEM_APPLY_TIMEOUT`] = 15s — deadline for the entire loop.
 //! - [`FILESYSTEM_CAS_BACKOFF_BASE`] = 2ms — backoff at the first retry.
 //! - [`FILESYSTEM_CAS_BACKOFF_MAX`] = 50ms — backoff ceiling.
 //!
 //! ## Capability gate (fail closed)
 //!
-//! Before attempting any write, [`cas_update`] asserts the backend can honor
-//! compare-and-swap. There are two layers, because the production composite
-//! router cannot answer capabilities without a concrete path
-//! (see [`ScopedFilesystem::capabilities`]):
+//! Before attempting any mutation, [`cas_update`] asserts the backend can honor
+//! compare-and-swap. A [`CasApply::delete`] additionally requires the declared
+//! [`Capability::Delete`]. There are two layers, because the production
+//! composite router cannot answer capabilities without a concrete path (see
+//! [`ScopedFilesystem::capabilities`]):
 //!
 //! - **Pre-flight:** if the backend advertises a *known* capability shape
 //!   (anything other than the empty default), and that shape does **not**
@@ -59,9 +65,10 @@
 //!   byte-only mount before it can blind-overwrite a snapshot.
 //! - **Op-time:** an empty/unknown capability shape (the composite router)
 //!   defers to the write, where an
-//!   [`FilesystemError::Unsupported`]`{ operation: WriteFile, .. }` is mapped
-//!   to the same [`CasUpdateError::CasUnsupported`]. Either way the helper
-//!   fails closed instead of falling back to `CasExpectation::Any`.
+//!   [`FilesystemError::Unsupported`] for the attempted versioned write or
+//!   conditional delete is mapped to the same
+//!   [`CasUpdateError::CasUnsupported`]. Either way the helper fails closed
+//!   instead of falling back to an unconditional mutation.
 //!
 //! ## Error mapping
 //!
@@ -77,7 +84,7 @@ use std::time::Duration;
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 
 use crate::{
-    BackendCapabilities, CasExpectation, Entry, FilesystemError, FilesystemOperation,
+    BackendCapabilities, Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation,
     RootFilesystem, ScopedFilesystem, TxnCapability,
 };
 
@@ -99,30 +106,32 @@ pub const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
 /// `snapshot` is the next snapshot to persist; `outcome` is whatever the caller
 /// wants returned from the whole `cas_update` call on success.
 ///
-/// Two no-op signals are available, covering the two cases where `apply` should
-/// skip the write entirely:
+/// The caller selects one of three typed mutation outcomes:
 ///
-/// 1. **Existing record, unchanged snapshot** — return `CasApply::new` with
-///    the same value that `apply` received. `cas_update` checks whether
-///    `current` is `Some(existing)` and the returned snapshot equals
-///    `existing` (i.e. `matches!(&current, Some(e) if *e == snapshot)`),
-///    and skips the write as a convenience fast-path for callers that already
-///    have a `PartialEq` snapshot.
-/// 2. **Any record state (including absent), explicit skip** — return
-///    `CasApply::no_op`. The `write: false` flag unconditionally bypasses the
-///    write regardless of what `snapshot` is set to. This is the correct signal
-///    when `current` is `None` and the computed snapshot equals a "default"
-///    value (no record should be created for an empty store), because for that
-///    case there is no `existing` to compare against.
+/// 1. **Write** — return `CasApply::new`. When the returned snapshot equals the
+///    existing value that `apply` received, `cas_update` skips the write as a
+///    convenience fast-path for callers with a `PartialEq` snapshot.
+/// 2. **No-op** — return `CasApply::no_op`. This unconditionally bypasses the
+///    mutation regardless of `snapshot`; use it when `current` is `None` and
+///    no empty/default record should be created.
+/// 3. **Delete** — return `CasApply::delete`. The helper conditionally deletes
+///    the version just read, then re-runs `apply` against a fresh read to prove
+///    the caller's postcondition across delete + recreate ABA cycles.
 pub struct CasApply<S, T> {
-    /// The new snapshot to write back. Ignored for persistence when `write` is
-    /// `false` (i.e., constructed via [`CasApply::no_op`]).
+    /// The new snapshot to write back. Ignored for persistence when writing is
+    /// not selected (i.e., constructed via [`CasApply::no_op`] or
+    /// [`CasApply::delete`]).
     pub snapshot: S,
     /// The value to return from [`cas_update`] on success.
     pub outcome: T,
-    /// When `false`, `cas_update` skips the write unconditionally and returns
-    /// `outcome` immediately.
-    write: bool,
+    operation: CasApplyOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CasApplyOperation {
+    Write,
+    NoOp,
+    Delete,
 }
 
 impl<S, T> CasApply<S, T> {
@@ -136,7 +145,7 @@ impl<S, T> CasApply<S, T> {
         Self {
             snapshot,
             outcome,
-            write: true,
+            operation: CasApplyOperation::Write,
         }
     }
 
@@ -151,7 +160,30 @@ impl<S, T> CasApply<S, T> {
         Self {
             snapshot,
             outcome,
-            write: false,
+            operation: CasApplyOperation::NoOp,
+        }
+    }
+
+    /// Produce a [`CasApply`] that conditionally deletes the current snapshot.
+    ///
+    /// The helper calls [`ScopedFilesystem::delete_if_version`] with the
+    /// version read for this `apply` invocation. A lost race is retried through
+    /// the same bounded, jittered loop as a versioned write. After a successful
+    /// delete (or a concurrent `NotFound`), the helper unconditionally re-reads
+    /// and re-runs `apply`; it returns only after the caller reports that the
+    /// freshly observed state satisfies its postcondition. This closes the ABA
+    /// hole for paths whose version restarts after delete + recreate. A
+    /// verification-only invocation does not replace `outcome`: after the
+    /// postcondition is established, the helper returns the outcome from the
+    /// successful delete invocation.
+    ///
+    /// `snapshot` is retained for the existing strongly typed result shape but
+    /// is not encoded or persisted.
+    pub fn delete(snapshot: S, outcome: T) -> Self {
+        Self {
+            snapshot,
+            outcome,
+            operation: CasApplyOperation::Delete,
         }
     }
 }
@@ -169,18 +201,20 @@ pub enum CasUpdateError<E> {
     Apply(E),
     /// The whole read-modify-write loop exceeded [`FILESYSTEM_APPLY_TIMEOUT`].
     Timeout,
-    /// [`FILESYSTEM_CAS_RETRIES`] consecutive writes lost the CAS race. The
-    /// snapshot is under sustained contention from other writers (or a backend
-    /// reporting persistent `VersionMismatch`); the caller should surface a
-    /// retryable/unavailable error rather than loop forever.
+    /// [`FILESYSTEM_CAS_RETRIES`] mutation attempts could not establish the
+    /// postcondition. The snapshot is under sustained contention from other
+    /// writers (or a backend reporting persistent `VersionMismatch`); the
+    /// caller should surface a retryable/unavailable error rather than loop
+    /// forever.
     RetriesExhausted,
     /// The backend cannot honor compare-and-swap (no
-    /// [`TxnCapability::Cas`]). Surfaced from the pre-flight capability gate or
-    /// from an op-time `Unsupported(WriteFile)`. Fail-closed: the helper
-    /// refuses rather than blind-overwriting.
+    /// [`TxnCapability::Cas`]) or a requested conditional delete. Surfaced
+    /// from the pre-flight capability gate or from an op-time `Unsupported`
+    /// mutation. Fail-closed: the helper refuses rather than applying an
+    /// unconditional mutation.
     CasUnsupported,
     /// Any other backend or serialization failure during read/decode/encode/
-    /// write. Carries the underlying [`FilesystemError`] for context.
+    /// mutation. Carries the underlying [`FilesystemError`] for context.
     Backend(FilesystemError),
 }
 
@@ -191,7 +225,7 @@ impl<E: std::fmt::Display> std::fmt::Display for CasUpdateError<E> {
             Self::Timeout => f.write_str("cas_update timed out"),
             Self::RetriesExhausted => f.write_str("cas_update CAS retries exhausted"),
             Self::CasUnsupported => {
-                f.write_str("cas_update backend does not support versioned compare-and-swap")
+                f.write_str("cas_update backend does not support the requested CAS mutation")
             }
             Self::Backend(error) => write!(f, "cas_update backend error: {error}"),
         }
@@ -200,7 +234,7 @@ impl<E: std::fmt::Display> std::fmt::Display for CasUpdateError<E> {
 
 impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for CasUpdateError<E> {}
 
-/// Lock-free, bounded, capability-gated CAS read-modify-write over a single
+/// Lock-free, bounded, capability-gated CAS read-modify-mutate over a single
 /// scoped snapshot at `path`.
 ///
 /// See the [module docs](self) for the full contract, retry/timeout/backoff
@@ -225,13 +259,16 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for CasUpdateErro
 ///   re-runnable**: it is re-invoked on every CAS retry against a freshly read
 ///   snapshot, so it must not mutate external state.
 ///
-///   Two no-op signals skip the write entirely:
+///   The mutation signals are:
 ///   - Return `CasApply::no_op(snapshot, outcome)` to skip the write for any
 ///     case, including when `current` is `None` (absent record).
 ///   - Return `CasApply::new(unchanged_snapshot, outcome)` where
 ///     `unchanged_snapshot` equals what `apply` was handed; `cas_update`
 ///     detects the equality via `PartialEq` and skips the write as a
 ///     convenience fast path.
+///   - Return `CasApply::delete(snapshot, outcome)` to conditionally delete the
+///     current version. The helper re-runs `apply` after deletion to establish
+///     the caller-defined postcondition across delete + recreate ABA cycles.
 ///
 /// `S: PartialEq` powers the equality fast path (skip the write when nothing
 /// changed); `S: Clone` lets each retry hand `apply` an owned snapshot while the
@@ -262,7 +299,15 @@ where
         return Err(CasUpdateError::CasUnsupported);
     }
 
-    let loop_future = cas_update_loop(filesystem, scope, path, &decode, &encode, &mut apply);
+    let loop_future = cas_update_loop(
+        filesystem,
+        scope,
+        path,
+        capabilities,
+        &decode,
+        &encode,
+        &mut apply,
+    );
     match tokio::time::timeout(FILESYSTEM_APPLY_TIMEOUT, loop_future).await {
         Ok(result) => result,
         Err(_) => Err(CasUpdateError::Timeout),
@@ -273,6 +318,7 @@ async fn cas_update_loop<F, S, T, E, D, N, A, Fut>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,
+    capabilities: BackendCapabilities,
     decode: &D,
     encode: &N,
     apply: &mut A,
@@ -285,7 +331,12 @@ where
     A: FnMut(Option<S>) -> Fut,
     Fut: Future<Output = Result<CasApply<S, T>, E>>,
 {
-    for attempt in 0..FILESYSTEM_CAS_RETRIES {
+    let mut mutation_attempts = 0;
+    // A successful conditional delete must be verified by a fresh read/apply,
+    // but that verification-only invocation must not replace the outcome from
+    // the mutation that actually succeeded.
+    let mut successful_delete_outcome = None;
+    loop {
         // 1. Read the current versioned snapshot. Pure reads are lock-free; a
         //    reader racing a write observes either the previous or next
         //    committed version, never a torn one.
@@ -304,7 +355,7 @@ where
         let CasApply {
             snapshot,
             outcome,
-            write,
+            operation,
         } = apply(current.clone())
             .await
             .map_err(CasUpdateError::Apply)?;
@@ -312,42 +363,92 @@ where
         // 3a. Explicit no-op: caller returned CasApply::no_op — skip the write
         //     unconditionally. This handles the absent-record + default-snapshot
         //     case where there is no `existing` to compare against.
-        if !write {
-            return Ok(outcome);
+        if operation == CasApplyOperation::NoOp {
+            return Ok(successful_delete_outcome.unwrap_or(outcome));
         }
 
         // 3b. Equality fast-path: snapshot is unchanged from what `apply`
         //     received, so skip the write.
-        if matches!(&current, Some(existing) if *existing == snapshot) {
-            return Ok(outcome);
+        if operation == CasApplyOperation::Write
+            && matches!(&current, Some(existing) if *existing == snapshot)
+        {
+            return Ok(successful_delete_outcome.unwrap_or(outcome));
         }
 
-        // 4. Encode + CAS put. Absent → create-if-absent; existing → version
-        //    precondition.
-        let entry = encode(&snapshot).map_err(CasUpdateError::Apply)?;
-        let cas = match version {
-            Some(version) => CasExpectation::Version(version),
-            None => CasExpectation::Absent,
-        };
-        match filesystem.put(scope, path, entry, cas).await {
-            Ok(_) => return Ok(outcome),
-            // 5a. Lost the CAS race — re-read and retry with backoff.
-            //     Skip the sleep on the final attempt: no retry follows it,
-            //     so the delay is pure tail latency (2–50 ms) with no benefit.
-            Err(FilesystemError::VersionMismatch { .. }) => {
-                if attempt + 1 < FILESYSTEM_CAS_RETRIES {
-                    cas_retry_backoff(attempt).await;
+        if operation == CasApplyOperation::Delete && current.is_none() {
+            return Ok(successful_delete_outcome.unwrap_or(outcome));
+        }
+        if operation == CasApplyOperation::Delete
+            && capabilities_known(&capabilities)
+            && !capabilities.has(Capability::Delete)
+        {
+            return Err(CasUpdateError::CasUnsupported);
+        }
+        if mutation_attempts >= FILESYSTEM_CAS_RETRIES {
+            return Err(CasUpdateError::RetriesExhausted);
+        }
+        let attempt = mutation_attempts;
+        mutation_attempts += 1;
+
+        match operation {
+            CasApplyOperation::Write => {
+                // Verification found that a different mutation is now needed;
+                // its outcome supersedes any earlier delete outcome.
+                drop(successful_delete_outcome.take());
+                // 4a. Encode + CAS put. Absent → create-if-absent; existing →
+                //     version precondition.
+                let entry = encode(&snapshot).map_err(CasUpdateError::Apply)?;
+                let cas = match version {
+                    Some(version) => CasExpectation::Version(version),
+                    None => CasExpectation::Absent,
+                };
+                match filesystem.put(scope, path, entry, cas).await {
+                    Ok(_) => return Ok(outcome),
+                    // 5a. Lost the CAS race — re-read and retry with backoff.
+                    Err(FilesystemError::VersionMismatch { .. }) => {
+                        if mutation_attempts < FILESYSTEM_CAS_RETRIES {
+                            cas_retry_backoff(attempt).await;
+                        }
+                    }
+                    // 5b. Backend cannot CAS-write — fail closed (no blind
+                    //     overwrite).
+                    Err(FilesystemError::Unsupported {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }) => return Err(CasUpdateError::CasUnsupported),
+                    Err(error) => return Err(CasUpdateError::Backend(error)),
                 }
             }
-            // 5b. Backend cannot CAS-write — fail closed (no blind overwrite).
-            Err(FilesystemError::Unsupported {
-                operation: FilesystemOperation::WriteFile,
-                ..
-            }) => return Err(CasUpdateError::CasUnsupported),
-            Err(error) => return Err(CasUpdateError::Backend(error)),
+            CasApplyOperation::Delete => {
+                let Some(expected_version) = version else {
+                    return Ok(successful_delete_outcome.unwrap_or(outcome));
+                };
+                match filesystem
+                    .delete_if_version(scope, path, expected_version)
+                    .await
+                {
+                    // Never return directly after delete. Re-read and re-apply
+                    // the caller's postcondition so delete + recreate cannot
+                    // win an ABA race with the captured version.
+                    Ok(()) => successful_delete_outcome = Some(outcome),
+                    Err(FilesystemError::NotFound { .. })
+                    | Err(FilesystemError::VersionMismatch { .. }) => {
+                        if mutation_attempts < FILESYSTEM_CAS_RETRIES {
+                            cas_retry_backoff(attempt).await;
+                        }
+                    }
+                    Err(FilesystemError::Unsupported {
+                        operation: FilesystemOperation::Delete,
+                        ..
+                    }) => return Err(CasUpdateError::CasUnsupported),
+                    Err(error) => return Err(CasUpdateError::Backend(error)),
+                }
+            }
+            CasApplyOperation::NoOp => {
+                return Ok(successful_delete_outcome.unwrap_or(outcome));
+            }
         }
     }
-    Err(CasUpdateError::RetriesExhausted)
 }
 
 /// `true` when the backend advertised a non-default capability shape and we can

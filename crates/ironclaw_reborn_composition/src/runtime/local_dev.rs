@@ -20,7 +20,7 @@ use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
-use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_runner::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
@@ -52,7 +52,6 @@ use crate::{
     runtime::ComposedSelectableSkillContextSource,
 };
 
-pub(crate) mod extension_surface;
 mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
@@ -64,11 +63,11 @@ mod skill_activation;
 mod surface_disclosure;
 mod synthetic_capability;
 
+use super::extension_surface::{ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource};
 #[cfg(test)]
 pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
-use extension_surface::{ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
@@ -127,8 +126,9 @@ pub(super) fn capability_wiring(
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
-    let extension_surface_source =
-        ExtensionCapabilitySurfaceSource::new(Some(services.extension_management.clone()));
+    let extension_surface_source = ExtensionCapabilitySurfaceSource::new(Some(
+        super::approval_surface_lifecycle_facade(services),
+    ));
     // First-class project creation reuses the same access-controlled
     // `ProjectService` facade the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real

@@ -50,7 +50,6 @@ function ImportButton({ onImport, isImporting, isBusy }) {
 export function RegistryTab({
   catalogEntries,
   onInstall,
-  onActivate,
   onConfigure,
   onRemove,
   onImport,
@@ -136,7 +135,6 @@ export function RegistryTab({
                 <ExtensionCard
                   key={entry.id}
                   ext={entry.extension || entry.entry}
-                  onActivate={onActivate}
                   onConfigure={onConfigure}
                   onRemove={onRemove}
                   isBusy={isBusy}

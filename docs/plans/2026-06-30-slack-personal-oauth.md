@@ -119,8 +119,7 @@ for Slack.
   direct-handler tests (scope enforcement, callback claim/PKCE, identity
   binding), the `slack_user` per-user runtime dispatch proof, and the JS
   behavioral suites now running in CI.
-- **Generic proof-code redeem route.** The WebUI keeps a generic proof-code
-  panel + `PAIRING_REDEEM_PATH` client as scaffolding, but no Reborn backend
-  mounts that route after the Slack-only redeem was removed. The first
-  non-Slack inbound channel must mount a generic redeem route (and emit its
-  connect requirement) in one change.
+- **Generic proof-code redeem route (retired).** The unmounted WebUI scaffolding
+  was removed. Shipped channel connection strategies must now be fully
+  implemented and manifest-driven; host-generated pairing uses the supported
+  code/deep-link/QR flow.

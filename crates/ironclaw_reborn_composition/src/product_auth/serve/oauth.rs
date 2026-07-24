@@ -10,7 +10,7 @@ use super::*;
 
 pub(super) async fn oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<OAuthStartRequest>,
 ) -> Result<Json<OAuthStartResponse>, ProductAuthRouteFailure> {
     let now = Utc::now();
@@ -50,6 +50,7 @@ pub(super) async fn oauth_start_handler(
                 pkce_verifier_hash,
                 pkce_verifier: pkce_verifier.clone(),
                 update_binding: None,
+                continuation: AuthContinuationRef::SetupOnly,
                 expires_at: request.expires_at,
             }),
     )
@@ -87,7 +88,7 @@ pub(super) async fn oauth_start_handler(
 /// verifiers, authorization codes, or opaque state.
 pub(super) async fn oauth_flow_status_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Path(flow_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
 ) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
@@ -104,13 +105,42 @@ pub(super) async fn oauth_flow_status_handler(
     Ok(Json(OAuthFlowStatusResponse { status }))
 }
 
-/// Recipe-driven extension OAuth start: the requested vendor resolves to its
-/// manifest recipe and the engine constructs the authorization URL (host-owned
-/// state/PKCE/redirect; requested scopes validated against the recipe ceiling,
-/// empty meaning the full ceiling).
+/// Authenticated, caller-scoped retry of an OAuth flow's unacknowledged
+/// internal continuation.
+///
+/// This command never repeats provider exchange. It exists for the browser's
+/// origin-independent completion watcher: a transient runtime-discovery
+/// failure can leave OAuth durably completed while readiness reconciliation is
+/// still pending. Re-driving the exact durable continuation converges that
+/// state without a public Activate action or another OAuth round-trip.
+pub(super) async fn oauth_flow_reconcile_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(flow_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
+) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    let flow_id = AuthFlowId::from_uuid(
+        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+    );
+    let fields = ScopeFields {
+        session_id: None,
+        thread_id: None,
+        invocation_id: query.invocation_id,
+    };
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
+    let status =
+        run_with_backend_timeout(state.product_auth.reconcile_oauth_flow(&scope, flow_id)).await?;
+    Ok(Json(OAuthFlowStatusResponse { status }))
+}
+
+/// Recipe-driven extension OAuth start: the browser selects one opaque
+/// manifest requirement key, then the server resolves that installed
+/// extension's vendor, label, and scopes before the engine constructs the
+/// authorization URL. The global recipe catalog remains only the provider
+/// protocol/config ceiling; it is not extension authority.
 pub(super) async fn extension_oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Path(package_id): Path<String>,
     Json(request): Json<ExtensionOAuthStartRequest>,
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
@@ -128,12 +158,19 @@ pub(super) async fn extension_oauth_start_handler(
         return Err(ProductAuthRouteFailure::invalid_request());
     }
 
+    let requirement = state
+        .resolve_extension_oauth_requirement(
+            &caller,
+            &requester_extension,
+            request.requirement.as_str(),
+        )
+        .await?;
     let engine = state.auth_engine()?;
-    let provider = AuthProviderId::new(request.provider)
+    let provider = AuthProviderId::new(requirement.provider)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let account_label = CredentialAccountLabel::new(request.account_label)
+    let account_label = CredentialAccountLabel::new(requirement.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let requested_scopes = request
+    let requested_scopes = requirement
         .scopes
         .into_iter()
         .map(ProviderScope::new)
@@ -164,19 +201,27 @@ pub(super) async fn extension_oauth_start_handler(
     ))
     .await?;
 
-    let flow = run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
-        RebornOAuthStartFlowRequest {
-            flow_id: Some(flow_id),
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: prepared.authorization_url.clone(),
-            opaque_state_hash: prepared.opaque_state_hash.clone(),
-            pkce_verifier_hash: prepared.pkce_verifier_hash.clone(),
-            pkce_verifier: prepared.pkce_verifier.clone(),
-            update_binding,
-            expires_at: request.expires_at,
-        },
-    ))
+    let flow = run_with_backend_timeout(
+        state
+            .product_auth
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                flow_id: Some(flow_id),
+                scope: scope.clone(),
+                provider: provider.clone(),
+                authorization_url: prepared.authorization_url.clone(),
+                opaque_state_hash: prepared.opaque_state_hash.clone(),
+                pkce_verifier_hash: prepared.pkce_verifier_hash.clone(),
+                pkce_verifier: prepared.pkce_verifier.clone(),
+                update_binding,
+                continuation: AuthContinuationRef::LifecycleActivation {
+                    package_ref: ironclaw_auth::LifecyclePackageRef::new(
+                        requester_extension.as_str(),
+                    )
+                    .map_err(|_| ProductAuthRouteFailure::invalid_request())?,
+                },
+                expires_at: request.expires_at,
+            }),
+    )
     .await?;
     // Same-process fast path only; the durable per-flow copy written by
     // `start_setup_oauth_flow` is the source of truth across restarts.
@@ -655,6 +700,9 @@ fn oauth_callback_failure_html(
         }
         AuthErrorCode::ProviderIdentityAlreadyConnected => {
             "This account is already connected to another IronClaw user. Disconnect it from that other account, then try again."
+        }
+        AuthErrorCode::LifecycleActivationFailed => {
+            "Authorization completed, but the extension could not finish setup. Return to IronClaw to review the extension's setup requirements."
         }
         _ => "Authorization failed. Please return to IronClaw and retry authorization.",
     };

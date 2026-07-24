@@ -66,7 +66,7 @@ pub use extension_host::channel_identity::{
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
 pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
@@ -105,9 +105,8 @@ pub use input::{
 };
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
-/// and the Google OAuth redirect URI from env into `OAuthRedirectUri` when
-/// building the runtime input / OAuth client config. The
+/// `runtime/mod.rs` parses the Google OAuth redirect URI from env into
+/// `OAuthRedirectUri` when building the runtime input / OAuth client config. The
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
 /// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
@@ -138,15 +137,15 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
+pub use ironclaw_product::PreferenceTargetCodec;
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product_workflow::PreferenceTargetCodec;
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
 };
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
@@ -182,7 +181,7 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
-// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// not depend on `ironclaw_product` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
@@ -192,7 +191,7 @@ pub use deployment::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
-pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
+pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,

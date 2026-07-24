@@ -4,17 +4,19 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_host_api::{ExtensionId, InstallationState, InvocationId, ResourceScope};
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceScope,
+};
+use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecyclePublicState,
 };
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
+    ExtensionActivationMode, ExtensionManagementPort,
 };
 use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use crate::{RebornBuildError, RebornProductAuthServices};
@@ -209,7 +211,7 @@ fn is_documentation_v6(ip: std::net::Ipv6Addr) -> bool {
 pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
     product_auth: &Arc<RebornProductAuthServices>,
-    extension_management: &Arc<RebornLocalExtensionManagementPort>,
+    extension_management: &Arc<ExtensionManagementPort>,
     owner_scope: ResourceScope,
 ) -> Result<NearAiMcpBootstrapOutcome, RebornBuildError> {
     let Some(config) = config else {
@@ -233,8 +235,20 @@ pub(crate) async fn bootstrap_nearai_mcp(
                 reason: format!("NEAR AI MCP package ref is invalid: {error}"),
             }
         })?;
+    let resource_scope = ResourceScope {
+        invocation_id: InvocationId::new(),
+        ..owner_scope.without_thread_and_mission()
+    };
+    let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+        resource_scope.clone(),
+        product_auth.runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
-        .project(package_ref.clone(), &owner_scope.user_id)
+        .project(
+            package_ref.clone(),
+            &owner_scope.user_id,
+            Some(&credential_gate),
+        )
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP extension projection failed: {error}"),
@@ -250,13 +264,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
     );
     if installed {
         match phase {
-            InstallationState::Active | InstallationState::Installed => {}
-            InstallationState::Disabled => {
-                tracing::debug!(
-                    "NEAR AI MCP credentials are present, but the extension is disabled; preserving explicit disabled state"
-                );
-                return Ok(NearAiMcpBootstrapOutcome::SkippedDisabled);
-            }
+            LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded => {}
             other => {
                 tracing::debug!(
                     phase = ?other,
@@ -267,10 +275,6 @@ pub(crate) async fn bootstrap_nearai_mcp(
         }
     }
 
-    let resource_scope = ResourceScope {
-        invocation_id: InvocationId::new(),
-        ..owner_scope.without_thread_and_mission()
-    };
     let scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Api);
     let provider =
         AuthProviderId::new("nearai").map_err(|error| RebornBuildError::InvalidConfig {
@@ -334,9 +338,8 @@ pub(crate) async fn bootstrap_nearai_mcp(
         }
     }
 
-    // Bootstrap acts as the base owner (the tenant operator), so the install
-    // derives a tenant-shared owner — the NEAR AI MCP extension is for the
-    // whole tenant, matching pre-#5459 behavior.
+    // Bootstrap installs for the owner named by the runtime scope. Extension
+    // membership remains per user even when that owner is also the operator.
     let bootstrap_caller = resource_scope.user_id.clone();
     if !installed {
         extension_management
@@ -349,7 +352,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
     // A not-installed (just installed above) or an installed-but-inactive
     // extension activates; an already-active one only reports its credential
     // outcome.
-    if !installed || phase == InstallationState::Installed {
+    if !installed || phase == LifecyclePublicState::SetupNeeded {
         extension_management
             .activate_with_credential_gate(
                 package_ref,
@@ -448,14 +451,14 @@ fn nearai_mcp_bootstrap_existing_credential_decision(
     NearAiMcpBootstrapExistingCredentialDecision::Submit { existing_account }
 }
 
-fn is_nearai_mcp_disabled_or_removed(error: &RebornServicesError) -> bool {
-    error.code == RebornServicesErrorCode::Forbidden
-        && error.kind == RebornServicesErrorKind::ParticipantDenied
+fn is_nearai_mcp_disabled_or_removed(error: &ProductSurfaceError) -> bool {
+    error.code == ProductSurfaceErrorCode::Forbidden
+        && error.kind == ProductSurfaceErrorKind::ParticipantDenied
 }
 
-fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &RebornServicesError) -> bool {
-    error.code == RebornServicesErrorCode::Unavailable
-        && error.kind == RebornServicesErrorKind::ServiceUnavailable
+fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &ProductSurfaceError) -> bool {
+    error.code == ProductSurfaceErrorCode::Unavailable
+        && error.kind == ProductSurfaceErrorKind::ServiceUnavailable
         && error.retryable
 }
 

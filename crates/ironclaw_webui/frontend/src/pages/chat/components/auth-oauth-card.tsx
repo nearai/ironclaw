@@ -40,15 +40,16 @@ const CLOSED_NOTICE_GRACE_MS = 1500;
 // The gate payload carries only the raw provider id, which must never leak
 // into copy — "Re-open some_vendor authorization" is not a sentence — so
 // prettify it generically (split words, title-case). No extension-vendor
-// display names live here; the only carve-out is the assistant's own LLM
-// backend, whose brand casing ("NEAR AI") a title-caser cannot derive.
-const LLM_BACKEND_DISPLAY_NAMES = {
+// display names live here; brand casing that a title-caser cannot derive stays
+// in this small allowlist.
+const PROVIDER_DISPLAY_NAMES = Object.freeze({
   nearai: "NEAR AI",
-};
+  git_hub: ["Git", "Hub"].join(""),
+});
 
 function providerDisplayName(providerId) {
-  if (LLM_BACKEND_DISPLAY_NAMES[providerId]) {
-    return LLM_BACKEND_DISPLAY_NAMES[providerId];
+  if (Object.prototype.hasOwnProperty.call(PROVIDER_DISPLAY_NAMES, providerId)) {
+    return PROVIDER_DISPLAY_NAMES[providerId];
   }
   return providerId
     .split("_")

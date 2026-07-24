@@ -50,7 +50,7 @@ The compatibility gate should eventually include replay coverage for:
 - SSE replay cursor;
 - WebSocket reconnect;
 - routine/job trigger;
-- extension install/activate/remove;
+- extension install/setup/remove, including host-owned readiness reconciliation;
 - v1 product-surface compatibility cases from #3031;
 - #3020 blocking compatibility cases.
 

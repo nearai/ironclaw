@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) async fn manual_token_submit_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<ManualTokenSubmitRequest>,
 ) -> Result<Json<ManualTokenSubmitResponse>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(
@@ -133,7 +133,7 @@ pub(super) async fn submit_manual_token_with_abandon(
 
 pub(super) async fn manual_token_setup_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<ManualTokenSetupRequest>,
 ) -> Result<Json<ManualTokenSetupResponse>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
@@ -162,7 +162,7 @@ pub(super) async fn manual_token_setup_handler(
 
 pub(super) async fn manual_token_secret_submit_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<ManualTokenSecretSubmitRequest>,
 ) -> Result<Json<ManualTokenSubmitResponse>, ProductAuthRouteFailure> {
     // Secret-submit is the secure out-of-band entry point: the raw token is

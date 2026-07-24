@@ -93,7 +93,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
                 let auth_resume = input.auth_resume.as_ref();
-                let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
+                let auth_resume_token = auth_resume.and_then(|r| r.resume_token.clone());
                 let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
                 if matches!(kind, GateKind::Approval) {
                     let approval_resume = input.approval_resume;

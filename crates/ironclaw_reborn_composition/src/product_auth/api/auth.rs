@@ -26,8 +26,8 @@ use ironclaw_auth::{
     scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
-use ironclaw_product_adapters::AuthPromptChallengeKind;
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product::AuthPromptChallengeKind;
+pub use ironclaw_product::ProductAuthContinuationDispatcher as RebornAuthContinuationDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -48,42 +48,9 @@ use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountVisibilityPolicy,
 };
 use crate::product_auth::oauth::oauth_gate::{OAuthGateChallengeRequest, OAuthGateFlowDriver};
-use ironclaw_product_workflow::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
-};
+use ironclaw_product::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
-
-/// Dispatches a typed continuation event once an OAuth callback flow has
-/// completed.
-///
-/// # Idempotency contract
-///
-/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
-/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
-/// succeeds but the subsequent `mark_continuation_dispatched` call fails
-/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
-/// will retry the full callback path and dispatch the same `flow_id` again.
-/// An implementation that assumes exactly-once delivery will process duplicate
-/// continuations and is incorrect.
-#[async_trait]
-pub trait RebornAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-
-    /// Settle the continuation of a flow that was canceled before completion.
-    ///
-    /// A canceled turn-gate flow must deny its exact blocked-auth gate so the
-    /// waiting turn fails closed instead of hanging until gate expiry; every
-    /// other continuation kind is already converged and is a no-op. Same
-    /// idempotency contract as [`Self::dispatch_auth_continuation`].
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-}
 
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -107,23 +74,6 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     }
 }
 
-#[async_trait]
-impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
-    }
-}
-
 /// Parsed OAuth callback request handed from a host-owned HTTP route into the
 /// Reborn product-auth boundary.
 ///
@@ -142,8 +92,8 @@ pub struct RebornOAuthCallbackRequest {
 
 /// Typed setup OAuth start request after host-route parsing and hashing.
 ///
-/// The browser-facing route chooses neither flow kind nor continuation. Those
-/// product-auth semantics stay here with the auth service boundary.
+/// The trusted server route selects the typed continuation from the route's
+/// product context. Browser input never chooses it.
 ///
 /// Deliberately not serializable and not comparable: it carries the raw
 /// `pkce_verifier` as a one-shot input to the auth service boundary. Its
@@ -162,6 +112,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     /// `SecretString`'s `Debug` stays redacted).
     pub(crate) pkce_verifier: secrecy::SecretString,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
+    pub(crate) continuation: AuthContinuationRef,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
 
@@ -570,12 +521,12 @@ pub struct RebornProductAuthServices {
     /// Between `complete_oauth_callback` (which marks the flow `Completed`) and
     /// `mark_continuation_dispatched` (which stamps the durable
     /// `continuation_emitted_at` fence), a completed flow is briefly
-    /// re-dispatchable. Two concurrent callbacks for that flow would each invoke
-    /// the continuation dispatcher — double activation, and a second wait on a
-    /// blocking dispatcher. This set holds the flows whose continuation dispatch
-    /// is in flight in this process so a concurrent second dispatch fails fast as
-    /// retryable instead of re-dispatching. The durable `continuation_emitted_at`
-    /// fence still covers the cross-process/replay case.
+    /// re-dispatchable. This set holds flows whose continuation dispatch is in
+    /// flight in this process so a concurrent local dispatch fails fast as
+    /// retryable instead of duplicating the internal reconciliation. Across
+    /// replicas, both callers can still enter before either stamps the durable
+    /// fence, so lifecycle continuations must remain idempotent; once stamped,
+    /// `continuation_emitted_at` prevents later replay.
     continuation_dispatch_inflight: Arc<Mutex<HashSet<AuthFlowId>>>,
 }
 
@@ -723,6 +674,16 @@ impl RebornProductAuthServices {
 
     pub fn flow_manager(&self) -> Arc<dyn AuthFlowManager> {
         self.flow_manager.clone()
+    }
+
+    /// Test-only view of the composed continuation dispatcher. Lets factory
+    /// tests pin (by `Arc::ptr_eq`) that other continuation producers —
+    /// channel pairing in particular — were wired with the SAME
+    /// lifecycle-wrapped dispatcher, not a bare turn-resume one. Ships zero
+    /// bytes in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn continuation_dispatcher_for_test(&self) -> Arc<dyn RebornAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation_dispatcher)
     }
 
     /// Auth-flow read projection used only by product/WebUI interaction views.
@@ -1352,6 +1313,38 @@ impl RebornProductAuthServices {
         }
     }
 
+    /// Re-drive a completed OAuth flow's still-unacknowledged continuation.
+    ///
+    /// Provider exchange and credential persistence happen only in the
+    /// callback path. This command reads the durable flow and, when the
+    /// callback already completed but its continuation fence was not stamped,
+    /// retries only the idempotent internal continuation. It is therefore safe
+    /// for the authenticated browser watcher to poll after a transient hosted
+    /// runtime or readiness failure without forcing the user through OAuth
+    /// again.
+    #[doc(hidden)]
+    pub async fn reconcile_oauth_flow(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
+        let record = match self.flow_manager.get_flow(scope, flow_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) | Err(AuthProductError::CrossScopeDenied) => {
+                return Err(AuthProductError::UnknownOrExpiredFlow.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if record.status == AuthFlowStatus::Completed && record.continuation_emitted_at.is_none() {
+            return self
+                .dispatch_completed_continuation(record)
+                .await
+                .map(|reconciled| reconciled.status)
+                .map_err(RebornOAuthCallbackError::from);
+        }
+        Ok(record.status)
+    }
+
     #[allow(
         dead_code,
         reason = "used by the WebUI v2 OAuth callback route when DCR fallback PKCE storage is enabled"
@@ -1417,7 +1410,7 @@ impl RebornProductAuthServices {
                     authorization_url: request.authorization_url,
                     expires_at: request.expires_at,
                 },
-                continuation: AuthContinuationRef::SetupOnly,
+                continuation: request.continuation,
                 update_binding: request.update_binding,
                 opaque_state_hash: Some(request.opaque_state_hash),
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
@@ -1685,11 +1678,11 @@ impl RebornProductAuthServices {
         // Single-flight: a concurrent callback for the same completed flow —
         // arriving in the window before `mark_continuation_dispatched` stamps the
         // durable `continuation_emitted_at` fence — must not re-invoke the
-        // continuation dispatcher (double activation) or re-run the provider
-        // exchange. It fails fast as retryable rather than blocking on the
-        // in-flight dispatch. The guard releases the flow's lease on drop, which
-        // covers every return path below (success, terminalized failure, and the
-        // retryable non-lifecycle failure).
+        // continuation dispatcher (duplicate internal reconciliation) or
+        // re-run the provider exchange. It fails fast as retryable rather than
+        // blocking on the in-flight dispatch. The guard releases the flow's
+        // lease on drop, which covers every return path below (success,
+        // terminalized failure, and the retryable non-lifecycle failure).
         let Some(_lease) = self.acquire_continuation_dispatch_lease(completed.id) else {
             return Err(AuthProductError::BackendUnavailable);
         };
@@ -1714,22 +1707,33 @@ impl RebornProductAuthServices {
                 error_code = ?dispatch_error_code,
                 "reborn auth flow completed but continuation dispatch failed"
             );
-            // Honest extension state machine: a lifecycle-activation continuation
-            // that fails to dispatch is a terminal activation failure. Terminalize
-            // the flow and compensate the just-minted credential so a failed
-            // activation never leaves a live credential or a re-dispatchable flow.
-            // Non-lifecycle continuations (setup-only, turn-gate resume, …) stay
-            // retryable: their credential is independently useful and the caller
-            // may re-drive the same flow.
-            if let AuthContinuationRef::LifecycleActivation { package_ref } =
-                &completed.continuation
-            {
-                self.compensate_failed_lifecycle_activation(
+            // A transient readiness failure is not an OAuth failure. Preserve
+            // the configured personal credential and leave the durable
+            // continuation fence unset so the authenticated reconcile command
+            // can retry internal readiness without another provider exchange.
+            if matches!(
+                completed.continuation,
+                AuthContinuationRef::LifecycleActivation { .. }
+            ) {
+                // `BackendUnavailable` here covers two re-drivable cases that must
+                // NOT be fenced: a genuine transient store fault, AND a
+                // *setup-incomplete* lifecycle continuation — the
+                // `LifecycleAuthContinuationDispatcher` deliberately returns this
+                // retryable code when an OAuth requirement completed but other
+                // manifest-declared setup still blocks the fan-out. Returning
+                // early (below) leaves `continuation_emitted_at` unstamped, so a
+                // later `reconcile_oauth_flow` re-drives the continuation once
+                // readiness is Active rather than treating it as permanently
+                // dispatched.
+                if dispatch_error_code == AuthErrorCode::BackendUnavailable {
+                    return Err(AuthProductError::BackendUnavailable);
+                }
+                self.terminalize_failed_lifecycle_continuation(
                     &completed,
-                    package_ref.clone(),
-                    dispatch_error_code,
+                    AuthErrorCode::LifecycleActivationFailed,
                 )
-                .await;
+                .await?;
+                return Err(AuthProductError::LifecycleActivationFailed);
             }
             let error = match error {
                 AuthProductError::TokenExchangeFailed
@@ -1744,52 +1748,18 @@ impl RebornProductAuthServices {
             .await
     }
 
-    /// Compensate a terminally-failed lifecycle activation.
+    /// Stop retrying a permanent lifecycle continuation failure while keeping
+    /// the OAuth credential intact.
     ///
-    /// The OAuth exchange already minted a credential for an extension whose
-    /// activation then failed terminally. Revoke that credential (clearing its
-    /// secrets) through the blessed lifecycle-cleanup path, then terminalize the
-    /// completed flow so it can never be re-dispatched. Both steps are
-    /// best-effort — on failure they log and the caller still returns the
-    /// sanitized dispatch error — but neither may leave a live credential paired
-    /// with a re-dispatchable flow.
-    async fn compensate_failed_lifecycle_activation(
+    /// Reauthorizing cannot repair a malformed manifest or policy-invalid
+    /// runtime catalog. Credential cleanup belongs to explicit removal or
+    /// disconnect; conflating it with internal readiness failure forced users
+    /// through OAuth repeatedly and discarded otherwise valid credentials.
+    async fn terminalize_failed_lifecycle_continuation(
         &self,
         completed: &AuthFlowRecord,
-        package_ref: ironclaw_auth::LifecyclePackageRef,
         dispatch_error_code: AuthErrorCode,
-    ) {
-        match ExtensionId::new(package_ref.as_str()) {
-            Ok(extension_id) => {
-                let request = SecretCleanupRequest {
-                    scope: completed.scope.clone(),
-                    extension_id,
-                    lifecycle_package: Some(package_ref.clone()),
-                    // The OAuth callback stores the minted personal credential as
-                    // `UserReusable` with no extension ownership, so an
-                    // extension-keyed cleanup alone would never reach it; select
-                    // the owner's account for this provider — the same selector a
-                    // channel disconnect uses to revoke (not delete) the token.
-                    provider: Some(completed.provider.clone()),
-                    action: ironclaw_auth::SecretCleanupAction::Uninstall,
-                };
-                if let Err(error) = self.cleanup_service.cleanup_for_lifecycle(request).await {
-                    tracing::warn!(
-                        flow_id = %completed.id,
-                        error_code = ?error.code(),
-                        "failed to compensate credential after terminal lifecycle activation failure"
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    flow_id = %completed.id,
-                    %error,
-                    "lifecycle activation package ref is not a valid extension id; \
-                     skipping credential compensation"
-                );
-            }
-        }
+    ) -> Result<(), AuthProductError> {
         if let Err(error) = self
             .flow_manager
             .fail_completed_continuation(&completed.scope, completed.id, dispatch_error_code)
@@ -1800,7 +1770,9 @@ impl RebornProductAuthServices {
                 error_code = ?error.code(),
                 "failed to terminalize auth flow after terminal lifecycle activation failure"
             );
+            return Err(AuthProductError::BackendUnavailable);
         }
+        Ok(())
     }
 
     /// Acquire the process-local continuation-dispatch lease for `flow_id`.
@@ -1896,6 +1868,7 @@ fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthPr
         }
         AuthErrorCode::MalformedConfig => AuthProductError::MalformedConfig,
         AuthErrorCode::MalformedCallback => AuthProductError::MalformedCallback,
+        AuthErrorCode::LifecycleActivationFailed => AuthProductError::LifecycleActivationFailed,
         AuthErrorCode::Canceled => AuthProductError::Canceled,
         AuthErrorCode::FlowAlreadyTerminal => AuthProductError::FlowAlreadyTerminal,
         AuthErrorCode::InvalidRequest => AuthProductError::InvalidRequest {
@@ -1918,6 +1891,7 @@ fn auth_challenge_to_view(
             account_label: None,
             authorization_url: Some(authorization_url.clone()),
             expires_at: Some(*expires_at),
+            pairing: None,
         },
         ironclaw_auth::AuthChallenge::ManualTokenRequired {
             provider,
@@ -1930,6 +1904,7 @@ fn auth_challenge_to_view(
             account_label: Some(label.clone()),
             authorization_url: None,
             expires_at: Some(*expires_at),
+            pairing: None,
         },
         ironclaw_auth::AuthChallenge::AccountSelectionRequired { .. }
         | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
@@ -1939,6 +1914,7 @@ fn auth_challenge_to_view(
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            pairing: None,
         },
     }
 }

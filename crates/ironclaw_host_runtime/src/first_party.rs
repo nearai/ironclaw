@@ -11,8 +11,8 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
-    HostRemediation, MountView, ResourceEstimate, ResourceScope, ResourceUsage, RunId,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
+    HostRemediation, InvocationOrigin, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
+    RunId, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
 
@@ -33,6 +33,10 @@ pub struct FirstPartyCapabilityRequest {
     /// non-loop callers. Handlers that enforce within-run continuity (e.g.
     /// coding read-before-edit) key state on it.
     pub run_id: Option<RunId>,
+    /// Authoritative origin of this capability call. Trigger/routine mutation
+    /// policy consumes this typed value and never re-derives it from
+    /// presentation data.
+    pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -50,6 +54,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
                 &self.authenticated_actor_user_id,
             )
             .field("run_id", &self.run_id)
+            .field("origin", &self.origin)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("services", &self.services)
@@ -64,6 +69,7 @@ impl PartialEq for FirstPartyCapabilityRequest {
             && self.scope == other.scope
             && self.authenticated_actor_user_id == other.authenticated_actor_user_id
             && self.run_id == other.run_id
+            && self.origin == other.origin
             && self.estimate == other.estimate
             && self.mounts == other.mounts
             && self.input == other.input
@@ -84,6 +90,9 @@ impl FirstPartyCapabilityRequest {
             scope,
             authenticated_actor_user_id: None,
             run_id: None,
+            origin: Some(InvocationOrigin::Product(
+                ironclaw_host_api::ProductKind::new("test").expect("valid test product kind"), // safety: test-support-only static fixture.
+            )),
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {

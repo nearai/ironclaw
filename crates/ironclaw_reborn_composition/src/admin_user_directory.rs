@@ -1,5 +1,5 @@
 //! Composition adapter implementing the product-workflow
-//! [`AdminUserService`](ironclaw_product_workflow::AdminUserService) port over
+//! [`AdminUserService`](ironclaw_product::AdminUserService) port over
 //! the Reborn identity user-directory + admin secret provisioner + a token
 //! minter.
 //!
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{SecretHandle, TenantId, UserId};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };

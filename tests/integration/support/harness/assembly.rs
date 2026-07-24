@@ -236,6 +236,13 @@ impl HostRuntime for TriggerActiveRunLookupHostRuntime {
         self.inner.auth_resume_capability(request).await
     }
 
+    async fn decline_auth_capability(
+        &self,
+        request: ironclaw_host_runtime::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.inner.decline_auth_capability(request).await
+    }
+
     async fn resume_spawn_capability(
         &self,
         request: RuntimeApprovalResume,
@@ -278,14 +285,21 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
     // dispatches); `Err(AuthRequired)` raises a `BlockedAuth` gate at dispatch.
     credential_account_result: Result<SecretHandle, CredentialStageError>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let filesystem = local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?;
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?,
+        Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GithubHarnessAuthorizer::new()?),
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
+    // The typed auth-gate deny/resume paths (#6520) durably terminalize the
+    // parked invocation through the run-state store; without it the decline
+    // fails closed as HostUnavailable and kills the run.
+    .with_filesystem_run_state(ironclaw_reborn_composition::wrap_scoped(Arc::clone(
+        &filesystem,
+    )))
     .with_secret_store(Arc::new(StaticSecretStore::new(
         SecretHandle::new("github_manual_access")?,
         SecretMaterial::from("ghp_fake_fixture_token"),
@@ -463,6 +477,23 @@ pub(crate) fn local_dev_root_filesystem(
             memory,
         )?;
     }
+    // Tenant-scoped structured state (run-state records, approval requests):
+    // the capability host's gate/decline/resume paths persist run records
+    // under `/tenants/...` via `with_filesystem_run_state`, mirroring the
+    // production `/tenants` mount in composition.
+    let tenant_state = Arc::new(InMemoryBackend::new());
+    root.mount(
+        local_dev_mount_descriptor(
+            "/tenants",
+            "local-dev-harness-tenant-state",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            tenant_state.capabilities(),
+        )?,
+        tenant_state,
+    )?;
     Ok(Arc::new(root))
 }
 

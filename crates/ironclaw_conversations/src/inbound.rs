@@ -103,12 +103,12 @@ where
             BindingResolutionPolicy::Trusted {
                 kind: TrustedInboundKind::Trigger,
                 ..
-            } => ironclaw_product_context::InboundClassification::TrustedTrigger,
+            } => ironclaw_turns::product_context::InboundClassification::TrustedTrigger,
             BindingResolutionPolicy::Trusted { .. } => {
-                ironclaw_product_context::InboundClassification::TrustedOther
+                ironclaw_turns::product_context::InboundClassification::TrustedOther
             }
             BindingResolutionPolicy::Untrusted => {
-                ironclaw_product_context::InboundClassification::Untrusted
+                ironclaw_turns::product_context::InboundClassification::Untrusted
             }
         };
         let surface_type = match &route_kind {
@@ -216,7 +216,7 @@ where
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedInboundMessage,
-        classification: ironclaw_product_context::InboundClassification,
+        classification: ironclaw_turns::product_context::InboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
@@ -256,7 +256,7 @@ where
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_inbound(
+                product_context: Some(ironclaw_turns::product_context::resolve_inbound(
                     classification,
                     run_adapter,
                     surface_type,

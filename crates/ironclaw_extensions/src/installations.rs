@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the three-state lifecycle collapse remains with the installation aggregate pending its planned split, plan #6175
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -327,14 +328,6 @@ impl<'de> Deserialize<'de> for ExtensionCredentialHandle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionActivationState {
-    Installed,
-    Disabled,
-    Enabled,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionCredentialBinding {
     credential_handle: ExtensionCredentialHandle,
@@ -475,20 +468,19 @@ impl ExtensionHealthSnapshot {
     }
 }
 
-/// Who an installation belongs to (#5459 P1 — shared vs member installs,
-/// membership model per the 2026-07-08 pivot in
-/// `docs/plans/2026-07-01-private-tool-installs.md`).
+/// The caller-membership axis of an installation.
 ///
-/// `Tenant` = installed for the whole tenant (the historical behavior, and
-/// what an operator install produces): every user sees and can dispatch the
-/// extension's capabilities. `Users` = held by a set of members: any number
-/// of users can independently install the same tool; only members see it,
-/// only members get grants minted for it.
+/// `Users` is the only owner shape created by current lifecycle operations:
+/// admins and ordinary users install/remove personal membership identically.
+/// Tenant-scoped deployment configuration is deliberately not represented by
+/// this enum. A future explicit required-extension policy must compose with
+/// caller membership rather than overloading owner identity.
 ///
-/// Legacy persisted records predate this field and deserialize as `Tenant`
-/// via `#[serde(default)]` — no migration required, no behavior change for
-/// existing installs. Rows written by the slot iteration of this feature
-/// (`{"kind": "user", "user_id": …}`) deserialize as a singleton member set.
+/// `Tenant` is retained only because persisted records that predate caller
+/// ownership omit this field and deserialize through `#[serde(default)]`.
+/// Composition narrows those compatibility rows to the configured operator at
+/// restore before ordinary lifecycle operations. New code must not create a
+/// `Tenant` row or interpret an admin's personal install as tenant-wide.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum InstallationOwner {
     #[default]
@@ -525,6 +517,49 @@ impl InstallationOwner {
         match self {
             Self::Users { user_ids } => Some(user_ids),
             Self::Tenant => None,
+        }
+    }
+
+    /// Return the caller-membership rewrite needed to join `user_id`.
+    ///
+    /// `None` means the user is already a member and the operation is an
+    /// idempotent no-op. A legacy `Tenant` compatibility row narrows to the
+    /// first explicit caller; current lifecycle code never creates `Tenant`.
+    pub fn joined_by(&self, user_id: &UserId) -> Result<Option<Self>, ExtensionInstallationError> {
+        match self {
+            Self::Tenant => Ok(Some(Self::user(user_id.clone()))),
+            Self::Users { user_ids } if user_ids.contains(user_id) => Ok(None),
+            Self::Users { user_ids } => {
+                let mut joined = user_ids.clone();
+                joined.insert(user_id.clone());
+                Self::users(joined).map(Some)
+            }
+        }
+    }
+
+    /// Return the remaining caller-membership set after `user_id` leaves.
+    /// `None` means no members remain and the shared runtime row may be torn
+    /// down. Callers must authorize membership before invoking this method.
+    /// A legacy tenant row must first be canonicalized to an explicit member;
+    /// this transition never guesses which caller owns that shared row.
+    pub fn without_member(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<Self>, ExtensionInstallationError> {
+        match self {
+            Self::Tenant => Err(ExtensionInstallationError::LegacyTenantOwnerNotCanonicalized),
+            Self::Users { user_ids } => {
+                let remaining = user_ids
+                    .iter()
+                    .filter(|member| *member != user_id)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if remaining.is_empty() {
+                    Ok(None)
+                } else {
+                    Self::users(remaining).map(Some)
+                }
+            }
         }
     }
 
@@ -594,16 +629,13 @@ impl TryFrom<InstallationOwnerWire> for InstallationOwner {
 pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
-    activation_state: ExtensionActivationState,
     manifest_ref: ExtensionManifestRef,
     credential_bindings: Vec<ExtensionCredentialBinding>,
     health: ExtensionHealthSnapshot,
     updated_at: DateTime<Utc>,
-    // Tenant-owned rows serialize WITHOUT the field so they keep the exact
-    // pre-#5459 byte shape: a rollback to an older binary (whose wire struct
-    // uses `deny_unknown_fields`) still loads a state.json that contains no
-    // private installs. Only user-private rows carry the field — the one
-    // shape an older binary genuinely cannot represent.
+    // `Tenant` is a read-only compatibility shape for records written before
+    // caller-scoped installations. Restore narrows it to the configured
+    // operator; new lifecycle operations never create it.
     #[serde(default, skip_serializing_if = "InstallationOwner::is_tenant")]
     owner: InstallationOwner,
 }
@@ -614,7 +646,6 @@ pub struct ExtensionInstallation {
 pub struct ExtensionInstallationPersistedParts {
     pub installation_id: ExtensionInstallationId,
     pub extension_id: ExtensionId,
-    pub activation_state: ExtensionActivationState,
     pub manifest_ref: ExtensionManifestRef,
     pub credential_bindings: Vec<ExtensionCredentialBinding>,
     pub health: ExtensionHealthSnapshot,
@@ -626,7 +657,6 @@ impl ExtensionInstallation {
     pub fn new(
         installation_id: ExtensionInstallationId,
         extension_id: ExtensionId,
-        activation_state: ExtensionActivationState,
         manifest_ref: ExtensionManifestRef,
         credential_bindings: Vec<ExtensionCredentialBinding>,
         updated_at: DateTime<Utc>,
@@ -635,7 +665,6 @@ impl ExtensionInstallation {
         Self::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id,
             extension_id,
-            activation_state,
             manifest_ref,
             credential_bindings,
             health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
@@ -663,7 +692,6 @@ impl ExtensionInstallation {
         Ok(Self {
             installation_id: parts.installation_id,
             extension_id: parts.extension_id,
-            activation_state: parts.activation_state,
             manifest_ref: parts.manifest_ref,
             credential_bindings: parts.credential_bindings,
             health: parts.health,
@@ -678,10 +706,6 @@ impl ExtensionInstallation {
 
     pub fn extension_id(&self) -> &ExtensionId {
         &self.extension_id
-    }
-
-    pub fn activation_state(&self) -> ExtensionActivationState {
-        self.activation_state
     }
 
     pub fn manifest_ref(&self) -> &ExtensionManifestRef {
@@ -704,18 +728,12 @@ impl ExtensionInstallation {
         &self.owner
     }
 
-    /// Same installation with a replaced owner (membership join/leave and
-    /// operator eviction-to-tenant are single row rewrites); refreshes
+    /// Same installation with a replaced caller-membership set; refreshes
     /// `updated_at` like every other row mutation.
     pub fn with_owner(mut self, owner: InstallationOwner) -> Self {
         self.owner = owner;
         self.updated_at = Utc::now();
         self
-    }
-
-    fn set_activation_state(&mut self, state: ExtensionActivationState) {
-        self.activation_state = state;
-        self.updated_at = Utc::now();
     }
 
     fn set_health(&mut self, health: ExtensionHealthSnapshot) {
@@ -734,7 +752,6 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
         struct Wire {
             installation_id: ExtensionInstallationId,
             extension_id: ExtensionId,
-            activation_state: ExtensionActivationState,
             manifest_ref: ExtensionManifestRef,
             credential_bindings: Vec<ExtensionCredentialBinding>,
             health: ExtensionHealthSnapshot,
@@ -757,7 +774,6 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
         Ok(Self {
             installation_id: wire.installation_id,
             extension_id: wire.extension_id,
-            activation_state: wire.activation_state,
             manifest_ref: wire.manifest_ref,
             credential_bindings: wire.credential_bindings,
             health: wire.health,
@@ -773,8 +789,6 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
 /// activation state, opaque credential bindings, health snapshots, and
 /// manifest-hash consistency. Domain crates validate domain-specific binding
 /// semantics when projecting their host-api sections from these records.
-/// `list_enabled_installations` returns enabled installations in
-/// newest-updated order with a deterministic installation-id tie-breaker.
 #[async_trait]
 pub trait ExtensionInstallationStore: Send + Sync {
     async fn list_manifests(
@@ -801,10 +815,6 @@ pub trait ExtensionInstallationStore: Send + Sync {
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError>;
 
-    async fn list_enabled_installations(
-        &self,
-    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError>;
-
     async fn get_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -813,12 +823,6 @@ pub trait ExtensionInstallationStore: Send + Sync {
     async fn upsert_installation(
         &self,
         installation: ExtensionInstallation,
-    ) -> Result<(), ExtensionInstallationError>;
-
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError>;
 
     async fn delete_installation(
@@ -836,29 +840,6 @@ pub trait ExtensionInstallationStore: Send + Sync {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError>;
-
-    /// Non-secret `[channel.config]` values for the extension's installation,
-    /// keyed by field handle. Stores without durable channel-config support
-    /// report empty (config completeness then derives as "nothing provided").
-    async fn channel_config(
-        &self,
-        _extension_id: &ExtensionId,
-    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
-        Ok(Vec::new())
-    }
-
-    /// Replace the stored non-secret `[channel.config]` values for the
-    /// extension's installation. Fails closed on stores without durable
-    /// channel-config support so a save can never silently vanish.
-    async fn set_channel_config(
-        &self,
-        _extension_id: &ExtensionId,
-        _values: Vec<(String, String)>,
-    ) -> Result<(), ExtensionInstallationError> {
-        Err(ExtensionInstallationError::InvalidInstallation {
-            reason: "channel config persistence is not supported by this store".to_string(),
-        })
-    }
 }
 
 #[async_trait]
@@ -902,12 +883,6 @@ where
         (**self).list_installations().await
     }
 
-    async fn list_enabled_installations(
-        &self,
-    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        (**self).list_enabled_installations().await
-    }
-
     async fn get_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -920,14 +895,6 @@ where
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).upsert_installation(installation).await
-    }
-
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
-    ) -> Result<(), ExtensionInstallationError> {
-        (**self).set_activation_state(installation_id, state).await
     }
 
     async fn delete_installation(
@@ -951,27 +918,11 @@ where
     ) -> Result<(), ExtensionInstallationError> {
         (**self).update_health(installation_id, health).await
     }
-
-    async fn channel_config(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
-        (**self).channel_config(extension_id).await
-    }
-
-    async fn set_channel_config(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ExtensionInstallationError> {
-        (**self).set_channel_config(extension_id, values).await
-    }
 }
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations";
 const MANIFEST_RECORD_KIND: &str = "extension_manifest_record";
 const INSTALLATION_RECORD_KIND: &str = "extension_installation_record";
-const CHANNEL_CONFIG_RECORD_KIND: &str = "extension_channel_config_record";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
 /// Filesystem-backed extension installation state store.
@@ -1042,12 +993,6 @@ impl FilesystemExtensionInstallationStore {
             &self.installations_root()?,
             "extension_installations_by_extension_id",
             "extension_id",
-        )
-        .await?;
-        self.ensure_exact_index(
-            &self.installations_root()?,
-            "extension_installations_by_activation_state",
-            "activation_state",
         )
         .await
     }
@@ -1143,10 +1088,6 @@ impl FilesystemExtensionInstallationStore {
         child_path(&self.root, "installations")
     }
 
-    fn channel_configs_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
-        child_path(&self.root, "channel-configs")
-    }
-
     fn manifest_path(
         &self,
         extension_id: &ExtensionId,
@@ -1165,81 +1106,6 @@ impl FilesystemExtensionInstallationStore {
             &self.installations_root()?,
             &format!("{}.json", row_token(installation_id.as_str())),
         )
-    }
-
-    fn channel_config_path(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<VirtualPath, ExtensionInstallationError> {
-        child_path(
-            &self.channel_configs_root()?,
-            &format!("{}.json", row_token(extension_id.as_str())),
-        )
-    }
-
-    async fn load_channel_config_entry(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Option<(WireChannelConfig, RecordVersion)>, ExtensionInstallationError> {
-        let path = self.channel_config_path(extension_id)?;
-        let Some(entry) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(store_unavailable("load extension channel config row"))?
-        else {
-            return Ok(None);
-        };
-        ensure_entry_kind(&entry.entry, CHANNEL_CONFIG_RECORD_KIND, &path)?;
-        let config: WireChannelConfig = entry.entry.parse_json().map_err(|error| {
-            corrupt_row("deserialize extension channel config row", &path, error)
-        })?;
-        if &config.extension_id != extension_id {
-            return Err(invalid_installation_error(format!(
-                "extension channel config row key {extension_id} contained config for {}",
-                config.extension_id
-            )));
-        }
-        Ok(Some((config, entry.version)))
-    }
-
-    async fn put_channel_config(
-        &self,
-        config: &WireChannelConfig,
-    ) -> Result<(), ExtensionInstallationError> {
-        let path = self.channel_config_path(&config.extension_id)?;
-        let payload = serde_json::to_value(config).map_err(invalid_installation_error)?;
-        let entry = Entry::record(record_kind(CHANNEL_CONFIG_RECORD_KIND)?, &payload)
-            .map_err(invalid_installation_error)?;
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await
-            .map(|_| ())
-            .map_err(store_unavailable("save extension channel config row"))
-    }
-
-    async fn delete_channel_config(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<(), ExtensionInstallationError> {
-        for _ in 0..=self.cas_retries {
-            let Some((_, version)) = self.load_channel_config_entry(extension_id).await? else {
-                return Ok(());
-            };
-            let path = self.channel_config_path(extension_id)?;
-            match self.filesystem.delete_if_version(&path, version).await {
-                Ok(()) | Err(FilesystemError::NotFound { .. }) => return Ok(()),
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => {
-                    return Err(store_unavailable("delete extension channel config row")(
-                        error,
-                    ));
-                }
-            }
-        }
-        Err(store_unavailable_error(
-            "extension channel config row changed repeatedly while deleting",
-        ))
     }
 
     async fn load_manifest_entry(
@@ -1473,22 +1339,6 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         Ok(installations)
     }
 
-    async fn list_enabled_installations(
-        &self,
-    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        let filter = Filter::Eq {
-            key: index_key("activation_state")?,
-            value: IndexValue::Text(activation_state_key(ExtensionActivationState::Enabled).into()),
-        };
-        let mut installations = self.query_installations(&filter).await?;
-        installations.sort_by(|a, b| {
-            b.updated_at()
-                .cmp(&a.updated_at())
-                .then_with(|| a.installation_id().cmp(b.installation_id()))
-        });
-        Ok(installations)
-    }
-
     async fn get_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -1514,52 +1364,12 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
             .map_err(SaveRowError::into_installation_error)
     }
 
-    async fn set_activation_state(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        state: ExtensionActivationState,
-    ) -> Result<(), ExtensionInstallationError> {
-        for _ in 0..=self.cas_retries {
-            let Some((mut installation, version)) =
-                self.load_installation_entry(installation_id).await?
-            else {
-                return Err(ExtensionInstallationError::InstallationNotFound {
-                    installation_id: installation_id.clone(),
-                });
-            };
-            if installation.activation_state() == state {
-                return Ok(());
-            }
-            if state == ExtensionActivationState::Enabled {
-                let manifest = self
-                    .get_manifest(installation.extension_id())
-                    .await?
-                    .ok_or_else(|| ExtensionInstallationError::UnknownManifest {
-                        extension_id: installation.extension_id().clone(),
-                    })?;
-                validate_installation_against_one_manifest(&manifest, &installation)?;
-            }
-            installation.set_activation_state(state);
-            match self
-                .put_installation(&installation, CasExpectation::Version(version))
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(SaveRowError::CasConflict) => continue,
-                Err(error) => return Err(error.into_installation_error()),
-            }
-        }
-        Err(store_unavailable_error(
-            "extension installation row changed repeatedly while updating activation state",
-        ))
-    }
-
     async fn delete_installation(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
         for _ in 0..=self.cas_retries {
-            let Some((installation, version)) =
+            let Some((_installation, version)) =
                 self.load_installation_entry(installation_id).await?
             else {
                 return Err(ExtensionInstallationError::InstallationNotFound {
@@ -1567,11 +1377,7 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
                 });
             };
             match self.delete_installation_row(installation_id, version).await {
-                Ok(()) => {
-                    self.delete_channel_config(installation.extension_id())
-                        .await?;
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(SaveRowError::CasConflict) => continue,
                 Err(SaveRowError::NotFound) => {
                     return Err(ExtensionInstallationError::InstallationNotFound {
@@ -1648,48 +1454,6 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
             "extension installation row changed repeatedly while updating health",
         ))
     }
-
-    async fn channel_config(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
-        if self
-            .query_installations_by_extension(extension_id)
-            .await?
-            .is_empty()
-        {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .load_channel_config_entry(extension_id)
-            .await?
-            .map(|(config, _)| config.values)
-            .unwrap_or_default())
-    }
-
-    async fn set_channel_config(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ExtensionInstallationError> {
-        if self
-            .query_installations_by_extension(extension_id)
-            .await?
-            .is_empty()
-        {
-            return Err(ExtensionInstallationError::InvalidInstallation {
-                reason: format!("extension {extension_id} has no installation for channel config"),
-            });
-        }
-        if values.is_empty() {
-            return self.delete_channel_config(extension_id).await;
-        }
-        self.put_channel_config(&WireChannelConfig {
-            extension_id: extension_id.clone(),
-            values,
-        })
-        .await
-    }
 }
 
 #[derive(Debug)]
@@ -1725,12 +1489,6 @@ struct WireManifestRecord {
     manifest_hash: Option<ManifestHash>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WireChannelConfig {
-    extension_id: ExtensionId,
-    values: Vec<(String, String)>,
 }
 
 impl WireManifestRecord {
@@ -1840,10 +1598,6 @@ fn entry_for_installation(
             .with_indexed(
                 index_key("extension_id")?,
                 IndexValue::Text(installation.extension_id().as_str().to_string()),
-            )
-            .with_indexed(
-                index_key("activation_state")?,
-                IndexValue::Text(activation_state_key(installation.activation_state()).into()),
             ),
     )
 }
@@ -1879,14 +1633,6 @@ fn child_path(root: &VirtualPath, child: &str) -> Result<VirtualPath, ExtensionI
 
 fn row_token(value: &str) -> String {
     sha256_digest_token(value.as_bytes()).replace(':', "_")
-}
-
-fn activation_state_key(state: ExtensionActivationState) -> &'static str {
-    match state {
-        ExtensionActivationState::Installed => "installed",
-        ExtensionActivationState::Disabled => "disabled",
-        ExtensionActivationState::Enabled => "enabled",
-    }
 }
 
 fn manifest_source_key(source: ManifestSource) -> &'static str {
@@ -1987,65 +1733,6 @@ mod tests {
                 "invalid cleanup channel must be rejected: {invalid}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn channel_config_round_trips_and_is_deleted_with_the_installation() {
-        let store = filesystem_store().await;
-        let manifest = manifest_record("fixture", Some("hash-1"));
-        let extension_id = manifest.extension_id().clone();
-        store
-            .upsert_manifest(manifest)
-            .await
-            .expect("upsert manifest");
-        let installed = installation("fixture", Some("hash-1"));
-        let installation_id = installed.installation_id().clone();
-        store
-            .upsert_installation(installed)
-            .await
-            .expect("upsert installation");
-
-        assert!(
-            store
-                .channel_config(&extension_id)
-                .await
-                .expect("read empty config")
-                .is_empty(),
-            "no config is provided until a save"
-        );
-        store
-            .set_channel_config(
-                &extension_id,
-                vec![(
-                    "public_endpoint_url".to_string(),
-                    "https://x.example".to_string(),
-                )],
-            )
-            .await
-            .expect("save config");
-        assert_eq!(
-            store
-                .channel_config(&extension_id)
-                .await
-                .expect("read config"),
-            vec![(
-                "public_endpoint_url".to_string(),
-                "https://x.example".to_string()
-            )]
-        );
-        // Channel config is installation-owned state: deleting the
-        // installation deletes it (removal order §6.2 step 5).
-        store
-            .delete_installation(&installation_id)
-            .await
-            .expect("delete installation");
-        assert!(
-            store
-                .channel_config(&extension_id)
-                .await
-                .expect("read after delete")
-                .is_empty()
-        );
     }
 
     #[tokio::test]
@@ -2172,7 +1859,6 @@ mod tests {
             ExtensionInstallationId::new(extension_id.as_str().to_string())
                 .expect("installation id"),
             extension_id.clone(),
-            ExtensionActivationState::Installed,
             ExtensionManifestRef::new(
                 extension_id,
                 hash.map(|value| ManifestHash::new(value).expect("hash")),
@@ -2207,7 +1893,6 @@ mod tests {
         let private = ExtensionInstallation::new(
             ExtensionInstallationId::new("fixture".to_string()).expect("installation id"),
             ExtensionId::new("fixture".to_string()).expect("extension id"),
-            ExtensionActivationState::Installed,
             ExtensionManifestRef::new(ExtensionId::new("fixture".to_string()).unwrap(), None),
             Vec::new(),
             Utc::now(),
@@ -2253,6 +1938,50 @@ mod tests {
         InstallationOwner::users(BTreeSet::new()).expect_err("empty member set is unconstructable");
     }
 
+    #[test]
+    fn caller_membership_join_and_leave_are_idempotent_domain_transitions() {
+        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+
+        assert_eq!(
+            InstallationOwner::Tenant
+                .without_member(&alice)
+                .expect_err("legacy tenant rows must be narrowed before removal"),
+            ExtensionInstallationError::LegacyTenantOwnerNotCanonicalized,
+            "a caller must never tear down a legacy shared row directly"
+        );
+
+        let alice_only = InstallationOwner::Tenant
+            .joined_by(&alice)
+            .expect("legacy owner narrows")
+            .expect("owner changes");
+        assert_eq!(alice_only, InstallationOwner::user(alice.clone()));
+        assert_eq!(
+            alice_only.joined_by(&alice).expect("same-member retry"),
+            None,
+            "joining an existing member must not rewrite the row"
+        );
+
+        let alice_and_bob = alice_only
+            .joined_by(&bob)
+            .expect("Bob joins")
+            .expect("owner changes");
+        assert!(alice_and_bob.visible_to(&alice));
+        assert!(alice_and_bob.visible_to(&bob));
+
+        let bob_only = alice_and_bob
+            .without_member(&alice)
+            .expect("Alice leaves")
+            .expect("Bob remains");
+        assert!(!bob_only.visible_to(&alice));
+        assert!(bob_only.visible_to(&bob));
+        assert_eq!(
+            bob_only.without_member(&bob).expect("Bob leaves"),
+            None,
+            "the last member tears down the aggregate"
+        );
+    }
+
     fn manifest_toml(extension_id: &str) -> String {
         format!(
             r#"
@@ -2296,6 +2025,8 @@ pub enum ExtensionInstallationError {
     InvalidValue { field: &'static str, reason: String },
     #[error("installation owner member set must not be empty")]
     EmptyOwnerMembers,
+    #[error("legacy tenant installation owner must be canonicalized before member removal")]
+    LegacyTenantOwnerNotCanonicalized,
     #[error("installation references unknown extension manifest {extension_id}")]
     UnknownManifest { extension_id: ExtensionId },
     #[error(

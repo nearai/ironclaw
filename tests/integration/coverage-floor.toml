@@ -67,4 +67,4 @@ captured_from = "955950b79"
 
 # No [[crate]] entries at initial landing — opt-in, added as owners choose to
 # ratchet a crate they care about (e.g. ironclaw_reborn_composition,
-# ironclaw_product_workflow) as a fast-follow, not blocking this landing.
+# ironclaw_product) as a fast-follow, not blocking this landing.

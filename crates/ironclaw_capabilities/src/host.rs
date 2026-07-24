@@ -1700,6 +1700,68 @@ where
         .await
     }
 
+    /// Terminalize an invocation whose auth gate was explicitly denied.
+    ///
+    /// This is the denial half of [`Self::auth_resume_json`]: it validates the
+    /// same sealed invocation identity and actor scope, transitions only the
+    /// matching `BlockedAuth` record to `Failed`, and never authorizes or
+    /// dispatches the capability.
+    pub async fn decline_auth_json(
+        &self,
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+    ) -> Result<(), CapabilityInvocationError> {
+        let run_state =
+            self.run_state
+                .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
+                    capability: capability_id.clone(),
+                    store: "run_state",
+                })?;
+        let invocation_id = context.invocation_id;
+        let scope = context.resource_scope.clone();
+        if context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+                detail: None,
+            });
+        }
+        let run_record = run_state
+            .get(&scope, invocation_id)
+            .await?
+            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.authenticated_actor_user_id != context.authenticated_actor_user_id {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id,
+                reason: DenyReason::PolicyDenied,
+                detail: None,
+            });
+        }
+        if run_record.status != RunStatus::BlockedAuth {
+            return Err(CapabilityInvocationError::ResumeNotBlocked {
+                capability: capability_id,
+                status: run_record.status,
+            });
+        }
+        if run_record.capability_id != capability_id {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ResumeContextMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ResumeContextMismatch {
+                capability: capability_id,
+                kind: resume_context_mismatch_kind(true, false),
+            });
+        }
+        run_state
+            .fail(&scope, invocation_id, "GateDeclined".to_string())
+            .await?;
+        Ok(())
+    }
+
     pub async fn resume_spawn_json(
         &self,
         context: ExecutionContext,
@@ -2741,7 +2803,7 @@ where
         // relocated from host_runtime's former `auth_resume_capability` call to
         // `apply_persistent_approval_policy`. The loop rebuilds a grant-less
         // context after the credential gate; a capability authorized only by a
-        // persistent grant (e.g. `extension_activate` under admin-config trust)
+        // persistent grant (e.g. `extension_install` under admin-config trust)
         // would otherwise be re-authorized grant-less and denied. Excluded for
         // `resume_json` (`PendingClaim`), which always carries a fresh approval
         // lease and never had persistent-approval applied — preserving behavior.

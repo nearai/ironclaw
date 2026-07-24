@@ -317,14 +317,23 @@ impl EventProjectionService for ActivityThreadMismatchProjectionService {
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionSnapshot, ProjectionError> {
-        Ok(snapshot_with_activity_thread(&request.scope, 10, "thread-b"))
+        Ok(snapshot_with_activity_thread(
+            &request.scope,
+            10,
+            "thread-b",
+        ))
     }
 
     async fn updates(
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError> {
-        Ok(replay_with_activity_thread(&request.scope, 2, 3, "thread-b"))
+        Ok(replay_with_activity_thread(
+            &request.scope,
+            2,
+            3,
+            "thread-b",
+        ))
     }
 }
 
@@ -712,6 +721,75 @@ impl FailingOutboundStore {
 
 #[async_trait]
 impl OutboundStateStore for FailingOutboundStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        _record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        _request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        _record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn put_run_final_reply_handoff(
+        &self,
+        _record: ironclaw_outbound::RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn list_pending_run_final_reply_handoffs(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<ironclaw_outbound::RunFinalReplyHandoffRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn complete_run_final_reply_handoff(
+        &self,
+        _record: &ironclaw_outbound::RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_final_reply_handoff_cursor(
+        &self,
+    ) -> Result<ironclaw_turns::EventCursor, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn advance_run_final_reply_handoff_cursor(
+        &self,
+        _cursor: ironclaw_turns::EventCursor,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn put_run_final_reply_target(
+        &self,
+        _record: ironclaw_outbound::RunFinalReplyTargetRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_final_reply_target(
+        &self,
+        _request: ironclaw_outbound::RunFinalReplyTargetRequest,
+    ) -> Result<Option<ironclaw_outbound::RunFinalReplyTargetRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
     async fn put_thread_notification_policy(
         &self,
         _policy: ThreadNotificationPolicy,
@@ -758,6 +836,20 @@ impl OutboundStateStore for FailingOutboundStore {
         &self,
         _attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        _request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        _request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
         Err(self.error())
     }
 

@@ -1,7 +1,8 @@
 schema_version = 1
 
 # A capability is "tested" only when a harvested journey or typed operation
-# case executes the real extension boundary and observes Emulate.
+# case observes Emulate, or an integration_evidence entry names its executable
+# test at the real local-WASM or hosted-MCP seam.
 [classifications]
 tested = [
   "github.add_issue_assignees",
@@ -29,6 +30,7 @@ tested = [
   "github.get_workflow_run_artifacts",
   "github.get_workflow_run_jobs",
   "github.get_workflow_runs",
+  "github.handle_webhook",
   "github.list_branches",
   "github.list_issue_comments",
   "github.list_issues",
@@ -115,6 +117,7 @@ tested = [
   "google-slides.insert_text",
   "google-slides.replace_all_text",
   "google-slides.replace_shapes_with_image",
+  "nearai.web_search",
   "slack.get_conversation_history",
   "slack.get_conversation_info",
   "slack.get_thread_replies",
@@ -123,27 +126,33 @@ tested = [
   "slack.search_messages",
   "slack.send_message",
   "slack.whoami",
+  "web-access.get_content",
+  "web-access.search",
 ]
 
 live_only = []
 unsupported = []
 
-[[waivers]]
-owner = "@serrrfirat"
-reason = "Webhook normalization is local logic and does not cross a provider boundary."
-issue = "#6524"
-review_condition = "Add a caller-path webhook ingress contract outside the Emulate provider runner."
-capabilities = [
-  "github.handle_webhook",
-]
+[[integration_evidence]]
+capability = "github.handle_webhook"
+target = "reborn_integration_tool_call"
+source = "tests/integration/tool_call.rs"
+test = "github_webhook_normalization_dispatches_through_bundled_wasm"
 
-[[waivers]]
-owner = "@serrrfirat"
-reason = "These search tools need a separate hermetic web-search/content provider double."
-issue = "#6524"
-review_condition = "Replace with tested when the non-Emulate provider fixture exists."
-capabilities = [
-  "nearai.web_search",
-  "web-access.get_content",
-  "web-access.search",
-]
+[[integration_evidence]]
+capability = "nearai.web_search"
+target = "reborn_integration_mcp"
+source = "tests/integration/mcp.rs"
+test = "nearai_web_search_dispatches_through_bundled_hosted_mcp"
+
+[[integration_evidence]]
+capability = "web-access.get_content"
+target = "reborn_integration_web_access"
+source = "tests/integration/web_access.rs"
+test = "get_content_dispatches_through_scripted_exa_mcp"
+
+[[integration_evidence]]
+capability = "web-access.search"
+target = "reborn_integration_web_access"
+source = "tests/integration/web_access.rs"
+test = "web_search_dispatches_through_scripted_exa_mcp"

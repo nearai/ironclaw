@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
+async fn product_event_stream_enriches_auth_prompt_through_projection_stream() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -51,7 +51,7 @@ async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
     }));
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -91,7 +91,7 @@ async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_prompt() {
+async fn product_event_stream_uses_credential_requirement_for_manual_token_auth_prompt() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -145,7 +145,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -185,7 +185,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 }
 
 #[tokio::test]
-async fn webui_event_stream_keeps_retired_channel_pairing_requirement_generic() {
+async fn product_event_stream_keeps_retired_channel_pairing_requirement_generic() {
     // Legacy persisted channel-pairing setup records now deserialize as
     // `Retired`. They still produce a generic auth prompt so the blocked state
     // remains visible, but they must not advertise the removed pairing-code
@@ -243,7 +243,7 @@ async fn webui_event_stream_keeps_retired_channel_pairing_requirement_generic() 
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -276,7 +276,7 @@ async fn webui_event_stream_keeps_retired_channel_pairing_requirement_generic() 
 }
 
 #[tokio::test]
-async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url() {
+async fn product_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -332,7 +332,7 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -357,7 +357,7 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
 }
 
 #[tokio::test]
-async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
+async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -403,7 +403,7 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
     .with_auth_challenges(Arc::new(FailingAuthChallengeProvider));
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -419,7 +419,7 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
+async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
     use crate::product_auth::api::auth::{
         RebornAuthContinuationDispatcher, RebornProductAuthServices,
     };
@@ -575,7 +575,7 @@ async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_g
     .with_auth_challenges(product_auth);
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,

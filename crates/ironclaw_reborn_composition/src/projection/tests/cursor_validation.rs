@@ -9,7 +9,7 @@ fn effective_runtime_payload_offset_resets_when_runtime_item_changes() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_rejects_malformed_projection_cursor() {
+async fn product_event_stream_rejects_malformed_projection_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -22,7 +22,7 @@ async fn webui_event_stream_rejects_malformed_projection_cursor() {
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
@@ -41,7 +41,7 @@ async fn webui_event_stream_rejects_malformed_projection_cursor() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit() {
+async fn product_event_stream_rejects_runtime_delivery_offset_above_payload_limit() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -49,7 +49,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit(
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id);
     let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
-    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+    let cursor = product_cursor_from_projection_cursor(&ProductSurfaceProjectionCursor {
         runtime: Some(EventProjectionCursor::origin_for_scope(
             runtime_projection_scope(&actor, &scope),
         )),
@@ -57,7 +57,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit(
         live_epoch: None,
         runtime_item: None,
         turn: None,
-        runtime_payloads_delivered: WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 2,
+        runtime_payloads_delivered: PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS + 2,
     })
     .unwrap();
     let services = build_reborn_projection_services(
@@ -66,7 +66,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit(
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -85,7 +85,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit(
 }
 
 #[tokio::test]
-async fn webui_event_stream_rejects_runtime_delivery_offset_above_item_payload_count() {
+async fn product_event_stream_rejects_runtime_delivery_offset_above_item_payload_count() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -103,7 +103,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_item_payload_c
     let event_log: Arc<dyn DurableEventLog> = event_log;
     let actor = TurnActor::new(user_id);
     let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
-    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+    let cursor = product_cursor_from_projection_cursor(&ProductSurfaceProjectionCursor {
         runtime: Some(EventProjectionCursor::origin_for_scope(
             runtime_projection_scope(&actor, &scope),
         )),
@@ -120,7 +120,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_item_payload_c
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -139,7 +139,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_item_payload_c
 }
 
 #[tokio::test]
-async fn webui_event_stream_rejects_legacy_partial_snapshot_offset_above_item_payload_count() {
+async fn product_event_stream_rejects_legacy_partial_snapshot_offset_above_item_payload_count() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -157,7 +157,7 @@ async fn webui_event_stream_rejects_legacy_partial_snapshot_offset_above_item_pa
     let event_log: Arc<dyn DurableEventLog> = event_log;
     let actor = TurnActor::new(user_id);
     let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
-    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+    let cursor = product_cursor_from_projection_cursor(&ProductSurfaceProjectionCursor {
         runtime: None,
         live: None,
         live_epoch: None,
@@ -172,7 +172,7 @@ async fn webui_event_stream_rejects_legacy_partial_snapshot_offset_above_item_pa
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,

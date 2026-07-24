@@ -202,17 +202,12 @@ export function useChat(threadId) {
     messages,
     messagesThreadId,
     pendingGate,
-    pendingGateRef,
-    setPendingGate,
-    setIsProcessing,
     sendRef,
   });
   const {
     pendingOnboarding,
     pendingOnboardingRef,
     setPendingOnboardingState,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = channelOnboarding;
@@ -482,7 +477,7 @@ export function useChat(threadId) {
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.ts`
-  // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
+  // (`stageFiles`); we split them into the `ProductInboundAttachment` wire
   // shape for the send and the render shape for the optimistic bubble so
   // cards/thumbnails appear immediately, matching what the timeline
   // projection returns after the run.
@@ -1089,8 +1084,6 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
     cancelRun,

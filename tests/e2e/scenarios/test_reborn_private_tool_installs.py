@@ -1,4 +1,4 @@
-"""Private tool installs E2E (#5459 P1): import, install/activate, per-user
+"""Private tool installs E2E (#5459 P1): import, install, per-user
 membership visibility, and real tool dispatch — driven through the real
 ``ironclaw-reborn serve`` binary.
 
@@ -11,17 +11,13 @@ Scenario:
 
 1. Operator imports the three ``test-tools/`` fixture bundles
    (``test-tools/README.md``).
-2. Operator installs + activates ``ascii-renderer`` tenant-wide (available to
-   everyone).
+2. Operator installs ``ascii-renderer`` for their own user; administrator
+   privilege does not make that membership tenant-wide.
 3. Operator creates two member users, alice and bob, through the admin API.
-4. Alice privately installs + activates ``hacker-news``.
-5. Alice prompts for ``ascii-renderer`` (shared) and ``hacker-news`` (her
-   private install); both dispatch.
-6. Bob privately installs + activates ``market-data``.
-7. ``hacker-news`` (alice's private install) is absent from bob's extension
-   list — membership-scoped visibility, checked without prompting.
-8. Bob prompts for ``ascii-renderer`` (shared) and ``market-data`` (his
-   private install) in one turn; both dispatch.
+4. Alice privately installs ``ascii-renderer`` and ``hacker-news``; both
+   dispatch.
+5. Bob cannot see either of Alice's memberships, then privately installs
+   ``ascii-renderer`` and ``market-data``; both dispatch.
 """
 
 import uuid
@@ -63,9 +59,7 @@ async def _import_tool(client: httpx.AsyncClient, base_url: str, zip_path) -> No
     assert response.json()["success"] is True
 
 
-async def _install_and_activate(
-    client: httpx.AsyncClient, base_url: str, tool_id: str
-) -> None:
+async def _install(client: httpx.AsyncClient, base_url: str, tool_id: str) -> None:
     install = await client.post(
         f"{base_url}{EXTENSIONS_BASE}/install",
         json={"package_ref": _package_ref(tool_id)},
@@ -73,13 +67,6 @@ async def _install_and_activate(
     )
     assert install.status_code == 200, install.text
     assert install.json()["success"] is True
-
-    activate = await client.post(
-        f"{base_url}{EXTENSIONS_BASE}/{tool_id}/activate",
-        timeout=15,
-    )
-    assert activate.status_code == 200, activate.text
-    assert activate.json()["success"] is True
 
 
 async def _create_member_user(
@@ -118,8 +105,8 @@ async def test_private_tool_installs_full_path(
             for tool_id in ("ascii-renderer", "hacker-news", "market-data"):
                 await _import_tool(operator, base_url, test_tool_zips[tool_id])
 
-            # 2. Operator installs + activates ascii-renderer tenant-wide.
-            await _install_and_activate(operator, base_url, "ascii-renderer")
+            # 2. Operator installs ascii-renderer only for their own user.
+            await _install(operator, base_url, "ascii-renderer")
 
             # 3. Operator creates alice and bob.
             alice = await _create_member_user(operator, base_url, display_name="Alice")
@@ -131,11 +118,18 @@ async def test_private_tool_installs_full_path(
             await enable_reborn_global_auto_approve(base_url, token=bob["token"])
 
         async with _user_client(base_url, alice["token"]) as alice_client:
-            # 4. Alice privately installs + activates hacker-news.
-            await _install_and_activate(alice_client, base_url, "hacker-news")
+            # 4. Alice's memberships are independent from the operator's.
+            alice_before = await alice_client.get(
+                f"{base_url}{EXTENSIONS_BASE}", timeout=15
+            )
+            assert alice_before.status_code == 200, alice_before.text
+            assert "ascii-renderer" not in _extension_ids(
+                alice_before.json()["extensions"]
+            )
+            await _install(alice_client, base_url, "ascii-renderer")
+            await _install(alice_client, base_url, "hacker-news")
 
-            # 5. Alice's ascii-renderer (shared) and hacker-news (her private
-            #    install) prompts both dispatch.
+            # Both of Alice's personal installs dispatch.
             thread_id = await create_thread(alice_client, base_url)
             await send_and_settle(
                 alice_client,
@@ -170,22 +164,18 @@ async def test_private_tool_installs_full_path(
             assert hn_preview["status"] == "completed", hn_preview
 
         async with _user_client(base_url, bob["token"]) as bob_client:
-            # 6. Bob privately installs + activates market-data.
-            await _install_and_activate(bob_client, base_url, "market-data")
-
-            # 7. Alice's private hacker-news install is invisible to bob —
-            #    a pure visibility check, no prompting needed.
+            # 5. Alice's memberships are invisible to Bob.
             bob_extensions = await bob_client.get(f"{base_url}{EXTENSIONS_BASE}", timeout=15)
             assert bob_extensions.status_code == 200, bob_extensions.text
             bob_ids = _extension_ids(bob_extensions.json()["extensions"])
             assert "hacker-news" not in bob_ids
-            # The shared ascii-renderer and his own market-data ARE visible.
-            assert "ascii-renderer" in bob_ids
-            assert "market-data" in bob_ids
+            assert "ascii-renderer" not in bob_ids
+            assert "market-data" not in bob_ids
 
-            # 8. Bob's combined prompt dispatches both the shared
-            #    ascii-renderer and his private market-data install in the
-            #    same turn.
+            await _install(bob_client, base_url, "ascii-renderer")
+            await _install(bob_client, base_url, "market-data")
+
+            # Bob's own installs dispatch in the same turn.
             thread_id = await create_thread(bob_client, base_url)
             await send_and_settle(
                 bob_client,

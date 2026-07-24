@@ -39,6 +39,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     let result = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
             authenticated_actor_user_id: None,
@@ -121,6 +122,7 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -152,6 +154,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -189,6 +192,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
     let result = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -230,6 +234,7 @@ async fn dispatcher_rejects_stale_authorized_lane_before_binding_dispatch() {
         .dispatch_json(authorized_with_lane(
             CapabilityDispatchRequest {
                 run_id: None,
+                origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
                 capability_id: CapabilityId::new("echo.say").unwrap(),
                 scope,
                 authenticated_actor_user_id: None,
@@ -272,6 +277,7 @@ async fn dispatcher_fails_closed_when_prepared_reservation_was_revoked_before_bi
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -528,6 +534,7 @@ fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -
 fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
         run_id: None,
+        origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,

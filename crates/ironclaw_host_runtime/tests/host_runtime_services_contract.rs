@@ -3,7 +3,13 @@ mod support;
 
 use support::host_runtime_harness::*;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_approvals::LeaseApproval;
@@ -44,7 +50,9 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-use ironclaw_run_state::{ApprovalRequestStore, RunStart, RunStateStore, RunStatus};
+use ironclaw_run_state::{
+    ApprovalRequestStore, RunRecord, RunStart, RunStateError, RunStateStore, RunStatus,
+};
 use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{
     FilesystemSecretStore, InMemoryCredentialBroker, SecretMaterial, SecretStore,
@@ -3121,6 +3129,202 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
 }
 
 #[tokio::test]
+async fn host_runtime_services_auth_decline_terminalizes_matching_blocked_invocation() {
+    let fixture = approval_resume_fixture();
+    let context = with_authenticated_actor(execution_context_without_grants(), Some("slack-alice"));
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+            authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+    let runtime = resume_runtime_with_empty_registry(&fixture);
+
+    let outcome = runtime
+        .decline_auth_capability((context, script_capability_id()))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::GateDeclined);
+    let record = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("blocked invocation remains durably recorded");
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error_kind.as_deref(), Some("GateDeclined"));
+    assert!(
+        fixture.events.events().is_empty(),
+        "declining auth must not dispatch the capability"
+    );
+}
+
+struct FailOnceAuthDeclineRunStateStore {
+    inner: Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    fail_attempts: AtomicUsize,
+}
+
+impl FailOnceAuthDeclineRunStateStore {
+    fn new(
+        inner: Arc<
+            ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+        >,
+    ) -> Self {
+        Self {
+            inner,
+            fail_attempts: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RunStateStore for FailOnceAuthDeclineRunStateStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        if self.fail_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(RunStateError::Filesystem(
+                "simulated transient decline failure at /tmp/runstate.db".to_string(),
+            ));
+        }
+        self.inner.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.inner.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unavailable() {
+    let fixture = approval_resume_fixture();
+    let context = with_authenticated_actor(execution_context_without_grants(), Some("slack-alice"));
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+            authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+    let fail_once_run_state = Arc::new(FailOnceAuthDeclineRunStateStore::new(Arc::clone(
+        &fixture.run_state,
+    )));
+    let runtime = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(fail_once_run_state)
+    .host_runtime_for_local_testing();
+
+    let first_error = runtime
+        .decline_auth_capability((context.clone(), script_capability_id()))
+        .await
+        .expect_err("transient durable-store failure must stay retryable");
+    assert!(matches!(
+        first_error,
+        ironclaw_host_runtime::HostRuntimeError::Unavailable { .. }
+    ));
+    assert_alice_run_status(
+        fixture.run_state.as_ref(),
+        &scope,
+        invocation_id,
+        RunStatus::BlockedAuth,
+    )
+    .await;
+
+    let retry = runtime
+        .decline_auth_capability((context, script_capability_id()))
+        .await
+        .expect("retry terminalizes the exact blocked invocation");
+    assert_failed_outcome(retry, RuntimeFailureKind::GateDeclined);
+    assert_alice_run_status(
+        fixture.run_state.as_ref(),
+        &scope,
+        invocation_id,
+        RunStatus::Failed,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_and_preflight() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -4288,6 +4492,42 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         .unwrap();
 
     assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
+async fn host_runtime_services_surfaces_invalid_mcp_catalog_without_retrying() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(MCP_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(Vec::new())),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
+    .with_mcp_runtime(Arc::new(InvalidToolCatalogMcpExecutor));
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability((
+            execution_context_with_dispatch_grant(mcp_capability_id()),
+            mcp_capability_id(),
+            ResourceEstimate::default(),
+            json!({"query": "reject an invalid catalog"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidOutput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+        }
+        other => panic!("expected non-retryable invalid-output failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]

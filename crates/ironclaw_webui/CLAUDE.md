@@ -27,7 +27,7 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
 Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
 stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
-/ DB, and no direct `ironclaw_product_adapters` edge (reach it through
+/ DB, and no direct `ironclaw_product` edge (reach it through
 composition's facade). Enforced by `ironclaw_architecture`
 (`tests/reborn_dependency_boundaries.rs`).
 
@@ -70,9 +70,9 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
-Handlers consume only `ironclaw_product_workflow::ProductSurface`. The bearer
+Handlers consume only `ironclaw_host_api::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
-`WebUiAuthenticatedCaller`, carries the matched token's `WebUiV2Capabilities`,
+`ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail
 closed (`500`) if that layer is missing (locked by
 `missing_caller_extension_returns_500`).
@@ -91,7 +91,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductWorkflow` |
-| `webui.v2.list/install/import/activate/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
+| `webui.v2.list/install/import/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductWorkflow` |

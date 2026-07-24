@@ -3005,6 +3005,22 @@ async fn filesystem_turn_state_store_rejects_byte_only_backend_before_persisting
 }
 
 #[tokio::test]
+async fn durable_event_log_replay_fails_closed_on_byte_only_backend() {
+    let backend = Arc::new(byte_only_filesystem());
+    let scoped = scoped_turns_fs(backend);
+    let store = FilesystemTurnStateRowStore::new(scoped);
+
+    let error = store
+        .read_turn_event_log_after(None, 32)
+        .await
+        .expect_err("durable replay must not fall back to a directory scan");
+    assert!(
+        matches!(error, TurnError::Unavailable { .. }),
+        "byte-only durable replay must fail explicitly: {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_turn_state_store_hides_records_from_other_tenants_via_mount_view() {
     // Regression for the ScopedFilesystem migration: two stores share one
     // underlying RootFilesystem but each is constructed with a MountView
@@ -3488,6 +3504,55 @@ async fn filesystem_turn_state_events_query_isolates_scopes_across_threads() {
         after_newest.entries.is_empty(),
         "reading after the newest cursor must return no further events"
     );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_event_log_replays_across_scopes_by_global_cursor() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let scope_a = turn_scope("thread-event-log-a");
+    let scope_b = turn_scope("thread-event-log-b");
+    store
+        .submit_turn(
+            submit_request_for(scope_a.clone(), "idem-event-log-a"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .expect("submit first scoped run");
+    store
+        .submit_turn(
+            submit_request_for(scope_b.clone(), "idem-event-log-b"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .expect("submit second scoped run");
+
+    let first = store
+        .read_turn_event_log_after(None, 1)
+        .await
+        .expect("read first bounded log page");
+    assert_eq!(first.entries.len(), 1);
+    assert!(first.truncated);
+
+    let second = store
+        .read_turn_event_log_after(Some(first.next_cursor), 1)
+        .await
+        .expect("resume from durable global cursor");
+    assert_eq!(second.entries.len(), 1);
+    assert_ne!(first.entries[0].scope, second.entries[0].scope);
+    assert!(second.entries[0].cursor > first.entries[0].cursor);
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let after_reopen = reopened
+        .read_turn_event_log_after(Some(first.next_cursor), 1)
+        .await
+        .expect("global cursor remains replayable after reopen");
+    assert_eq!(after_reopen.entries, second.entries);
 }
 
 #[tokio::test]

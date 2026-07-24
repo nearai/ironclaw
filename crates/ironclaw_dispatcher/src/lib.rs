@@ -190,8 +190,13 @@ where
             Actor::Sealed(user_id) => Some(user_id.clone()),
             Actor::System => None,
         };
+        let origin = invocation.origin.clone();
         let run_id = match invocation.origin {
-            InvocationOrigin::LoopRun(run_id) if invocation.process_id.is_none() => Some(run_id),
+            InvocationOrigin::LoopRun(run_id) | InvocationOrigin::ScheduledLoopRun(run_id)
+                if invocation.process_id.is_none() =>
+            {
+                Some(run_id)
+            }
             _ => None,
         };
         let mut request = CapabilityDispatchRequest {
@@ -199,6 +204,7 @@ where
             scope: invocation.scope,
             authenticated_actor_user_id,
             run_id,
+            origin,
             estimate: invocation.estimate,
             mounts,
             resource_reservation,

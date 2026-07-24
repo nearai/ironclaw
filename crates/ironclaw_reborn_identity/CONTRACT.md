@@ -20,7 +20,7 @@ admin surface extends this store; it does not stand up a new one. See
 Bottom-of-stack, downstream-facing. Among internal `ironclaw_*` crates it
 depends **only** on `ironclaw_host_api` (identity/scope newtypes, `ScopedPath`)
 and `ironclaw_filesystem` (the durable substrate). It must never reach upstream
-(`ironclaw_reborn_composition`, `ironclaw_product_workflow`) or onto the v1
+(`ironclaw_reborn_composition`, `ironclaw_product`) or onto the v1
 legacy enclave. This is machine-enforced: `reborn_crate_dependency_boundaries_hold`
 in `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` allows
 exactly those two edges. The only external consumer is

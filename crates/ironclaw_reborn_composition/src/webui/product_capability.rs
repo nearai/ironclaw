@@ -1,31 +1,32 @@
 //! Generic product command adapter into the canonical host-runtime pipeline.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    CasApply, CompositeRootFilesystem, ContentType, Entry, RootFilesystem, ScopedFilesystem,
-    cas_update,
+    CasApply, CompositeRootFilesystem, ContentType, Entry, FilesystemError, RootFilesystem,
+    ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
     ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
     CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, EffectKind, ExecutionContext,
     ExtensionId, FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId,
     InvocationOrigin, MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef,
-    ProcessWaypoint, ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta,
-    ResultProgress, ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension,
-    TerminateHint, ToolVerdict, TrustClass,
+    ProcessWaypoint, ProductKind, ProductSurfaceCaller, ProductSurfaceError, Resolution,
+    ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken,
+    RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
-    WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID, ProductCapabilityInvoker,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID,
 };
 
 use crate::RebornRuntime;
 use crate::extension_host::lifecycle::SkillManagementMountResolver;
+use tokio::sync::Mutex as AsyncMutex;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
@@ -43,6 +44,8 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
     // a single composite filesystem, so which resolver is live is the only
     // deployment-shape distinction the invoker still needs.
     skill_mount_resolver: Arc<SkillManagementMountResolver>,
+    system_extensions_lifecycle_mounts: MountView,
+    activity_locks: Arc<AsyncMutex<HashMap<ActivityId, Arc<AsyncMutex<()>>>>>,
 }
 
 #[derive(Clone)]
@@ -59,6 +62,28 @@ impl RuntimeProductCapabilityInvoker {
                 &runtime.extension_filesystem,
             ))),
             skill_mount_resolver: runtime.skill_management.mount_resolver(),
+            system_extensions_lifecycle_mounts: runtime.system_extensions_lifecycle_mounts.clone(),
+            activity_locks: Arc::new(AsyncMutex::new(HashMap::new())),
+        }
+    }
+
+    async fn lock_for_activity(&self, activity_id: ActivityId) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.activity_locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(activity_id)
+                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+        )
+    }
+
+    async fn release_activity_lock(&self, activity_id: ActivityId, lock: &Arc<AsyncMutex<()>>) {
+        let mut locks = self.activity_locks.lock().await;
+        if locks
+            .get(&activity_id)
+            .is_some_and(|current| Arc::ptr_eq(current, lock))
+            && Arc::strong_count(lock) <= 2
+        {
+            locks.remove(&activity_id);
         }
     }
 }
@@ -67,16 +92,18 @@ impl RuntimeProductCapabilityInvoker {
 impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
     async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         capability: CapabilityId,
         input: serde_json::Value,
         activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+    ) -> Result<Resolution, ProductSurfaceError> {
         let Self {
             host_runtime,
             registry,
             results,
             skill_mount_resolver,
+            system_extensions_lifecycle_mounts,
+            activity_locks: _,
         } = self;
         // The origin-to-gate matrix is still provisional in today's kernel.
         // Encode the direct user gesture as one exact, host-issued grant. The
@@ -84,39 +111,60 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         // so a concurrent stronger replacement no longer fits this attenuated
         // grant and fails closed.
         let descriptor = registry.get_capability(&capability);
-        let context =
-            product_execution_context(&caller, activity_id, descriptor, &**skill_mount_resolver)?;
+        let context = product_execution_context(
+            &caller,
+            activity_id,
+            descriptor,
+            &**skill_mount_resolver,
+            system_extensions_lifecycle_mounts,
+        )?;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
+        if let Some(replayed) = results.replay(&scope, invocation_id).await? {
+            return Ok(replayed);
+        }
+        let activity_lock = self.lock_for_activity(activity_id).await;
+        let _activity_guard = activity_lock.lock().await;
+        if let Some(replayed) = results.replay(&scope, invocation_id).await? {
+            drop(_activity_guard);
+            self.release_activity_lock(activity_id, &activity_lock)
+                .await;
+            return Ok(replayed);
+        }
         let requested_capability = capability.clone();
-        let outcome = host_runtime
-            .invoke_capability((context, capability, ResourceEstimate::default(), input))
-            .await
-            .map_err(RebornServicesError::internal_from)?;
-        ensure_matching_capability(&requested_capability, &outcome)?;
-        product_resolution(results, &scope, invocation_id, outcome).await
+        let result = async {
+            let outcome = host_runtime
+                .invoke_capability((context, capability, ResourceEstimate::default(), input))
+                .await
+                .map_err(ProductSurfaceError::internal_from)?;
+            ensure_matching_capability(&requested_capability, &outcome)?;
+            product_resolution(results, &scope, invocation_id, outcome).await
+        }
+        .await;
+        drop(_activity_guard);
+        self.release_activity_lock(activity_id, &activity_lock)
+            .await;
+        result
     }
 }
 
 fn product_execution_context(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     activity_id: ActivityId,
     descriptor: Option<&CapabilityDescriptor>,
     skill_mount_resolver: &SkillManagementMountResolver,
-) -> Result<ExecutionContext, RebornServicesError> {
+    system_extensions_lifecycle_mounts: &MountView,
+) -> Result<ExecutionContext, ProductSurfaceError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
-    let scope = ResourceScope {
-        tenant_id: caller.tenant_id.clone(),
-        user_id: caller.user_id.clone(),
-        agent_id: caller.agent_id.clone(),
-        project_id: caller.project_id.clone(),
-        mission_id: None,
-        thread_id: None,
-        invocation_id,
-    };
+    let scope = product_resource_scope(caller, invocation_id);
     let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
-        .map_err(RebornServicesError::internal_from)?;
-    let invocation_mounts = product_invocation_mounts(&scope, descriptor, skill_mount_resolver)?;
+        .map_err(ProductSurfaceError::internal_from)?;
+    let invocation_mounts = product_invocation_mounts(
+        &scope,
+        descriptor,
+        skill_mount_resolver,
+        system_extensions_lifecycle_mounts,
+    )?;
     let grants = descriptor
         .map(|descriptor| CapabilitySet {
             grants: vec![product_gesture_grant(
@@ -140,7 +188,7 @@ fn product_execution_context(
         thread_id: None,
         run_id: None,
         origin: Some(InvocationOrigin::Product(
-            ProductKind::new("webui").map_err(RebornServicesError::internal_from)?,
+            ProductKind::new("webui").map_err(ProductSurfaceError::internal_from)?,
         )),
         extension_id,
         // Both are provisional input to the kernel. Resolve/authorize derives
@@ -153,8 +201,23 @@ fn product_execution_context(
     };
     context
         .validate()
-        .map_err(RebornServicesError::internal_from)?;
+        .map_err(ProductSurfaceError::internal_from)?;
     Ok(context)
+}
+
+fn product_resource_scope(
+    caller: &ProductSurfaceCaller,
+    invocation_id: InvocationId,
+) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    }
 }
 
 fn product_gesture_grant(
@@ -210,14 +273,18 @@ fn product_invocation_mounts(
     scope: &ResourceScope,
     descriptor: Option<&CapabilityDescriptor>,
     skill_mount_resolver: &SkillManagementMountResolver,
-) -> Result<MountView, RebornServicesError> {
+    system_extensions_lifecycle_mounts: &MountView,
+) -> Result<MountView, ProductSurfaceError> {
     let Some(descriptor) = descriptor else {
         return Ok(MountView::default());
     };
+    if is_extension_lifecycle_capability(&descriptor.id) {
+        return Ok(system_extensions_lifecycle_mounts.clone());
+    }
     if !is_skill_management_capability(&descriptor.id) {
         return Ok(MountView::default());
     }
-    skill_mount_resolver(scope).map_err(RebornServicesError::internal_from)
+    skill_mount_resolver(scope).map_err(ProductSurfaceError::internal_from)
 }
 
 fn is_skill_management_capability(capability: &CapabilityId) -> bool {
@@ -230,18 +297,26 @@ fn is_skill_management_capability(capability: &CapabilityId) -> bool {
     )
 }
 
+fn is_extension_lifecycle_capability(capability: &CapabilityId) -> bool {
+    // #6520 removed the separate activate capability; install drives readiness.
+    matches!(
+        capability.as_str(),
+        EXTENSION_INSTALL_CAPABILITY_ID | EXTENSION_REMOVE_CAPABILITY_ID
+    )
+}
+
 async fn product_resolution(
     results: &ProductResultFilesystem,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     outcome: RuntimeCapabilityOutcome,
-) -> Result<Resolution, RebornServicesError> {
+) -> Result<Resolution, ProductSurfaceError> {
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
             let body = serde_json::to_vec(&completed.output)
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             if body.len() > PRODUCT_RESULT_MAX_BYTES {
-                return Err(RebornServicesError::internal_from(
+                return Err(ProductSurfaceError::internal_from(
                     "product capability result exceeded the durable output bound",
                 ));
             }
@@ -264,7 +339,7 @@ async fn product_resolution(
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             Ok(Resolution::Blocked(Blocked::Approval(
                 GateWaypoint::new(GateRef::for_approval_request(gate.approval_request_id))
                     .with_resume(resume),
@@ -272,7 +347,7 @@ async fn product_resolution(
         }
         RuntimeCapabilityOutcome::AuthRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
-                .map_err(RebornServicesError::internal_from)?;
+                .map_err(ProductSurfaceError::internal_from)?;
             Ok(Resolution::Blocked(Blocked::Auth(
                 GateWaypoint::new(GateRef::for_auth_gate(gate.gate_id.as_str()))
                     .with_resume(resume),
@@ -358,7 +433,7 @@ fn fixed_summary(summary: &'static str) -> SafeSummary {
 fn ensure_matching_capability(
     requested: &CapabilityId,
     outcome: &RuntimeCapabilityOutcome,
-) -> Result<(), RebornServicesError> {
+) -> Result<(), ProductSurfaceError> {
     let actual = match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => &completed.capability_id,
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => &gate.capability_id,
@@ -369,7 +444,7 @@ fn ensure_matching_capability(
         RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
     };
     if actual != requested {
-        return Err(RebornServicesError::internal_from(
+        return Err(ProductSurfaceError::internal_from(
             "host runtime returned an outcome for a different capability",
         ));
     }
@@ -377,12 +452,24 @@ fn ensure_matching_capability(
 }
 
 impl ProductResultFilesystem {
+    async fn replay(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<Resolution>, ProductSurfaceError> {
+        match self {
+            Self::Composite(filesystem) => {
+                replay_product_result(filesystem, scope, invocation_id).await
+            }
+        }
+    }
+
     async fn persist(
         &self,
         scope: &ResourceScope,
         result_ref: ResultRef,
         body: Vec<u8>,
-    ) -> Result<(), RebornServicesError> {
+    ) -> Result<(), ProductSurfaceError> {
         match self {
             Self::Composite(filesystem) => {
                 persist_product_result(filesystem, scope, result_ref, body).await
@@ -396,12 +483,12 @@ async fn persist_product_result<F>(
     scope: &ResourceScope,
     result_ref: ResultRef,
     body: Vec<u8>,
-) -> Result<(), RebornServicesError>
+) -> Result<(), ProductSurfaceError>
 where
     F: RootFilesystem + ?Sized,
 {
     let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.json"))
-        .map_err(RebornServicesError::internal_from)?;
+        .map_err(ProductSurfaceError::internal_from)?;
     let write_body = body.clone();
     cas_update(
         filesystem,
@@ -426,15 +513,51 @@ where
         },
     )
     .await
-    .map_err(RebornServicesError::internal_from)
+    .map_err(ProductSurfaceError::internal_from)
+}
+
+async fn replay_product_result<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+) -> Result<Option<Resolution>, ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+    let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let body = match filesystem
+        .read_bytes_bounded(scope, &path, PRODUCT_RESULT_MAX_BYTES)
+        .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(ProductSurfaceError::internal_from(error)),
+    };
+    Ok(Some(Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: result_ref,
+            byte_len: body.len() as u64,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: fixed_summary("capability completed"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    })))
 }
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        EffectKind, NetworkScheme, NetworkTargetPattern, PermissionMode,
-        RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-        RuntimeKind, SecretHandle, TrustClass,
+        EffectKind, MountAlias, MountGrant, MountPermissions, NetworkScheme, NetworkTargetPattern,
+        PermissionMode, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+        RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass, VirtualPath,
     };
 
     use super::*;
@@ -523,6 +646,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn product_invocation_mounts_grants_extension_lifecycle_mounts() {
+        let skill_mount_resolver = |_scope: &ResourceScope| Ok(MountView::default());
+        for capability in [
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            let descriptor = descriptor_with_id(capability);
+            let lifecycle_mounts =
+                crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+                    .expect("expected extension lifecycle mounts");
+            let mounts = product_invocation_mounts(
+                &resource_scope(),
+                Some(&descriptor),
+                &skill_mount_resolver,
+                &lifecycle_mounts,
+            )
+            .expect("extension lifecycle product mounts");
+
+            assert_eq!(mounts, lifecycle_mounts);
+
+            let production_lifecycle_mounts =
+                crate::factory::production_system_extensions_lifecycle_mount_view()
+                    .expect("expected production extension lifecycle mounts");
+            let production_mounts = product_invocation_mounts(
+                &resource_scope(),
+                Some(&descriptor),
+                &skill_mount_resolver,
+                &production_lifecycle_mounts,
+            )
+            .expect("production extension lifecycle product mounts");
+            assert_eq!(production_mounts, production_lifecycle_mounts);
+        }
+    }
+
+    #[test]
+    fn product_invocation_mounts_keeps_skill_mounts_scoped() {
+        let scope = resource_scope();
+        let descriptor = descriptor_with_id(SKILL_REMOVE_CAPABILITY_ID);
+        let skill_mount_resolver = |scope: &ResourceScope| {
+            crate::local_dev_mounts::scoped_skill_management_mount_view(scope)
+        };
+        let lifecycle_mounts = MountView::default();
+        let mounts = product_invocation_mounts(
+            &scope,
+            Some(&descriptor),
+            &skill_mount_resolver,
+            &lifecycle_mounts,
+        )
+        .expect("skill product mounts");
+
+        assert_eq!(
+            mounts,
+            crate::local_dev_mounts::scoped_skill_management_mount_view(&scope)
+                .expect("expected skill mounts")
+        );
+    }
+
+    #[test]
+    fn product_invocation_mounts_leaves_unclassified_capabilities_empty() {
+        let descriptor = descriptor_with_id("builtin.product-gesture-test");
+        let skill_mount_resolver = |_scope: &ResourceScope| Ok(MountView::default());
+        let lifecycle_mounts = MountView::default();
+        let mounts = product_invocation_mounts(
+            &resource_scope(),
+            Some(&descriptor),
+            &skill_mount_resolver,
+            &lifecycle_mounts,
+        )
+        .expect("product mounts");
+
+        assert_eq!(mounts, MountView::default());
+    }
+
+    #[tokio::test]
+    async fn product_result_replay_returns_persisted_resolution() {
+        let filesystem = scoped_product_results_filesystem();
+        let scope = resource_scope();
+        let invocation_id = InvocationId::new();
+        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+        let body = br#"{"status":"installed"}"#.to_vec();
+
+        persist_product_result(&filesystem, &scope, result_ref, body.clone())
+            .await
+            .expect("product result persists");
+        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+            .await
+            .expect("product result replays")
+            .expect("persisted result should replay");
+
+        let Resolution::Done(outcome) = replayed else {
+            panic!("persisted product result should replay as a completed outcome");
+        };
+        assert_eq!(outcome.refs.result, result_ref);
+        assert_eq!(outcome.refs.byte_len, body.len() as u64);
+        assert_eq!(outcome.verdict, ToolVerdict::Success);
+    }
+
+    fn descriptor_with_id(id: &str) -> CapabilityDescriptor {
+        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
+        descriptor.id = CapabilityId::new(id).unwrap();
+        descriptor
+    }
+
+    fn resource_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("tenant-test").unwrap(),
+            user_id: ironclaw_host_api::UserId::new("user-test").unwrap(),
+            agent_id: Some(ironclaw_host_api::AgentId::new("agent-test").unwrap()),
+            project_id: Some(ironclaw_host_api::ProjectId::new("project-test").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
     fn descriptor_with_network(
         network_targets: Vec<NetworkTargetPattern>,
         runtime_credentials: Vec<RuntimeCredentialRequirement>,
@@ -542,5 +781,17 @@ mod tests {
             resource_profile: None,
             origin_gate_matrix: None,
         }
+    }
+
+    fn scoped_product_results_filesystem() -> ScopedFilesystem<InMemoryBackend> {
+        ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new(PRODUCT_RESULT_ROOT).unwrap(),
+                VirtualPath::new(PRODUCT_RESULT_ROOT).unwrap(),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("product results mount view"),
+        )
     }
 }

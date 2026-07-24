@@ -1,8 +1,8 @@
 //! Persistence port for installation lifecycle records.
 //!
 //! `ExtensionHost` is the only writer of installation state; this port is the
-//! host's working set, rehydrated from the facade's durable
-//! `ExtensionActivationState` records at every boot. The record carries the
+//! host's working set, rehydrated from durable installation membership records
+//! at every boot. The record carries the
 //! resolved contract (so a restore never needs the package source), the
 //! current working state (`Installed` / `Active` / `Failed`), the non-secret
 //! config values, and a typed, redacted last error.
