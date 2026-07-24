@@ -214,34 +214,78 @@ def _python_function(
     call from one inside a comment or a string literal.
     """
     tree = ast.parse(source)
-    for node in tree.body:
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == symbol
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == symbol
+    ]
+    if not matches:
+        raise AssertionError(f"{role} {symbol!r} is missing from {source_label}")
+    # Python binds the last definition, so inspecting the first would let a
+    # stale earlier copy vouch for a redefinition that never calls the readback.
+    # A duplicate module-level name is a defect in its own right, so reject it
+    # rather than silently picking one.
+    if len(matches) > 1:
+        raise AssertionError(
+            f"{role} {symbol!r} is defined {len(matches)} times at module level "
+            f"in {source_label}; only the last definition runs, so the evidence "
+            "is ambiguous"
+        )
+    return matches[0]
+
+
+def _scope_nodes(node: ast.AST, *, top: bool = False):
+    """Nodes in this function's own execution scope.
+
+    Deliberately does not descend into nested `def`/`lambda`/`class` bodies: a
+    call sitting inside a nested function that nobody invokes never runs, and
+    must not count as evidence that the readback executed.
+    """
+    children = node.body if top else ast.iter_child_nodes(node)
+    for child in children:
+        if isinstance(
+            child,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
         ):
-            return node
-    raise AssertionError(f"{role} {symbol!r} is missing from {source_label}")
+            continue
+        yield child
+        yield from _scope_nodes(child)
 
 
 def _assert_python_symbol_called(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
-    symbol: str,
+    helper: ast.FunctionDef | ast.AsyncFunctionDef,
     caller: str,
     source_label: str,
 ) -> None:
-    called = any(
-        isinstance(node, ast.Call)
+    symbol = helper.name
+    nodes = list(_scope_nodes(function, top=True))
+    calls = [
+        node
+        for node in nodes
+        if isinstance(node, ast.Call)
         and (
             (isinstance(node.func, ast.Name) and node.func.id == symbol)
             or (isinstance(node.func, ast.Attribute) and node.func.attr == symbol)
         )
-        for node in ast.walk(function)
-    )
-    assert called, (
+    ]
+    assert calls, (
         f"journey evidence assertion helper {symbol!r} is never called by "
         f"{caller!r} in {source_label}; declaring it is not evidence that the "
         "readback runs"
     )
+    if isinstance(helper, ast.AsyncFunctionDef):
+        # An un-awaited coroutine call builds a coroutine and discards it. The
+        # assertions inside it never execute, so it is not evidence either.
+        awaited = {
+            id(node.value) for node in nodes if isinstance(node, ast.Await)
+        }
+        assert any(id(call) in awaited for call in calls), (
+            f"journey evidence assertion helper {symbol!r} is called by "
+            f"{caller!r} in {source_label} but never awaited; the readback "
+            "never runs"
+        )
 
 
 def _assert_journey_evidence_is_executable(evidence: dict) -> None:
@@ -259,7 +303,7 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
     )
     # The assertion helper is the part that actually reads provider state back.
     # Without it the named test still runs but proves nothing about the write.
-    _python_function(
+    helper = _python_function(
         source,
         evidence["assertion"],
         evidence["source"],
@@ -270,7 +314,7 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
     # would still be credited. Bind the evidence to an actual invocation.
     _assert_python_symbol_called(
         test,
-        evidence["assertion"],
+        helper,
         evidence["test"],
         evidence["source"],
     )
@@ -339,13 +383,65 @@ def test_journey_evidence_rejects_a_helper_that_never_runs(test_body: str):
     test = _python_function(
         source, "test_journey", "synthetic.py", "journey evidence test"
     )
-    _python_function(
+    helper = _python_function(
         source, "_assert_readback", "synthetic.py", "journey evidence helper"
     )
     with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
         _assert_python_symbol_called(
-            test, "_assert_readback", "test_journey", "synthetic.py"
+            test, helper, "test_journey", "synthetic.py"
         )
+
+
+def test_journey_evidence_rejects_an_unawaited_coroutine_call():
+    """Calling an async readback without awaiting it never runs its assertions."""
+    source = (
+        "async def test_journey(world):\n"
+        "    _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    with pytest.raises(AssertionError, match="never awaited"):
+        _assert_python_symbol_called(
+            test, helper, "test_journey", "synthetic.py"
+        )
+
+
+def test_journey_evidence_rejects_a_call_inside_an_uninvoked_nested_function():
+    """A call in a nested def nobody invokes never executes."""
+    source = (
+        "async def test_journey(world):\n"
+        "    async def _dead_branch():\n"
+        "        await _assert_readback(world)\n"
+        "    return None\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
+        _assert_python_symbol_called(
+            test, helper, "test_journey", "synthetic.py"
+        )
+
+
+def test_journey_evidence_rejects_a_duplicated_definition():
+    """Python binds the last def; a stale earlier copy must not vouch for it."""
+    source = (
+        "async def test_journey(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def test_journey(world):\n"
+        "    return None\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    with pytest.raises(AssertionError, match="defined 2 times at module level"):
+        _python_function(source, "test_journey", "synthetic.py", "test")
 
 
 @pytest.mark.parametrize(
@@ -374,7 +470,7 @@ def test_journey_evidence_accepts_a_genuinely_invoked_helper(call: str):
     )
     _assert_python_symbol_called(
         _python_function(source, "test_journey", "synthetic.py", "test"),
-        "_assert_readback",
+        _python_function(source, "_assert_readback", "synthetic.py", "helper"),
         "test_journey",
         "synthetic.py",
     )
@@ -415,11 +511,13 @@ def test_read_capabilities_cover_every_required_outcome_class():
     """Epic #6524 workstream 5: seeded success *and* empty-result per read."""
     covered = _covered_capability_outcomes()
     backlogged = backlogged_capabilities("read_requires_outcome_classes")
+    # Integration evidence is not subtracted here. It names one executable test
+    # per capability with no notion of outcome class, so letting it exempt a
+    # read would be a silent exemption of exactly the kind this gate exists to
+    # remove. Those capabilities are carried in the backlog with a reason.
     missing = sorted(
         f"{capability_id}:{outcome_class}"
-        for capability_id in READ_CAPABILITY_IDS
-        - INTEGRATION_EVIDENCE_CAPABILITY_IDS
-        - backlogged
+        for capability_id in READ_CAPABILITY_IDS - backlogged
         for outcome_class in REQUIRED_READ_OUTCOME_CLASSES
         - covered.get(capability_id, set())
     )

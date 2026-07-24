@@ -269,3 +269,16 @@ capabilities = [
   "slack.search_messages",
   "slack.whoami",
 ]
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "Evidenced by a named Cargo integration test at a non-Emulate seam (local WASM, hosted MCP, Exa-backed web access), so there is no provider world in which to seed an empty result. integration_evidence names one executable test per capability and carries no outcome class, so it must not silently exempt these from the read rule."
+issue = "#6524"
+review_condition = "Make integration_evidence outcome-aware, or add a hermetic double for these seams, then require success and empty like every other read."
+capabilities = [
+  "github.handle_webhook",
+  "nearai.web_search",
+  "web-access.get_content",
+  "web-access.search",
+]
