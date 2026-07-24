@@ -2049,6 +2049,18 @@ pub(crate) async fn build_storage_composite(
     Ok((Arc::new(composite), reopen))
 }
 
+/// Serialize PostgreSQL testcontainer startup within an integration-test
+/// process. Testcontainers can otherwise issue concurrent streamed pulls for
+/// the same image tag, which can terminate one pull early while another succeeds.
+pub(crate) async fn serialize_postgres_testcontainer_start<T>(
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    static START_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = START_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
+    operation.await
+}
+
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
 /// a test failure (REL-3): in CI it panics with the docker context; locally
 /// the message names the fix.
@@ -2075,8 +2087,7 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
              skip is a failure per REL-3): {error}"
         )
     };
-    let container = image
-        .start()
+    let container = serialize_postgres_testcontainer_start(image.start())
         .await
         .map_err(|error| unavailable(error.to_string()))?;
     let host = container
