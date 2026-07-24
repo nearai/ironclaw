@@ -1952,6 +1952,22 @@ async def test_reborn_v2_configure_modal_traps_and_restores_keyboard_focus(
         await page.keyboard.press("Escape")
         await expect(dialog).to_have_count(0)
         await expect(trigger).to_be_focused()
+
+        harness["update_installed_extension"](
+            "config-tool", installation_state="active"
+        )
+        await page.reload()
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        overflow_trigger = card.get_by_role("button", name="More actions")
+        await overflow_trigger.click()
+        await card.get_by_role("menuitem", name="Reconfigure").click()
+
+        dialog = page.get_by_role("dialog", name="Configure Config Tool")
+        await expect(dialog).to_be_visible(timeout=5000)
+        await page.keyboard.press("Escape")
+        await expect(dialog).to_have_count(0)
+        await expect(overflow_trigger).to_be_focused()
         assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
