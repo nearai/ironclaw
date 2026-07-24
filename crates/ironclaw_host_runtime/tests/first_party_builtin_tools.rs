@@ -169,7 +169,11 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .expect("memory write manifest");
     assert_eq!(
         memory_write.effects,
-        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem
+        ]
     );
     for capability_id in [
         MEMORY_SEARCH_CAPABILITY_ID,
@@ -181,7 +185,10 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             .iter()
             .find(|descriptor| descriptor.id.as_str() == capability_id)
             .expect("memory read-like manifest");
-        assert_eq!(descriptor.effects, vec![EffectKind::ReadFilesystem]);
+        assert_eq!(
+            descriptor.effects,
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+        );
     }
 
     let handlers =
@@ -263,7 +270,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         ECHO_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
-        MEMORY_SEARCH_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
     ] {
@@ -272,7 +278,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
     for gated in [
         WRITE_FILE_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
