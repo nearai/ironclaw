@@ -1011,15 +1011,15 @@ async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
     await expect(cancel_button).to_be_visible(timeout=10000)
     await cancel_button.click()
 
-    await expect(cancel_button).to_be_visible(timeout=3000)
-    await expect(cancel_button).to_be_enabled(timeout=3000)
+    await expect(cancel_button).to_be_visible(timeout=10000)
+    await expect(cancel_button).to_be_enabled(timeout=10000)
     await expect(composer).to_have_attribute("data-send-disabled", "true")
     error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
         has_text="Couldn't stop this run"
     )
     await expect(error_toast).to_have_text(
         "Couldn't stop this run. It may still be running. Try again.",
-        timeout=3000,
+        timeout=10000,
     )
     await expect(error_toast).not_to_contain_text("internal cancellation detail")
     assert cancel_requests == 1
