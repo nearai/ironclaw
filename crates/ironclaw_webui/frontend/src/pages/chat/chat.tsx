@@ -56,6 +56,20 @@ function hasVisibleStreamingAssistantText(messages, activeRunId) {
   );
 }
 
+function cancellationFailureDiagnostic(error) {
+  const status =
+    error &&
+    typeof error === "object" &&
+    Number.isInteger(error.status) &&
+    error.status >= 400 &&
+    error.status <= 599
+      ? error.status
+      : null;
+  return status === null
+    ? { category: "request_error" }
+    : { category: "http_error", status };
+}
+
 export function Chat({
   threads,
   activeThreadId,
@@ -230,7 +244,10 @@ export function Chat({
       try {
         await cancelRun("user_requested");
       } catch (error) {
-        console.error("Failed to cancel active run:", error);
+        console.error(
+          "Failed to cancel active run",
+          cancellationFailureDiagnostic(error)
+        );
         toast(t("chat.cancelFailed"), { tone: "error" });
       }
     },

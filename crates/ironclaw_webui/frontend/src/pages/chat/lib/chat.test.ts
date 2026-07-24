@@ -189,7 +189,14 @@ test("Chat cancel button routes through active thread run cancellation", async (
 test("Chat shows a localized error toast when run cancellation fails", async () => {
   const toastCalls = [];
   const consoleErrors = [];
-  const cancellationError = new Error("cancel failed");
+  const cancellationError = Object.assign(
+    new Error("sensitive cancellation detail"),
+    {
+      status: 503,
+      body: '{"error":"sensitive cancellation detail"}',
+      payload: { error: "sensitive cancellation detail" },
+    }
+  );
   const { tree, components } = renderChat({
     toastCalls,
     consoleErrors,
@@ -227,9 +234,16 @@ test("Chat shows a localized error toast when run cancellation fails", async () 
       options: { tone: "error" },
     },
   ]);
-  assert.deepEqual(consoleErrors, [
-    ["Failed to cancel active run:", cancellationError],
+  assert.deepEqual(JSON.parse(JSON.stringify(consoleErrors)), [
+    [
+      "Failed to cancel active run",
+      { category: "http_error", status: 503 },
+    ],
   ]);
+  assert.doesNotMatch(
+    JSON.stringify(consoleErrors),
+    /sensitive cancellation detail/
+  );
 });
 
 test("Chat leaves the composer editable while a run is processing", () => {
