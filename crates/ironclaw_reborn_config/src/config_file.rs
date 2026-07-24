@@ -446,17 +446,19 @@ pub struct SlackChannelRouteSection {
 
 /// Telegram channel host enablement.
 ///
-/// `enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true` mounts the
-/// Telegram updates route and the WebUI setup/pairing surface. The env var
+/// Enabled by default — an absent `[telegram]` section, or one that omits
+/// `enabled`, still mounts the Telegram updates route and the WebUI
+/// setup/pairing surface. Set `enabled = false` (or
+/// `IRONCLAW_REBORN_TELEGRAM_ENABLED=false`) to opt out. The env var
 /// overrides only this enablement gate. The bot token, webhook registration,
 /// and pairing are configured at runtime through the WebUI channel setup
 /// surface; no Telegram identifiers or secrets live in this file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramSection {
-    /// Explicit enablement gate. Omitted/false means the Telegram routes are
-    /// not mounted by `ironclaw-reborn serve` unless
-    /// `IRONCLAW_REBORN_TELEGRAM_ENABLED` overrides it.
+    /// Enablement gate. Omitted/true means the Telegram routes are mounted
+    /// by `ironclaw serve` by default; set explicitly to `false` (or
+    /// override via `IRONCLAW_REBORN_TELEGRAM_ENABLED`) to disable.
     pub enabled: Option<bool>,
 }
 
