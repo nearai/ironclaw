@@ -30,12 +30,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
 
-use crate::extension_host::channel_identity::{
-    ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
+use ironclaw_extension_host::{
+    FilesystemChannelDmTargetStore, channel_config_connection_scope_source,
     discover_channel_extensions,
 };
-use ironclaw_extension_host::FilesystemChannelDmTargetStore;
-use ironclaw_host_api::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup};
+use ironclaw_host_api::{
+    ChannelConnectionScope, ChannelConnectionScopeSource, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityLookup,
+};
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
 /// per-user channel disconnect can revoke the caller's personal vendor

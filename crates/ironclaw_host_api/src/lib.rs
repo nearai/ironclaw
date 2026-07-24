@@ -38,6 +38,7 @@ pub mod authorized;
 pub mod capability;
 pub mod capability_profile;
 pub mod channel;
+pub mod channel_identity;
 pub mod decision;
 pub mod dispatch;
 #[cfg(feature = "test-support")]
@@ -88,6 +89,7 @@ pub use authorized::*;
 pub use capability::*;
 pub use capability_profile::*;
 pub use channel::*;
+pub use channel_identity::*;
 pub use decision::*;
 pub use dispatch::*;
 pub use error::*;

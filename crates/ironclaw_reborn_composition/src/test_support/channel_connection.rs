@@ -41,10 +41,9 @@ use crate::extension_host::channel_connection::{
 };
 use crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning;
 use crate::extension_host::channel_identity::{
-    ChannelIdentityBindingConfig, ChannelIdentityPostBindFactory,
-    bind_channel_identities_for_callback,
+    ChannelIdentityBindingConfig, bind_channel_identities_for_callback,
 };
-use ironclaw_host_api::RebornUserIdentityLookup;
+use ironclaw_host_api::{ChannelIdentityPostBindFactory, RebornUserIdentityLookup};
 
 /// Identity inputs for [`build_channel_connection_for_test`]. Plain strings
 /// so harness callers outside this crate don't need the id newtypes;

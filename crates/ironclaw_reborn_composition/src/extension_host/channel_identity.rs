@@ -26,17 +26,20 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
+use ironclaw_extension_host::{
+    ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
+};
 use ironclaw_extensions::ExtensionInstallationStore;
-use ironclaw_host_api::{ExtensionId, TenantId, UserId};
-use ironclaw_product::AdapterInstallationId;
+use ironclaw_host_api::{
+    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
+    ChannelIdentityPostBindFactory, ExtensionId, TenantId, UserId,
+};
 
 use crate::product_auth::api::auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture,
 };
-use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -52,73 +55,6 @@ const SCOPING_CLAIMS: [&str; 3] = ["team_id", "enterprise_id", "app_id"];
 /// Registered on the product-auth route state by composition wiring.
 pub(crate) type ProviderIdentityHookFactory =
     dyn Fn(&str, &AuthProductScope) -> Option<OAuthProviderIdentityCheck> + Send + Sync;
-
-/// One extension's connection scope: the adapter installation the bindings
-/// key under plus the identity claim values a proven vendor identity must
-/// match before it may bind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelConnectionScope {
-    pub(crate) installation_id: AdapterInstallationId,
-    pub(crate) expected_team_id: Option<String>,
-    pub(crate) expected_enterprise_id: Option<String>,
-    pub(crate) expected_app_id: Option<String>,
-}
-
-impl ChannelConnectionScope {
-    /// Whether any scoping claim value is configured. A scope with no
-    /// expected claims is "not configured yet" — the bind path fails closed.
-    pub(crate) fn has_expected_claims(&self) -> bool {
-        self.expected_team_id.is_some()
-            || self.expected_enterprise_id.is_some()
-            || self.expected_app_id.is_some()
-    }
-
-    /// The installation-scoped provider-user-id prefix every binding under
-    /// this scope shares (the same composite-key scheme inbound actor
-    /// resolution uses).
-    pub(crate) fn provider_user_id_prefix(&self) -> String {
-        format!("{}:", self.installation_id.as_str())
-    }
-}
-
-/// Resolves one extension's current [`ChannelConnectionScope`].
-///
-/// `Ok(None)` means the extension's connection scoping is not configured
-/// yet; the identity-binding and connection paths fail closed on it.
-#[async_trait]
-pub(crate) trait ChannelConnectionScopeSource: Send + Sync {
-    async fn resolve_connection_scope(&self) -> Result<Option<ChannelConnectionScope>, String>;
-}
-
-/// Vendor residue port: fire-and-forget provisioning after a successful
-/// identity bind (for example, opening the caller's personal DM target so
-/// outbound delivery can reach them). Implementations spawn their own work
-/// and surface failures via logs — a provisioning failure must never fail
-/// the OAuth callback that already bound the identity.
-pub(crate) trait ChannelIdentityPostBind: Send + Sync {
-    fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str);
-}
-
-/// Builds per-extension post-bind provisioning for generically-discovered
-/// channel extensions (a lane override carries its own `post_bind`; the
-/// generic DM-target provisioning implements this).
-pub(crate) trait ChannelIdentityPostBindFactory: Send + Sync {
-    fn post_bind_for_extension(
-        &self,
-        extension_id: &str,
-    ) -> Option<Arc<dyn ChannelIdentityPostBind>>;
-}
-
-/// Per-extension override for a channel lane whose configure surface
-/// predates `[channel.config]`: the lane names the provider it binds under
-/// and supplies its own scope source (and optional post-bind provisioning).
-#[derive(Clone)]
-pub(crate) struct ChannelIdentityOverride {
-    pub(crate) extension_id: String,
-    pub(crate) provider: String,
-    pub(crate) scope_source: Arc<dyn ChannelConnectionScopeSource>,
-    pub(crate) post_bind: Option<Arc<dyn ChannelIdentityPostBind>>,
-}
 
 /// Everything the generic post-OAuth identity binding hook needs.
 ///
@@ -190,143 +126,6 @@ struct ChannelIdentityTarget {
     extension_id: String,
     scope_source: Arc<dyn ChannelConnectionScopeSource>,
     post_bind: Option<Arc<dyn ChannelIdentityPostBind>>,
-}
-
-/// The generic `[channel.config]`-backed scope source: the installation
-/// record supplies the adapter installation id; non-secret config values
-/// whose handles carry a claim suffix supply the expected claim values.
-struct ChannelConfigConnectionScopeSource {
-    installation_store: Arc<dyn ExtensionInstallationStore>,
-    extension_id: ExtensionId,
-    channel_config: Option<Arc<ChannelConfigService>>,
-}
-
-#[async_trait]
-impl ChannelConnectionScopeSource for ChannelConfigConnectionScopeSource {
-    async fn resolve_connection_scope(&self) -> Result<Option<ChannelConnectionScope>, String> {
-        let Some(record) = self
-            .installation_store
-            .get_manifest(&self.extension_id)
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
-        };
-        let Some(channel) = record.resolved().channel.as_ref() else {
-            return Ok(None);
-        };
-        let installation = self
-            .installation_store
-            .list_installations()
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|installation| installation.extension_id() == &self.extension_id);
-        let Some(installation) = installation else {
-            return Ok(None);
-        };
-        let installation_id = AdapterInstallationId::new(installation.installation_id().as_str())
-            .map_err(|error| error.to_string())?;
-        let values = if let Some(channel_config) = &self.channel_config {
-            channel_config
-                .effective_non_secret_config(&self.extension_id)
-                .await
-                .map_err(|error| error.to_string())?
-        } else {
-            self.installation_store
-                .channel_config(&self.extension_id)
-                .await
-                .map_err(|error| error.to_string())?
-        };
-        let expected = |claim: &str| -> Option<String> {
-            channel
-                .config
-                .fields
-                .iter()
-                .filter(|field| !field.secret)
-                .find(|field| handle_declares_claim(field.handle.as_str(), claim))
-                .and_then(|field| {
-                    values
-                        .iter()
-                        .find(|(handle, _)| handle == field.handle.as_str())
-                        .map(|(_, value)| value.clone())
-                })
-                .filter(|value| !value.trim().is_empty())
-        };
-        Ok(Some(ChannelConnectionScope {
-            installation_id,
-            expected_team_id: expected("team_id"),
-            expected_enterprise_id: expected("enterprise_id"),
-            expected_app_id: expected("app_id"),
-        }))
-    }
-}
-
-/// Handle-suffix convention: `{claim}` or `*_{claim}` declares the expected
-/// value for that identity claim.
-fn handle_declares_claim(handle: &str, claim: &str) -> bool {
-    handle == claim
-        || handle
-            .strip_suffix(claim)
-            .is_some_and(|prefix| prefix.ends_with('_'))
-}
-
-/// The generic scope source for one extension over the durable installation
-/// store — also used by the generic connection service so the connect-report
-/// prefix and the bind prefix can never diverge.
-pub(crate) fn channel_config_connection_scope_source(
-    installation_store: Arc<dyn ExtensionInstallationStore>,
-    extension_id: ExtensionId,
-    channel_config: Option<Arc<ChannelConfigService>>,
-) -> Arc<dyn ChannelConnectionScopeSource> {
-    Arc::new(ChannelConfigConnectionScopeSource {
-        installation_store,
-        extension_id,
-        channel_config,
-    })
-}
-
-/// A generically-discovered channel extension: its id and the auth vendors
-/// its manifest declares. Shared by the identity hook and the connection
-/// service.
-pub(crate) struct DiscoveredChannelExtension {
-    pub(crate) extension_id: String,
-    pub(crate) providers: Vec<String>,
-}
-
-/// Installed extensions whose manifest declares a channel surface, excluding
-/// `overridden` extension ids (their lane owns identity binding). OAuth
-/// channels expose one or more auth vendors; proof-code paired channels expose
-/// none but must still be discoverable by the generic connection service so
-/// removal can revoke their pairing-owned state.
-pub(crate) async fn discover_channel_extensions(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
-    overridden: &BTreeSet<String>,
-) -> Result<Vec<DiscoveredChannelExtension>, String> {
-    let manifests = installation_store
-        .list_manifests()
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut discovered = Vec::new();
-    for record in manifests {
-        let resolved = record.resolved();
-        if resolved.channel.is_none() {
-            continue;
-        }
-        let extension_id = resolved.id.as_str().to_string();
-        if overridden.contains(&extension_id) {
-            continue;
-        }
-        discovered.push(DiscoveredChannelExtension {
-            extension_id,
-            providers: resolved
-                .auth
-                .iter()
-                .map(|surface| surface.vendor.as_str().to_string())
-                .collect(),
-        });
-    }
-    Ok(discovered)
 }
 
 /// Build the provider-identity hook factory product-auth serve registers:
@@ -592,12 +391,16 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use async_trait::async_trait;
+    use ironclaw_extension_host::handle_declares_claim;
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
         ManifestSource,
     };
-    use ironclaw_host_api::{InvocationId, ResourceScope};
+    use ironclaw_host_api::{
+        AdapterInstallationId, ChannelConnectionScope, InvocationId, ResourceScope,
+    };
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;

@@ -1944,9 +1944,7 @@ impl RebornRuntime {
                     snapshot_updates,
                 ),
             )
-                as Arc<
-                    dyn crate::extension_host::channel_identity::ChannelIdentityPostBindFactory,
-                >),
+                as Arc<dyn ironclaw_host_api::ChannelIdentityPostBindFactory>),
             _ => None,
         };
         Some(

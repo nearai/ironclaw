@@ -19,6 +19,7 @@ mod admin_configuration_store;
 pub mod channel_config;
 pub mod channel_delivery;
 pub mod channel_dm_targets;
+pub mod channel_identity;
 pub mod channel_identity_store;
 pub mod channel_subject_routes;
 pub mod deployment_channels;
@@ -65,6 +66,10 @@ pub use channel_delivery::{IngressReplyContextSource, SnapshotChannelDeliveryRes
 pub use channel_dm_targets::{
     ChannelDmTargetError, ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY,
     DM_TARGET_SPACE_ID_KEY, FilesystemChannelDmTargetStore, dm_target_payload,
+};
+pub use channel_identity::{
+    DiscoveredChannelExtension, channel_config_connection_scope_source,
+    discover_channel_extensions, handle_declares_claim,
 };
 pub use channel_identity_store::{
     FilesystemChannelIdentityStore, channel_identity_mount_view,
