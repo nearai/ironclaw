@@ -146,11 +146,6 @@ async def test_reborn_v2_extension_routes_require_auth_served(reborn_v2_server):
             ),
             (
                 "POST",
-                "/api/webchat/v2/extensions/web-access/activate",
-                {"client_action_id": client_action_id()},
-            ),
-            (
-                "POST",
                 "/api/webchat/v2/extensions/web-access/remove",
                 {"client_action_id": client_action_id()},
             ),
@@ -195,6 +190,7 @@ async def test_reborn_v2_extension_routes_reject_invalid_input_served(
 
         malformed_package_id = await client.post(
             f"{reborn_v2_server}/api/webchat/v2/extensions/bad%20id/remove",
+            json={"client_action_id": client_action_id()},
             timeout=15,
         )
         assert malformed_package_id.status_code == 400

@@ -1040,6 +1040,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_runtime/src/first_party_tools/http.rs",
         "github",
     ),
+    // Presentation-only brand casing: the auth-gate card's display-name table
+    // must key on the wire vendor id to function (the prior `git_hub` key
+    // never matched and rendered "Github"). Same class as the table's
+    // carved-out `nearai` row; behavior stays manifest-generic.
+    (
+        "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
+        "github",
+    ),
     ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
     ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
     (
