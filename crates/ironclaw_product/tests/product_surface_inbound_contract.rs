@@ -1,0 +1,613 @@
+//! Contract tests for route-independent WebUI inbound DTOs.
+
+use base64::Engine;
+use ironclaw_host_api::{
+    AgentId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ProjectId,
+    TenantId, ThreadId, UserId,
+};
+use ironclaw_product::{
+    ProductCancelReason, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductGateResolution, ProductInboundAttachment, ProductInboundCommand,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_turns::SanitizedCancelReason;
+use serde_json::json;
+use uuid::Uuid;
+
+fn caller() -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
+        TenantId::new("tenant-alpha").expect("valid tenant"),
+        UserId::new("user-alpha").expect("valid user"),
+        Some(AgentId::new("agent-alpha").expect("valid agent")),
+        Some(ProjectId::new("project-alpha").expect("valid project")),
+    )
+}
+
+fn run_id() -> String {
+    "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
+}
+
+fn assert_validation_error(
+    err: &ProductSurfaceError,
+    field: &str,
+    code: ProductSurfaceValidationCode,
+) {
+    assert_eq!(err.field.as_deref(), Some(field));
+    assert_eq!(err.validation_code, Some(code));
+}
+
+#[test]
+fn create_thread_maps_authenticated_caller_to_canonical_command() {
+    let request: ProductCreateThreadRequest = serde_json::from_value(json!({
+        "client_action_id": "create-1",
+        "requested_thread_id": "thread-alpha"
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+
+    let ProductInboundCommand::CreateThread {
+        caller,
+        client_action_id,
+        requested_thread_id,
+    } = command
+    else {
+        panic!("expected create-thread command");
+    };
+    assert_eq!(caller.user_id.as_str(), "user-alpha");
+    assert_eq!(client_action_id.as_str(), "create-1");
+    assert_eq!(
+        requested_thread_id,
+        Some(ThreadId::new("thread-alpha").expect("valid thread"))
+    );
+}
+
+#[test]
+fn send_message_maps_body_to_turn_scope_actor_and_content() {
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
+        "client_action_id": "send-1",
+        "thread_id": "thread-alpha",
+        "content": "hello\nworld"
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+
+    let ProductInboundCommand::SendMessage {
+        scope,
+        actor,
+        client_action_id,
+        content,
+        requested_model,
+    } = command
+    else {
+        panic!("expected send-message command");
+    };
+    assert_eq!(scope.tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(scope.agent_id.expect("agent").as_str(), "agent-alpha");
+    assert_eq!(scope.project_id.expect("project").as_str(), "project-alpha");
+    assert_eq!(scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(actor.user_id.as_str(), "user-alpha");
+    assert_eq!(client_action_id.as_str(), "send-1");
+    assert_eq!(content, "hello\nworld");
+    // No `model` in the request → no requested-model hint.
+    assert_eq!(requested_model, None);
+}
+
+#[test]
+fn send_message_carries_requested_model_and_drops_default_alias() {
+    // A concrete model is carried through as a requested-model hint.
+    let request = ProductSubmitTurnRequest {
+        client_action_id: Some("send-model".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        content: Some("hi".to_string()),
+        attachments: Vec::new(),
+        model: Some("gpt-4o".to_string()),
+    };
+    let ProductInboundCommand::SendMessage {
+        requested_model, ..
+    } = request.into_command(caller()).expect("valid command")
+    else {
+        panic!("expected send-message command");
+    };
+    assert_eq!(requested_model.as_deref(), Some("gpt-4o"));
+
+    // The "default" alias (and empty) are dropped to `None` so a default-model
+    // request falls back to the deployment's active model.
+    for alias in ["default", "DEFAULT", "  ", ""] {
+        let request = ProductSubmitTurnRequest {
+            client_action_id: Some("send-default".to_string()),
+            thread_id: Some("thread-alpha".to_string()),
+            content: Some("hi".to_string()),
+            attachments: Vec::new(),
+            model: Some(alias.to_string()),
+        };
+        let ProductInboundCommand::SendMessage {
+            requested_model, ..
+        } = request.into_command(caller()).expect("valid command")
+        else {
+            panic!("expected send-message command");
+        };
+        assert_eq!(requested_model, None, "alias {alias:?} must drop to None");
+    }
+}
+
+#[test]
+fn cancel_run_maps_to_canonical_cancel_request() {
+    let request: ProductCancelRunRequest = serde_json::from_value(json!({
+        "client_action_id": "cancel-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "reason": "operator_requested"
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+
+    let ProductInboundCommand::CancelRun { request } = command else {
+        panic!("expected cancel-run command");
+    };
+    assert_eq!(request.scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(request.actor.user_id.as_str(), "user-alpha");
+    assert_eq!(request.idempotency_key.as_str(), "cancel-1");
+    assert_eq!(request.reason, SanitizedCancelReason::OperatorRequested);
+}
+
+#[test]
+fn retry_run_maps_to_canonical_retry_command() {
+    let request: ProductRetryRunRequest = serde_json::from_value(json!({
+        "client_action_id": "retry-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id()
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+
+    let ProductInboundCommand::RetryRun {
+        scope,
+        actor,
+        run_id: parsed_run_id,
+        client_action_id,
+    } = command
+    else {
+        panic!("expected retry-run command");
+    };
+    assert_eq!(scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(actor.user_id.as_str(), "user-alpha");
+    assert_eq!(
+        parsed_run_id.as_uuid(),
+        Uuid::parse_str(&run_id()).expect("uuid")
+    );
+    assert_eq!(client_action_id.as_str(), "retry-1");
+}
+
+#[test]
+fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "credential_provided",
+        "credential_ref": "credential-alpha"
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+
+    let ProductInboundCommand::ResolveGate {
+        scope,
+        actor,
+        run_id: parsed_run_id,
+        gate_ref,
+        client_action_id,
+        resolution,
+    } = command
+    else {
+        panic!("expected resolve-gate command");
+    };
+    assert_eq!(scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(actor.user_id.as_str(), "user-alpha");
+    assert_eq!(
+        parsed_run_id.as_uuid(),
+        Uuid::parse_str(&run_id()).expect("uuid")
+    );
+    assert_eq!(gate_ref.as_str(), "gate-alpha");
+    assert_eq!(client_action_id.as_str(), "gate-1");
+    assert_eq!(
+        resolution,
+        ProductGateResolution::CredentialProvided {
+            credential_ref: "credential-alpha".to_string()
+        }
+    );
+}
+
+#[test]
+fn missing_content_returns_stable_validation_error() {
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
+        "client_action_id": "send-1",
+        "thread_id": "thread-alpha"
+    }))
+    .expect("request json");
+
+    let err = request.into_command(caller()).expect_err("missing content");
+
+    assert_validation_error(&err, "content", ProductSurfaceValidationCode::MissingField);
+    assert_eq!(
+        serde_json::to_value(&err).expect("error json"),
+        json!({
+            "code": "invalid_request",
+            "kind": "validation",
+            "status_code": 400,
+            "retryable": false,
+            "field": "content",
+            "validation_code": "missing_field"
+        })
+    );
+}
+
+#[test]
+fn blank_client_action_id_returns_stable_validation_error() {
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
+        "client_action_id": "   ",
+        "thread_id": "thread-alpha",
+        "content": "hello"
+    }))
+    .expect("request json");
+
+    let err = request.into_command(caller()).expect_err("blank action id");
+
+    assert_validation_error(
+        &err,
+        "client_action_id",
+        ProductSurfaceValidationCode::Blank,
+    );
+}
+
+#[test]
+fn invalid_thread_id_returns_stable_validation_error() {
+    let request: ProductSubmitTurnRequest = serde_json::from_value(json!({
+        "client_action_id": "send-1",
+        "thread_id": "../other-thread",
+        "content": "hello"
+    }))
+    .expect("request json");
+
+    let err = request
+        .into_command(caller())
+        .expect_err("invalid thread id");
+
+    assert_validation_error(&err, "thread_id", ProductSurfaceValidationCode::InvalidId);
+}
+
+#[test]
+fn missing_run_id_returns_stable_validation_error_for_cancel() {
+    let request: ProductCancelRunRequest = serde_json::from_value(json!({
+        "client_action_id": "cancel-1",
+        "thread_id": "thread-alpha"
+    }))
+    .expect("request json");
+
+    let err = request.into_command(caller()).expect_err("missing run id");
+
+    assert_validation_error(&err, "run_id", ProductSurfaceValidationCode::MissingField);
+}
+
+#[test]
+fn invalid_run_id_returns_stable_validation_error_for_gate_resolution() {
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": "not-a-uuid",
+        "gate_ref": "gate-alpha",
+        "resolution": "approved"
+    }))
+    .expect("request json");
+
+    let err = request.into_command(caller()).expect_err("invalid run id");
+
+    assert_validation_error(&err, "run_id", ProductSurfaceValidationCode::InvalidId);
+}
+
+#[test]
+fn missing_gate_ref_returns_stable_validation_error() {
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "resolution": "declined"
+    }))
+    .expect("request json");
+
+    let err = request
+        .into_command(caller())
+        .expect_err("missing gate ref");
+
+    assert_validation_error(&err, "gate_ref", ProductSurfaceValidationCode::MissingField);
+}
+
+#[test]
+fn blank_credential_ref_returns_stable_validation_error() {
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "credential_provided",
+        "credential_ref": ""
+    }))
+    .expect("request json");
+
+    let err = request
+        .into_command(caller())
+        .expect_err("blank credential ref");
+
+    assert_validation_error(&err, "credential_ref", ProductSurfaceValidationCode::Blank);
+}
+
+#[test]
+fn command_serializes_with_stable_command_tag() {
+    let request = ProductSubmitTurnRequest {
+        client_action_id: Some("send-1".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        content: Some("hello".to_string()),
+        attachments: Vec::new(),
+        model: None,
+    };
+    let command = request.into_command(caller()).expect("valid command");
+
+    let value = serde_json::to_value(command).expect("command json");
+
+    assert_eq!(value["command"], "send_message");
+    assert_eq!(value["scope"]["thread_id"], "thread-alpha");
+    assert_eq!(value["actor"]["user_id"], "user-alpha");
+}
+
+#[test]
+fn token_fields_reject_control_characters() {
+    let request = ProductSubmitTurnRequest {
+        client_action_id: Some("send\n1".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        content: Some("hello".to_string()),
+        attachments: Vec::new(),
+        model: None,
+    };
+
+    let err = request.into_command(caller()).expect_err("control char");
+
+    assert_validation_error(
+        &err,
+        "client_action_id",
+        ProductSurfaceValidationCode::InvalidControlCharacter,
+    );
+}
+
+#[test]
+fn invalid_cancel_reason_returns_stable_validation_error() {
+    let request = ProductCancelRunRequest {
+        client_action_id: Some("cancel-1".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        run_id: Some(run_id()),
+        reason: Some("not_a_reason".to_string()),
+    };
+
+    let err = request.into_command(caller()).expect_err("invalid reason");
+
+    assert_validation_error(&err, "reason", ProductSurfaceValidationCode::InvalidValue);
+}
+
+#[test]
+fn invalid_gate_resolution_returns_stable_validation_error() {
+    let request = ProductResolveGateRequest {
+        client_action_id: Some("gate-1".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        run_id: Some(run_id()),
+        gate_ref: Some("gate-alpha".to_string()),
+        resolution: Some("not_a_resolution".to_string()),
+        always: None,
+        credential_ref: None,
+    };
+
+    let err = request
+        .into_command(caller())
+        .expect_err("invalid resolution");
+
+    assert_validation_error(
+        &err,
+        "resolution",
+        ProductSurfaceValidationCode::InvalidValue,
+    );
+}
+
+#[test]
+fn cancel_reason_defaults_to_user_requested() {
+    let request = ProductCancelRunRequest {
+        client_action_id: Some("cancel-1".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        run_id: Some(run_id()),
+        reason: None,
+    };
+
+    let ProductInboundCommand::CancelRun { request } = request
+        .into_command(caller())
+        .expect("valid cancel command")
+    else {
+        panic!("expected cancel-run command");
+    };
+
+    assert_eq!(request.reason, SanitizedCancelReason::UserRequested);
+}
+
+#[test]
+fn cancel_reason_serializes_as_snake_case() {
+    assert_eq!(
+        serde_json::to_value(ProductCancelReason::Policy).expect("reason json"),
+        json!("policy")
+    );
+}
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn send_with_attachments(attachments: Vec<ProductInboundAttachment>) -> ProductSubmitTurnRequest {
+    ProductSubmitTurnRequest {
+        client_action_id: Some("send-att".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        content: Some("see attached".to_string()),
+        attachments,
+        model: None,
+    }
+}
+
+#[test]
+fn decode_attachments_decodes_metadata_kind_and_bytes() {
+    let request = send_with_attachments(vec![
+        ProductInboundAttachment {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("report.pdf".to_string()),
+            data_base64: b64(b"%PDF-1.7 body"),
+        },
+        ProductInboundAttachment {
+            // Uppercase + charset params normalize; kind derives from registry.
+            mime_type: "IMAGE/PNG; charset=binary".to_string(),
+            filename: None,
+            data_base64: b64(&[0x89, 0x50, 0x4E, 0x47]),
+        },
+    ]);
+
+    let decoded = request
+        .decode_attachments()
+        .expect("valid attachments decode");
+    assert_eq!(decoded.len(), 2);
+
+    // `kind`/`fallback_extension` are derived from `mime_type` inside the
+    // landing bridge, so the decoded DTO carries only the raw upload fields.
+    assert_eq!(decoded[0].mime_type, "application/pdf");
+    assert_eq!(decoded[0].filename.as_deref(), Some("report.pdf"));
+    assert_eq!(decoded[0].bytes, b"%PDF-1.7 body");
+
+    assert_eq!(decoded[1].mime_type, "image/png");
+    assert!(decoded[1].filename.is_none());
+}
+
+#[test]
+fn decode_attachments_rejects_unsupported_mime() {
+    let request = send_with_attachments(vec![ProductInboundAttachment {
+        mime_type: "image/svg+xml".to_string(),
+        filename: None,
+        data_base64: b64(b"<svg/>"),
+    }]);
+    let err = request
+        .decode_attachments()
+        .expect_err("svg is unsupported");
+    assert_validation_error(
+        &err,
+        "attachments.mime_type",
+        ProductSurfaceValidationCode::InvalidValue,
+    );
+}
+
+#[test]
+fn decode_attachments_rejects_malformed_base64() {
+    let request = send_with_attachments(vec![ProductInboundAttachment {
+        mime_type: "application/pdf".to_string(),
+        filename: None,
+        data_base64: "not valid base64!!!".to_string(),
+    }]);
+    let err = request.decode_attachments().expect_err("bad base64");
+    assert_validation_error(
+        &err,
+        "attachments.data_base64",
+        ProductSurfaceValidationCode::InvalidValue,
+    );
+}
+
+#[test]
+fn decode_attachments_rejects_per_file_oversize() {
+    let request = send_with_attachments(vec![ProductInboundAttachment {
+        mime_type: "application/pdf".to_string(),
+        filename: None,
+        data_base64: b64(&vec![0u8; 10 * 1024 * 1024 + 1]),
+    }]);
+    let err = request.decode_attachments().expect_err("over per-file cap");
+    assert_validation_error(&err, "attachments", ProductSurfaceValidationCode::TooLong);
+}
+
+#[test]
+fn decode_attachments_rejects_total_oversize() {
+    let three_mib = vec![0u8; 3 * 1024 * 1024];
+    let request = send_with_attachments(vec![
+        ProductInboundAttachment {
+            mime_type: "application/pdf".to_string(),
+            filename: None,
+            data_base64: b64(&three_mib),
+        };
+        4 // 12 MiB total > 10 MiB cap
+    ]);
+    let err = request.decode_attachments().expect_err("over total cap");
+    assert_validation_error(&err, "attachments", ProductSurfaceValidationCode::TooLong);
+}
+
+#[test]
+fn decode_attachments_rejects_too_many() {
+    let request = send_with_attachments(vec![
+        ProductInboundAttachment {
+            mime_type: "text/plain".to_string(),
+            filename: None,
+            data_base64: b64(b"x"),
+        };
+        11 // > MAX_INLINE_ATTACHMENTS (10)
+    ]);
+    let err = request
+        .decode_attachments()
+        .expect_err("too many attachments");
+    assert_validation_error(&err, "attachments", ProductSurfaceValidationCode::TooLong);
+}
+
+#[test]
+fn decode_attachments_empty_is_ok() {
+    let request = send_with_attachments(Vec::new());
+    assert!(
+        request
+            .decode_attachments()
+            .expect("empty decodes")
+            .is_empty()
+    );
+}
+
+/// The decline vocabulary is exactly one wire string. The retired legacy
+/// strings ("denied", "cancelled") are rejected — the v2 browser has always
+/// been the only producer and it now sends "declined".
+#[test]
+fn declined_is_the_only_decline_wire_string() {
+    let request: ProductResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "declined"
+    }))
+    .expect("declined request json");
+    let command = request.into_command(caller()).expect("valid command");
+    let ProductInboundCommand::ResolveGate { resolution, .. } = command else {
+        panic!("expected resolve-gate command");
+    };
+    assert_eq!(resolution, ProductGateResolution::Declined);
+
+    for retired in ["denied", "cancelled"] {
+        let request: ProductResolveGateRequest = serde_json::from_value(json!({
+            "client_action_id": "gate-1",
+            "thread_id": "thread-alpha",
+            "run_id": run_id(),
+            "gate_ref": "gate-alpha",
+            "resolution": retired
+        }))
+        .expect("request json parses; resolution validates at into_command");
+        assert!(
+            request.into_command(caller()).is_err(),
+            "retired decline string {retired:?} must be rejected"
+        );
+    }
+}

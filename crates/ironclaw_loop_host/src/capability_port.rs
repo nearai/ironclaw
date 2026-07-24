@@ -1469,6 +1469,70 @@ impl HostRuntimeLoopCapabilityPort {
             .await
     }
 
+    async fn finish_auth_decline_outcome(
+        &self,
+        key: &IdempotencyKey,
+        conversion: RuntimeOutcomeConversion<'_>,
+    ) -> Result<GatedResolution, AgentLoopHostError> {
+        let RuntimeOutcomeConversion {
+            input_ref,
+            invocation_id,
+            correlation_id,
+            requested_capability_id,
+            outcome,
+        } = conversion;
+        let failure = match &outcome {
+            RuntimeCapabilityOutcome::Failed(failure) => failure,
+            _ => {
+                let result = Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "capability auth decline returned a non-terminal runtime outcome",
+                ));
+                self.record_loop_completed(key, invocation_id, result.clone())?;
+                return result;
+            }
+        };
+        let result = runtime_outcome_to_loop(
+            &self.run_context,
+            self.result_writer.as_ref(),
+            RuntimeOutcomeConversion {
+                input_ref,
+                invocation_id,
+                correlation_id,
+                requested_capability_id,
+                outcome: outcome.clone(),
+            },
+        )
+        .await;
+        if should_retry_result_write(&outcome, &result) {
+            self.record_runtime_completed(
+                key,
+                invocation_id,
+                correlation_id,
+                requested_capability_id.clone(),
+                outcome.clone(),
+            )?;
+            return result;
+        }
+        if result.is_err() {
+            self.record_loop_completed(key, invocation_id, result.clone())?;
+            return result;
+        }
+        let milestone = LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: CapabilityActivityId::from_uuid(invocation_id.as_uuid()),
+            capability_id: failure.capability_id.clone(),
+            // The current contract may already be gone. Durable invocation
+            // identity, rather than stale provider/runtime metadata, is the
+            // authority for this terminal transition.
+            provider: None,
+            runtime: None,
+            reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+            safe_summary: runtime_failure_loop_safe_summary(failure),
+        };
+        self.complete_terminal_milestone(key, invocation_id, result, Some(milestone))
+            .await
+    }
+
     async fn complete_terminal_milestone(
         &self,
         key: &IdempotencyKey,
@@ -2114,7 +2178,10 @@ impl HostRuntimeLoopCapabilityPort {
             (Some(_), Some(_)) | (Option::None, Option::None) => return Ok(Option::None),
             (Some(resume), Option::None) => invocation_id_from_resume_token(&resume.resume_token)?,
             (Option::None, Some(auth_resume)) => {
-                invocation_id_from_resume_token(&auth_resume.resume_token)?
+                let Some(resume_token) = auth_resume.resume_token.as_ref() else {
+                    return Ok(Option::None);
+                };
+                invocation_id_from_resume_token(resume_token)?
             }
         };
         Ok(Some(self.replay_payload_for_resume(invocation_id).await?))
@@ -2142,11 +2209,163 @@ impl HostRuntimeLoopCapabilityPort {
         })
     }
 
+    async fn invoke_auth_decline_dispatch(
+        &self,
+        request: LoopRequest,
+        invocation_id: InvocationId,
+    ) -> Result<GatedResolution, AgentLoopHostError> {
+        let idempotency_key = auth_decline_idempotency_key(
+            &self.run_context,
+            request.activity_id,
+            invocation_id,
+            &request.capability_id,
+        )?;
+        loop {
+            match self.reserve_dispatch(&idempotency_key, invocation_id)? {
+                DispatchReservation::Reserved => break,
+                DispatchReservation::Wait(notify) => {
+                    self.wait_for_dispatch_completion(&idempotency_key, notify)
+                        .await?;
+                }
+                DispatchReservation::RuntimeCompleted {
+                    invocation_id,
+                    correlation_id,
+                    requested_capability_id,
+                    outcome,
+                } => {
+                    return self
+                        .finish_auth_decline_outcome(
+                            &idempotency_key,
+                            RuntimeOutcomeConversion {
+                                input_ref: &request.input_ref,
+                                invocation_id,
+                                correlation_id,
+                                requested_capability_id: &requested_capability_id,
+                                outcome,
+                            },
+                        )
+                        .await;
+                }
+                DispatchReservation::TerminalMilestonePending {
+                    invocation_id,
+                    result,
+                    milestone,
+                } => {
+                    return self
+                        .complete_terminal_milestone(
+                            &idempotency_key,
+                            invocation_id,
+                            result,
+                            Some(milestone),
+                        )
+                        .await;
+                }
+                DispatchReservation::LoopCompleted(result) => return result,
+            }
+        }
+
+        let guard = self.dispatch_reservation_guard(&idempotency_key);
+        let invocation_context = auth_decline_context_from_visible(
+            &self.visible_request.context,
+            &self.run_context,
+            request.activity_id,
+        )?;
+        let correlation_id = invocation_context.correlation_id;
+        let requested_capability_id = request.capability_id.clone();
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            invocation_id,
+            &request.input_ref,
+        );
+        let activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
+        self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id,
+            capability_id: requested_capability_id.clone(),
+        })
+        .await?;
+
+        let outcome = match dispatch_runtime_capability_auth_decline(
+            self.runtime.as_ref(),
+            invocation_context,
+            request.capability_id,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error @ HostRuntimeError::Unavailable { .. }) => {
+                return Err(host_runtime_error(error));
+            }
+            Err(error) => {
+                let host_error = host_runtime_error(error);
+                let milestone = LoopHostMilestoneKind::CapabilityFailed {
+                    activity_id,
+                    capability_id: requested_capability_id,
+                    provider: None,
+                    runtime: None,
+                    reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    safe_summary: None,
+                };
+                guard.commit();
+                return self
+                    .complete_terminal_milestone(
+                        &idempotency_key,
+                        invocation_id,
+                        Err(host_error),
+                        Some(milestone),
+                    )
+                    .await;
+            }
+        };
+        guard.commit();
+        self.finish_auth_decline_outcome(
+            &idempotency_key,
+            RuntimeOutcomeConversion {
+                input_ref: &request.input_ref,
+                invocation_id,
+                correlation_id,
+                requested_capability_id: &requested_capability_id,
+                outcome,
+            },
+        )
+        .await
+    }
+
     async fn invoke_capability_dispatch(
         &self,
         request: LoopRequest,
     ) -> Result<GatedResolution, AgentLoopHostError> {
         let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
+        if let Some(auth_resume) = request.auth_resume.as_ref().filter(|resume| {
+            matches!(
+                resume.disposition,
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            )
+        }) {
+            if request.approval_resume.is_some() {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
+            }
+            if auth_resume.prior_approval.is_some() {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "denied capability auth resume must not carry prior approval identity",
+                ));
+            }
+            if let Some(resume_token) = auth_resume.resume_token.as_ref() {
+                let token_invocation_id = invocation_id_from_resume_token(resume_token)?;
+                ensure_resume_invocation_matches_activity(
+                    token_invocation_id,
+                    requested_invocation_id,
+                    "auth denial",
+                )?;
+            }
+            return self
+                .invoke_auth_decline_dispatch(request, requested_invocation_id)
+                .await;
+        }
         // Normalize resume mode and validate token/activity identity before
         // dispatch reservation. Cached replay branches can return without
         // touching runtime state, so they must pass the same fail-closed checks
@@ -2186,8 +2405,13 @@ impl HostRuntimeLoopCapabilityPort {
                 }
             }
             (_, Some(auth_resume)) => {
-                let resume_invocation_id =
-                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                let resume_token = auth_resume.resume_token.as_ref().ok_or_else(|| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "resolved capability auth resume is missing its resume token",
+                    )
+                })?;
+                let resume_invocation_id = invocation_id_from_resume_token(resume_token)?;
                 ensure_resume_invocation_matches_activity(
                     resume_invocation_id,
                     requested_invocation_id,
@@ -2782,6 +3006,16 @@ async fn dispatch_runtime_capability_auth_resume(
         .await
 }
 
+async fn dispatch_runtime_capability_auth_decline(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    context: ExecutionContext,
+    capability_id: CapabilityId,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    runtime
+        .decline_auth_capability((context, capability_id))
+        .await
+}
+
 fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
     capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
 }
@@ -2924,9 +3158,9 @@ struct VisibleInvocationContextRequest<'a> {
 fn invocation_context_from_visible(
     request: VisibleInvocationContextRequest<'_>,
 ) -> Result<ExecutionContext, AgentLoopHostError> {
-    let mut context = request.base.clone();
-    let loop_driver_extension = loop_driver_execution_extension_id(request.run_context)?;
-    context.extension_id = loop_driver_extension.clone();
+    let mut context =
+        auth_decline_context_from_visible(request.base, request.run_context, request.activity_id)?;
+    let loop_driver_extension = context.extension_id.clone();
     context.runtime = request.capability.runtime;
     context.trust = request.trust;
     context.grants = invocation_grants_from_visible(
@@ -2939,7 +3173,28 @@ fn invocation_context_from_visible(
     // caller-supplied mounts, while this invocation context receives the execution mounts that the
     // authority resolver selected for the run and capability dispatch.
     context.mounts = request.execution_mounts.clone();
-    let invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
+    context.validate().map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability execution context is invalid",
+        )
+    })?;
+    Ok(context)
+}
+
+/// Reconstruct only the host-sealed identity required to terminalize a denied
+/// auth gate. This deliberately does not consult the current capability
+/// surface, provider trust, grants, mounts, or input: the admitted invocation's
+/// durable `BlockedAuth` record is the authority, and `CapabilityHost` validates
+/// its exact scope, actor, activity, and capability before mutation.
+fn auth_decline_context_from_visible(
+    base: &ExecutionContext,
+    run_context: &LoopRunContext,
+    activity_id: CapabilityActivityId,
+) -> Result<ExecutionContext, AgentLoopHostError> {
+    let mut context = base.clone();
+    context.extension_id = loop_driver_execution_extension_id(run_context)?;
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     context.invocation_id = invocation_id;
     context.correlation_id = CorrelationId::new();
     context.process_id = None;
@@ -2948,17 +3203,27 @@ fn invocation_context_from_visible(
     // Prompt-visible run identity: tool calls within the same turn-run share
     // it, so run-scoped policy state (e.g. coding read-before-edit) carries
     // across tool calls of one run but never leaks into a later run.
-    let run_id = ironclaw_host_api::RunId::from_uuid(request.run_context.run_id.as_uuid());
+    let run_id = ironclaw_host_api::RunId::from_uuid(run_context.run_id.as_uuid());
     context.run_id = Some(run_id);
     // Authoritative origin (§5.2.1): a tool call inside an agent loop turn-run is
     // model-initiated, so the loop ingress seals `LoopRun`. The kernel would also
     // reconstruct this from `run_id`, but stamping `origin` explicitly makes the
     // loop the authoritative source rather than relying on the compat fallback.
-    context.origin = Some(InvocationOrigin::LoopRun(run_id));
-    context.authenticated_actor_user_id = request
-        .run_context
-        .actor()
-        .map(|actor| actor.user_id.clone());
+    context.origin = Some(
+        match run_context
+            .product_context
+            .as_ref()
+            .map(|product_context| product_context.origin)
+        {
+            Some(ironclaw_turns::TurnOriginKind::ScheduledTrigger) => {
+                InvocationOrigin::ScheduledLoopRun(run_id)
+            }
+            Some(ironclaw_turns::TurnOriginKind::WebUi)
+            | Some(ironclaw_turns::TurnOriginKind::Inbound)
+            | None => InvocationOrigin::LoopRun(run_id),
+        },
+    );
+    context.authenticated_actor_user_id = run_context.actor().map(|actor| actor.user_id.clone());
     context.validate().map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -3112,15 +3377,30 @@ fn invocation_idempotency_key(
             "resume:{}:{}",
             resume.approval_request_id, resume.resume_token
         ),
-        (None, Some(auth_resume)) => format!(
-            "auth-resume:{}:{}",
-            auth_resume
-                .prior_approval
+        (None, Some(auth_resume))
+            if matches!(
+                auth_resume.disposition,
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            ) =>
+        {
+            "auth-denied".to_string()
+        }
+        (None, Some(auth_resume)) => {
+            let resume_token = auth_resume
+                .resume_token
                 .as_ref()
-                .map(|pa| pa.approval_request_id.to_string())
-                .unwrap_or_else(|| "none".to_string()),
-            auth_resume.resume_token
-        ),
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "missing".to_string());
+            format!(
+                "auth-resume:{}:{}",
+                auth_resume
+                    .prior_approval
+                    .as_ref()
+                    .map(|pa| pa.approval_request_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                resume_token
+            )
+        }
         (None, None) => "dispatch".to_string(),
     };
     let payload = format!(
@@ -3130,6 +3410,29 @@ fn invocation_idempotency_key(
         request.capability_id.as_str(),
         input_ref.as_str(),
         resume_scope
+    );
+    IdempotencyKey::new(format!(
+        "loop-capability:{}",
+        sha256_digest_token(payload.as_bytes())
+    ))
+    .map_err(host_runtime_error)
+}
+
+fn auth_decline_idempotency_key(
+    run_context: &LoopRunContext,
+    activity_id: CapabilityActivityId,
+    invocation_id: InvocationId,
+    capability_id: &CapabilityId,
+) -> Result<IdempotencyKey, AgentLoopHostError> {
+    // Auth denial terminalizes an already-admitted durable invocation. Its
+    // replay identity must therefore remain stable when the current surface or
+    // input reference changes after the invocation entered BlockedAuth.
+    let payload = format!(
+        "loop-capability-auth-decline\nrun={}\nactivity={}\ninvocation={}\ncapability={}\nmode=auth-denied",
+        run_context.run_id,
+        activity_id,
+        invocation_id,
+        capability_id.as_str(),
     );
     IdempotencyKey::new(format!(
         "loop-capability:{}",
@@ -3246,10 +3549,10 @@ async fn runtime_outcome_to_loop(
             loop_gate_ref("auth", gate.gate_id.to_string())?,
             gate.credential_requirements,
             blocked_summary(gate.reason).to_string(),
-            Some(ironclaw_turns::run_profile::CapabilityAuthResume {
-                resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
-                prior_approval: None,
-            }),
+            Some(ironclaw_turns::run_profile::CapabilityAuthResume::resolved(
+                resume_token_from_invocation_id(conversion.invocation_id)?,
+                None,
+            )),
         ),
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => resolution::resource_blocked(
             loop_gate_ref("resource", gate.gate_id.to_string())?,
@@ -3567,6 +3870,7 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Backend => CapabilityFailureKind::Backend,
         RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
+        RuntimeFailureKind::GateDeclined => CapabilityFailureKind::GateDeclined,
         RuntimeFailureKind::Internal => CapabilityFailureKind::Internal,
         RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
         RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
@@ -8688,7 +8992,8 @@ mod tests {
                     .expect("valid input ref"),
             }),
             auth_resume: Some(CapabilityAuthResume {
-                resume_token,
+                resume_token: Some(resume_token),
+                disposition: None,
                 prior_approval: None,
             }),
         };
@@ -8965,7 +9270,8 @@ mod tests {
                 input_ref: invocation.input_ref,
                 approval_resume: None,
                 auth_resume: Some(CapabilityAuthResume {
-                    resume_token: resume_token_for_different_activity(invocation.activity_id),
+                    resume_token: Some(resume_token_for_different_activity(invocation.activity_id)),
+                    disposition: None,
                     prior_approval: None,
                 }),
             })
@@ -10576,6 +10882,7 @@ mod tests {
     struct RecordingResultWriter {
         records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
         display_previews: Mutex<Vec<Option<CapabilityDisplayOutputPreview>>>,
+        failure_previews: Mutex<Vec<(InvocationId, CapabilityId, String)>>,
     }
 
     impl RecordingResultWriter {
@@ -10587,6 +10894,13 @@ mod tests {
             self.display_previews
                 .lock()
                 .expect("display previews lock")
+                .clone()
+        }
+
+        fn failure_previews(&self) -> Vec<(InvocationId, CapabilityId, String)> {
+            self.failure_previews
+                .lock()
+                .expect("failure previews lock")
                 .clone()
         }
     }
@@ -10623,6 +10937,19 @@ mod tests {
                 output_digest: Some(output_digest),
                 model_observation: None,
             })
+        }
+
+        async fn stage_capability_failure_preview(
+            &self,
+            _run_context: &LoopRunContext,
+            invocation_id: InvocationId,
+            capability_id: &CapabilityId,
+            summary: &str,
+        ) {
+            self.failure_previews
+                .lock()
+                .expect("failure previews lock")
+                .push((invocation_id, capability_id.clone(), summary.to_string()));
         }
     }
 

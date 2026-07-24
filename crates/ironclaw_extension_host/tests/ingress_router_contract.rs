@@ -28,7 +28,7 @@ use ironclaw_extension_host::{
     LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_host_api::SecretHandle;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ChannelAdapter, ChannelError, DeliveryReport, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope,
     ProductTriggerReason, VerifiedInbound,
@@ -53,6 +53,11 @@ name = "Acme Chat"
 version = "0.1.0"
 description = "router contract fixture"
 trust = "third_party"
+
+[admin_configuration]
+group_id = "extension.acme-chat"
+display_name = "Acme Chat deployment configuration"
+fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true, required = false } ]
 
 [runtime]
 kind = "wasm"
@@ -84,9 +89,6 @@ signed_payload = [
   { literal = ":" },
   { body = true },
 ]
-
-[channel.config]
-fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]
 scheme = "https"

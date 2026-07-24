@@ -407,6 +407,15 @@ where
         self.read_turn_events_from_durable_rows(scope, owner_user_id, after, limit)
             .await
     }
+
+    async fn read_turn_event_log_after(
+        &self,
+        after: Option<crate::EventCursor>,
+        limit: usize,
+    ) -> Result<crate::TurnEventPage, TurnError> {
+        self.read_turn_event_log_from_durable_rows(after, limit)
+            .await
+    }
 }
 
 #[async_trait]

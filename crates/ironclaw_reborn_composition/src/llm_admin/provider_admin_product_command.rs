@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use ironclaw_product_adapters::{
-    ProductCommandResultPayload, ProductInboundAck, ProductRejection, ProductRejectionKind,
-};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProductCommand, ProductCommandContext, ProductCommandService, ProductModelCommand,
     ProductWorkflowError,
+};
+use ironclaw_product::{
+    ProductCommandResultPayload, ProductInboundAck, ProductRejection, ProductRejectionKind,
 };
 use serde::Serialize;
 

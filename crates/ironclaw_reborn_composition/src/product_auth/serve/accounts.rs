@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) async fn accounts_list_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<AccountsListRequest>,
 ) -> Result<Json<CredentialAccountListPage>, ProductAuthRouteFailure> {
     // invocation_id is required so the list is scoped to the caller's current
@@ -36,7 +36,7 @@ pub(super) async fn accounts_list_handler(
 
 pub(super) async fn accounts_select_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<AccountsSelectRequest>,
 ) -> Result<Json<CredentialAccountProjection>, ProductAuthRouteFailure> {
     // invocation_id required: links the selection to the active auth interaction
@@ -62,7 +62,7 @@ pub(super) async fn accounts_select_handler(
 
 pub(super) async fn accounts_recovery_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<AccountsRecoveryRequest>,
 ) -> Result<Json<CredentialRecoveryProjection>, ProductAuthRouteFailure> {
     // invocation_id required: recovery projection is scoped to the active
@@ -89,7 +89,7 @@ pub(super) async fn accounts_recovery_handler(
 
 pub(super) async fn accounts_refresh_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<AccountsRefreshRequest>,
 ) -> Result<Json<CredentialRefreshReport>, ProductAuthRouteFailure> {
     // invocation_id required: refresh is scoped to the active interaction.

@@ -11,6 +11,10 @@ const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
 const toolSurfaces = [{ kind: "tool" }];
 
 function useExtensionsSourceForTest() {
+  const extensionActions = readFileSync(
+    new URL("../lib/extension-actions.ts", import.meta.url),
+    "utf8",
+  ).replaceAll("export function ", "function ");
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
@@ -25,18 +29,15 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
 }
 
 function contextFor(mutationState, queryCalls) {
   return {
     React: { useCallback: (fn) => fn, useEffect: () => {}, useRef: () => ({ current: null }), useState: () => [null, () => {}] },
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     // The real surface-taxonomy helper: grouping and install routing must key
@@ -52,16 +53,12 @@ function contextFor(mutationState, queryCalls) {
       return { data: { requests: [] }, isLoading: false };
     },
     useQueryClient: () => ({ invalidateQueries: () => {} }),
-    useT: () => (key, params = {}) => {
-      if (key === "extensions.channelInstalledSetup") {
-        return `${params.name} installed. Connect the account using the setup panel below.`;
-      }
-      return `${key}${params.name ? `:${params.name}` : ""}`;
-    },
+    useT: () => (key, params = {}) =>
+      `${key}${params.name ? `:${params.name}` : ""}`,
   };
 }
 
-test("useExtensions points channel install success at the setup panel", () => {
+test("useExtensions preserves the server install result message", async () => {
   const mutationConfigs = [];
   const actionResults = [];
   const context = {
@@ -81,29 +78,41 @@ test("useExtensions points channel install success at the setup panel", () => {
     },
     useQuery: ({ queryKey }) => {
       if (queryKey[0] === "extensions") {
-        return { data: { extensions: [] }, isLoading: false };
+        return {
+          data: { extensions: [] },
+          isLoading: false,
+          refetch: () => Promise.resolve({ data: { extensions: [] } }),
+        };
       }
       if (queryKey[0] === "extension-registry") {
-        return { data: { entries: [] }, isLoading: false };
+        return {
+          data: { entries: [] },
+          isLoading: false,
+          refetch: () => Promise.resolve({ data: { entries: [] } }),
+        };
       }
-      return { data: {}, isLoading: false };
+      return {
+        data: {},
+        isLoading: false,
+        refetch: () => Promise.resolve({ data: {} }),
+      };
     },
   };
   vm.runInNewContext(useExtensionsSourceForTest(), context);
 
   context.globalThis.__testExports.useExtensions();
-  mutationConfigs[0].onSuccess(
-    { success: true, message: "Slack is installed. Activate it to make its tools available." },
+  await mutationConfigs[0].onSuccess(
+    { success: true, message: "Slack installed. Complete setup to publish its tools." },
     { displayName: "Slack", surfaces: channelSurfaces }
   );
 
   assert.deepEqual(JSON.parse(JSON.stringify(actionResults[0])), {
     type: "success",
-    message: "Slack installed. Connect the account using the setup panel below.",
+    message: "Slack installed. Complete setup to publish its tools.",
   });
 });
 
-test("useExtensions install→configure hands the modal the channel surfaces (so it shows Connect, not 'no config')", () => {
+test("useExtensions hands setup the authoritative installed channel projection", async () => {
   const mutationConfigs = [];
   const needsSetupPayloads = [];
   const context = {
@@ -122,31 +131,54 @@ test("useExtensions install→configure hands the modal the channel surfaces (so
       return { mutate: () => {}, isPending: false, isSuccess: false, isError: false };
     },
     useQuery: ({ queryKey }) => {
-      if (queryKey[0] === "extensions") return { data: { extensions: [] }, isLoading: false };
-      if (queryKey[0] === "extension-registry") return { data: { entries: [] }, isLoading: false };
-      return { data: {}, isLoading: false };
+      if (queryKey[0] === "extensions") {
+        return {
+          data: { extensions: [] },
+          isLoading: false,
+          refetch: () =>
+            Promise.resolve({
+              data: {
+                extensions: [
+                  {
+                    package_ref: { kind: "extension", id: "slack" },
+                    display_name: "Slack",
+                    installation_state: "setup_needed",
+                    surfaces: channelSurfaces,
+                  },
+                ],
+              },
+            }),
+        };
+      }
+      if (queryKey[0] === "extension-registry") {
+        return {
+          data: { entries: [] },
+          isLoading: false,
+          refetch: () => Promise.resolve({ data: { entries: [] } }),
+        };
+      }
+      return {
+        data: {},
+        isLoading: false,
+        refetch: () => Promise.resolve({ data: {} }),
+      };
     },
   };
   vm.runInNewContext(useExtensionsSourceForTest(), context);
 
   context.globalThis.__testExports.useExtensions();
-  // Install a connectable channel with auto-configure — the modal is opened via
-  // onNeedsSetup. Its payload MUST carry `surfaces` or the modal cannot tell it
-  // is a channel and wrongly renders "No configuration required".
-  mutationConfigs[0].onSuccess(
+  await mutationConfigs[0].onSuccess(
     { success: true },
     {
       displayName: "Slack",
-      surfaces: channelSurfaces,
       packageRef: { kind: "extension", id: "slack" },
-      configureAfterInstall: true,
       onNeedsSetup: (payload) => needsSetupPayloads.push(payload),
     }
   );
 
   assert.equal(needsSetupPayloads.length, 1, "install-configure must open the modal");
   assert.deepEqual(needsSetupPayloads[0].surfaces, channelSurfaces);
-  assert.equal(needsSetupPayloads[0].authenticated, false);
+  assert.equal(needsSetupPayloads[0].installation_state, "setup_needed");
 });
 
 test("useExtensions places uninstalled wasm channel-surface registry entry in channelRegistry not toolRegistry", () => {

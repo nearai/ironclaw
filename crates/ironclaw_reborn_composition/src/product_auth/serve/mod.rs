@@ -50,11 +50,13 @@ use ironclaw_host_api::ingress::{
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, BoundProductSurface, ExtensionId, InvocationId, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
+    UserId,
 };
-use ironclaw_product_workflow::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface, RebornExtensionListResponse,
-    RebornServicesError, RebornViewQuery, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
+    RebornExtensionListResponse, RebornSetupExtensionResponse,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -73,6 +75,8 @@ use crate::{
 pub(crate) const OAUTH_START_PATH: &str = "/api/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/product-auth/oauth/callback/{flow_id}";
 pub(crate) const OAUTH_FLOW_STATUS_PATH: &str = "/api/product-auth/oauth/flow/{flow_id}/status";
+pub(crate) const OAUTH_FLOW_RECONCILE_PATH: &str =
+    "/api/product-auth/oauth/flow/{flow_id}/reconcile";
 /// One public callback per vendor, `{provider}` resolved as recipe data —
 /// the path shape vendor-registered redirect URLs already point at
 /// (checklist AUTH-13).
@@ -92,6 +96,8 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/product-auth/lifecycle/cle
 const LEGACY_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 const LEGACY_OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
 const LEGACY_OAUTH_FLOW_STATUS_PATH: &str = "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
+const LEGACY_OAUTH_FLOW_RECONCILE_PATH: &str =
+    "/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile";
 const LEGACY_VENDOR_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/{provider}/callback";
 const LEGACY_MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
@@ -107,6 +113,7 @@ const LEGACY_LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
 const OAUTH_FLOW_STATUS_ROUTE_ID: &str = "product_auth.oauth.flow_status";
+const OAUTH_FLOW_RECONCILE_ROUTE_ID: &str = "product_auth.oauth.flow_reconcile";
 const VENDOR_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.vendor.callback";
 const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
@@ -171,7 +178,7 @@ pub struct ProductAuthRouteState {
     /// Installed-inventory guard for extension OAuth starts: a flow may be
     /// minted only for an extension the caller actually has installed
     /// (fail-closed — an unwired lookup rejects rather than skips).
-    installed_extension_lookup: Option<Arc<dyn InstalledExtensionLookup>>,
+    installed_extension_lookup: Option<Arc<InstalledExtensionLookup>>,
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
@@ -188,62 +195,139 @@ pub struct ProductAuthRouteState {
     pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
 }
 
-/// Answers "does this caller have this extension installed?" for the
-/// extension OAuth start guard. Implemented over the descriptor-backed
-/// ProductSurface extension inventory view by production wiring; tests may
-/// substitute a scripted lookup.
-#[async_trait::async_trait]
-trait InstalledExtensionLookup: Send + Sync {
-    async fn is_installed(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstalledExtensionOAuthRequirement {
+    provider: String,
+    account_label: String,
+    scopes: Vec<String>,
 }
 
-struct RebornServicesInstalledExtensionLookup {
-    api: Arc<dyn ProductSurface>,
+/// Closed installed-extension lookup selected by composition. This remains an
+/// enum rather than a mock-driven trait: production has one authoritative
+/// lifecycle projection, while the scripted variant exists only in unit tests.
+#[derive(Clone)]
+enum InstalledExtensionLookup {
+    ProductSurface(Arc<dyn ProductSurface>),
+    #[cfg(test)]
+    Scripted {
+        extension_id: ExtensionId,
+        requirement_name: String,
+        requirement: InstalledExtensionOAuthRequirement,
+    },
+    #[cfg(test)]
+    InstalledThenRemoved {
+        extension_id: ExtensionId,
+        requirement_name: String,
+        requirement: InstalledExtensionOAuthRequirement,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    },
 }
 
-#[async_trait::async_trait]
-impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
+impl InstalledExtensionLookup {
     async fn is_installed(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
-        let page = self
-            .api
-            .query(
-                caller.clone(),
-                RebornViewQuery {
-                    view_id: EXTENSIONS_VIEW.id.to_string(),
-                    params: json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        let inventory: RebornExtensionListResponse =
-            serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
-        Ok(inventory.extensions.iter().any(|extension| {
-            extension.package_ref.kind == LifecyclePackageKind::Extension
-                && extension.package_ref.id.as_str() == extension_id.as_str()
-        }))
+    ) -> Result<bool, ProductSurfaceError> {
+        match self {
+            Self::ProductSurface(api) => {
+                let surface = BoundProductSurface::new(Arc::clone(api), caller.clone());
+                let page = surface
+                    .query(ProductSurfaceQueryRequest {
+                        view_id: EXTENSIONS_VIEW.id.to_string(),
+                        input: json!({}),
+                        cursor: None,
+                        limit: None,
+                    })
+                    .await?;
+                let payload = page
+                    .items
+                    .into_iter()
+                    .next()
+                    .ok_or_else(ProductSurfaceError::internal)?;
+                let inventory: RebornExtensionListResponse =
+                    serde_json::from_value(payload).map_err(ProductSurfaceError::internal_from)?;
+                Ok(inventory.extensions.iter().any(|extension| {
+                    extension.package_ref.kind == LifecyclePackageKind::Extension
+                        && extension.package_ref.id.as_str() == extension_id.as_str()
+                }))
+            }
+            #[cfg(test)]
+            Self::Scripted {
+                extension_id: installed_extension_id,
+                ..
+            } => Ok(extension_id == installed_extension_id),
+            #[cfg(test)]
+            Self::InstalledThenRemoved {
+                extension_id: installed_extension_id,
+                calls,
+                ..
+            } => Ok(extension_id == installed_extension_id
+                && calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0),
+        }
     }
-}
 
-#[cfg(test)]
-struct TestInstalledExtensionLookup;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl InstalledExtensionLookup for TestInstalledExtensionLookup {
-    async fn is_installed(
+    async fn oauth_requirement(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
-        _extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
-        Ok(true)
+        caller: &ProductSurfaceCaller,
+        extension_id: &ExtensionId,
+        requirement_name: &str,
+    ) -> Result<Option<InstalledExtensionOAuthRequirement>, ProductSurfaceError> {
+        match self {
+            Self::ProductSurface(api) => {
+                let surface = BoundProductSurface::new(Arc::clone(api), caller.clone());
+                let page = surface
+                    .query(ProductSurfaceQueryRequest {
+                        view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+                        input: json!({ "package_id": extension_id.as_str() }),
+                        cursor: None,
+                        limit: None,
+                    })
+                    .await?;
+                let payload = page
+                    .items
+                    .into_iter()
+                    .next()
+                    .ok_or_else(ProductSurfaceError::internal)?;
+                let setup: RebornSetupExtensionResponse =
+                    serde_json::from_value(payload).map_err(ProductSurfaceError::internal_from)?;
+                Ok(setup.secrets.into_iter().find_map(|secret| {
+                    if secret.name != requirement_name {
+                        return None;
+                    }
+                    let RebornExtensionCredentialSetup::OAuth {
+                        account_label,
+                        scopes,
+                        ..
+                    } = secret.setup
+                    else {
+                        return None;
+                    };
+                    Some(InstalledExtensionOAuthRequirement {
+                        provider: secret.provider,
+                        account_label,
+                        scopes,
+                    })
+                }))
+            }
+            #[cfg(test)]
+            Self::Scripted {
+                extension_id: installed_extension_id,
+                requirement_name: installed_requirement_name,
+                requirement,
+            } => Ok((extension_id == installed_extension_id
+                && requirement_name == installed_requirement_name)
+                .then(|| requirement.clone())),
+            #[cfg(test)]
+            Self::InstalledThenRemoved {
+                extension_id: installed_extension_id,
+                requirement_name: installed_requirement_name,
+                requirement,
+                ..
+            } => Ok((extension_id == installed_extension_id
+                && requirement_name == installed_requirement_name)
+                .then(|| requirement.clone())),
+        }
     }
 }
 
@@ -268,18 +352,26 @@ impl ProductAuthRouteState {
         }
     }
 
-    /// Wire the WebUI facade as the installed-extension inventory source for
+    /// Wire the product surface as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub fn with_webui_api(mut self, webui_api: Arc<dyn ProductSurface>) -> Self {
-        self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
-            api: webui_api,
-        }));
+    pub fn with_product_surface(mut self, product_surface: Arc<dyn ProductSurface>) -> Self {
+        self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::ProductSurface(
+            product_surface,
+        )));
         self
     }
 
     #[cfg(test)]
     fn with_test_installed_extension_lookup(mut self) -> Self {
-        self.installed_extension_lookup = Some(Arc::new(TestInstalledExtensionLookup));
+        self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::Scripted {
+            extension_id: ExtensionId::new("vendorco-tools").expect("test extension id"), // safety: cfg(test)-only static fixture.
+            requirement_name: "vendorco_oauth".to_string(),
+            requirement: InstalledExtensionOAuthRequirement {
+                provider: "vendorco".to_string(),
+                account_label: "vendorco-tools vendorco".to_string(),
+                scopes: vec!["items:read".to_string()],
+            },
+        }));
         self
     }
 
@@ -289,7 +381,7 @@ impl ProductAuthRouteState {
     /// with the terminal not-installed conflict.
     pub(super) async fn require_installed_extension(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         requester_extension: &ExtensionId,
     ) -> Result<(), ProductAuthRouteFailure> {
         let Some(lookup) = self.installed_extension_lookup.as_ref() else {
@@ -313,6 +405,35 @@ impl ProductAuthRouteState {
             return Err(ProductAuthRouteFailure::extension_not_installed());
         }
         Ok(())
+    }
+
+    /// Resolve one OAuth requirement from the installed extension's lifecycle
+    /// projection. The browser supplies only the manifest requirement key;
+    /// provider, label, and scopes remain server-owned data.
+    async fn resolve_extension_oauth_requirement(
+        &self,
+        caller: &ProductSurfaceCaller,
+        requester_extension: &ExtensionId,
+        requirement_name: &str,
+    ) -> Result<InstalledExtensionOAuthRequirement, ProductAuthRouteFailure> {
+        let Some(lookup) = self.installed_extension_lookup.as_ref() else {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        };
+        tokio::time::timeout(
+            PRODUCT_AUTH_BACKEND_TIMEOUT,
+            lookup.oauth_requirement(caller, requester_extension, requirement_name),
+        )
+        .await
+        .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                extension_id = %requester_extension,
+                "installed extension OAuth requirement lookup failed before OAuth start"
+            );
+            ProductAuthRouteFailure::backend_unavailable()
+        })?
+        .ok_or_else(ProductAuthRouteFailure::invalid_request)
     }
 
     /// Register the post-exchange provider-identity hook. The handler
@@ -518,6 +639,14 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 get(oauth::oauth_flow_status_handler),
             )
             .route(
+                OAUTH_FLOW_RECONCILE_PATH,
+                post(oauth::oauth_flow_reconcile_handler),
+            )
+            .route(
+                LEGACY_OAUTH_FLOW_RECONCILE_PATH,
+                post(oauth::oauth_flow_reconcile_handler),
+            )
+            .route(
                 EXTENSION_OAUTH_START_PATH,
                 post(oauth::extension_oauth_start_handler),
             )
@@ -633,6 +762,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         flow_status_policy(),
     ));
     descriptors.push(descriptor(
+        OAUTH_FLOW_RECONCILE_ROUTE_ID,
+        NetworkMethod::Post,
+        OAUTH_FLOW_RECONCILE_PATH,
+        flow_reconcile_policy(),
+    ));
+    descriptors.push(descriptor(
         OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         OAUTH_CALLBACK_PATH,
@@ -702,6 +837,12 @@ fn legacy_product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         NetworkMethod::Get,
         LEGACY_OAUTH_FLOW_STATUS_PATH,
         flow_status_policy(),
+    ));
+    descriptors.push(descriptor(
+        "product_auth.oauth.flow_reconcile.legacy",
+        NetworkMethod::Post,
+        LEGACY_OAUTH_FLOW_RECONCILE_PATH,
+        flow_reconcile_policy(),
     ));
     descriptors.push(descriptor(
         "product_auth.oauth.callback.legacy",
@@ -775,6 +916,30 @@ pub(super) fn flow_status_policy() -> IngressPolicy {
     .expect("product-auth OAuth flow-status policy must validate") // safety: same authenticated LocalGateway shape as the OAuth start mutation, but NoBody + read-only per-caller poll cadence.
 }
 
+pub(super) fn flow_reconcile_policy() -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::BearerToken],
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        // The command carries no browser-selected lifecycle inputs. Its only
+        // authority is the caller-scoped durable flow id plus invocation id.
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerCaller,
+            max_requests: OAUTH_FLOW_STATUS_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    })
+    .expect("product-auth OAuth flow-reconcile policy must validate") // safety: authenticated LocalGateway command with no body and a bounded per-caller poll cadence.
+}
+
 pub(super) fn accounts_refresh_policy() -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
@@ -833,10 +998,9 @@ pub(super) struct OAuthStartRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ExtensionOAuthStartRequest {
-    provider: String,
-    account_label: String,
-    scopes: Vec<String>,
+    requirement: String,
     expires_at: Timestamp,
     invocation_id: Option<String>,
 }
@@ -1107,6 +1271,7 @@ pub(super) fn route_failure_from_callback_error(
         AuthErrorCode::CrossScopeDenied => StatusCode::FORBIDDEN,
         AuthErrorCode::ProviderDenied | AuthErrorCode::Canceled => StatusCode::BAD_REQUEST,
         AuthErrorCode::FlowAlreadyTerminal => StatusCode::CONFLICT,
+        AuthErrorCode::LifecycleActivationFailed => StatusCode::CONFLICT,
         AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => {
             StatusCode::SERVICE_UNAVAILABLE
         }
@@ -1124,7 +1289,7 @@ pub(super) fn route_failure_from_callback_error(
 }
 
 pub(super) fn scope_from_authenticated_caller(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     request: &OAuthStartRequest,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     scope_from_authenticated_caller_parts(
@@ -1146,7 +1311,7 @@ pub(super) fn scope_from_authenticated_caller(
 /// host owns the canonical id and the browser carries it forward across
 /// follow-up calls.
 pub(super) fn scope_from_authenticated_caller_parts(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     let thread_id = fields
@@ -1194,7 +1359,7 @@ pub(super) fn scope_from_authenticated_caller_parts(
 /// MUST carry back the id minted by a prior setup/start response so the host
 /// can re-derive the matching scope without minting a fresh, unmatched one.
 pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     if fields.invocation_id.is_none() {
@@ -1684,15 +1849,16 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
     use ironclaw_auth::{
-        AuthFlowManager, AuthInteractionService, AuthProviderClient,
+        AuthChallenge, AuthFlowKind, AuthFlowManager, AuthInteractionService, AuthProviderClient,
         CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
-        CredentialSetupService, SecretCleanupService,
+        CredentialSetupService, NewAuthFlow, OAuthCallbackInput, OAuthProviderExchange,
+        ProviderCallbackOutcome, SecretCleanupService,
     };
     use ironclaw_host_api::{
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
-    use ironclaw_product_workflow::AuthChallengeProvider;
+    use ironclaw_product::AuthChallengeProvider;
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Mutex;
@@ -1756,6 +1922,10 @@ mod tests {
                 "product_auth.oauth.flow_status.legacy",
             ),
             (
+                OAUTH_FLOW_RECONCILE_ROUTE_ID,
+                "product_auth.oauth.flow_reconcile.legacy",
+            ),
+            (
                 VENDOR_OAUTH_CALLBACK_ROUTE_ID,
                 "product_auth.oauth.vendor.callback.legacy",
             ),
@@ -1775,6 +1945,249 @@ mod tests {
             assert_eq!(legacy.method(), default.method());
             assert_eq!(legacy.policy(), default.policy());
         }
+    }
+
+    #[test]
+    fn flow_reconcile_route_descriptor_locks_authenticated_no_body_policy() {
+        let descriptors = product_auth_route_descriptors();
+        let reconcile = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route_id().as_str() == OAUTH_FLOW_RECONCILE_ROUTE_ID)
+            .expect("the flow-reconcile descriptor must be registered");
+
+        assert_eq!(reconcile.method(), NetworkMethod::Post);
+        let policy = reconcile.policy();
+        assert!(matches!(policy.body_limit(), BodyLimitPolicy::NoBody));
+        assert!(matches!(
+            policy.auth(),
+            IngressAuthPolicy::Required { schemes }
+                if schemes.contains(&IngressAuthScheme::BearerToken)
+        ));
+        assert_eq!(
+            policy.scope_source(),
+            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+        );
+        assert!(matches!(
+            policy.rate_limit(),
+            RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerCaller,
+                ..
+            }
+        ));
+        assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
+    }
+
+    async fn completed_reconcile_flow(
+        services: &ironclaw_auth::InMemoryAuthProductServices,
+        scope: &AuthProductScope,
+        tag: &str,
+    ) -> ironclaw_auth::AuthFlowRecord {
+        let provider = AuthProviderId::new(format!("route-reconcile-{tag}")).expect("provider");
+        let state_hash = opaque_state_hash(&format!("state-{tag}")).expect("state hash");
+        let verifier_hash = pkce_verifier_hash(&format!("verifier-{tag}")).expect("PKCE hash");
+        let flow = services
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: provider.clone(),
+                challenge: AuthChallenge::SetupRequired {
+                    provider: provider.clone(),
+                    message: "route reconciliation test".to_string(),
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: Some(verifier_hash.clone()),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            })
+            .await
+            .expect("create flow");
+        services
+            .complete_oauth_callback(
+                scope,
+                OAuthCallbackInput {
+                    flow_id: flow.id,
+                    opaque_state_hash: state_hash,
+                    outcome: ProviderCallbackOutcome::Authorized {
+                        exchange: Box::new(OAuthProviderExchange {
+                            provider,
+                            account_label: CredentialAccountLabel::new(format!("account-{tag}"))
+                                .expect("account label"),
+                            authorization_code_hash: AuthorizationCodeHash::new(sha256_hex(
+                                &format!("code-{tag}"),
+                            ))
+                            .expect("authorization code hash"),
+                            pkce_verifier_hash: verifier_hash,
+                            access_secret: SecretHandle::new(format!("access-{tag}"))
+                                .expect("access handle"),
+                            refresh_secret: None,
+                            scopes: Vec::new(),
+                            account_id: None,
+                            provider_identity: None,
+                        }),
+                    },
+                },
+            )
+            .await
+            .expect("complete flow")
+    }
+
+    fn reconcile_route_state(
+        shared: &Arc<ironclaw_auth::InMemoryAuthProductServices>,
+        dispatcher: Arc<RecordingDispatcher>,
+    ) -> ProductAuthRouteState {
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                dispatcher,
+            )),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+    }
+
+    fn reconcile_uri_for(path_template: &str, flow: &ironclaw_auth::AuthFlowRecord) -> String {
+        format!(
+            "{}?invocation_id={}",
+            path_template.replace("{flow_id}", &flow.id.to_string()),
+            flow.scope.resource.invocation_id
+        )
+    }
+
+    fn reconcile_uri(flow: &ironclaw_auth::AuthFlowRecord) -> String {
+        reconcile_uri_for(OAUTH_FLOW_RECONCILE_PATH, flow)
+    }
+
+    fn legacy_reconcile_uri(flow: &ironclaw_auth::AuthFlowRecord) -> String {
+        reconcile_uri_for(LEGACY_OAUTH_FLOW_RECONCILE_PATH, flow)
+    }
+
+    #[tokio::test]
+    async fn flow_reconcile_route_dispatches_only_one_unfenced_completed_continuation() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let state = reconcile_route_state(&shared, dispatcher.clone());
+        let mut resource = test_resource_scope();
+        resource.invocation_id = InvocationId::new();
+        let scope = AuthProductScope::new(resource, AuthSurface::Callback);
+        let flow = completed_reconcile_flow(shared.as_ref(), &scope, "once").await;
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        for uri in [reconcile_uri(&flow), legacy_reconcile_uri(&flow)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("route response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(dispatcher.events().len(), 1);
+        let stored = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert!(stored.continuation_emitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn flow_reconcile_route_does_not_dispatch_fenced_terminal_or_foreign_flows() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let state = reconcile_route_state(&shared, dispatcher.clone());
+        let mut resource = test_resource_scope();
+        resource.invocation_id = InvocationId::new();
+        let scope = AuthProductScope::new(resource, AuthSurface::Callback);
+
+        let fenced = completed_reconcile_flow(shared.as_ref(), &scope, "fenced").await;
+        shared
+            .mark_continuation_dispatched(&scope, fenced.id, Utc::now())
+            .await
+            .expect("fence flow");
+        let terminal = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
+                challenge: AuthChallenge::SetupRequired {
+                    provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
+                    message: "terminal route reconciliation test".to_string(),
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            })
+            .await
+            .expect("create terminal flow");
+        let terminal = shared
+            .cancel_flow(&scope, terminal.id)
+            .await
+            .expect("cancel flow");
+
+        let owner_app = product_auth_route_mount(state.clone())
+            .protected
+            .layer(axum::Extension(test_caller()));
+        for flow in [&fenced, &terminal] {
+            let response = owner_app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(reconcile_uri(flow))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("route response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let foreign = completed_reconcile_flow(shared.as_ref(), &scope, "foreign").await;
+        let foreign_caller = ProductSurfaceCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("user-beta").expect("user"),
+            None,
+            None,
+        );
+        let response = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(foreign_caller))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(reconcile_uri(&foreign))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(dispatcher.events().is_empty());
     }
 
     struct NoopDispatcher;
@@ -1841,8 +2254,8 @@ mod tests {
         }
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
             None,
@@ -1997,9 +2410,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "vendorco",
-                            "account_label": "work account",
-                            "scopes": [],
+                            "requirement": "vendorco_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": InvocationId::new().to_string(),
                         })
@@ -2016,7 +2427,8 @@ mod tests {
             .expect("response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
         assert_eq!(json["provider"], "vendorco");
-        assert_eq!(json["continuation"]["type"], "setup_only");
+        assert_eq!(json["continuation"]["type"], "lifecycle_activation");
+        assert_eq!(json["continuation"]["package_ref"], "vendorco-tools");
         let authorization_url = json["authorization_url"]
             .as_str()
             .expect("authorization url");
@@ -2088,9 +2500,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "vendorco",
-                            "account_label": "work account",
-                            "scopes": ["items:read"],
+                            "requirement": "vendorco_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -2219,9 +2629,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "vendorco",
-                            "account_label": "work account",
-                            "scopes": ["items:read"],
+                            "requirement": "vendorco_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -2314,9 +2722,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "vendorco",
-                            "account_label": "work account",
-                            "scopes": [],
+                            "requirement": "vendorco_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": InvocationId::new().to_string(),
                         })
@@ -2360,23 +2766,6 @@ mod tests {
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
     }
 
-    /// Reports installed on the first inventory check and uninstalled on
-    /// every later one — the shape of an uninstall racing an OAuth start.
-    struct SequencedInstalledExtensionLookup {
-        calls: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait]
-    impl InstalledExtensionLookup for SequencedInstalledExtensionLookup {
-        async fn is_installed(
-            &self,
-            _caller: &WebUiAuthenticatedCaller,
-            _extension_id: &ExtensionId,
-        ) -> Result<bool, RebornServicesError> {
-            Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
-        }
-    }
-
     /// An uninstall racing the start (installed at the pre-check, gone at
     /// the post-check) must abort the just-started flow: the caller gets the
     /// terminal not-installed conflict and the minted flow is canceled so a
@@ -2398,9 +2787,17 @@ mod tests {
             None,
             None,
         );
-        state.installed_extension_lookup = Some(Arc::new(SequencedInstalledExtensionLookup {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        }));
+        state.installed_extension_lookup =
+            Some(Arc::new(InstalledExtensionLookup::InstalledThenRemoved {
+                extension_id: ExtensionId::new("vendorco-tools").expect("extension"),
+                requirement_name: "vendorco_oauth".to_string(),
+                requirement: InstalledExtensionOAuthRequirement {
+                    provider: "vendorco".to_string(),
+                    account_label: "vendorco-tools vendorco".to_string(),
+                    scopes: vec!["items:read".to_string()],
+                },
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }));
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -2413,9 +2810,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "vendorco",
-                            "account_label": "work account",
-                            "scopes": ["items:read"],
+                            "requirement": "vendorco_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": InvocationId::new().to_string(),
                         })

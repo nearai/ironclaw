@@ -8,10 +8,10 @@ use ironclaw_loop_host::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_outbound::{
-    DeliveryTargetCapabilities, OutboundDeliveryTargetId, OutboundDeliveryTargetScope,
-    OutboundDeliveryTargetSummary, OutboundError,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetRegistrationOutcome,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
 };
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,
@@ -21,7 +21,6 @@ use ironclaw_turns::{
 use crate::RebornCompositionProfile;
 use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
 };
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
@@ -53,7 +52,9 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            },
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
@@ -214,7 +215,7 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
         "slack:test",
         Arc::new(StaticOutboundDeliveryTargetProvider {
             summary: OutboundDeliveryTargetSummary::new(
-                OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
+                slack_target_id,
                 "slack",
                 "Slack DM",
                 Some("Personal Slack direct message".to_string()),

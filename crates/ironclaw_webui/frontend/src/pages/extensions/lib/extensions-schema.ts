@@ -26,6 +26,10 @@ export function hasChannelSurface(item) {
   return extensionSurfaces(item).some((surface) => surface?.kind === "channel");
 }
 
+export function hasAuthSurface(item) {
+  return extensionSurfaces(item).some((surface) => surface?.kind === "auth");
+}
+
 export function hasToolSurface(item) {
   return extensionSurfaces(item).some((surface) => surface?.kind === "tool");
 }
@@ -42,52 +46,21 @@ export function channelConnection(item) {
   return channelSurface(item)?.connection || null;
 }
 
-export function isInboundProofCodeConnection(connection) {
-  return connection?.strategy === "inbound_proof_code";
+export function isWebGeneratedCodeConnection(connection) {
+  return connection?.strategy === "web_generated_code";
 }
 
-// A channel extension whose connect affordance is a browser OAuth relay:
-// connecting happens through the configure modal's OAuth secret, never a
-// paste-a-code pairing panel. Derived from the wire only — the surface
-// connection strategy, or an oauth-kind setup secret.
-export function connectsViaOauth(item, secrets = []) {
-  if (channelConnection(item)?.strategy === "oauth") return true;
-  return secrets.some((secret) => secret?.setup?.kind === "oauth");
-}
-
-// Installation-state axis (§6.1, `ironclaw_host_api::InstallationState`) — the
-// six honest resting states a *listed* extension's `installation_state` can
-// carry. `removed` is an action-response signal only (removal drops the
-// record) and never appears on a listed extension, so it has no card tone.
-// The old transient states (`activating`/`deactivating`/`removing`/
-// `removal_pending`) no longer exist on the wire — the host now persists only
-// `installed` / `active` / `failed` and derives `configured` / `disabled` /
-// `unsupported` at projection time (never a real in-flight step).
-//
-// Onboarding-state axis (§6.2, `RebornExtensionOnboardingState`) — layered on
-// top of installation state for an extension still missing credentials.
-// `installed` / `failed` are shared with the installation axis above;
-// `auth_required` / `setup_required` are onboarding-only.
+// Caller-visible lifecycle has only two listed states. Absence from the
+// installed list is `uninstalled`; internal install/discovery/publication
+// checkpoints never become extra card states.
 export const STATE_TONES = {
-  installed: "muted",
-  configured: "muted",
+  setup_needed: "warning",
   active: "success",
-  disabled: "muted",
-  failed: "danger",
-  unsupported: "warning",
-  auth_required: "warning",
-  setup_required: "muted",
 };
 
 export const STATE_LABELS = {
-  installed: "installed",
-  configured: "configured",
+  setup_needed: "setup needed",
   active: "active",
-  disabled: "disabled",
-  failed: "failed",
-  unsupported: "unsupported",
-  auth_required: "auth needed",
-  setup_required: "setup needed",
 };
 
 // The primary vendor account on the extensions wire

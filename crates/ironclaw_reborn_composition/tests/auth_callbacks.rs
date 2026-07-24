@@ -509,12 +509,12 @@ async fn oauth_callback_handler_returns_provider_identity_for_host_binding() {
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activation_failure() {
+async fn oauth_callback_handler_terminalizes_lifecycle_failure_without_revoking_valid_auth() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
     let services = RebornProductAuthServices::from_shared(
         shared_auth.clone(),
         Arc::new(FailingContinuationDispatcher {
-            error: AuthProductError::TokenExchangeFailed,
+            error: AuthProductError::LifecycleActivationFailed,
         }),
     );
     let owner = scope("alice");
@@ -525,16 +525,19 @@ async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activatio
         .await
         .expect_err("dispatch failure is reported to caller");
 
-    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
-    assert!(error.retryable);
+    assert_eq!(error.code, AuthErrorCode::LifecycleActivationFailed);
+    assert!(
+        !error.retryable,
+        "a terminal lifecycle-activation failure must not surface as a retryable 503"
+    );
     let accounts = shared_auth
         .accounts_for_owner(&owner)
         .await
         .expect("accounts after failed lifecycle activation");
     assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].status, CredentialAccountStatus::Revoked);
-    assert!(accounts[0].access_secret.is_none());
-    assert!(accounts[0].refresh_secret.is_none());
+    assert_eq!(accounts[0].status, CredentialAccountStatus::Configured);
+    assert!(accounts[0].access_secret.is_some());
+    assert!(accounts[0].refresh_secret.is_some());
 
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
     let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
@@ -555,6 +558,64 @@ async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activatio
     assert_eq!(retry_error.code, AuthErrorCode::FlowAlreadyTerminal);
     assert_eq!(provider_client.calls(), 0);
     assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn oauth_callback_reconcile_retries_transient_lifecycle_without_reexchange_or_reauth() {
+    let shared_auth = Arc::new(InMemoryAuthProductServices::new());
+    let services = RebornProductAuthServices::from_shared(
+        shared_auth.clone(),
+        Arc::new(FailingContinuationDispatcher {
+            error: AuthProductError::BackendUnavailable,
+        }),
+    );
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+
+    let error = services
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
+        .await
+        .expect_err("transient readiness failure remains retryable");
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert!(error.retryable);
+
+    let account = shared_auth
+        .accounts_for_owner(&owner)
+        .await
+        .expect("accounts after transient readiness failure")
+        .into_iter()
+        .next()
+        .expect("OAuth account remains configured");
+    assert_eq!(account.status, CredentialAccountStatus::Configured);
+    assert!(account.access_secret.is_some());
+    assert!(account.refresh_secret.is_some());
+    let flow = shared_auth
+        .get_flow(&owner, flow_id)
+        .await
+        .expect("flow lookup")
+        .expect("completed flow");
+    assert_eq!(flow.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert!(flow.continuation_emitted_at.is_none());
+
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let retry_services = RebornProductAuthServices::new(
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        provider_client.clone(),
+        shared_auth,
+        dispatcher.clone(),
+    );
+    let status = retry_services
+        .reconcile_oauth_flow(&owner, flow_id)
+        .await
+        .expect("authenticated reconcile retries the internal continuation");
+
+    assert_eq!(status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert_eq!(provider_client.calls(), 0, "OAuth exchange must not repeat");
+    assert_eq!(dispatcher.events().len(), 1);
 }
 
 #[tokio::test]

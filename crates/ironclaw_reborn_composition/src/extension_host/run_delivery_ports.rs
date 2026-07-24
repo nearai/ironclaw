@@ -1,5 +1,5 @@
 //! Composition implementations of the generic run-delivery ports
-//! (`ironclaw_product_workflow::run_delivery`): approval-gate context from
+//! (`ironclaw_product::run_delivery`): approval-gate context from
 //! the projection layer, blocked-auth prompt views from the product-auth
 //! engine, and the auth-flow cancel bridge. All delivery *semantics* live in
 //! the generic components; these adapters only surface composition-owned
@@ -8,15 +8,105 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_product_workflow::{
-    ApprovalPromptContextSource, AuthChallengeProvider, BlockedAuthPromptSource,
+use ironclaw_auth::{AuthProductError, AuthProviderId};
+use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
+use ironclaw_product::{
+    ApprovalPromptContextSource, AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptSource,
+    ChannelPairingRegistry, PairingAuthChallengeView,
 };
+use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{GateRef, TurnScope};
 
-use ironclaw_product_workflow::auth_prompt_view_for_blocked_auth;
+use ironclaw_product::auth_prompt_view_for_blocked_auth;
+
+/// One recipe-driven challenge materializer for every product surface.
+/// Product-auth owns OAuth/manual challenges; the canonical channel-pairing
+/// registry owns host-issued pairing codes. Callers see one typed provider.
+pub(crate) struct RecipeAuthChallengeProvider {
+    product_auth: Option<Arc<dyn AuthChallengeProvider>>,
+    pairing: Option<Arc<ChannelPairingRegistry>>,
+}
+
+impl RecipeAuthChallengeProvider {
+    pub(crate) fn compose(
+        product_auth: Option<Arc<dyn AuthChallengeProvider>>,
+        pairing: Option<Arc<ChannelPairingRegistry>>,
+    ) -> Option<Arc<dyn AuthChallengeProvider>> {
+        if product_auth.is_none() && pairing.is_none() {
+            return None;
+        }
+        Some(Arc::new(Self {
+            product_auth,
+            pairing,
+        }))
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RecipeAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: ironclaw_turns::TurnRunId,
+        gate_ref: &str,
+        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
+        if let [requirement] = credential_requirements
+            && requirement.setup == RuntimeCredentialAccountSetup::Pairing
+        {
+            let Some(service) = self
+                .pairing
+                .as_ref()
+                .and_then(|registry| registry.get(requirement.requester_extension.as_str()))
+            else {
+                return Ok(None);
+            };
+            let issue = service
+                .pending_or_issue(owner_user_id)
+                .await
+                .map_err(|error| {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::channel_pairing",
+                        %error,
+                        "pairing challenge materialization failed"
+                    );
+                    AuthProductError::BackendUnavailable
+                })?;
+            let Some(issue) = issue else {
+                return Ok(None);
+            };
+            return Ok(Some(AuthChallengeView {
+                kind: ironclaw_product::AuthPromptChallengeKind::Pairing,
+                provider: AuthProviderId::new(requirement.provider.as_str().to_string())
+                    .map_err(|_| AuthProductError::MalformedConfig)?,
+                account_label: None,
+                authorization_url: None,
+                expires_at: Some(issue.expires_at),
+                pairing: Some(PairingAuthChallengeView {
+                    issue,
+                    connection: service.connection_requirement().clone(),
+                }),
+            }));
+        }
+
+        match &self.product_auth {
+            Some(provider) => {
+                provider
+                    .challenge_for_gate(
+                        scope,
+                        owner_user_id,
+                        run_id,
+                        gate_ref,
+                        credential_requirements,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+}
 
 /// Approval-gate context over the shared projection read model — the same
 /// source the WebUI gate projection renders from.
@@ -63,7 +153,7 @@ impl ProductAuthBlockedAuthPromptSource {
 impl BlockedAuthPromptSource for ProductAuthBlockedAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
         &self,
-        request: ironclaw_product_workflow::BlockedAuthPromptRequest<'_>,
+        request: ironclaw_product::BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError> {
         auth_prompt_view_for_blocked_auth(request, self.auth_challenges.as_deref()).await
     }

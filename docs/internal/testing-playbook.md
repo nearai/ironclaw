@@ -455,3 +455,24 @@ layer is omitted, explain why in one sentence.
 - Use browser tests only when browser behavior matters.
 - Live canaries supplement deterministic tests; they never replace them.
 - Extend an existing test when it already covers the same workflow.
+
+## Provider fault profiles
+
+Use `tests/e2e/provider_fault_proxy.py` when a provider operation must cross
+the real Reborn extension and network path while Emulate retains authoritative
+provider state. The proxy supplies reusable HTTP, malformed-response, timeout,
+connection-reset, and lost-acknowledgement profiles. Its ledger records only
+request metadata, body digests, and credential fingerprints.
+
+Apply profiles by operation equivalence class instead of multiplying every
+provider operation by every failure. A representative read, idempotent write,
+and non-idempotent write must assert the model-visible result, proxy attempt
+count, whether the provider received the request, and direct provider
+readback. A lost-acknowledgement test must prove the provider committed while
+the runtime did not report success, and must prove that no blind duplicate
+request occurred.
+
+Keep missing credentials, credential refresh, and account-scope behavior at
+their existing auth/runtime seams when a provider proxy cannot create the
+condition faithfully. Fault state must be reset independently from provider
+state after every case.

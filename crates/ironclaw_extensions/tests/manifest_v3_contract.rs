@@ -39,14 +39,15 @@ fn catalog() -> HostPortCatalog {
 }
 
 fn parse_v3(toml: &str) -> Result<ExtensionManifestRecord, String> {
-    ExtensionManifestRecord::from_toml(
-        toml,
-        ManifestSource::HostBundled,
-        &catalog(),
-        None,
-        &contracts(),
-    )
-    .map_err(|error| error.to_string())
+    parse_v3_with_source(toml, ManifestSource::HostBundled)
+}
+
+fn parse_v3_with_source(
+    toml: &str,
+    source: ManifestSource,
+) -> Result<ExtensionManifestRecord, String> {
+    ExtensionManifestRecord::from_toml(toml, source, &catalog(), None, &contracts())
+        .map_err(|error| error.to_string())
 }
 
 fn acme_record() -> ExtensionManifestRecord {
@@ -154,21 +155,8 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
 
 #[test]
 fn admin_configuration_is_manifest_declared_and_resolved_without_installation_state() {
-    let toml = ACME_MANIFEST.replace(
-        "[runtime]",
-        r#"[admin_configuration]
-group_id = "vendor.acme"
-display_name = "Acme deployment credentials"
-description = "Shared OAuth client credentials."
-fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
-  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]
-
-[runtime]"#,
-    );
-
-    let record = parse_v3(&toml).expect("manifest-declared admin configuration should parse");
+    let record = parse_v3(ACME_MANIFEST)
+        .expect("manifest-declared admin configuration should parse without installation state");
     let [descriptor] = record.resolved().admin_configuration.as_slice() else {
         panic!("expected one resolved admin configuration descriptor");
     };
@@ -181,17 +169,14 @@ fields = [
 #[test]
 fn duplicate_admin_configuration_handles_fail_closed() {
     let toml = ACME_MANIFEST.replace(
-        "[runtime]",
-        r#"[admin_configuration]
-group_id = "vendor.acme"
-display_name = "Acme deployment credentials"
-description = "Shared OAuth client credentials."
-fields = [
+        r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
+]"#,
+        r#"fields = [
   { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
   { handle = "acme_client_id", label = "Duplicate", secret = true, required = true },
-]
-
-[runtime]"#,
+]"#,
     );
 
     let error = parse_v3(&toml).expect_err("duplicate handles must fail closed");
@@ -202,22 +187,195 @@ fields = [
 }
 
 #[test]
-fn channel_admin_configuration_cannot_drift_from_channel_config() {
-    let toml = ACME_MANIFEST.replace(
-        "[runtime]",
-        r#"[admin_configuration]
-group_id = "vendor.acme"
-display_name = "Acme deployment credentials"
-fields = [
-  { handle = "wrong_handle", label = "Wrong", secret = true, required = true },
-]
+fn channel_runtime_configuration_comes_from_admin_configuration_alone() {
+    let record = parse_v3(ACME_MANIFEST)
+        .expect("one manifest-owned admin schema should configure the channel runtime");
+    let [descriptor] = record.resolved().admin_configuration.as_slice() else {
+        panic!("expected one resolved admin configuration descriptor");
+    };
+    assert_eq!(descriptor.group_id.as_str(), "vendor.acme");
+    assert_eq!(
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.handle.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acme_bot_token", "acme_signing_secret"]
+    );
+    assert!(record.resolved().channel.is_some());
+}
 
-[runtime]"#,
+#[test]
+fn channel_runtime_secret_references_must_be_declared_by_admin_configuration() {
+    let toml = ACME_MANIFEST.replace(
+        r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
+]"#,
+        r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+]"#,
     );
 
-    let error = parse_v3(&toml).expect_err("parallel channel declarations must not drift");
+    let error = parse_v3(&toml).expect_err("undeclared channel secrets must fail closed");
     assert!(
-        error.contains("exactly match") && error.contains("channel.config"),
+        error.contains("channel ingress verification")
+            && error.contains("acme_signing_secret")
+            && error.contains("admin_configuration"),
+        "{error}"
+    );
+}
+
+/// An `[admin_configuration]` group is deployment-owned, operator-managed state.
+/// Only a host-bundled (first-party) manifest — one compiled into the binary —
+/// may declare one. An untrusted, filesystem-discovered, or registry-installed
+/// manifest must be rejected at parse: otherwise it could collide with a
+/// first-party group id (aborting boot via a descriptor conflict) or register
+/// itself as a consumer of a first-party group's non-secret routing.
+#[test]
+fn admin_configuration_group_is_reserved_to_first_party_manifests() {
+    const THIRD_PARTY_ADMIN_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "third-party-admin"
+name = "Third Party Admin"
+version = "0.1.0"
+description = "A third-party manifest that declares a deployment-owned admin group."
+trust = "third_party"
+
+[admin_configuration]
+group_id = "vendor.rogue"
+display_name = "Rogue deployment configuration"
+fields = [ { handle = "rogue_secret", label = "Secret", secret = true, required = true } ]
+
+[runtime]
+kind = "wasm"
+module = "wasm/rogue.wasm"
+
+[[tools]]
+id = "third-party-admin.noop"
+description = "A no-op tool."
+effects = []
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/rogue/noop.input.v1.json"
+"#;
+
+    // A host-bundled (first-party) source may declare an admin group.
+    parse_v3_with_source(THIRD_PARTY_ADMIN_MANIFEST, ManifestSource::HostBundled)
+        .expect("host-bundled manifest may declare [admin_configuration]");
+
+    // Every non-first-party source is rejected at parse — the earliest
+    // fail-closed point for the deployment-owned admin surface.
+    for source in [
+        ManifestSource::InstalledLocal,
+        ManifestSource::RegistryInstalled,
+    ] {
+        let error = parse_v3_with_source(THIRD_PARTY_ADMIN_MANIFEST, source)
+            .expect_err("a non-first-party manifest must not declare [admin_configuration]");
+        assert!(
+            error.contains("admin_configuration")
+                && (error.contains("host-bundled") || error.contains("first-party")),
+            "{source:?}: {error}"
+        );
+    }
+}
+
+// Each channel runtime reference must resolve to a matching `[admin_configuration]`
+// field. The ingress-verification branch is covered above; these cover the
+// remaining fail-closed branches (egress credential, egress body credential,
+// connection deep-link placeholder, and the secret-flag mismatch).
+
+#[test]
+fn undeclared_channel_egress_credential_fails_closed() {
+    let toml = ACME_MANIFEST.replace(
+        "credential_handle = \"acme_bot_token\"",
+        "credential_handle = \"acme_undeclared_egress_token\"",
+    );
+
+    let error = parse_v3(&toml).expect_err("an undeclared egress credential must fail closed");
+    assert!(
+        error.contains("channel egress credential")
+            && error.contains("acme_undeclared_egress_token")
+            && error.contains("admin_configuration"),
+        "{error}"
+    );
+}
+
+#[test]
+fn undeclared_channel_egress_body_credential_fails_closed() {
+    let toml = ACME_MANIFEST.replace(
+        "methods = [\"post\"]\ncredential_handle = \"acme_bot_token\"",
+        "methods = [\"post\"]\ncredential_handle = \"acme_bot_token\"\n\
+         body_credentials = [{ handle = \"acme_undeclared_body_secret\", pointer = \"/token\" }]",
+    );
+
+    let error = parse_v3(&toml).expect_err("an undeclared egress body credential must fail closed");
+    assert!(
+        error.contains("channel egress body credential")
+            && error.contains("acme_undeclared_body_secret")
+            && error.contains("admin_configuration"),
+        "{error}"
+    );
+}
+
+#[test]
+fn undeclared_channel_connection_placeholder_fails_closed() {
+    // Extend the fixture channel with a generated-code connection whose deep
+    // link interpolates a non-`{code}` placeholder that no admin field declares.
+    let toml = ACME_MANIFEST.replace(
+        "[channel.presentation]\n\
+         supports_markdown = true\n\
+         supports_threads = false\n\
+         max_message_chars = 4000\n",
+        "[channel.presentation]\n\
+         supports_markdown = true\n\
+         supports_threads = false\n\
+         max_message_chars = 4000\n\n\
+         [channel.connection]\n\
+         provider = \"acme\"\n\
+         strategy = \"web_generated_code\"\n\
+         instructions = \"Pair your Acme account by opening the link.\"\n\
+         submit_label = \"Open pairing\"\n\
+         error_message = \"Pairing failed.\"\n\
+         connection_success_message = \"Acme paired.\"\n\
+         deep_link_template = \"https://acme.example/pair?ref={acme_undeclared_ref}&code={code}\"\n\n\
+         [channel.connection.notices]\n\
+         connect_required = \"Pair first.\"\n\
+         paired = \"Paired.\"\n\
+         already_paired_same_user = \"Already paired.\"\n\
+         already_bound_to_other_user = \"Paired elsewhere.\"\n\
+         expired_or_unknown = \"Invalid code.\"\n",
+    );
+    assert!(
+        toml.contains("[channel.connection]"),
+        "the connection block must be inserted for this test to exercise the placeholder branch"
+    );
+
+    let error = parse_v3(&toml).expect_err("an undeclared connection placeholder must fail closed");
+    assert!(
+        error.contains("channel connection placeholder")
+            && error.contains("acme_undeclared_ref")
+            && error.contains("admin_configuration"),
+        "{error}"
+    );
+}
+
+#[test]
+fn channel_secret_declared_with_wrong_secret_flag_fails_closed() {
+    // The ingress verification requires `acme_signing_secret` as a secret field;
+    // declaring it non-secret in [admin_configuration] must fail closed rather
+    // than silently expose a signing secret through the non-secret read path.
+    let toml = ACME_MANIFEST.replace(
+        "{ handle = \"acme_signing_secret\", label = \"Signing secret\", secret = true, required = true },",
+        "{ handle = \"acme_signing_secret\", label = \"Signing secret\", secret = false, required = true },",
+    );
+
+    let error = parse_v3(&toml)
+        .expect_err("a channel secret declared with the wrong flag must fail closed");
+    assert!(
+        error.contains("channel ingress verification")
+            && error.contains("acme_signing_secret")
+            && error.contains("secret = true"),
         "{error}"
     );
 }

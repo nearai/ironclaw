@@ -3,7 +3,7 @@
 //! Assembly only: this module constructs the [`ExtensionIngressRouter`] over
 //! the generic host's snapshot watch, provides the per-extension
 //! registration surface concrete channel graphs plug into (secrets + inbound
-//! sink), the generic inbound sink over the ProductSurface channel admission
+//! sink), the generic inbound sink over typed product channel admission
 //! (idempotency ledger → identity/conversation binding → turn submission),
 //! and — behind the serve feature — the one `PublicRouteMount` that serves
 //! `/webhooks/extensions/{extension_id}/{route_suffix}` for every active
@@ -21,20 +21,21 @@ use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
+use ironclaw_product::{
     AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
-    NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductSourceChannel, ProtocolAuthEvidence,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductSourceChannel, ProtocolAuthEvidence, parse_interaction_resolution_text,
+    strip_wrapping_inline_code,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
-    ChannelInboundSurfaceRequest, ProductOperationRequest, ProductSurface,
-    WebUiAuthenticatedCaller,
+    ChannelInboundSurfaceRequest,
+};
+use ironclaw_product::{
+    ChannelPairingConsumeOutcome, ChannelPairingInterception, ChannelPairingInterceptor,
 };
 use tokio::task::JoinSet;
-
-use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
 /// Fixed host route paths inside the extension ingress namespace
 /// (`/webhooks/extensions/…`). An extension whose canonical route collides
@@ -62,17 +63,10 @@ pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
-        _error: ironclaw_product_adapters::ProductAdapterError,
+        _error: ironclaw_product::ProductAdapterError,
     ) {
     }
 }
-
-/// Optional protocol-specific reclassification of a normalized message into
-/// a richer channel payload classification (today: gate-resolution replies like
-/// `approve` / `deny gate:<ref>` / `auth deny <ref>`). Transitional debt:
-/// deleted when gate replies become a host-generic channel concern.
-pub type InboundPayloadClassifier =
-    dyn Fn(&NormalizedInboundMessage) -> Option<ChannelInboundClassification> + Send + Sync;
 
 /// How the sink mints the trusted auth claim for admitted messages —
 /// mirrors the ingress verification recipe the router executed.
@@ -93,16 +87,13 @@ impl VerifiedEvidenceMint {
             Self::RequestSignature {
                 signature_header,
                 timestamp_header,
-            } => ironclaw_product_adapters::auth::mark_request_signature_verified(
+            } => ironclaw_product::auth::mark_request_signature_verified(
                 signature_header.clone(),
                 timestamp_header.clone(),
                 subject,
             ),
             Self::SharedSecretHeader { header } => {
-                ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
-                    header.clone(),
-                    subject,
-                )
+                ironclaw_product::auth::mark_shared_secret_header_verified(header.clone(), subject)
             }
         }
     }
@@ -298,37 +289,15 @@ impl InboundSink for ExtensionIngressRegistry {
 
 // ── The generic inbound sink over ProductSurface admission ──────────────────
 
-/// Pre-admission pairing interception for `WebGeneratedCode` channels: a
-/// direct message from an actor with no identity binding is offered to the
-/// pairing seam BEFORE ProductSurface admission, so a pairing code is consumed
-/// instead of becoming (or failing as) a turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ChannelPairingInterception {
-    NotHandled,
-    Consumed(ChannelPairingConsumeOutcome),
-    Failed,
-}
-
-#[async_trait]
-pub(crate) trait ChannelPairingInterceptor: Send + Sync {
-    async fn intercept(
-        &self,
-        installation_id: &AdapterInstallationId,
-        message: &NormalizedInboundMessage,
-    ) -> ChannelPairingInterception;
-}
-
 /// Configuration for [`GenericChannelInboundSink`].
 pub struct ChannelInboundSinkConfig {
     /// The adapter identity stamped on inbound envelopes.
     pub adapter_id: ProductAdapterId,
     /// Auth-claim shape matching the executed verification recipe.
     pub evidence: VerifiedEvidenceMint,
-    /// Optional protocol-specific payload reclassification (gate replies).
-    pub classifier: Option<Arc<InboundPayloadClassifier>>,
-    /// The ProductSurface channel admission door: durable idempotency ledger →
+    /// The typed channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
-    pub surface: Arc<dyn ProductSurface>,
+    pub surface: Arc<dyn ChannelInboundProductSurface>,
     /// Optional post-admission follow-up (e.g. final-reply delivery).
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
@@ -401,13 +370,11 @@ impl GenericChannelInboundSink {
         }
     }
 
-    fn channel_caller() -> Result<WebUiAuthenticatedCaller, InboundSinkError> {
-        Ok(WebUiAuthenticatedCaller::new(
-            TenantId::new("channel-ingress").map_err(Self::permanent)?,
-            UserId::new("channel-ingress").map_err(Self::permanent)?,
-            None,
-            None,
-        ))
+    fn retryable(reason: impl std::fmt::Display) -> InboundSinkError {
+        InboundSinkError {
+            retryable: true,
+            reason: reason.to_string(),
+        }
     }
 
     async fn spawn_observer<F>(&self, run: F)
@@ -457,7 +424,9 @@ impl InboundSink for GenericChannelInboundSink {
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
         // Pairing pre-admission gate: a serviced pairing interaction is
         // durably reflected in the pairing/identity stores, not the turn
-        // ledger — the vendor still gets its 2xx.
+        // ledger. The vendor gets 2xx only after the generic lifecycle/fan-out
+        // dispatcher accepts and settles that intent; transient failures ask
+        // the provider to redeliver.
         if let Some(pairing) = &self.pairing {
             // Boxed: the consume path (CAS claim → identity bind → completion
             // fan-out) is a deep async subtree nested inside the admission
@@ -465,22 +434,51 @@ impl InboundSink for GenericChannelInboundSink {
             match Box::pin(pairing.intercept(&installation, &message)).await {
                 ChannelPairingInterception::NotHandled => {}
                 ChannelPairingInterception::Consumed(outcome) => {
-                    if let Some(observer) = self.pairing_outcome_observer.clone() {
-                        let conversation = message.conversation.clone();
-                        let event_id = message.event_id.clone();
-                        self.spawn_observer(async move {
+                    let observer = self.pairing_outcome_observer.clone();
+                    let conversation = message.conversation.clone();
+                    let event_id = message.event_id.clone();
+                    self.spawn_observer(async move {
+                        if let Some(observer) = observer {
                             observer.observe(conversation, event_id, outcome).await;
-                        })
-                        .await;
-                    }
+                        }
+                    })
+                    .await;
                     return Ok(InboundAdmissionAck::Accepted);
                 }
-                ChannelPairingInterception::Failed => {
-                    return Ok(InboundAdmissionAck::Accepted);
+                ChannelPairingInterception::RetryableFailure => {
+                    return Err(Self::retryable("pairing admission failed retryably"));
                 }
             }
         }
         let evidence = self.config.evidence.mint(&installation_id);
+        // Gate-resolution commands are part of the channel-neutral product
+        // grammar advertised by the shared delivery driver. Every normalized
+        // channel message crosses this sink, so classify them here exactly
+        // once instead of relying on an optional vendor registration that can
+        // silently diverge between Slack, Telegram, and future channels.
+        let interaction = parse_interaction_resolution_text(
+            strip_wrapping_inline_code(&message.text),
+            message.trigger,
+        )
+        .map_err(Self::permanent)?;
+        let classification = match interaction {
+            Some(ProductInboundPayload::ApprovalResolution(payload)) => {
+                Some(ChannelInboundClassification::ApprovalResolution(payload))
+            }
+            Some(ProductInboundPayload::ScopedApprovalResolution(payload)) => Some(
+                ChannelInboundClassification::ScopedApprovalResolution(payload),
+            ),
+            Some(ProductInboundPayload::AuthResolution(payload)) => {
+                Some(ChannelInboundClassification::AuthResolution(payload))
+            }
+            Some(ProductInboundPayload::NoOp) => Some(ChannelInboundClassification::NoOp),
+            Some(_) => {
+                return Err(Self::permanent(
+                    "channel interaction parser returned a non-interaction payload",
+                ));
+            }
+            None => None,
+        };
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
@@ -495,21 +493,10 @@ impl InboundSink for GenericChannelInboundSink {
             installation_id: installation,
             evidence,
             received_at: Utc::now(),
-            classification: self
-                .config
-                .classifier
-                .as_ref()
-                .and_then(|classify| classify(&message)),
+            classification,
             message,
         };
-        let response = Box::pin(self.config.surface.execute_command(
-            Self::channel_caller()?,
-            ProductOperationRequest::channel_inbound(request),
-        ))
-        .await
-        .map_err(Self::permanent)?
-        .into_channel_inbound()
-        .map_err(Self::permanent)?;
+        let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
         match response {
             ChannelInboundSurfaceOutcome::Admitted(admission) => {
                 let admission = *admission;
@@ -798,58 +785,74 @@ mod serve_mount {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use ironclaw_host_api::ChannelInboundProductSurface;
     use ironclaw_host_api::UserId;
-    use ironclaw_product_adapters::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
-        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
+    use ironclaw_product::{
+        ChannelAdapter, ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundOutcome,
+        NormalizedInboundMessage, ParsedProductInbound, ProductInboundPayload,
+        ProductTriggerReason, TrustedInboundContext, UserMessagePayload, VerifiedInbound,
     };
-    use ironclaw_product_workflow::{
-        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
-        ProductOperationResponse, ProductOperationTypedInput, ProductSurface, RebornServicesError,
-        RebornServicesErrorCode, RebornServicesErrorKind,
-    };
+    use ironclaw_product::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+    use tokio::sync::Notify;
 
     use super::*;
-    use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
     struct CountingSurface {
         submissions: AtomicUsize,
+        payloads: Mutex<Vec<ProductInboundPayload>>,
     }
 
     impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
+                payloads: Mutex::new(Vec::new()),
             }
         }
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
         }
+
+        fn payloads(&self) -> Vec<ProductInboundPayload> {
+            match self.payloads.lock() {
+                Ok(payloads) => payloads.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
     }
 
     #[async_trait]
-    impl ProductSurface for CountingSurface {
-        async fn execute_command(
+    impl ChannelInboundProductSurface for CountingSurface {
+        async fn admit_channel_inbound(
             &self,
-            _caller: WebUiAuthenticatedCaller,
-            request: ProductOperationRequest,
-        ) -> Result<ProductOperationResponse, RebornServicesError> {
-            let operation_id =
-                ProductOperationId::parse(request.operation_id.as_str()).ok_or_else(unavailable)?;
-            if operation_id != ProductOperationId::ChannelInboundAdmit {
-                return Err(unavailable());
-            }
-            let Some(ProductOperationTypedInput::ChannelInbound(request)) = request.typed_input
-            else {
-                return Ok(ProductOperationResponse::channel_inbound(
-                    ChannelInboundSurfaceOutcome::unavailable(),
-                ));
-            };
+            request: ChannelInboundSurfaceRequest,
+        ) -> ChannelInboundSurfaceOutcome {
             self.submissions.fetch_add(1, Ordering::SeqCst);
+            let payload = match request.classification {
+                Some(classification) => classification.into(),
+                None => ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new(
+                        request.message.text.clone(),
+                        request
+                            .message
+                            .attachments
+                            .iter()
+                            .map(|attachment| attachment.descriptor.clone())
+                            .collect(),
+                        request.message.trigger,
+                    )
+                    .expect("user message payload"),
+                ),
+            };
+            match self.payloads.lock() {
+                Ok(mut payloads) => payloads.push(payload.clone()),
+                Err(poisoned) => poisoned.into_inner().push(payload.clone()),
+            }
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
@@ -868,35 +871,15 @@ mod tests {
                     request.message.event_id,
                     request.message.actor,
                     request.message.conversation,
-                    ProductInboundPayload::UserMessage(
-                        UserMessagePayload::new(
-                            request.message.text,
-                            Vec::new(),
-                            request.message.trigger,
-                        )
-                        .expect("user message payload"),
-                    ),
+                    payload,
                 )
                 .expect("parsed inbound"),
             )
             .expect("trusted envelope");
-            Ok(ProductOperationResponse::channel_inbound(
-                ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
-                    envelope,
-                    ack,
-                })),
-            ))
-        }
-    }
-
-    fn unavailable() -> RebornServicesError {
-        RebornServicesError {
-            code: RebornServicesErrorCode::Unavailable,
-            kind: RebornServicesErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: false,
-            field: None,
-            validation_code: None,
+            ChannelInboundSurfaceOutcome::Admitted(Box::new(ChannelInboundSurfaceAdmission {
+                envelope,
+                ack,
+            }))
         }
     }
 
@@ -912,6 +895,47 @@ mod tests {
             _message: &NormalizedInboundMessage,
         ) -> ChannelPairingInterception {
             self.interception.clone()
+        }
+    }
+
+    struct BlockingPairingCompletion {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ChannelPairingInterceptor for BlockingPairingCompletion {
+        async fn intercept(
+            &self,
+            _installation_id: &AdapterInstallationId,
+            _message: &NormalizedInboundMessage,
+        ) -> ChannelPairingInterception {
+            self.started.notify_one();
+            self.release.notified().await;
+            ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
+                user_id: UserId::new("paired-user").expect("user id"),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RetryOncePairingCompletion {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChannelPairingInterceptor for RetryOncePairingCompletion {
+        async fn intercept(
+            &self,
+            _installation_id: &AdapterInstallationId,
+            _message: &NormalizedInboundMessage,
+        ) -> ChannelPairingInterception {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return ChannelPairingInterception::RetryableFailure;
+            }
+            ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
+                user_id: UserId::new("paired-user").expect("user id"),
+            })
         }
     }
 
@@ -946,8 +970,7 @@ mod tests {
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
-            surface: Arc::clone(&workflow) as Arc<dyn ProductSurface>,
+            surface: Arc::clone(&workflow) as Arc<dyn ChannelInboundProductSurface>,
             observer: None,
         })
         .with_pairing(
@@ -957,6 +980,181 @@ mod tests {
             ))),
         );
         (sink, workflow, outcomes)
+    }
+
+    fn one_normalized_message(
+        adapter: &dyn ChannelAdapter,
+        extension_id: &str,
+        installation_id: &str,
+        body: &[u8],
+    ) -> NormalizedInboundMessage {
+        let outcome = adapter
+            .inbound(VerifiedInbound {
+                extension_id,
+                installation_id,
+                body,
+                headers: &[],
+            })
+            .expect("shipping channel adapter must normalize the fixture");
+        let InboundOutcome::Messages(mut messages) = outcome else {
+            panic!("fixture must normalize to one channel message");
+        };
+        assert_eq!(messages.len(), 1);
+        messages.remove(0)
+    }
+
+    async fn admit_through_shipping_sink(
+        extension_id: &str,
+        installation_id: &str,
+        message: NormalizedInboundMessage,
+    ) -> Arc<CountingSurface> {
+        let surface = Arc::new(CountingSurface::new());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Test-Verified".to_string(),
+            },
+            surface: Arc::clone(&surface) as Arc<dyn ChannelInboundProductSurface>,
+            observer: None,
+        });
+        sink.admit(InboundAdmission {
+            extension_id: extension_id.to_string(),
+            installation_id: installation_id.to_string(),
+            message,
+        })
+        .await
+        .expect("normalized interaction reaches workflow");
+        surface
+    }
+
+    #[tokio::test]
+    async fn real_slack_and_telegram_normalizers_reach_shared_sink_as_auth_resolution() {
+        let slack_message = one_normalized_message(
+            &ironclaw_slack_extension::SlackChannelAdapter,
+            "slack",
+            "slack-install",
+            br#"{
+                "type":"event_callback",
+                "team_id":"T-A",
+                "api_app_id":"A-slack",
+                "event_id":"Ev-auth-deny-shared-sink",
+                "event":{
+                    "type":"message",
+                    "channel_type":"im",
+                    "user":"U123",
+                    "channel":"D123",
+                    "text":"`auth deny gate:auth-shared-sink`",
+                    "ts":"1710000000.000001"
+                }
+            }"#,
+        );
+        let telegram_message = one_normalized_message(
+            &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+            "telegram",
+            "telegram-install",
+            br#"{
+                "update_id":701,
+                "message":{
+                    "message_id":17,
+                    "date":1710000000,
+                    "text":"`auth deny gate:auth-shared-sink`",
+                    "from":{"id":9911,"is_bot":false,"first_name":"Ada"},
+                    "chat":{"id":8675309,"type":"private"}
+                }
+            }"#,
+        );
+
+        for (extension_id, installation_id, message) in [
+            ("slack", "slack-install", slack_message),
+            ("telegram", "telegram-install", telegram_message),
+        ] {
+            let workflow =
+                admit_through_shipping_sink(extension_id, installation_id, message).await;
+            let payloads = workflow.payloads();
+            assert_eq!(payloads.len(), 1);
+            let ProductInboundPayload::AuthResolution(payload) = &payloads[0] else {
+                panic!(
+                    "{extension_id} auth-deny must reach the workflow as AuthResolution, got {:?}",
+                    payloads[0]
+                );
+            };
+            assert_eq!(payload.auth_request_ref, "gate:auth-shared-sink");
+            assert_eq!(
+                payload.result,
+                ironclaw_product::AuthResolutionResult::Denied
+            );
+        }
+    }
+
+    async fn admit_text_through_sink(text: &str) -> Arc<CountingSurface> {
+        let surface = Arc::new(CountingSurface::new());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            surface: Arc::clone(&surface) as Arc<dyn ChannelInboundProductSurface>,
+            observer: None,
+        });
+        sink.admit(admission_for(text))
+            .await
+            .expect("normalized message reaches the workflow");
+        surface
+    }
+
+    #[tokio::test]
+    async fn ambiguous_verb_first_chat_reaches_the_workflow_as_a_user_message_turn() {
+        // Regression (#6520): the shared sink classifies every inbound message
+        // for gate-resolution commands. A normal chat message that merely
+        // *starts* with a command verb ("approve this design") is not the
+        // reserved gate-command shape, so it must NOT be pulled out of the
+        // conversation as a no-op and silently settled. It falls through to
+        // normal turn handling — the sink hands the workflow a UserMessage
+        // (which submits a turn), never a NoOp.
+        let surface = admit_text_through_sink("approve this design").await;
+        let payloads = surface.payloads();
+        assert_eq!(
+            payloads.len(),
+            1,
+            "the message must reach the workflow once"
+        );
+        assert!(
+            matches!(payloads[0], ProductInboundPayload::UserMessage(_)),
+            "ambiguous verb-first chat must submit a turn, not settle as a no-op: {:?}",
+            payloads[0]
+        );
+        assert_eq!(
+            surface.submit_count(),
+            1,
+            "the ambiguous message must be submitted, not swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn confident_gate_commands_still_classify_as_resolutions_at_the_shared_sink() {
+        // The fall-through fix must not weaken the confident, reserved
+        // gate-command shapes. Targeted `approve gate:<ref>` still reaches the
+        // workflow as an ApprovalResolution (which resolves the gate), and a
+        // bare `deny` still reaches it as a ScopedApprovalResolution (the
+        // delivered-gate-thread reply grammar) — neither becomes a user message.
+        let targeted = admit_text_through_sink("approve gate:approval-xyz").await;
+        assert!(
+            matches!(
+                targeted.payloads().as_slice(),
+                [ProductInboundPayload::ApprovalResolution(_)]
+            ),
+            "`approve gate:<ref>` must reach the workflow as an ApprovalResolution: {:?}",
+            targeted.payloads()
+        );
+        let scoped = admit_text_through_sink("deny").await;
+        assert!(
+            matches!(
+                scoped.payloads().as_slice(),
+                [ProductInboundPayload::ScopedApprovalResolution(_)]
+            ),
+            "bare `deny` must reach the workflow as a ScopedApprovalResolution: {:?}",
+            scoped.payloads()
+        );
     }
 
     struct FailingSink;
@@ -1083,6 +1281,83 @@ mod tests {
             assert_eq!(workflow.submit_count(), 0);
             assert_eq!(observer.lock().expect("outcomes lock").pop(), Some(outcome));
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_webhook_ack_waits_for_continuation_acceptance() {
+        let surface = Arc::new(CountingSurface::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let sink = Arc::new(
+            GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+                adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+                evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                    header: "X-Vendor-Secret".to_string(),
+                },
+                surface: surface as Arc<dyn ChannelInboundProductSurface>,
+                observer: None,
+            })
+            .with_pairing(
+                Arc::new(BlockingPairingCompletion {
+                    started: Arc::clone(&started),
+                    release: Arc::clone(&release),
+                }),
+                None,
+            ),
+        );
+
+        let mut admission = tokio::spawn({
+            let sink = Arc::clone(&sink);
+            async move { sink.admit(admission_for("ABCDEFGH")).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(250), started.notified())
+            .await
+            .expect("continuation dispatch must start before acknowledgement");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut admission)
+                .await
+                .is_err(),
+            "provider acknowledgement must wait for continuation acceptance"
+        );
+        release.notify_one();
+        let ack = admission
+            .await
+            .expect("admission task")
+            .expect("pairing admission");
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        sink.drain().await;
+    }
+
+    #[tokio::test]
+    async fn pairing_transient_failure_requests_redelivery_before_ack() {
+        let surface = Arc::new(CountingSurface::new());
+        let pairing = Arc::new(RetryOncePairingCompletion::default());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            surface: Arc::clone(&surface) as Arc<dyn ChannelInboundProductSurface>,
+            observer: None,
+        })
+        .with_pairing(
+            Arc::clone(&pairing) as Arc<dyn ChannelPairingInterceptor>,
+            None,
+        );
+
+        let first = sink
+            .admit(admission_for("ABCDEFGH"))
+            .await
+            .expect_err("failed continuation must not acknowledge provider ingress");
+        assert!(first.retryable);
+
+        let second = sink
+            .admit(admission_for("ABCDEFGH"))
+            .await
+            .expect("provider redelivery must re-drive pairing completion");
+        assert_eq!(second, InboundAdmissionAck::Accepted);
+        assert_eq!(pairing.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(surface.submit_count(), 0);
     }
 
     #[tokio::test]

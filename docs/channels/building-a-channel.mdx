@@ -25,15 +25,14 @@ cargo install wasm-tools
 
 ## 1. Create the project structure
 
-Create a new crate under `channels-src/` (or another location) with this layout:
+Create a new crate outside the retired legacy source trees with this layout:
 
 ```text
-channels-src/
-└── my-channel/
-    ├── Cargo.toml
-    ├── src/
-    │   └── lib.rs
-    └── my-channel.capabilities.json
+my-channel/
+├── Cargo.toml
+├── src/
+│   └── lib.rs
+└── my-channel.capabilities.json
 ```
 
 After building, deploy to:
@@ -309,7 +308,7 @@ With code and capabilities in place, build the channel and copy the two required
 ### Generic channel build
 
 ```bash
-cd channels-src/my-channel
+cd my-channel
 cargo build --release --target wasm32-wasip2
 
 # Convert the raw wasm module into a component and strip it
@@ -323,17 +322,14 @@ cp my-channel.capabilities.json ~/.ironclaw/channels/
 ```
 
 <Note>
-The channels shipped in `channels-src/` use small `build.sh` wrappers that do exactly this component-conversion step. If your channel lives in the repo, following that pattern is the safest option.
+Current first-party channels are shipped as packaged artifacts. For repository-maintained Reborn channels, use `crates/ironclaw_first_party_extensions/assets/<channel>/manifest.toml` plus checked-in schemas/prompts and CI-built WASM artifacts rather than adding a new legacy source tree.
 </Note>
 
-### Telegram channel example
+### Packaged channel artifact example
 
 ```bash
-rustup target add wasm32-wasip2
-./channels-src/telegram/build.sh
-
 mkdir -p ~/.ironclaw/channels
-cp channels-src/telegram/telegram.wasm channels-src/telegram/telegram.capabilities.json ~/.ironclaw/channels/
+cp my-channel.wasm my-channel.capabilities.json ~/.ironclaw/channels/
 ```
 
 <Danger>

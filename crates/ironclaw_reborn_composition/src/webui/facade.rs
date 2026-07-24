@@ -7,15 +7,17 @@ use chrono::Utc;
 use async_trait::async_trait;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{InvocationId, ResourceScope};
-use ironclaw_product_adapters::ProjectionStream;
-use ironclaw_product_workflow::{
-    ChannelConnectionFacade, OperatorStatusService, ProductSurface, RebornOperatorStatusCheck,
+use ironclaw_host_api::{
+    InvocationId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
+};
+use ironclaw_product::ProjectionStream;
+use ironclaw_product::{
+    ChannelConnectionFacade, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -26,11 +28,9 @@ use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
-    extension_host::lifecycle::{
-        RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
-    },
+    extension_host::lifecycle::{LifecycleFacade, SkillManagementPort, SkillManagementPortError},
     extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
-    observability::RebornLocalServiceLifecycle,
+    observability::OperatorServiceLifecycle,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
@@ -53,7 +53,7 @@ use crate::{
 /// the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
-    pub api: Arc<dyn ProductSurface>,
+    pub product_surface: Arc<dyn ProductSurface>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
 }
@@ -62,7 +62,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RebornWebuiBundle")
-            .field("api", &"Arc<dyn ProductSurface>")
+            .field("product_surface", &"Arc<dyn ProductSurface>")
             .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .finish()
@@ -125,8 +125,8 @@ pub(crate) fn build_webui_services_with_channel_connection(
         runtime.extension_management.installation_store_handle(),
     );
     let mut api = ProductRebornServices::new_with_product_ports(
-        runtime.webui_thread_service(),
-        runtime.webui_turn_coordinator(),
+        runtime.product_thread_service(),
+        runtime.product_turn_coordinator(),
         RuntimeProductCapabilityInvoker::from_runtime(runtime),
         admin_configuration_view,
     )
@@ -174,9 +174,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
             move |scope, accepted_message_ref, message| {
                 activation_recorder
                     .record_user_message(scope.clone(), accepted_message_ref.clone(), message)
-                    .map_err(|_| RebornServicesError {
-                        code: RebornServicesErrorCode::Internal,
-                        kind: RebornServicesErrorKind::Internal,
+                    .map_err(|_| ProductSurfaceError {
+                        code: ProductSurfaceErrorCode::Internal,
+                        kind: ProductSurfaceErrorKind::Internal,
                         status_code: 500,
                         retryable: false,
                         field: None,
@@ -186,9 +186,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
             move |scope, accepted_message_ref| {
                 activation_clearer
                     .clear_accepted_message(scope, accepted_message_ref)
-                    .map_err(|_| RebornServicesError {
-                        code: RebornServicesErrorCode::Internal,
-                        kind: RebornServicesErrorKind::Internal,
+                    .map_err(|_| ProductSurfaceError {
+                        code: ProductSurfaceErrorCode::Internal,
+                        kind: ProductSurfaceErrorKind::Internal,
                         status_code: 500,
                         retryable: false,
                         field: None,
@@ -235,11 +235,11 @@ pub(crate) fn build_webui_services_with_channel_connection(
                 Some(runtime.extension_management.clone()),
             )),
         );
-        let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
+        let mut lifecycle_facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
         lifecycle_facade =
             lifecycle_facade.with_extension_management(runtime.extension_management.clone());
-        lifecycle_facade = lifecycle_facade.with_channel_config(runtime.channel_config.clone());
+        lifecycle_facade = lifecycle_facade
+            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone());
         if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
@@ -251,14 +251,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
         );
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
-    // The generic channel-config configure port: the setup facade renders
-    // manifest-declared channel-config fields and routes submitted values
-    // through it (extension-runtime §6.4).
-    api = api.with_channel_config_facade(Arc::new(
-        crate::extension_host::channel_config::RebornChannelConfigFacade::new(
-            runtime.channel_config.clone(),
-        ),
-    ));
+    // The manifest-declared administrator-configuration surface is rendered and
+    // routed through `admin_configuration_view` (built above from the canonical
+    // Admin Configuration service); no separate channel-config facade port.
     // Share the activation selector's live master switch when the selected skill
     // context reads it. Deployments without that selector pass `None`, so the
     // toggle reports unavailable rather than writing to an orphan flag.
@@ -290,7 +285,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_facade(channel_connection);
     }
-    api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+    api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.product_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         runtime.readiness.clone(),
     )));
@@ -298,7 +293,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
-            RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+            OperatorServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
                 runtime.owner_user_id.clone(),
                 webui_boot_config,
@@ -321,7 +316,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     }
 
     Ok(RebornWebuiBundle {
-        api: Arc::new(api),
+        product_surface: Arc::new(api),
         product_auth: Some(Arc::clone(&runtime.product_auth)),
         readiness: runtime.readiness.clone(),
     })
@@ -335,7 +330,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
 /// `/v1/models` catalog so both read the same configured-model source.
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
-) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {
+) -> Option<Arc<dyn ironclaw_product::LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
     let keys = crate::LlmKeyStore::new(runtime.secret_store());
     let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
@@ -365,14 +360,14 @@ impl ReadinessOperatorStatusService {
 impl OperatorStatusService for ReadinessOperatorStatusService {
     async fn status(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError> {
         Ok(status_response_from_readiness(&self.readiness))
     }
 }
 
 struct LocalSkillsProductFacade {
-    skill_management: Arc<RebornLocalSkillManagementPort>,
+    skill_management: Arc<SkillManagementPort>,
     // `RebornRuntimeStores::skill_auto_activate_learned`); the read facade
     // reports it for the skills view. Writes go through the first-party
     // `builtin.skill_auto_activate_learned_set` capability. `None` when no
@@ -387,7 +382,7 @@ struct LocalSkillsProductFacade {
 
 impl LocalSkillsProductFacade {
     fn new(
-        skill_management: Arc<RebornLocalSkillManagementPort>,
+        skill_management: Arc<SkillManagementPort>,
         auto_activate_learned: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
@@ -401,8 +396,8 @@ impl LocalSkillsProductFacade {
 impl SkillsProductFacade for LocalSkillsProductFacade {
     async fn list_skills(
         &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornSkillListResponse, ProductSurfaceError> {
         let scope = caller_skill_scope(caller);
         let skills = self
             .skill_management
@@ -420,9 +415,9 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn search_skills(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+    ) -> Result<RebornSkillSearchResponse, ProductSurfaceError> {
         let scope = caller_skill_scope(caller);
         let result = self
             .skill_management
@@ -439,9 +434,9 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
 
     async fn read_skill_content(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+    ) -> Result<RebornSkillContentResponse, ProductSurfaceError> {
         let scope = caller_skill_scope(caller);
         let content = self
             .skill_management
@@ -455,7 +450,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
     }
 }
 
-fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
+fn caller_skill_scope(caller: ProductSurfaceCaller) -> ResourceScope {
     ResourceScope {
         tenant_id: caller.tenant_id,
         user_id: caller.user_id,
@@ -516,37 +511,37 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
     }
 }
 
-fn map_skill_management_error(error: RebornLocalSkillManagementError) -> RebornServicesError {
+fn map_skill_management_error(error: SkillManagementPortError) -> ProductSurfaceError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { .. } => internal_skill_error(),
-        RebornLocalSkillManagementError::Skill(error) => match error.kind() {
-            ironclaw_skills::SkillManagementErrorKind::NotFound => RebornServicesError {
-                code: RebornServicesErrorCode::NotFound,
-                kind: RebornServicesErrorKind::NotFound,
+        SkillManagementPortError::InvalidContext { .. } => internal_skill_error(),
+        SkillManagementPortError::Skill(error) => match error.kind() {
+            ironclaw_skills::SkillManagementErrorKind::NotFound => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::NotFound,
+                kind: ProductSurfaceErrorKind::NotFound,
                 status_code: 404,
                 retryable: false,
                 field: None,
                 validation_code: None,
             },
-            ironclaw_skills::SkillManagementErrorKind::Conflict => RebornServicesError {
-                code: RebornServicesErrorCode::Conflict,
-                kind: RebornServicesErrorKind::Conflict,
+            ironclaw_skills::SkillManagementErrorKind::Conflict => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Conflict,
+                kind: ProductSurfaceErrorKind::Conflict,
                 status_code: 409,
                 retryable: false,
                 field: None,
                 validation_code: None,
             },
-            ironclaw_skills::SkillManagementErrorKind::Resource => RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
+            ironclaw_skills::SkillManagementErrorKind::Resource => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Unavailable,
+                kind: ProductSurfaceErrorKind::ServiceUnavailable,
                 status_code: 503,
                 retryable: true,
                 field: None,
                 validation_code: None,
             },
-            ironclaw_skills::SkillManagementErrorKind::FilesystemDenied => RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ironclaw_skills::SkillManagementErrorKind::FilesystemDenied => ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -558,10 +553,10 @@ fn map_skill_management_error(error: RebornLocalSkillManagementError) -> RebornS
     }
 }
 
-fn invalid_skill_request() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::InvalidRequest,
-        kind: RebornServicesErrorKind::Validation,
+fn invalid_skill_request() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
         status_code: 400,
         retryable: false,
         field: None,
@@ -569,10 +564,10 @@ fn invalid_skill_request() -> RebornServicesError {
     }
 }
 
-fn internal_skill_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
+fn internal_skill_error() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Internal,
+        kind: ProductSurfaceErrorKind::Internal,
         status_code: 500,
         retryable: false,
         field: None,

@@ -4718,10 +4718,14 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
     assert_eq!(model_observation.summary, safe_summary);
     assert!(matches!(
         &model_observation.detail,
-        ToolObservationDetail::GenericFailure {
-            failure_kind,
-            detail: None,
-        } if failure_kind.as_str() == "none"
+        ToolObservationDetail::ResultReference {
+            result_ref: observed_ref,
+            byte_len: 0,
+            preview: None,
+            total_bytes: None,
+            next_offset: None,
+            item_count: None,
+        } if observed_ref == result_ref.as_str()
     ));
     assert!(model_observation.artifacts.is_empty());
     assert!(model_observation.recovery.is_none());
@@ -7319,7 +7323,8 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                  (pre-fix: was None because resume_token was not propagated)",
         );
     assert_eq!(
-        phase3_auth_resume.resume_token, resume_token,
+        phase3_auth_resume.resume_token.as_ref(),
+        Some(&resume_token),
         "auth_resume.resume_token must match the original approval resume token"
     );
     let phase3_pa = phase3_auth_resume
@@ -7410,7 +7415,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                     Vec::new(),
                     "auth required".to_string(),
                     Some(CapabilityAuthResume {
-                        resume_token: auth_gate_resume_token,
+                        resume_token: Some(auth_gate_resume_token),
+                        disposition: None,
                         prior_approval: None,
                     }),
                 )
@@ -7498,7 +7504,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .as_ref()
         .expect("phase 3 invocation must carry auth_resume");
     assert_eq!(
-        phase3_ar.resume_token, resume_token,
+        phase3_ar.resume_token.as_ref(),
+        Some(&resume_token),
         "phase 3 auth_resume.resume_token must preserve the original approval invocation token"
     );
     let phase3_pa = phase3_ar
@@ -7640,7 +7647,8 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         .as_ref()
         .expect("first batch call must carry auth_resume (pre-fix: both carried it)");
     assert_eq!(
-        first_auth.resume_token, resume_token,
+        first_auth.resume_token.as_ref(),
+        Some(&resume_token),
         "first call auth_resume.resume_token must match"
     );
     let first_pa = first_auth
@@ -8130,7 +8138,15 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     // Use a provider call fixture (provider_replay set) so the observation is
     // actually appended to appended_result_refs by
     // append_capability_safe_summary_ref_with_observation.
-    let host = MockHost::new(Vec::new()); // no model responses or batch outcomes needed
+    let host =
+        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::failed(
+                CapabilityFailureKind::GateDeclined,
+                "auth gate denied by user".to_string(),
+                None,
+            )],
+            stopped_on_suspension: false,
+        }]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -8165,17 +8181,22 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     };
     calls[0].activity_id = denied_activity_id;
 
+    let mut current_surface =
+        ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+            &host,
+            VisibleCapabilityRequest,
+        )
+        .await
+        .expect("visible surface");
+    current_surface.descriptors.clear();
+    current_surface.callable_capability_ids = Some(Vec::new());
+
     let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
-                    &host,
-                    VisibleCapabilityRequest,
-                )
-                .await
-                .expect("visible surface"),
+                surface: current_surface,
                 calls,
             },
         )
@@ -8196,24 +8217,23 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         "pending_auth_resume must be cleared after surfacing the deny failure"
     );
 
-    // 3. Zero batch invocations: the short-circuit fired before invoke_capability_batch.
-    assert!(
-        host.batch_invocations().is_empty(),
-        "denied auth resume must not dispatch any capability batch invocations"
+    // 3. The denial crosses the canonical capability port as a typed terminal
+    // auth resume even though the blocked capability has disappeared from the
+    // current surface. The production host uses this request only to
+    // terminalize the exact durable invocation; it never dispatches the
+    // capability provider.
+    let batches = host.batch_invocations();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].invocations.len(), 1);
+    let auth_resume = batches[0].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("denied auth resume reaches the capability lifecycle");
+    assert_eq!(
+        auth_resume.disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
     );
-    assert!(
-        host.progress_events().iter().any(|event| matches!(
-            event,
-            LoopProgressEvent::CapabilityActivityFailed {
-                activity_id,
-                capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::GateDeclined,
-                ..
-            } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
-        )),
-        "denied auth resume must emit a persistent failed capability activity"
-    );
-
+    assert!(auth_resume.resume_token.is_none());
     // 4. One model-visible observation appended with GateDeclined error + Forbidden retry.
     let appended = host.appended_result_refs();
     assert_eq!(
@@ -8253,8 +8273,8 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
     };
     let blocked_activity_id = calls[0].activity_id;
 
-    let host =
-        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::ResolutionBatch {
             resolutions: vec![
                 resolution::auth_required(
                     LoopGateRef::new("gate:hook-auth-tokenless").expect("valid"),
@@ -8265,7 +8285,18 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
                 .resolution,
             ],
             stopped_on_suspension: true,
-        }]);
+        },
+        // Phase 2: the denied resume crosses the port as a typed terminal
+        // auth resume; the host terminalizes it as a gate-declined failure.
+        ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::failed(
+                CapabilityFailureKind::GateDeclined,
+                "auth gate denied by user".to_string(),
+                None,
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -8340,22 +8371,31 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         final_state.pending_auth_resume.is_none(),
         "denied tokenless auth resume must be cleared"
     );
+    let batches = host.batch_invocations();
     assert_eq!(
-        host.batch_invocations().len(),
-        1,
-        "denied tokenless auth resume must not re-dispatch the parked capability"
+        batches.len(),
+        2,
+        "phase 2 must send exactly one more batch: the typed denial terminalization"
+    );
+    assert_eq!(batches[1].invocations.len(), 1);
+    let denied_resume = batches[1].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("denied tokenless resume reaches the capability lifecycle");
+    assert_eq!(
+        denied_resume.disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
     );
     assert!(
-        host.progress_events().iter().any(|event| matches!(
-            event,
-            LoopProgressEvent::CapabilityActivityFailed {
-                activity_id,
-                capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::GateDeclined,
-                ..
-            } if *activity_id == blocked_activity_id && *emitted_capability_id == capability_id()
-        )),
-        "denied tokenless auth gate must emit CapabilityActivityFailed for the original activity"
+        denied_resume.resume_token.is_none(),
+        "hook-style tokenless auth gates should remain tokenless"
+    );
+    // The parked activity id must travel on the typed denial so the host
+    // terminalizes the ORIGINAL durable invocation (the loop no longer
+    // synthesizes a CapabilityActivityFailed event for it).
+    assert_eq!(
+        batches[1].invocations[0].activity_id, blocked_activity_id,
+        "denied tokenless auth gate must terminalize the original activity id"
     );
 }
 
@@ -8387,15 +8427,24 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             },
         ])
         .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
-            resolutions: vec![resolution::completed(
-                y_result_ref.clone(),
-                "list done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                false,
-                0,
-                None,
-                None,
-            )],
+            // Order matches invocation order: X's typed denial terminalizes
+            // first, then Y's normal dispatch completes.
+            resolutions: vec![
+                resolution::failed(
+                    CapabilityFailureKind::GateDeclined,
+                    "auth gate denied by user".to_string(),
+                    None,
+                ),
+                resolution::completed(
+                    y_result_ref.clone(),
+                    "list done".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ),
+            ],
             stopped_on_suspension: false,
         }]);
 
@@ -8493,26 +8542,42 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         "pending_auth_resume must be cleared after the denied call was surfaced"
     );
 
-    // 3. Exactly one batch invocation containing only call Y (not X).
+    // 3. One batch carries BOTH calls: X as a typed terminal denial (the host
+    // terminalizes the durable invocation, never dispatches the provider) and
+    // Y as a plain dispatch.
     let batches = host.batch_invocations();
     assert_eq!(
         batches.len(),
         1,
-        "exactly one batch invocation must occur for the remaining (non-denied) call Y"
-    );
-    let batch_ids: Vec<_> = batches[0]
-        .invocations
-        .iter()
-        .map(|inv| &inv.capability_id)
-        .collect();
-    assert!(
-        batch_ids.iter().all(|id| **id == other_capability_id()),
-        "the batch must contain only call Y (other_capability_id), not call X"
+        "one batch must carry the typed denial for X and the dispatch for Y"
     );
     assert_eq!(
-        batch_ids.len(),
-        1,
-        "batch must contain exactly one invocation (call Y)"
+        batches[0].invocations.len(),
+        2,
+        "batch must contain X's denial terminalization and Y's dispatch"
+    );
+    let x_invocation = batches[0]
+        .invocations
+        .iter()
+        .find(|invocation| invocation.capability_id == capability_id())
+        .expect("X's invocation must be present");
+    let x_resume = x_invocation
+        .auth_resume
+        .as_ref()
+        .expect("X must carry the typed denied auth resume");
+    assert_eq!(
+        x_resume.disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
+    );
+    assert!(x_resume.resume_token.is_none());
+    let y_invocation = batches[0]
+        .invocations
+        .iter()
+        .find(|invocation| invocation.capability_id == other_capability_id())
+        .expect("Y's invocation must be present");
+    assert!(
+        y_invocation.auth_resume.is_none(),
+        "Y must dispatch as a plain invocation"
     );
 
     // 4. Two result refs appended total:
@@ -8585,15 +8650,24 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
     let y_result_ref = LoopResultRef::new("result:same-cap-y-outcome").expect("valid");
     let host =
         MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
-            resolutions: vec![resolution::completed(
-                y_result_ref.clone(),
-                "same capability second call done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                false,
-                0,
-                None,
-                None,
-            )],
+            // Order matches invocation order: the denied activity's typed
+            // terminalization first, then the surviving call's completion.
+            resolutions: vec![
+                resolution::failed(
+                    CapabilityFailureKind::GateDeclined,
+                    "auth gate denied by user".to_string(),
+                    None,
+                ),
+                resolution::completed(
+                    y_result_ref.clone(),
+                    "same capability second call done".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ),
+            ],
             stopped_on_suspension: false,
         }]);
 
@@ -8676,22 +8750,50 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
     assert_eq!(
         batches.len(),
         1,
-        "the non-denied same-capability call must still dispatch"
+        "one batch must carry the denied activity's terminalization and the surviving call"
     );
-    assert_eq!(batches[0].invocations.len(), 1);
-    assert_eq!(batches[0].invocations[0].activity_id, surviving_activity_id);
-    assert_eq!(batches[0].invocations[0].capability_id, capability_id());
+    assert_eq!(batches[0].invocations.len(), 2);
+    let denied_invocation = batches[0]
+        .invocations
+        .iter()
+        .find(|invocation| invocation.activity_id == denied_activity_id)
+        .expect("denied activity's invocation must be present");
+    assert_eq!(
+        denied_invocation
+            .auth_resume
+            .as_ref()
+            .expect("denied activity carries the typed denied auth resume")
+            .disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
+    );
+    let surviving_invocation = batches[0]
+        .invocations
+        .iter()
+        .find(|invocation| invocation.activity_id == surviving_activity_id)
+        .expect("surviving activity's invocation must be present");
+    assert_eq!(surviving_invocation.capability_id, capability_id());
     assert!(
-        host.progress_events().iter().any(|event| matches!(
-            event,
-            LoopProgressEvent::CapabilityActivityFailed {
-                activity_id,
-                capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::GateDeclined,
-                ..
-            } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
-        )),
+        surviving_invocation.auth_resume.is_none(),
+        "the surviving same-capability call must dispatch as a plain invocation"
+    );
+    // The typed batch above already pins that ONLY the parked activity carries
+    // the denied resume (the host terminalizes the durable invocation; the
+    // loop no longer synthesizes a CapabilityActivityFailed event for it).
+    // The model-visible gate-declined observation lands for X alone:
+    let appended = host.appended_result_refs();
+    let declined_observations: Vec<_> = appended
+        .iter()
+        .filter_map(|entry| entry.model_observation.as_ref())
+        .filter(|observation| observation.status == ToolObservationStatus::Error)
+        .collect();
+    assert_eq!(
+        declined_observations.len(),
+        1,
         "only the parked activity should receive the gate-declined failure"
+    );
+    assert_eq!(
+        declined_observations[0].summary, "Capability declined by user.",
+        "the gate-declined failure must be the model-visible declined observation"
     );
     assert!(final_state.pending_auth_resume.is_none());
     assert!(final_state.result_refs.contains(&y_result_ref));
@@ -8736,8 +8838,14 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             },
         ])
         .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
-            // Two outcomes for Y and Z — order matches invocations.
+            // Order matches invocation order: X's typed denial terminalizes
+            // first, then Y and Z complete.
             resolutions: vec![
+                resolution::failed(
+                    CapabilityFailureKind::GateDeclined,
+                    "auth gate denied by user".to_string(),
+                    None,
+                ),
                 resolution::completed(
                     y_result_ref.clone(),
                     "list done".to_string(),
@@ -8866,33 +8974,46 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         "pending_auth_resume must be cleared after the denied call was surfaced"
     );
 
-    // 3. Exactly one batch invocation containing Y and Z (not X).
-    //    This validates the outcomes.len() == invocations.len() invariant for >1 remaining.
+    // 3. One batch carries all three: X as a typed terminal denial plus the
+    //    plain dispatches for Y and Z. This validates the
+    //    outcomes.len() == invocations.len() invariant for >1 remaining.
     let batches = host.batch_invocations();
     assert_eq!(
         batches.len(),
         1,
-        "exactly one batch invocation must occur for the remaining calls Y and Z"
+        "one batch must carry X's denial terminalization plus Y and Z"
     );
-    let batch_cap_ids: Vec<_> = batches[0]
+    assert_eq!(
+        batches[0].invocations.len(),
+        3,
+        "batch must contain X's denial terminalization and the Y/Z dispatches"
+    );
+    let x_invocation = batches[0]
         .invocations
         .iter()
-        .map(|inv| &inv.capability_id)
-        .collect();
+        .find(|invocation| invocation.capability_id == capability_id())
+        .expect("X's invocation must be present");
     assert_eq!(
-        batch_cap_ids.len(),
-        2,
-        "batch must contain exactly 2 invocations (Y and Z, not X)"
+        x_invocation
+            .auth_resume
+            .as_ref()
+            .expect("X carries the typed denied auth resume")
+            .disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
     );
-    let dispatched_ids: std::collections::HashSet<_> =
-        batch_cap_ids.iter().map(|id| (*id).clone()).collect();
+    let dispatched_ids: std::collections::HashSet<_> = batches[0]
+        .invocations
+        .iter()
+        .filter(|invocation| invocation.auth_resume.is_none())
+        .map(|invocation| invocation.capability_id.clone())
+        .collect();
     let expected_ids: std::collections::HashSet<_> =
         [other_capability_id(), z_capability_id.clone()]
             .into_iter()
             .collect();
     assert_eq!(
         dispatched_ids, expected_ids,
-        "batch must contain exactly the two distinct remaining capabilities Y (demo.list) and Z (demo.write), not [Y,Y] or any other combination"
+        "the plain dispatches must be exactly Y (demo.list) and Z (demo.write)"
     );
 
     // 4. Three result refs appended total:

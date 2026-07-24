@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_product_adapters::ChannelAdapter;
+use ironclaw_product::ChannelAdapter;
 
 /// One manifest-declared channel paired with the adapter linked by the
 /// assembling binary.

@@ -15,7 +15,6 @@ pub(crate) mod admin_configuration_capability;
 pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
-pub(crate) mod channel_config;
 pub(crate) mod channel_connection;
 pub(crate) mod channel_delivery;
 pub(crate) mod channel_dm_provisioning;

@@ -151,6 +151,18 @@ pub(super) fn events_query_filter(
     ]))
 }
 
+/// Filter for a bounded host-internal replay of the lifecycle log across all
+/// turn scopes in this already tenant/backend-scoped mount.
+pub(super) fn event_log_query_filter(after: Option<EventCursor>) -> Result<Filter, TurnError> {
+    let after_cursor = after.map(|cursor| cursor.0).unwrap_or(0);
+    let lo = cursor_to_i64(EventCursor(after_cursor)).saturating_add(1);
+    Ok(Filter::Range {
+        key: cursor_index_key()?,
+        lo: IndexValue::I64(lo),
+        hi: IndexValue::I64(i64::MAX),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};

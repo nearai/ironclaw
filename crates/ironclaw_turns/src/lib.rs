@@ -17,6 +17,8 @@ mod ids;
 mod lifecycle;
 pub mod loop_exit;
 mod origin;
+pub mod product_adapter;
+pub mod product_context;
 mod request;
 mod response;
 pub mod run_profile;
@@ -66,6 +68,9 @@ pub use ids::{
     RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
     TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
+pub use ironclaw_host_api::{
+    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,
+};
 pub use lifecycle::{
     DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     NoopLifecyclePublicationErrorPort, TurnLifecycleEventBus,
@@ -77,9 +82,7 @@ pub use loop_exit::{
     LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
-pub use origin::{
-    ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
-};
+pub use origin::{ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnSurfaceType};
 pub use request::{
     CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
     ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
@@ -103,8 +106,7 @@ pub use run_profile::{
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind,
-    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState,
+    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind, TurnActiveRunRefState,
     TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
     is_recoverability_critical,
 };

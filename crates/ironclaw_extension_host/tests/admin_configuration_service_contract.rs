@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_extension_host::{
@@ -317,6 +320,198 @@ async fn idempotency_is_key_dominant_for_secrets_but_conflicts_on_nonsecret_chan
     assert_eq!(
         conflict,
         AdminConfigurationServiceError::IdempotencyConflict
+    );
+}
+
+#[tokio::test]
+async fn exact_replay_reconciles_after_interruption_following_durable_publication() {
+    let (service, _) = service();
+    let scope = sample_scope("tenant-a", "operator-a");
+    let key = idempotency_key("interrupted-save");
+    let committed = service
+        .replace(
+            &scope,
+            &group_id(),
+            &key,
+            0,
+            submitted("client-a", "secret-a"),
+        )
+        .await
+        .expect("simulate durable publication before the caller was interrupted");
+    let reconcile_calls = AtomicUsize::new(0);
+
+    let replay = service
+        .replace_with_reconcile(
+            &scope,
+            &group_id(),
+            &key,
+            0,
+            submitted("client-a", "secret-a"),
+            || {
+                reconcile_calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("retry must heal the interrupted runtime reconciliation");
+
+    assert_eq!(replay, committed);
+    assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reconcile_failure_restores_previous_revision_and_secret_material() {
+    let (service, secrets) = service();
+    let scope = sample_scope("tenant-a", "operator-a");
+    service
+        .replace(
+            &scope,
+            &group_id(),
+            &idempotency_key("baseline"),
+            0,
+            submitted("client-a", "secret-a"),
+        )
+        .await
+        .unwrap();
+    let reconcile_calls = AtomicUsize::new(0);
+
+    let error = service
+        .replace_with_reconcile(
+            &scope,
+            &group_id(),
+            &idempotency_key("failing-save"),
+            1,
+            submitted("client-b", "secret-b"),
+            || {
+                let call = reconcile_calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(if call == 0 {
+                    Err(AdminConfigurationServiceError::RuntimeReconciliationFailed)
+                } else {
+                    Ok(())
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        AdminConfigurationServiceError::RuntimeReconciliationFailed
+    );
+    assert_eq!(
+        reconcile_calls.load(Ordering::SeqCst),
+        2,
+        "runtime must be reconciled once for the candidate and once after rollback"
+    );
+    let restored = service.get(&scope, &group_id()).await.unwrap();
+    assert_eq!(restored.revision, 1);
+    assert_eq!(restored.fields[0].value.as_deref(), Some("client-a"));
+    let restored_secret = service
+        .secret_material(
+            &scope,
+            &group_id(),
+            &SecretHandle::new("client_secret").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the previous secret remains usable after rollback");
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&restored_secret),
+        "secret-a"
+    );
+    assert_eq!(
+        secrets
+            .metadata_for_scope(&scope.tenant_shared_managed_scope())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the failed candidate secret is cleaned only after the previous revision is restored"
+    );
+}
+
+#[tokio::test]
+async fn failed_reconcile_cannot_roll_back_a_later_concurrent_writer() {
+    let (service, _) = service();
+    let service = Arc::new(service);
+    let scope = sample_scope("tenant-a", "operator-a");
+    service
+        .replace(
+            &scope,
+            &group_id(),
+            &idempotency_key("baseline"),
+            0,
+            submitted("client-a", "secret-a"),
+        )
+        .await
+        .unwrap();
+    let reconcile_entered = Arc::new(tokio::sync::Barrier::new(2));
+    let release_reconcile = Arc::new(tokio::sync::Barrier::new(2));
+    let first_service = Arc::clone(&service);
+    let first_scope = scope.clone();
+    let first_entered = Arc::clone(&reconcile_entered);
+    let first_release = Arc::clone(&release_reconcile);
+    let first_reconcile_calls = Arc::new(AtomicUsize::new(0));
+    let first_calls = Arc::clone(&first_reconcile_calls);
+    let first = tokio::spawn(async move {
+        first_service
+            .replace_with_reconcile(
+                &first_scope,
+                &group_id(),
+                &idempotency_key("first-writer"),
+                1,
+                submitted("client-b", "secret-b"),
+                || {
+                    let call = first_calls.fetch_add(1, Ordering::SeqCst);
+                    let entered = Arc::clone(&first_entered);
+                    let release = Arc::clone(&first_release);
+                    async move {
+                        if call > 0 {
+                            return Ok(());
+                        }
+                        entered.wait().await;
+                        release.wait().await;
+                        Err(AdminConfigurationServiceError::RuntimeReconciliationFailed)
+                    }
+                },
+            )
+            .await
+    });
+
+    reconcile_entered.wait().await;
+    let later = service
+        .replace(
+            &scope,
+            &group_id(),
+            &idempotency_key("later-writer"),
+            2,
+            submitted("client-c", "secret-c"),
+        )
+        .await
+        .expect("a later writer may advance while the first runtime reconcile is in flight");
+    release_reconcile.wait().await;
+
+    assert_eq!(
+        first.await.unwrap().unwrap_err(),
+        AdminConfigurationServiceError::RuntimeRollbackFailed,
+        "the stale rollback must report that it could not restore its predecessor"
+    );
+    assert_eq!(later.revision, 3);
+    let current = service.get(&scope, &group_id()).await.unwrap();
+    assert_eq!(current.revision, 3);
+    assert_eq!(current.fields[0].value.as_deref(), Some("client-c"));
+    let current_secret = service
+        .secret_material(
+            &scope,
+            &group_id(),
+            &SecretHandle::new("client_secret").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the later writer's secret remains authoritative");
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&current_secret),
+        "secret-c"
     );
 }
 

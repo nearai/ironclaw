@@ -12,15 +12,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, VirtualPath};
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{
+    AgentId, BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceStreamRequest, ProjectId, TenantId, ThreadId, VirtualPath,
+};
+use ironclaw_product::{
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,
+    TIMELINE_VIEW,
+};
+use ironclaw_product::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
     ProjectionSubscriptionRequest,
-};
-use ironclaw_product_workflow::{
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, ProductSurface,
-    RebornStreamEventsRequest, RebornTimelineRequest, TIMELINE_VIEW, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
@@ -79,9 +82,10 @@ pub async fn build_openai_compat_route_mount(
             ref_filesystem,
             openai_compat_ref_root(&tenant_id)?,
         ));
-    let projection_stream = runtime.webui_event_stream();
+    let projection_stream = runtime.product_event_stream();
     let product_surface =
-        crate::webui::facade::build_webui_services(runtime, Some(projection_stream.clone()))?.api;
+        crate::webui::facade::build_webui_services(runtime, Some(projection_stream.clone()))?
+            .product_surface;
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
     ));
@@ -92,11 +96,11 @@ pub async fn build_openai_compat_route_mount(
     let external_tool_catalog = runtime.external_tool_catalog.clone();
     let responses_projection_reader = Arc::new(
         OpenAiResponsesThreadProjectionReader::new(
-            runtime.webui_thread_service(),
+            runtime.product_thread_service(),
             projection_stream.clone(),
             external_tool_catalog.clone(),
         )
-        .with_turn_coordinator(runtime.webui_turn_coordinator()),
+        .with_turn_coordinator(runtime.product_turn_coordinator()),
     );
     let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
         product_surface.clone(),
@@ -115,7 +119,7 @@ pub async fn build_openai_compat_route_mount(
         });
     let external_tool_resume: Arc<dyn OpenAiCompatExternalToolResume> =
         Arc::new(OpenAiCompatRuntimeExternalToolResume {
-            coordinator: runtime.webui_turn_coordinator(),
+            coordinator: runtime.product_turn_coordinator(),
         });
     let responses_workflow = Arc::new(
         OpenAiResponsesWorkflow::new(product_surface, ref_store, responses_projection_reader)
@@ -188,7 +192,7 @@ impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
     ) -> Result<Vec<OpenAiCompatModelEntry>, OpenAiCompatHttpError> {
         // The route authenticated the caller; carry its tenant/user scope into
         // the LLM-config read so the snapshot is scoped to the same identity.
-        let webui_caller = WebUiAuthenticatedCaller::new(
+        let product_caller = ProductSurfaceCaller::new(
             caller.scope().tenant_id().clone(),
             caller.scope().user_id().clone(),
             caller.scope().agent_id().cloned(),
@@ -196,7 +200,7 @@ impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
         );
         let snapshot = self
             .llm_config
-            .snapshot(webui_caller)
+            .snapshot(product_caller)
             .await
             .map_err(map_llm_config_error_to_openai)?;
         Ok(model_entries_from_snapshot(&snapshot))
@@ -219,8 +223,10 @@ fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatH
     }
 }
 
-fn openai_webui_caller(scope: &OpenAiCompatActorScope) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn product_surface_caller_from_openai_scope(
+    scope: &OpenAiCompatActorScope,
+) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         scope.tenant_id().clone(),
         scope.user_id().clone(),
         scope.agent_id().cloned(),
@@ -244,45 +250,63 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
         &self,
         request: OpenAiChatProjectionStreamRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        self.product_surface
-            .stream_events(
-                openai_webui_caller(&request.actor_scope),
-                RebornStreamEventsRequest {
-                    thread_id: request
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            product_surface_caller_from_openai_scope(&request.actor_scope),
+        );
+        let response = surface
+            .stream_events(ProductSurfaceStreamRequest {
+                stream_id: Some(
+                    request
                         .projection_subscription
                         .scope
                         .thread_id
                         .as_str()
                         .to_string(),
-                    after_cursor: request.after_cursor,
-                },
-            )
-            .await
-            .map(|response| response.events)
-            .map_err(Into::into)
+                ),
+                after_cursor: request
+                    .after_cursor
+                    .map(|cursor| cursor.as_str().to_string()),
+            })
+            .await?;
+        decode_product_outbound_events(response.events)
     }
 
     async fn drain_response(
         &self,
         request: OpenAiResponseProjectionStreamRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        self.product_surface
-            .stream_events(
-                openai_webui_caller(&request.actor_scope),
-                RebornStreamEventsRequest {
-                    thread_id: request
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            product_surface_caller_from_openai_scope(&request.actor_scope),
+        );
+        let response = surface
+            .stream_events(ProductSurfaceStreamRequest {
+                stream_id: Some(
+                    request
                         .projection_subscription
                         .scope
                         .thread_id
                         .as_str()
                         .to_string(),
-                    after_cursor: request.after_cursor,
-                },
-            )
-            .await
-            .map(|response| response.events)
-            .map_err(Into::into)
+                ),
+                after_cursor: request
+                    .after_cursor
+                    .map(|cursor| cursor.as_str().to_string()),
+            })
+            .await?;
+        decode_product_outbound_events(response.events)
     }
+}
+
+fn decode_product_outbound_events(
+    events: Vec<serde_json::Value>,
+) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    events
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ProductSurfaceError::internal_from(error).into())
 }
 
 struct OpenAiChatCompletionThreadProjectionReader {
@@ -312,10 +336,13 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
             _ => return Err(OpenAiCompatHttpError::internal()),
         };
         loop {
+            let surface = BoundProductSurface::new(
+                Arc::clone(&self.product_surface),
+                product_surface_caller_from_openai_scope(&request.actor_scope),
+            );
             let timeline = TIMELINE_VIEW
                 .query_on(
-                    self.product_surface.as_ref(),
-                    openai_webui_caller(&request.actor_scope),
+                    &surface,
                     RebornTimelineRequest::new(
                         request.projection_read.scope.thread_id.as_str().to_string(),
                     ),

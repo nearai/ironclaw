@@ -208,8 +208,9 @@ The lifecycle algorithm is generic:
 
 Telegram constructs and registers its pairing requirement from its host module. Generic
 lifecycle source contains no Telegram identifiers, feature-specific fields, or imports.
-The existing pairing challenge shape, provider id, `SetupOnly` continuation, and resumed
-run recomputation remain unchanged.
+The existing pairing challenge shape and provider id remain unchanged. Pairing
+dispatches the extension-scoped `LifecycleActivation` continuation, and the
+resumed run recomputes readiness.
 
 ### 5. Telegram behavior leaves composition
 
@@ -332,7 +333,7 @@ generic lifecycle loads installation
   -> Telegram registration queries concrete pairing service
   -> disconnected: generic RuntimeCredentialAuthRequirement is returned
   -> blocked run renders Pairing challenge
-  -> Telegram pairing consume dispatches SetupOnly continuation
+  -> Telegram pairing consume dispatches LifecycleActivation continuation
   -> resumed activation recomputes status and succeeds
 ```
 

@@ -6,7 +6,7 @@ use ironclaw_loop_host::{
     HostIdentityContextCandidate, HostIdentityContextSource, LoopCapabilityInputResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };

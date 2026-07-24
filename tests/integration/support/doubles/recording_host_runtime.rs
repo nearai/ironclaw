@@ -99,6 +99,17 @@ impl HostRuntime for RecordingHostRuntime {
         self.inner.resume_spawn_capability(request).await
     }
 
+    /// Forward the denied-gate terminalization to the real runtime — like
+    /// `auth_resume_capability` above, `decline_auth_capability` is a
+    /// DEFAULTED trait method whose default fails closed, so a wrapper that
+    /// forgets to forward it kills every denied-auth-resume run.
+    async fn decline_auth_capability(
+        &self,
+        request: ironclaw_host_runtime::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.inner.decline_auth_capability(request).await
+    }
+
     async fn visible_capabilities(
         &self,
         request: RuntimeVisibleCapabilityRequest,

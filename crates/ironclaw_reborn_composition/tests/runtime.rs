@@ -14,7 +14,7 @@ use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionDecision, ListPendingApprovalsRequest, ListPendingAuthInteractionsRequest,
     ResolveApprovalInteractionRequest,
 };

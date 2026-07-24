@@ -1,5 +1,14 @@
 # #3288 Reborn lifecycle UX realignment
 
+> **Historical note (superseded July 2026).** The shipping Reborn extension
+> lifecycle is now `uninstalled` -> `setup_needed` or `active`: install joins
+> caller membership and the host reconciles readiness automatically. There is
+> no public extension Activate/Disable route, command, capability, or browser
+> action. The current contract lives in
+> [`extension-runtime/overview.md`](extension-runtime/overview.md) and its
+> [`checklist.md`](extension-runtime/checklist.md); the inventory below records
+> the earlier #3288 staging state only.
+
 ## Purpose
 
 Issue #3288 is the lifecycle product-surface slice for extensions, skills, MCP,
@@ -31,9 +40,9 @@ of truth remains the owning service.
 | Surface | Current implementation | Reborn lifecycle owner | Status |
 | --- | --- | --- | --- |
 | Chat/product commands | `ProductWorkflow` supports normalized command payloads and now recognizes #3288 extension/skill lifecycle command names. | `LifecycleProductFacade` | Contract wired; concrete production facade still follow-up. |
-| WebUI extension setup | `/api/webchat/v2/extensions/{extension_name}/setup` validates typed `ExtensionName` and returns a side-effect-free lifecycle projection. | `LifecycleProductFacade::project_package` over the extension package ref. | Projection wired; no setup/configure/activate side effects yet. |
+| WebUI extension setup | `/api/webchat/v2/extensions/{extension_name}/setup` validates typed `ExtensionName` and returns the caller's derived lifecycle projection plus the manifest-declared personal setup affordance. Completing that affordance reconciles readiness automatically. | `LifecycleProductFacade::project_package` over the extension package ref, with setup continuation owned by the declared auth/pairing recipe. | Shipping three-state lifecycle; there is no separate user activation action. |
 | Skill search/install/remove | Existing first-party `builtin.skill_*` capability uses Reborn skill management filesystem logic; local-dev composition now wraps the same skill management implementation behind `LifecycleProductFacade`. | `LifecycleProductFacade` over skill management. | Local-dev wired; production lifecycle store/composition still follow-up. |
-| Extension install/activate/remove | Local-dev composition wires extension search/install/activate/remove through `LifecycleProductFacade`; the Reborn CLI exposes that facade for operator testing, and the local-dev agent surface exposes model-visible `builtin.extension_search`, `builtin.extension_install`, `builtin.extension_activate`, and `builtin.extension_remove` capabilities over the same lifecycle port. | Extension lifecycle/config/package services behind facade. | Local-dev CLI and agent-loop surfaces wired; production lifecycle store/composition still follow-up. |
+| Extension install/setup/remove | The staged branch exposed lifecycle operations that predated the final public contract. Shipping Reborn exposes search/install/remove plus setup continuations; install and setup completion trigger host-owned readiness reconciliation rather than a separate public activation command. | Extension lifecycle/config/package services behind facade. | Historical staging behavior; superseded by the current three-state lifecycle contract linked above. |
 | MCP lifecycle | Manifest/runtime validation and runtime policy checks exist. | MCP lifecycle service behind facade. | Product lifecycle commands deferred. |
 | WASM lifecycle | WASM runtime and adapter slices exist. | WASM package lifecycle service behind facade. | Product lifecycle commands deferred. |
 | Capability publication | Host runtime hot capability catalog and visible surface exist. | CapabilityCatalog/ToolSurfaceService path, not product lifecycle. | Must remain separate from install/readiness UX. |
@@ -47,8 +56,10 @@ of truth remains the owning service.
 - The standalone `ironclaw-reborn` CLI still reports several catalog surfaces as
   not wired; do not read CLI command availability as lifecycle migration
   completion.
-- WebUI setup now returns a Reborn lifecycle projection, but it intentionally
-  does not configure, authenticate, activate, or migrate v1 setup behavior.
+- WebUI setup returns the caller's Reborn lifecycle projection and the
+  manifest-declared personal auth/pairing affordance. Operator configuration
+  remains a separate admin surface, while successful personal setup invokes
+  the same host-owned readiness reconciliation used after install.
 - Runtime/composition PRs on `reborn-integration` may prove execution paths, but
   #3288 still requires production lifecycle stores, cleanup plans, and concrete
   facade services before it is complete.

@@ -31,8 +31,10 @@
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
-use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ResourceScope, TenantId, UserId,
+};
+use ironclaw_product::ChannelConnectionFacade;
 
 use crate::extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionFacade,
@@ -114,6 +116,9 @@ pub fn build_channel_connection_for_test(
         credential_cleanup,
         account_status_reader,
         Some(runtime.channel_dm_target_store.clone()),
+        Arc::new(ironclaw_product::ChannelWorkflowStateService::new(
+            runtime.extension_filesystem.clone() as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+        )),
         runtime.channel_pairing.clone(),
     ));
     let disconnect_slot = &runtime.channel_facade_slot;
@@ -146,7 +151,7 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
-        channel_config: Some(runtime.channel_config.clone()),
+        admin_configuration_resolver: Some(runtime.admin_configuration_resolver.clone()),
         binding_store: Arc::clone(&identity_store)
             as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
@@ -232,7 +237,7 @@ impl ChannelConnectionTestBundle {
 
     /// Surface (a) of the extensions page: what `list_extensions` merges via
     /// [`ChannelConnectionFacade::caller_channel_connections`]
-    /// (`ironclaw_product_workflow/src/reborn_services/extensions.rs`).
+    /// (`ironclaw_product/src/reborn_services/extensions.rs`).
     /// Returns the entry for `extension_id`; an absent entry reads as `false`
     /// — the generic facade discovers channel extensions from the durable
     /// installation store, so a removed (or never-installed) extension has no
@@ -244,7 +249,7 @@ impl ChannelConnectionTestBundle {
     ) -> Result<bool, String> {
         let connections = self
             .facade
-            .caller_channel_connections(WebUiAuthenticatedCaller::new(
+            .caller_channel_connections(ProductSurfaceCaller::new(
                 self.tenant_id.clone(),
                 user_id.clone(),
                 Some(self.agent_id.clone()),

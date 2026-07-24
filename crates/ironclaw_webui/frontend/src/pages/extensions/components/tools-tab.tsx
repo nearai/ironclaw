@@ -10,7 +10,6 @@ function packageId(item) {
 export function ToolsTab({
   tools,
   toolRegistry,
-  onActivate,
   onConfigure,
   onRemove,
   onInstall,
@@ -44,7 +43,6 @@ export function ToolsTab({
                 <ExtensionCard
                   key={packageId(ext)}
                   ext={ext}
-                  onActivate={onActivate}
                   onConfigure={onConfigure}
                   onRemove={onRemove}
                   isBusy={isBusy}

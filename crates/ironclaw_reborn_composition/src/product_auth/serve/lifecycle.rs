@@ -17,7 +17,7 @@ use super::*;
 
 pub(super) async fn lifecycle_cleanup_handler(
     State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
     Json(request): Json<LifecycleCleanupRequest>,
 ) -> Result<Json<SecretCleanupReport>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;

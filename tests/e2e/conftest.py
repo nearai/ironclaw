@@ -31,12 +31,12 @@ from helpers import (
     wait_for_port_line,
     wait_for_ready,
 )
+from provider_fault_proxy import ProviderFaultProxyWorld
 
 # Project root (two levels up from tests/e2e/)
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Git main repo root (for worktree support — WASM build artifacts live
-# in the main repo's tools-src/*/target/ and aren't shared across worktrees)
+# Git main repo root (for worktree support).
 _MAIN_ROOT = None
 try:
     import subprocess as _sp
@@ -142,8 +142,6 @@ def _binary_needs_rebuild(binary: Path) -> bool:
         ROOT / "Cargo.lock",
         ROOT / "build.rs",
         ROOT / "providers.json",
-        ROOT / "src",
-        ROOT / "channels-src",
         ROOT / "crates",
     ]
     return any(_latest_mtime(path) > binary_mtime for path in inputs)
@@ -171,7 +169,11 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
         raise
 
 async def _stop_process(
-    proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
+    proc: asyncio.subprocess.Process,
+    *,
+    sig: int | None = None,
+    timeout: float,
+    process_group: bool = False,
 ) -> None:
     """Signal a subprocess and wait briefly without masking exit races."""
     async def _drain_pipes() -> None:
@@ -180,12 +182,11 @@ async def _stop_process(
         except (asyncio.TimeoutError, ValueError):
             pass
 
-    if proc.returncode is not None:
-        await _drain_pipes()
-        return
-
+    signal_to_send = signal.SIGKILL if sig is None else sig
     try:
-        if sig is None:
+        if process_group:
+            os.killpg(proc.pid, signal_to_send)
+        elif sig is None:
             proc.kill()
         else:
             proc.send_signal(sig)
@@ -196,10 +197,11 @@ async def _stop_process(
             pass
         return
 
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+    if proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
     await _drain_pipes()
 
 
@@ -459,8 +461,6 @@ def ironclaw_reborn_openai_compat_binary():
         _latest_mtime(ROOT / "Cargo.lock"),
         _latest_mtime(ROOT / "build.rs"),
         _latest_mtime(ROOT / "providers.json"),
-        _latest_mtime(ROOT / "src"),
-        _latest_mtime(ROOT / "channels-src"),
         _latest_mtime(ROOT / "crates"),
     )
     if (
@@ -572,6 +572,7 @@ async def _run_emulate_server(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
 
     try:
@@ -610,9 +611,10 @@ async def _run_emulate_server(
         )
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=5)
-            if proc.returncode is None:
-                await _stop_process(proc, timeout=2)
+            await _stop_process(
+                proc, sig=signal.SIGINT, timeout=5, process_group=True
+            )
+        await _stop_process(proc, timeout=2, process_group=True)
 
 
 async def _bootstrap_emulate_github_access(
@@ -772,20 +774,51 @@ class ResettableEmulateProviderWorld:
             if stack is not None:
                 await stack.aclose()
             if reserve:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(("127.0.0.1", self._ports[service]))
-                self._reservations[service] = sock
+                self._reservations[service] = await self._reserve_service_port(
+                    service
+                )
         if services is None:
             reservations, self._reservations = self._reservations, {}
             for sock in reservations.values():
                 sock.close()
+
+    async def _reserve_service_port(self, service: str) -> socket.socket:
+        last_error: OSError | None = None
+        for _ in range(20):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", self._ports[service]))
+                return sock
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+                await asyncio.sleep(0.1)
+        raise last_error or OSError(
+            f"could not reserve Emulate {service} port {self._ports[service]}"
+        )
 
 
 @pytest.fixture(scope="module")
 async def resettable_emulate_provider_world():
     """Keep stable provider URLs while restoring seed state per journey."""
     world = ResettableEmulateProviderWorld()
+    try:
+        await world.start()
+        yield world
+    finally:
+        await world.close()
+
+
+@pytest.fixture(scope="module")
+async def provider_fault_proxy_world(resettable_emulate_provider_world):
+    """Proxy stable Emulate worlds through independently resettable faults."""
+    world = ProviderFaultProxyWorld(
+        {
+            service: server["url"]
+            for service, server in resettable_emulate_provider_world.servers.items()
+        }
+    )
     try:
         await world.start()
         yield world
@@ -908,33 +941,8 @@ def wasm_tools_dir(_wasm_build_symlinks):
 
 @pytest.fixture(scope="session", autouse=True)
 def _wasm_build_symlinks():
-    """Symlink WASM build artifacts from the main repo into the worktree.
-
-    In a git worktree, tools-src/*/target/ directories don't exist because
-    Cargo build artifacts aren't shared. The install API's source fallback
-    checks these paths. Symlinking makes the fallback work without rebuilding.
-    """
-    if _MAIN_ROOT is None or _MAIN_ROOT == ROOT:
-        yield
-        return
-
-    created = []
-    for src_dir_name in ("tools-src", "channels-src"):
-        src_dir = ROOT / src_dir_name
-        main_src_dir = _MAIN_ROOT / src_dir_name
-        if src_dir.is_dir() and main_src_dir.is_dir():
-            for child in src_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                target = child / "target"
-                main_target = main_src_dir / child.name / "target"
-                if not target.exists() and main_target.is_dir():
-                    target.symlink_to(main_target)
-                    created.append(target)
+    """Compatibility fixture retained for older worktrees."""
     yield
-    for link in created:
-        if link.is_symlink():
-            link.unlink()
 
 
 @pytest.fixture(scope="session")

@@ -16,8 +16,8 @@
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
 use ironclaw_reborn_composition::{
-    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOAuthSetup,
-    FirstPartyPackageOnboarding, production_first_party_trust_policy,
+    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
+    production_first_party_trust_policy,
 };
 use ironclaw_trust::HostTrustPolicy;
 
@@ -68,11 +68,9 @@ pub(crate) fn test_first_party_bundles() -> Vec<FirstPartyPackageBundle> {
                     setup_url: copy.setup_url,
                     credential_next_step: copy.credential_next_step,
                 }),
-                oauth_setup: bundle.oauth_setup.map(|setup| FirstPartyPackageOAuthSetup {
-                    requirement_name: setup.requirement_name,
-                    provider: setup.provider,
-                    scopes: setup.scopes,
-                }),
+                // The source `PackageBundle` no longer carries a bespoke
+                // `oauth_setup` override (#6520 folded it into the manifest).
+                oauth_setup: None,
                 trust_effects: bundle.trust_effects,
                 search_aliases,
             }

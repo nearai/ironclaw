@@ -138,7 +138,7 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
     phrase: "connect to Gmail",
 };
 // A github task with no credential seeded: the agent should onboard the github
-// extension (install + activate) and reach the auth gate. Deterministic and
+// extension with the single install action and reach the auth gate. Deterministic and
 // state-independent — no live PR or CI run involved.
 const GITHUB_NOTIFICATIONS: QaPhrase = QaPhrase {
     fixture: "github_notifications",
@@ -168,8 +168,10 @@ const SLACK_OOO_STATUS_FIXTURE: &str = "slack_ooo_status";
 const SLACK_THREAD_REPLIES_FIXTURE: &str = "slack_thread_replies";
 #[derive(serde::Deserialize)]
 struct LiveCanaryManifest {
+    schema_version: u64,
     selected_cases: Vec<String>,
     no_model_cases: Vec<String>,
+    quarantined_model_cases: Vec<String>,
 }
 
 fn load_live_canary_manifest() -> LiveCanaryManifest {
@@ -391,7 +393,7 @@ async fn contract_web_hn_search_queries_for_keywords() {
 async fn contract_connect_gmail_routes_through_extension_tools() {
     let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
     assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
-    assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);
+    assert_tool_not_called(&gmail, "builtin.extension_activate");
 }
 
 #[tokio::test]
@@ -400,14 +402,15 @@ async fn contract_github_notifications_onboards_the_github_extension() {
     // onboarding rather than failing outright.
     let trace = load_qa_trace(GITHUB_NOTIFICATIONS.fixture);
     assert_tool_called_with(&trace, "builtin.extension_install", &["github"]);
-    assert_tool_called_with(&trace, "builtin.extension_activate", &["github"]);
+    assert_tool_not_called(&trace, "builtin.extension_activate");
 }
 
 #[tokio::test]
 async fn contract_investigate_ci_job_reads_the_pinned_job_logs() {
     let trace = load_qa_trace(INVESTIGATE_CI_JOB.fixture);
     // Investigation routes through the first-party GitHub extension...
-    assert_tool_called_with(&trace, "builtin.extension_activate", &["github"]);
+    assert_tool_called_with(&trace, "builtin.extension_install", &["github"]);
+    assert_tool_not_called(&trace, "builtin.extension_activate");
     // ...and reads the pinned failing job's logs via the new capability (host
     // follows GitHub's 302 -> blob-storage redirect, stripping the
     // api.github.com Bearer token on the cross-host hop). The plain-text log is
@@ -433,8 +436,8 @@ fn canonical_tool_name_folds_provider_escape_to_dot() {
         "github.get_job_logs"
     );
     assert_eq!(
-        canonical_recorded_tool_name("builtin__extension_activate"),
-        "builtin.extension_activate"
+        canonical_recorded_tool_name("builtin__extension_install"),
+        "builtin.extension_install"
     );
     // Already-dotted names and inner underscores are preserved.
     assert_eq!(canonical_recorded_tool_name("slack.whoami"), "slack.whoami");
@@ -452,7 +455,6 @@ async fn contract_slack_channel_membership_lists_joined_conversations() {
         &[
             "builtin.extension_search",
             "builtin.extension_install",
-            "builtin.extension_activate",
             "slack.list_conversations",
         ],
     );
@@ -461,7 +463,6 @@ async fn contract_slack_channel_membership_lists_joined_conversations() {
         &[
             &["builtin.extension_search"][..],
             &["builtin.extension_install"][..],
-            &["builtin.extension_activate"][..],
             &["slack.list_conversations"][..],
         ],
     );
@@ -475,7 +476,6 @@ async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
         &[
             "builtin.extension_search",
             "builtin.extension_install",
-            "builtin.extension_activate",
             "slack.whoami",
             "slack.get_conversation_history",
         ],
@@ -485,7 +485,6 @@ async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
         &[
             &["builtin.extension_search"][..],
             &["builtin.extension_install"][..],
-            &["builtin.extension_activate"][..],
             &["slack.whoami"][..],
             &["slack.get_conversation_history"][..],
         ],
@@ -508,7 +507,6 @@ async fn contract_slack_mention_encoding_uses_exact_conversation_lookup() {
         &[
             "builtin.extension_search",
             "builtin.extension_install",
-            "builtin.extension_activate",
             "slack.get_conversation_info",
             "slack.send_message",
         ],
@@ -518,7 +516,6 @@ async fn contract_slack_mention_encoding_uses_exact_conversation_lookup() {
         &[
             &["builtin.extension_search"][..],
             &["builtin.extension_install"][..],
-            &["builtin.extension_activate"][..],
             &["slack.get_conversation_info"][..],
             &["slack.send_message"][..],
         ],
@@ -546,7 +543,6 @@ async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
         &[
             "builtin.extension_search",
             "builtin.extension_install",
-            "builtin.extension_activate",
             "slack.search_messages",
             "slack.search_messages",
             "slack.search_messages",
@@ -559,7 +555,6 @@ async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
         &[
             &["builtin.extension_search"][..],
             &["builtin.extension_install"][..],
-            &["builtin.extension_activate"][..],
             &["slack.search_messages"][..],
             &["slack.search_messages"][..],
             &["slack.search_messages"][..],
@@ -680,8 +675,12 @@ async fn contract_slack_thread_replies_expands_the_recent_thread() {
 }
 
 #[test]
-fn contract_live_canary_harvested_traces_cover_every_model_case() {
+fn contract_live_canary_harvested_traces_cover_active_and_quarantined_model_cases() {
     let manifest = load_live_canary_manifest();
+    assert_eq!(
+        manifest.schema_version, 2,
+        "live-canary manifest schema must explicitly account for quarantined traces"
+    );
     let selected = manifest
         .selected_cases
         .iter()
@@ -700,6 +699,24 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
     assert!(
         no_model.is_subset(&selected),
         "every no-model case must belong to the selected live-QA inventory"
+    );
+    let quarantined = manifest
+        .quarantined_model_cases
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        quarantined.len(),
+        manifest.quarantined_model_cases.len(),
+        "live-canary manifest must not contain duplicate quarantined cases"
+    );
+    assert!(
+        quarantined.is_subset(&selected),
+        "every quarantined case must belong to the selected live-QA inventory"
+    );
+    assert!(
+        quarantined.is_disjoint(&no_model),
+        "a case cannot both have no model trace and quarantine a model trace"
     );
 
     let fixture_dir = qa_fixture_path("live_canary/case-manifest")
@@ -720,6 +737,7 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
         .collect::<std::collections::BTreeSet<_>>();
     let expected_model_cases = selected
         .difference(&no_model)
+        .filter(|case| !quarantined.contains(*case))
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
@@ -742,6 +760,12 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
         );
 
         let calls = recorded_tool_calls(&trace);
+        assert!(
+            calls
+                .iter()
+                .all(|(name, _)| name != "builtin.extension_activate"),
+            "{case} invokes retired builtin.extension_activate and must be quarantined"
+        );
         for required_tool in &trace.expects.tools_used {
             assert!(
                 calls.iter().any(|(name, _)| name == required_tool),
@@ -754,6 +778,38 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
         assert!(
             !qa_fixture_path(&format!("live_canary/{case}")).exists(),
             "{case} is a preflight/connect probe and should not invent a model trace"
+        );
+    }
+
+    let quarantine_dir = fixture_dir.join("quarantined_retired_activation");
+    let actual_quarantined_cases = std::fs::read_dir(&quarantine_dir)
+        .expect("read quarantined live-canary fixture directory")
+        .map(|entry| entry.expect("read quarantined fixture entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| path.file_stem()?.to_str().map(ToString::to_string))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_quarantined_cases, quarantined,
+        "quarantined fixture files must exactly match the promoted manifest"
+    );
+
+    for case in quarantined {
+        assert!(
+            !qa_fixture_path(&format!("live_canary/{case}")).exists(),
+            "{case} is quarantined and must not remain in the active fixture directory"
+        );
+        let trace = load_qa_trace(&format!(
+            "live_canary/quarantined_retired_activation/{case}"
+        ));
+        let calls = recorded_tool_calls(&trace);
+        assert!(
+            calls
+                .iter()
+                .any(|(name, _)| name == "builtin.extension_activate"),
+            "{case} must contain the retired call that justifies its quarantine"
         );
     }
 }

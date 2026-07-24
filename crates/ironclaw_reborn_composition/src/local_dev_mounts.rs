@@ -120,6 +120,8 @@ pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountVi
     MountView::new(vec![grant(MEMORY_ALIAS, MEMORY_TARGET, permissions)?])
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
 pub(crate) fn system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError> {
     MountView::new(vec![grant(
         "/system/extensions",

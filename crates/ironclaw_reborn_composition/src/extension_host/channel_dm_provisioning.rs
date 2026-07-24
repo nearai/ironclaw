@@ -17,8 +17,8 @@
 use std::{sync::Arc, time::Duration};
 
 use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::TargetQuery;
-use ironclaw_product_workflow::ChannelDeliveryResolver;
+use ironclaw_product::ChannelDeliveryResolver;
+use ironclaw_product::TargetQuery;
 
 use crate::extension_host::channel_dm_targets::{
     FilesystemChannelDmTargetStore, dm_target_payload,
@@ -182,7 +182,7 @@ async fn provision_dm_target(
         .await
     {
         Ok(candidates) => candidates,
-        Err(ironclaw_product_adapters::ChannelError::Unsupported) => return Ok(false),
+        Err(ironclaw_product::ChannelError::Unsupported) => return Ok(false),
         Err(error) => {
             return Err(DmTargetProvisioningError::TargetDiscovery(
                 error.to_string(),
@@ -220,11 +220,11 @@ mod tests {
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
         TenantId,
     };
-    use ironclaw_product_adapters::{
+    use ironclaw_product::ResolvedChannelDelivery;
+    use ironclaw_product::{
         ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome,
         OutboundEnvelope, TargetCandidate, VerifiedInbound,
     };
-    use ironclaw_product_workflow::ResolvedChannelDelivery;
 
     use super::*;
 

@@ -2,6 +2,10 @@
 
 import asyncio
 import json
+import re
+import tomllib
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import expect
@@ -17,11 +21,43 @@ def _package_ref(package_id: str) -> dict:
     return {"kind": "extension", "id": package_id}
 
 
+def _assert_client_action_id(body: dict) -> None:
+    assert isinstance(body.get("client_action_id"), str)
+    assert body["client_action_id"]
+
+
+def _assert_install_requests(requests: list[dict], *package_ids: str) -> None:
+    assert len(requests) == len(package_ids)
+    for request, package_id in zip(requests, package_ids, strict=True):
+        assert request.get("package_ref") == _package_ref(package_id)
+        _assert_client_action_id(request)
+
+
+def _assert_setup_submit_requests(
+    requests: list[dict], expected: list[dict]
+) -> None:
+    assert len(requests) == len(expected)
+    for request, expected_request in zip(requests, expected, strict=True):
+        assert request["package_id"] == expected_request["package_id"]
+        body = dict(request["body"])
+        _assert_client_action_id(body)
+        body.pop("client_action_id")
+        assert body == expected_request["body"]
+
+
 # Product taxonomy travels in `surfaces` (NEA-25): a channel is a surface an
 # extension declares, and `runtime` is an implementation badge only. The
 # retired extension `kind` wire string (`wasm_tool` / `mcp_server` /
 # `wasm_channel`) no longer exists.
 TOOL_SURFACES = [{"kind": "tool"}]
+
+TELEGRAM_MANIFEST = tomllib.loads(
+    (
+        Path(__file__).resolve().parents[3]
+        / "crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml"
+    ).read_text(encoding="utf-8")
+)
+TELEGRAM_PAIRING_INSTRUCTIONS = TELEGRAM_MANIFEST["channel"]["connection"]["instructions"]
 
 
 def _channel_surfaces(**connection) -> list[dict]:
@@ -38,7 +74,7 @@ REGISTRY_TOOL = {
     "description": "A registry WASM tool",
     "keywords": ["search", "utility"],
     "installed": False,
-    "surfaces": TOOL_SURFACES,
+    "surfaces": TOOL_SURFACES + [{"kind": "auth"}],
 }
 
 REGISTRY_MCP = {
@@ -56,26 +92,18 @@ ACTIVE_TOOL = {
     "display_name": "Active Tool",
     "runtime": "wasm",
     "description": "An installed WASM tool extension",
-    "active": True,
-    "authenticated": True,
-    "has_auth": False,
-    "needs_setup": False,
     "tools": ["search", "fetch"],
     "installation_state": "active",
     "surfaces": TOOL_SURFACES,
 }
 
-INACTIVE_MCP = {
-    "package_ref": _package_ref("inactive-mcp"),
-    "display_name": "Inactive MCP",
+INSTALLED_MCP = {
+    "package_ref": _package_ref("installed-mcp"),
+    "display_name": "Installed MCP",
     "runtime": "mcp",
-    "description": "An inactive MCP server",
-    "active": False,
-    "authenticated": False,
-    "has_auth": False,
-    "needs_setup": False,
+    "description": "A setup-free installed MCP server",
     "tools": ["lookup"],
-    "installation_state": "installed",
+    "installation_state": "active",
     "surfaces": TOOL_SURFACES,
 }
 
@@ -84,10 +112,6 @@ CHANNEL_READY = {
     "display_name": "Telegram Channel",
     "runtime": "wasm",
     "description": "A configured messaging channel",
-    "active": True,
-    "authenticated": True,
-    "has_auth": True,
-    "needs_setup": False,
     "tools": [],
     "installation_state": "active",
     "surfaces": _channel_surfaces(),
@@ -98,14 +122,13 @@ TELEGRAM_CHANNEL_SETUP = {
     "display_name": "Telegram",
     "runtime": "wasm",
     "description": "Telegram bot channel",
-    "active": False,
-    "authenticated": False,
-    "has_auth": True,
-    "needs_setup": True,
     "tools": [],
-    "installation_state": "installed",
-    "onboarding_state": "setup_required",
-    "surfaces": _channel_surfaces(),
+    "installation_state": "setup_needed",
+    "surfaces": _channel_surfaces(
+        channel="telegram",
+        strategy="web_generated_code",
+        instructions=TELEGRAM_PAIRING_INSTRUCTIONS,
+    ),
 }
 
 AVAILABLE_CHANNEL = {
@@ -123,11 +146,8 @@ LABEL_CHANNEL_BASE = {
     "display_name": "Label Channel",
     "runtime": "wasm",
     "description": "A WASM channel used to assert card action labels.",
-    "active": False,
-    "authenticated": False,
-    "has_auth": False,
-    "needs_setup": True,
     "tools": [],
+    "installation_state": "setup_needed",
     "surfaces": _channel_surfaces(),
 }
 
@@ -136,14 +156,9 @@ CONFIG_TOOL = {
     "display_name": "Config Tool",
     "runtime": "wasm",
     "description": "A tool that requires manual setup.",
-    "active": False,
-    "authenticated": False,
-    "has_auth": True,
-    "needs_setup": True,
     "tools": [],
-    "installation_state": "installed",
-    "onboarding_state": "setup_required",
-    "surfaces": TOOL_SURFACES,
+    "installation_state": "setup_needed",
+    "surfaces": TOOL_SURFACES + [{"kind": "auth"}],
 }
 
 OAUTH_TOOL = {
@@ -151,14 +166,9 @@ OAUTH_TOOL = {
     "display_name": "OAuth Tool",
     "runtime": "wasm",
     "description": "A tool that requires OAuth setup.",
-    "active": False,
-    "authenticated": False,
-    "has_auth": True,
-    "needs_setup": True,
     "tools": [],
-    "installation_state": "installed",
-    "onboarding_state": "setup_required",
-    "surfaces": TOOL_SURFACES,
+    "installation_state": "setup_needed",
+    "surfaces": TOOL_SURFACES + [{"kind": "auth"}],
 }
 
 CONFIG_TOOL_REGISTRY = {
@@ -168,9 +178,7 @@ CONFIG_TOOL_REGISTRY = {
     "description": "A registry tool that requires manual setup.",
     "keywords": ["config"],
     "installed": True,
-    "has_auth": True,
-    "needs_setup": True,
-    "surfaces": TOOL_SURFACES,
+    "surfaces": TOOL_SURFACES + [{"kind": "auth"}],
 }
 
 
@@ -185,9 +193,11 @@ async def _open_mocked_extensions_page(
     setup_get_responses=None,
     setup_submit_responses=None,
     install_responses=None,
+    install_projections=None,
     oauth_start_responses=None,
-    activate_responses=None,
     remove_responses=None,
+    pairing_statuses=None,
+    pairing_mint_responses=None,
     defer_extension_list=False,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
@@ -198,14 +208,17 @@ async def _open_mocked_extensions_page(
     setup_get_responses_by_id = dict(setup_get_responses or {})
     setup_submit_responses_by_id = dict(setup_submit_responses or {})
     install_responses_by_id = dict(install_responses or {})
+    install_projections_by_id = dict(install_projections or {})
     oauth_start_responses_by_id = dict(oauth_start_responses or {})
-    activate_responses_by_id = dict(activate_responses or {})
     remove_responses_by_id = dict(remove_responses or {})
+    pairing_statuses_by_id = dict(pairing_statuses or {})
+    pairing_mint_responses_by_id = dict(pairing_mint_responses or {})
     install_requests: list[dict] = []
-    activate_requests: list[str] = []
     remove_requests: list[str] = []
     setup_submit_requests: list[dict] = []
     oauth_start_requests: list[dict] = []
+    pairing_status_requests: list[str] = []
+    pairing_mint_requests: list[str] = []
     extension_list_requests: list[str] = []
     registry_requests: list[str] = []
     extension_list_gate = asyncio.Event()
@@ -219,6 +232,19 @@ async def _open_mocked_extensions_page(
             body=json.dumps(payload),
             headers={"Cache-Control": "no-store"},
         )
+
+    def update_installed_extension(package_id: str, **updates):
+        extension = next(
+            (
+                candidate
+                for candidate in installed_extensions
+                if candidate.get("package_ref", {}).get("id") == package_id
+            ),
+            None,
+        )
+        if extension is None:
+            raise AssertionError(f"extension is not installed: {package_id}")
+        extension.update(updates)
 
     async def handle_extensions(route):
         nonlocal installed_extensions
@@ -234,6 +260,49 @@ async def _open_mocked_extensions_page(
         if path == "/api/webchat/v2/extensions/registry" and request.method == "GET":
             registry_requests.append(request.url)
             await fulfill_json(route, {"entries": registry_entries})
+            return
+
+        if (
+            path.startswith("/api/webchat/v2/extensions/")
+            and path.endswith("/pairing/status")
+            and request.method == "GET"
+        ):
+            package_id = unquote(
+                path.removeprefix("/api/webchat/v2/extensions/").removesuffix(
+                    "/pairing/status"
+                )
+            )
+            pairing_status_requests.append(package_id)
+            await fulfill_json(
+                route,
+                pairing_statuses_by_id.get(
+                    package_id,
+                    {"connected": False, "pending": None},
+                ),
+            )
+            return
+
+        if (
+            path.startswith("/api/webchat/v2/extensions/")
+            and path.endswith("/pairing/mint")
+            and request.method == "POST"
+        ):
+            package_id = unquote(
+                path.removeprefix("/api/webchat/v2/extensions/").removesuffix(
+                    "/pairing/mint"
+                )
+            )
+            pairing_mint_requests.append(package_id)
+            await fulfill_json(
+                route,
+                pairing_mint_responses_by_id.get(
+                    package_id,
+                    {
+                        "code": "PAIRCODE",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                ),
+            )
             return
 
         if (
@@ -276,13 +345,23 @@ async def _open_mocked_extensions_page(
                     status=response.get("status", 200),
                 )
                 return
+            installed_extension = next(
+                (
+                    extension
+                    for extension in installed_extensions
+                    if extension.get("package_ref", {}).get("id") == package_id
+                ),
+                None,
+            )
             await fulfill_json(
                 route,
                 setup_payloads_by_id.get(
                     package_id,
                     {
                         "package_ref": _package_ref(package_id),
-                        "phase": "installed",
+                        "phase": (
+                            installed_extension or {}
+                        ).get("installation_state", "setup_needed"),
                         "blockers": [],
                         "secrets": [],
                         "fields": [],
@@ -309,10 +388,7 @@ async def _open_mocked_extensions_page(
             if response.get("success") is not False:
                 for extension in installed_extensions:
                     if extension.get("package_ref", {}).get("id") == package_id:
-                        extension["authenticated"] = True
-                        extension["needs_setup"] = False
-                        extension["installation_state"] = "configured"
-                        extension.pop("onboarding_state", None)
+                        extension["installation_state"] = "active"
             await fulfill_json(route, response)
             return
 
@@ -340,52 +416,21 @@ async def _open_mocked_extensions_page(
                 extension.get("package_ref", {}).get("id") == package_id
                 for extension in installed_extensions
             ):
-                requires_setup = bool(entry.get("needs_setup") or entry.get("has_auth"))
-                installed = dict(entry)
-                installed.update(
-                    {
-                        "active": False,
-                        "authenticated": False,
-                        "has_auth": bool(entry.get("has_auth") or requires_setup),
-                        "needs_setup": requires_setup,
-                        # §6.1 installation state is `installed` after install;
-                        # the onboarding axis (§6.2) carries setup_required.
-                        "installation_state": "installed",
-                        "tools": entry.get("tools") or [],
-                    }
+                installed = dict(
+                    install_projections_by_id.get(
+                        package_id,
+                        {
+                            **entry,
+                            "installation_state": "active",
+                            "tools": entry.get("tools") or [],
+                        },
+                    )
                 )
-                if requires_setup:
-                    installed["onboarding_state"] = "setup_required"
                 installed.pop("installed", None)
                 installed_extensions.append(installed)
             if response.get("success") is not False and entry:
                 entry["installed"] = True
             await fulfill_json(route, response)
-            return
-
-        if (
-            path.startswith("/api/webchat/v2/extensions/")
-            and path.endswith("/activate")
-            and request.method == "POST"
-        ):
-            package_id = unquote(
-                path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/activate")
-            )
-            activate_requests.append(package_id)
-            response = activate_responses_by_id.get(
-                package_id,
-                {"success": True, "message": f"{package_id} activated"},
-            )
-            if response.get("success") is not False:
-                for extension in installed_extensions:
-                    if extension.get("package_ref", {}).get("id") == package_id:
-                        extension["active"] = True
-                        extension["installation_state"] = "active"
-                        extension.pop("onboarding_state", None)
-            await fulfill_json(
-                route,
-                response,
-            )
             return
 
         if (
@@ -425,13 +470,15 @@ async def _open_mocked_extensions_page(
         "context": context,
         "page": page,
         "install_requests": install_requests,
-        "activate_requests": activate_requests,
         "remove_requests": remove_requests,
         "setup_submit_requests": setup_submit_requests,
         "oauth_start_requests": oauth_start_requests,
+        "pairing_status_requests": pairing_status_requests,
+        "pairing_mint_requests": pairing_mint_requests,
         "extension_list_requests": extension_list_requests,
         "registry_requests": registry_requests,
         "extension_list_gate": extension_list_gate,
+        "update_installed_extension": update_installed_extension,
     }
 
 
@@ -448,7 +495,7 @@ def _label_channel(**overrides):
 def _manual_config_setup_payload() -> dict:
     return {
         "package_ref": _package_ref("config-tool"),
-        "phase": "installed",
+        "phase": "setup_needed",
         "blockers": [],
         "secrets": [
             {
@@ -526,9 +573,7 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
         await registry_tool_card.get_by_role("button", name="Install").click()
         await expect(page.get_by_text("Registry Tool installed")).to_be_visible(timeout=5000)
 
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "registry-tool")
         await expect(page.get_by_text("Installed").first).to_be_visible(timeout=5000)
     finally:
         await harness["context"].close()
@@ -647,9 +692,9 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
             timeout=5000
         )
         # A registry failure blocks only the registry tab; on the channels tab
-        # the installed data still renders and the failure stays visible (and
-        # retryable) through the partial-catalog banner.
-        await expect(error_banner).to_contain_text("Some extension data is unavailable")
+        # the installed data still renders and the failure banner remains tied
+        # to the catalog failure cause.
+        await expect(error_banner).to_contain_text("Extension catalog unavailable")
 
         failed_request_count = registry_requests
         registry_available = True
@@ -861,10 +906,9 @@ async def test_reborn_legacy_extensions_multiple_installs_remain_listed(
             timeout=5000
         )
 
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")},
-            {"package_ref": _package_ref("registry-mcp")},
-        ]
+        _assert_install_requests(
+            harness["install_requests"], "registry-tool", "registry-mcp"
+        )
 
         installed_tool = _card_by_title(page, "Registry Tool")
         installed_mcp = _card_by_title(page, "Registry MCP Server")
@@ -906,106 +950,11 @@ async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_ava
         await expect(
             page.get_by_text("Registry Tool is not available for this workspace.")
         ).to_be_visible(timeout=5000)
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "registry-tool")
 
         await expect(card.get_by_text("available", exact=True)).to_be_visible(timeout=5000)
         await expect(card.get_by_role("button", name="Install")).to_have_count(1)
         await expect(card.get_by_text("installed", exact=True)).to_have_count(0)
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_extensions_install_auth_url_opens_popup(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        registry=[REGISTRY_TOOL],
-        install_responses={
-            "registry-tool": {
-                "success": True,
-                "message": "Registry Tool installed",
-                "auth_url": "HTTPS://example.com/oauth?state=install",
-            }
-        },
-    )
-    try:
-        page = harness["page"]
-        await page.evaluate(
-            """
-            () => {
-              window.__openedUrls = [];
-              window.open = (url) => {
-                window.__openedUrls.push(url);
-                return null;
-              };
-            }
-            """
-        )
-
-        card = _card_by_title(page, "Registry Tool")
-        await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Install").click()
-
-        await expect(page.get_by_text("Registry Tool installed")).to_be_visible(
-            timeout=5000
-        )
-        await page.wait_for_function(
-            "() => window.__openedUrls.some((url) => /^https:\\/\\//i.test(url))",
-            timeout=5000,
-        )
-        opened = await page.evaluate("() => window.__openedUrls")
-        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_extensions_install_auth_url_requires_https(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        registry=[REGISTRY_TOOL],
-        install_responses={
-            "registry-tool": {
-                "success": True,
-                "message": "Registry Tool installed",
-                "auth_url": "javascript:alert('install-xss')",
-            }
-        },
-    )
-    try:
-        page = harness["page"]
-        await page.evaluate(
-            """
-            () => {
-              window.__openedUrls = [];
-              window.open = (url) => {
-                window.__openedUrls.push(url);
-                return null;
-              };
-            }
-            """
-        )
-
-        card = _card_by_title(page, "Registry Tool")
-        await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Install").click()
-
-        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
-            timeout=5000
-        )
-        assert await page.evaluate("() => window.__openedUrls") == []
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("registry-tool")}
-        ]
     finally:
         await harness["context"].close()
 
@@ -1015,17 +964,22 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
 ):
     setup_channel = {
         **AVAILABLE_CHANNEL,
-        "has_auth": True,
-        "needs_setup": True,
     }
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
         registry=[setup_channel],
+        install_projections={
+            "slack-channel": {
+                **setup_channel,
+                "installation_state": "setup_needed",
+                "tools": [],
+            }
+        },
         setup_payloads={
             "slack-channel": {
                 "package_ref": _package_ref("slack-channel"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -1055,9 +1009,7 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
         await expect(page.get_by_text("Slack Channel installed")).to_be_visible(
             timeout=5000
         )
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("slack-channel")}
-        ]
+        _assert_install_requests(harness["install_requests"], "slack-channel")
         await expect(
             page.get_by_role("heading", name="Configure Slack Channel")
         ).to_be_visible(timeout=5000)
@@ -1080,7 +1032,7 @@ async def test_reborn_legacy_extensions_installed_actions(
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
-        installed=[ACTIVE_TOOL, INACTIVE_MCP],
+        installed=[ACTIVE_TOOL],
         registry=[REGISTRY_TOOL, REGISTRY_MCP],
     )
     try:
@@ -1092,44 +1044,11 @@ async def test_reborn_legacy_extensions_installed_actions(
         await expect(active_card.get_by_text("search")).to_be_visible()
         await expect(active_card.get_by_text("fetch")).to_be_visible()
 
-        inactive_card = _card_by_title(page, "Inactive MCP")
-        await expect(inactive_card).to_be_visible(timeout=5000)
-        await inactive_card.get_by_role("button", name="Activate").click()
-        await expect(page.get_by_text("inactive-mcp activated")).to_be_visible(timeout=5000)
-        assert harness["activate_requests"] == ["inactive-mcp"]
-
         await active_card.get_by_label("More actions").click()
         await page.get_by_role("menuitem", name="Remove").click()
         await _resolve_remove_confirmation(page, "Active Tool", accept=True)
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_activate_success_marks_extension_active_with_capabilities(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("installed", exact=True)).to_be_visible()
-
-        await card.get_by_role("button", name="Activate").click()
-        await expect(page.get_by_text("inactive-mcp activated")).to_be_visible(timeout=5000)
-        assert harness["activate_requests"] == ["inactive-mcp"]
-
-        await expect(card.get_by_text("active", exact=True)).to_be_visible(timeout=5000)
-        await expect(card.get_by_role("button", name="Activate")).to_have_count(0)
-        await card.get_by_role("button", name="1 capability").click()
-        await expect(card.get_by_text("lookup", exact=True)).to_be_visible()
     finally:
         await harness["context"].close()
 
@@ -1247,17 +1166,14 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
 ):
     configured_tool = {
         **CONFIG_TOOL,
-        "active": True,
-        "authenticated": True,
-        "needs_setup": False,
         "installation_state": "active",
     }
-    configured_tool.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
         installed=[configured_tool],
         registry=[CONFIG_TOOL_REGISTRY],
+        install_projections={"config-tool": CONFIG_TOOL},
         setup_payloads={"config-tool": _manual_config_setup_payload()},
         tab="installed",
     )
@@ -1283,9 +1199,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         await expect(available_card.get_by_role("button", name="Install")).to_be_visible()
         await available_card.get_by_role("button", name="Install").click()
         await expect(page.get_by_text("Config Tool installed")).to_be_visible(timeout=5000)
-        assert harness["install_requests"] == [
-            {"package_ref": _package_ref("config-tool")}
-        ]
+        _assert_install_requests(harness["install_requests"], "config-tool")
 
         reinstalled_card = _card_by_title(page, "Config Tool")
         await expect(reinstalled_card.get_by_text("setup needed")).to_be_visible(
@@ -1306,18 +1220,17 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "fresh-token"},
-                        "fields": {},
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1341,128 +1254,6 @@ async def test_reborn_legacy_extensions_null_tools_render_no_capabilities(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_activate_failure_keeps_extension_inactive(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        activate_responses={
-            "inactive-mcp": {
-                "success": False,
-                "message": "Configure credentials before activation.",
-            }
-        },
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("installed", exact=True)).to_be_visible()
-        await card.get_by_role("button", name="Activate").click()
-
-        await expect(
-            page.get_by_text("Configure credentials before activation.")
-        ).to_be_visible(timeout=5000)
-        assert harness["activate_requests"] == ["inactive-mcp"]
-
-        await expect(card.get_by_text("installed", exact=True)).to_be_visible(timeout=5000)
-        await expect(card.get_by_role("button", name="Activate")).to_have_count(1)
-        await expect(card.get_by_text("active", exact=True)).to_have_count(0)
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_activate_auth_url_requires_https(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        activate_responses={
-            "inactive-mcp": {
-                "success": True,
-                "message": "Inactive MCP activated",
-                "auth_url": "javascript:alert('xss')",
-            }
-        },
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        await page.evaluate(
-            """
-            () => {
-              window.__openedUrls = [];
-              window.open = (url) => {
-                window.__openedUrls.push(url);
-                return null;
-              };
-            }
-            """
-        )
-
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Activate").click()
-
-        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
-            timeout=5000
-        )
-        assert await page.evaluate("() => window.__openedUrls") == []
-        assert harness["activate_requests"] == ["inactive-mcp"]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_activate_auth_url_accepts_uppercase_https(
-    reborn_v2_server, reborn_v2_browser
-):
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[INACTIVE_MCP],
-        activate_responses={
-            "inactive-mcp": {
-                "success": True,
-                "message": "Inactive MCP activated",
-                "auth_url": "HTTPS://example.com/oauth?state=abc",
-            }
-        },
-        tab="mcp",
-    )
-    try:
-        page = harness["page"]
-        await page.evaluate(
-            """
-            () => {
-              window.__openedUrls = [];
-              window.open = (url) => {
-                window.__openedUrls.push(url);
-                return null;
-              };
-            }
-            """
-        )
-
-        card = _card_by_title(page, "Inactive MCP")
-        await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Activate").click()
-
-        await page.wait_for_function(
-            "() => window.__openedUrls.some((url) => /^https:\\/\\//i.test(url))",
-            timeout=5000,
-        )
-        opened = await page.evaluate("() => window.__openedUrls")
-        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
-        assert harness["activate_requests"] == ["inactive-mcp"]
-    finally:
-        await harness["context"].close()
-
-
 async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -1470,24 +1261,27 @@ async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
         reborn_v2_server,
         reborn_v2_browser,
         installed=[
-            # `configured` is the honest §6.1 resting state for a channel whose
-            # operator setup is saved but which is not active yet — the old
-            # transient `activation_in_progress` never appears on the wire.
-            # `has_auth` (the channel binds a caller account) is what keeps the
-            # Connect/Reconnect affordance in the overflow menu.
+            # Operator setup and per-user connection remain separate. Public
+            # lifecycle is derived only as setup_needed or active.
             _label_channel(
-                authenticated=False,
-                has_auth=True,
-                needs_setup=False,
-                installation_state="configured",
+                installation_state="setup_needed",
             ),
             _label_channel(
                 package_ref=_package_ref("label-channel-authenticated"),
                 display_name="Authenticated Label Channel",
-                authenticated=True,
-                has_auth=True,
-                needs_setup=False,
-                installation_state="configured",
+                installation_state="active",
+                auth_accounts=[
+                    {
+                        "vendor": "label-channel",
+                        "accounts": [
+                            {
+                                "account_id": "label-channel",
+                                "state": "connected",
+                                "is_default": True,
+                            }
+                        ],
+                    }
+                ],
             ),
         ],
         tab="channels",
@@ -1497,15 +1291,13 @@ async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
 
         unauthenticated = _card_by_title(page, "Label Channel")
         await expect(unauthenticated).to_be_visible(timeout=5000)
-        await _open_card_menu(unauthenticated)
         await expect(
-            page.get_by_role("menuitem", name="Connect", exact=True)
+            unauthenticated.get_by_role("button", name="Connect", exact=True)
         ).to_have_count(1)
         await expect(
-            page.get_by_role("menuitem", name="Reconnect", exact=True)
+            unauthenticated.get_by_role("button", name="Reconnect", exact=True)
         ).to_have_count(0)
 
-        await page.mouse.click(8, 8)
         authenticated = _card_by_title(page, "Authenticated Label Channel")
         await expect(authenticated).to_be_visible(timeout=5000)
         await _open_card_menu(authenticated)
@@ -1527,9 +1319,7 @@ async def test_reborn_legacy_channel_setup_required_has_single_connect_action(
         reborn_v2_browser,
         installed=[
             _label_channel(
-                authenticated=False,
-                installation_state="installed",
-                onboarding_state="setup_required",
+                installation_state="setup_needed",
             )
         ],
         tab="channels",
@@ -1560,17 +1350,25 @@ async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activat
         reborn_v2_browser,
         installed=[
             _label_channel(
-                active=True,
-                authenticated=True,
-                has_auth=True,
-                needs_setup=True,
                 installation_state="active",
+                auth_accounts=[
+                    {
+                        "vendor": "label-channel",
+                        "accounts": [
+                            {
+                                "account_id": "label-channel",
+                                "state": "connected",
+                                "is_default": True,
+                            }
+                        ],
+                    }
+                ],
             )
         ],
         setup_payloads={
             "label-channel": {
                 "package_ref": _package_ref("label-channel"),
-                "phase": "installed",
+                "phase": "active",
                 "blockers": [],
                 "secrets": [
                     {
@@ -1606,181 +1404,6 @@ async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activat
         await expect(modal.get_by_text("Extension is active.")).to_be_visible()
         await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
         await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
-        assert harness["activate_requests"] == []
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
-    reborn_v2_server, reborn_v2_browser
-):
-    # Pairing is a connect affordance on the channel surface (strategy
-    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
-    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
-    pairing_channel = {
-        **TELEGRAM_CHANNEL_SETUP,
-        "active": False,
-        "authenticated": True,
-        "needs_setup": False,
-        "installation_state": "configured",
-        "surfaces": _channel_surfaces(
-            channel="telegram",
-            strategy="inbound_proof_code",
-        ),
-    }
-    pairing_channel.pop("onboarding_state", None)
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[pairing_channel],
-        tab="channels",
-    )
-    try:
-        page = harness["page"]
-        redeem_requests: list[dict] = []
-
-        async def handle_redeem(route):
-            redeem_requests.append(json.loads(route.request.post_data or "{}"))
-            await route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    {
-                        "provider": "telegram",
-                        "provider_user_id": "123456789",
-                    }
-                ),
-            )
-
-        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
-
-        card = _card_by_title(page, "Telegram")
-        await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("configured", exact=True)).to_be_visible()
-        await expect(card.get_by_role("button", name="Activate")).to_have_count(0)
-
-        section = page.locator("[data-testid='pairing-section']").first
-        await expect(section).to_be_visible(timeout=5000)
-        input_field = section.locator("[data-testid='pairing-code-input']")
-        await input_field.fill("  PAIR-1234  ")
-        await section.locator("[data-testid='pairing-submit']").click()
-
-        await expect(section.locator("[data-testid='pairing-success']")).to_contain_text(
-            "Pairing complete.", timeout=5000
-        )
-        await expect(input_field).to_have_value("")
-        assert redeem_requests == [{"channel": "telegram", "code": "PAIR-1234"}]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_channel_pairing_enter_key_submits_code(
-    reborn_v2_server, reborn_v2_browser
-):
-    # Pairing is a connect affordance on the channel surface (strategy
-    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
-    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
-    pairing_channel = {
-        **TELEGRAM_CHANNEL_SETUP,
-        "active": False,
-        "authenticated": True,
-        "needs_setup": False,
-        "installation_state": "configured",
-        "surfaces": _channel_surfaces(
-            channel="telegram",
-            strategy="inbound_proof_code",
-        ),
-    }
-    pairing_channel.pop("onboarding_state", None)
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[pairing_channel],
-        tab="channels",
-    )
-    try:
-        page = harness["page"]
-        redeem_requests: list[dict] = []
-
-        async def handle_redeem(route):
-            redeem_requests.append(json.loads(route.request.post_data or "{}"))
-            await route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    {
-                        "provider": "telegram",
-                        "provider_user_id": "987654321",
-                    }
-                ),
-            )
-
-        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
-
-        section = page.locator("[data-testid='pairing-section']").first
-        await expect(section).to_be_visible(timeout=5000)
-        input_field = section.locator("[data-testid='pairing-code-input']")
-        await input_field.fill("  pair-5678  ")
-        await input_field.press("Enter")
-
-        await expect(section.locator("[data-testid='pairing-success']")).to_contain_text(
-            "Pairing complete.", timeout=5000
-        )
-        await expect(input_field).to_have_value("")
-        assert redeem_requests == [{"channel": "telegram", "code": "PAIR-5678"}]
-    finally:
-        await harness["context"].close()
-
-
-async def test_reborn_legacy_channel_pairing_failure_keeps_code_for_retry(
-    reborn_v2_server, reborn_v2_browser
-):
-    # Pairing is a connect affordance on the channel surface (strategy
-    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
-    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
-    pairing_channel = {
-        **TELEGRAM_CHANNEL_SETUP,
-        "active": False,
-        "authenticated": True,
-        "needs_setup": False,
-        "installation_state": "configured",
-        "surfaces": _channel_surfaces(
-            channel="telegram",
-            strategy="inbound_proof_code",
-        ),
-    }
-    pairing_channel.pop("onboarding_state", None)
-    harness = await _open_mocked_extensions_page(
-        reborn_v2_server,
-        reborn_v2_browser,
-        installed=[pairing_channel],
-        tab="channels",
-    )
-    try:
-        page = harness["page"]
-        redeem_requests: list[dict] = []
-
-        async def handle_redeem(route):
-            redeem_requests.append(json.loads(route.request.post_data or "{}"))
-            await route.fulfill(
-                status=400,
-                content_type="application/json",
-                body=json.dumps({"error": "Invalid pairing code"}),
-            )
-
-        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
-
-        section = page.locator("[data-testid='pairing-section']").first
-        await expect(section).to_be_visible(timeout=5000)
-        input_field = section.locator("[data-testid='pairing-code-input']")
-        await input_field.fill("bad-code")
-        await section.locator("[data-testid='pairing-submit']").click()
-
-        await expect(section.locator("[data-testid='pairing-error']")).to_contain_text(
-            "Invalid pairing code", timeout=5000
-        )
-        await expect(input_field).to_have_value("bad-code")
-        assert redeem_requests == [{"channel": "telegram", "code": "BAD-CODE"}]
     finally:
         await harness["context"].close()
 
@@ -1795,7 +1418,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         setup_payloads={
             "config-tool": {
                 "package_ref": _package_ref("config-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -1813,14 +1436,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
                         "auto_generate": False,
                     },
                 ],
-                "fields": [
-                    {
-                        "name": "workspace",
-                        "prompt": "Workspace",
-                        "placeholder": "team-slug",
-                        "optional": False,
-                    }
-                ],
+                "fields": [],
                 "onboarding": {
                     "credential_instructions": "Paste credentials from the provider.",
                     "credential_next_step": "Save to continue.",
@@ -1841,11 +1457,10 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         await expect(page.get_by_text("Paste credentials from the provider.")).to_be_visible()
         await page.locator('input[type="password"]').nth(0).fill("secret-token")
         await page.locator('input[type="password"]').nth(1).fill("rotated-secret")
-        await page.locator('input[type="text"][placeholder="team-slug"]').fill("team-a")
         await page.get_by_role("button", name="Save").click()
 
         await expect(page.get_by_role("heading", name="Configure Config Tool")).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
@@ -1855,11 +1470,10 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
                             "API_TOKEN": "secret-token",
                             "OPTIONAL_SECRET": "rotated-secret",
                         },
-                        "fields": {"workspace": "team-a"},
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -1874,7 +1488,7 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
         setup_payloads={
             "config-tool": {
                 "package_ref": _package_ref("config-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -1906,14 +1520,7 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
                         "auto_generate": True,
                     },
                 ],
-                "fields": [
-                    {
-                        "name": "workspace",
-                        "prompt": "Workspace",
-                        "placeholder": "team-slug",
-                        "optional": True,
-                    }
-                ],
+                "fields": [],
                 "onboarding": None,
             }
         },
@@ -1931,14 +1538,12 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
         await expect(modal).to_contain_text("Existing token")
         await expect(modal).to_contain_text("Optional secret")
         await expect(modal).to_contain_text("Generated secret")
-        await expect(modal).to_contain_text("Workspace")
         await expect(modal.get_by_text("configured", exact=True)).to_be_visible()
-        await expect(modal.get_by_text("optional", exact=True)).to_have_count(2)
+        await expect(modal.get_by_text("optional", exact=True)).to_have_count(1)
         await expect(modal.get_by_text("Auto-generated if left blank")).to_be_visible()
         await expect(
             modal.locator('input[type="password"][placeholder*="leave blank to keep"]')
         ).to_have_count(1)
-        await expect(modal.locator('input[type="text"][placeholder="team-slug"]')).to_be_visible()
 
         await modal.get_by_role("button", name="Cancel").click()
         assert harness["setup_submit_requests"] == []
@@ -1957,7 +1562,7 @@ async def test_reborn_legacy_configure_modal_setup_url_requires_https(
             setup_payloads={
                 "config-tool": {
                     "package_ref": _package_ref("config-tool"),
-                    "phase": "installed",
+                    "phase": "setup_needed",
                     "blockers": [],
                     "secrets": [
                         {
@@ -2023,7 +1628,7 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
         setup_payloads={
             package_id: {
                 "package_ref": _package_ref(package_id),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2052,18 +1657,17 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
         await modal.get_by_role("button", name="Save").click()
 
         await expect(modal).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": package_id,
                 "body": {
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "quoted-secret"},
-                        "fields": {},
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2073,12 +1677,8 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
 ):
     configured_tool = {
         **CONFIG_TOOL,
-        "active": True,
-        "authenticated": True,
-        "needs_setup": False,
         "installation_state": "active",
     }
-    configured_tool.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -2086,7 +1686,7 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
         setup_payloads={
             "config-tool": {
                 "package_ref": _package_ref("config-tool"),
-                "phase": "installed",
+                "phase": "active",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2122,18 +1722,17 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
                     "action": "submit",
                     "payload": {
                         "secrets": {},
-                        "fields": {},
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2148,7 +1747,7 @@ async def test_reborn_legacy_configure_modal_save_failure_stays_open(
         setup_payloads={
             "config-tool": {
                 "package_ref": _package_ref("config-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2242,7 +1841,7 @@ async def test_reborn_legacy_configure_modal_auto_resolved_setup_has_no_manual_f
         setup_payloads={
             "auto-resolved-oauth-tool": {
                 "package_ref": _package_ref("auto-resolved-oauth-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [],
                 "fields": [],
@@ -2341,18 +1940,17 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
+        _assert_setup_submit_requests(harness["setup_submit_requests"], [
             {
                 "package_id": "config-tool",
                 "body": {
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "enter-token"},
-                        "fields": {},
                     },
                 },
             }
-        ]
+        ])
     finally:
         await harness["context"].close()
 
@@ -2372,7 +1970,7 @@ async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
         setup_payloads={
             "telegram": {
                 "package_ref": _package_ref("telegram"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2385,6 +1983,18 @@ async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
                 ],
                 "fields": [],
                 "onboarding": None,
+            }
+        },
+        pairing_statuses={
+            "telegram": {
+                "connected": False,
+                "pending": {
+                    "code": "TGPAIR01",
+                    "deep_link": "https://t.me/ironclaw_test_bot?start=TGPAIR01",
+                    "expires_at": (
+                        datetime.now(timezone.utc) + timedelta(minutes=5)
+                    ).isoformat(),
+                },
             }
         },
         tab="channels",
@@ -2402,12 +2012,402 @@ async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
         modal = page.get_by_label("Configure Telegram")
 
         # The modal hosts the pairing panel, not a bot-token secret form.
-        await expect(modal.get_by_test_id("telegram-pairing-panel")).to_be_visible(
+        await expect(modal.get_by_test_id("pairing-web-code-panel")).to_be_visible(
             timeout=5000
         )
         await expect(modal.get_by_text("Telegram Bot Token")).to_have_count(0)
         await expect(modal.locator('input[type="password"]')).to_have_count(0)
         assert harness["setup_submit_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Lock the current manifest-driven user journeys at the served SPA boundary.
+
+    This one browser context covers the regressions QA found together: operator
+    configuration must not leak into a user's Slack setup, WebGeneratedCode
+    must preserve Telegram's QR/deep-link flow, OAuth completion must directly
+    derive the active/tools-visible state without an activate action, and the
+    automation page must stop presenting a removed channel's delivery target.
+    """
+
+    slack_registry = {
+        "package_ref": _package_ref("slack"),
+        "display_name": "Slack",
+        "runtime": "wasm",
+        "description": "Slack messaging and tools",
+        "installed": False,
+        "surfaces": _channel_surfaces(
+            channel="slack",
+            strategy="admin_managed_channels",
+        )
+        + [{"kind": "auth"}],
+    }
+    telegram_registry = {
+        **TELEGRAM_CHANNEL_SETUP,
+        "installed": False,
+    }
+    telegram_registry.pop("installation_state", None)
+    notion_registry = {
+        "package_ref": _package_ref("notion-like"),
+        "display_name": "Notion Workspace",
+        "runtime": "mcp",
+        "description": "Notion-like OAuth MCP tools",
+        "installed": False,
+        "tools": [],
+        "surfaces": TOOL_SURFACES + [{"kind": "auth"}],
+    }
+    telegram_pending = {
+        "code": "TGSTART1",
+        "deep_link": "https://t.me/ironclaw_test_bot?start=TGSTART1",
+        "expires_at": (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat(),
+    }
+
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[slack_registry, telegram_registry, notion_registry],
+        install_projections={
+            "slack": {
+                **slack_registry,
+                "installation_state": "setup_needed",
+                "tools": [],
+            },
+            "telegram": TELEGRAM_CHANNEL_SETUP,
+            "notion-like": {
+                **notion_registry,
+                "installation_state": "setup_needed",
+                "tools": [],
+            },
+        },
+        setup_payloads={
+            "slack": {
+                "package_ref": _package_ref("slack"),
+                "phase": "setup_needed",
+                "blockers": [],
+                "secrets": [
+                    {
+                        "name": "slack_credential",
+                        "prompt": "Slack account",
+                        "provider": "slack",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                        "setup": {
+                            "kind": "oauth",
+                            "account_label": "Personal Slack",
+                            "scopes": ["chat:write", "im:history"],
+                        },
+                    }
+                ],
+                "fields": [],
+                "onboarding": {
+                    "credential_instructions": "Connect your own Slack account.",
+                },
+            },
+            # Even if a stale setup payload contains an operator-owned token,
+            # the manifest's WebGeneratedCode strategy owns Telegram's user
+            # surface and the modal must never render this manual secret.
+            "telegram": {
+                "package_ref": _package_ref("telegram"),
+                "phase": "setup_needed",
+                "blockers": [],
+                "secrets": [
+                    {
+                        "name": "telegram_bot_token",
+                        "prompt": "Telegram Bot Token",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            },
+            "notion-like": {
+                "package_ref": _package_ref("notion-like"),
+                "phase": "setup_needed",
+                "blockers": [],
+                "secrets": [
+                    {
+                        "name": "notion_credential",
+                        "prompt": "Notion account",
+                        "provider": "notion",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                        "setup": {
+                            "kind": "oauth",
+                            "account_label": "Personal Notion",
+                            "scopes": ["read_content"],
+                            "invocation_id": "notion-invocation",
+                        },
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            },
+        },
+        oauth_start_responses={
+            "notion-like": {
+                "success": True,
+                "authorization_url": "https://api.notion.test/oauth/authorize",
+                "flow_id": "flow-notion-like",
+                "callback_scope": {"invocation_id": "notion-invocation"},
+            }
+        },
+        pairing_statuses={
+            "telegram": {
+                "connected": False,
+                "pending": telegram_pending,
+            }
+        },
+        tab="registry",
+    )
+    try:
+        page = harness["page"]
+        requested_paths: list[str] = []
+        page.on(
+            "request",
+            lambda request: requested_paths.append(urlparse(request.url).path),
+        )
+
+        # Slack's caller-scoped install opens only its personal OAuth account.
+        slack_card = _card_by_title(page, "Slack")
+        await slack_card.get_by_role("button", name="Install").click()
+        slack_modal = page.get_by_role("dialog", name="Configure Slack")
+        await expect(slack_modal).to_be_visible(timeout=5000)
+        await expect(slack_modal.get_by_text("Slack account", exact=True)).to_be_visible()
+        await expect(slack_modal.get_by_role("button", name="Authorize")).to_be_visible()
+        for operator_field in [
+            "Signing secret",
+            "OAuth client secret",
+            "OAuth client ID",
+            "App ID",
+            "Workspace (team) ID",
+            "Bot user ID",
+            "Allowed channels",
+            "Subject routes",
+            "Slack bot token",
+        ]:
+            await expect(slack_modal.get_by_text(operator_field, exact=False)).to_have_count(
+                0
+            )
+        await expect(slack_modal.locator('input[type="password"]')).to_have_count(0)
+        await slack_modal.get_by_label("Close").click()
+
+        # Telegram's manifest strategy renders the web-minted code directly:
+        # QR + countdown + a t.me `start` payload, with no retired `/pair`.
+        telegram_card = _card_by_title(page, "Telegram")
+        await telegram_card.get_by_role("button", name="Install").click()
+        telegram_modal = page.get_by_role("dialog", name="Configure Telegram")
+        pairing_panel = telegram_modal.get_by_test_id("pairing-web-code-panel")
+        await expect(pairing_panel).to_be_visible(timeout=5000)
+        await expect(pairing_panel.get_by_test_id("pairing-code")).to_have_text(
+            "TGSTART1"
+        )
+        await expect(
+            pairing_panel.get_by_role("img", name="Telegram pairing QR")
+        ).to_be_visible(timeout=5000)
+        pairing_link = pairing_panel.get_by_test_id("pairing-open-link")
+        await expect(pairing_link).to_be_visible()
+        deep_link = await pairing_link.get_attribute("href")
+        assert deep_link is not None
+        assert parse_qs(urlparse(deep_link).query) == {"start": ["TGSTART1"]}
+        await expect(pairing_panel.get_by_test_id("pairing-countdown")).to_have_text(
+            re.compile(r"^Expires in \d+:\d{2}$")
+        )
+        await expect(pairing_panel.get_by_text(re.compile(r"/start"))).to_be_visible()
+        await expect(pairing_panel.get_by_text(re.compile(r"/pair\b"))).to_have_count(0)
+        await expect(telegram_modal.get_by_text("Telegram Bot Token")).to_have_count(0)
+        await telegram_modal.get_by_label("Close").click()
+
+        # A Notion-like OAuth MCP extension derives active from membership +
+        # completed auth. There is no second activate button or request.
+        notion_card = _card_by_title(page, "Notion Workspace")
+        await notion_card.get_by_role("button", name="Install").click()
+        notion_modal = page.get_by_role("dialog", name="Configure Notion Workspace")
+        await expect(notion_modal).to_be_visible(timeout=5000)
+        await expect(notion_card.get_by_text("setup needed", exact=True)).to_be_visible()
+        await expect(page.get_by_role("button", name="Activate", exact=True)).to_have_count(
+            0
+        )
+        await page.evaluate(
+            """
+            () => {
+              window.__openedOauthUrls = [];
+              window.open = (url) => {
+                const popup = {
+                  closed: false,
+                  close() { this.closed = true; },
+                  location: {
+                    _href: url,
+                    get href() { return this._href; },
+                    set href(value) {
+                      this._href = value;
+                      window.__openedOauthUrls.push(value);
+                    },
+                  },
+                };
+                window.__openedOauthUrls.push(url);
+                return popup;
+              };
+            }
+            """
+        )
+        await notion_modal.get_by_role("button", name="Authorize").click()
+        await _wait_for_request_count(harness["oauth_start_requests"], 1)
+        await page.wait_for_function(
+            "() => window.__openedOauthUrls.includes("
+            "'https://api.notion.test/oauth/authorize')",
+            timeout=5000,
+        )
+        harness["update_installed_extension"](
+            "notion-like",
+            installation_state="active",
+            tools=["notion.search", "notion.fetch"],
+        )
+        await page.evaluate(
+            """
+            () => {
+              const channel = new BroadcastChannel("ironclaw-product-auth");
+              channel.postMessage({
+                type: "ironclaw:product-auth:oauth-complete",
+                status: "completed",
+                flowId: "flow-notion-like",
+                continuation: { type: "setup_only" },
+                completedAt: Date.now(),
+              });
+              channel.close();
+            }
+            """
+        )
+        await expect(notion_modal).to_have_count(0, timeout=5000)
+        notion_card = _card_by_title(page, "Notion Workspace")
+        await expect(notion_card.get_by_text("active", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        await notion_card.get_by_role("button", name="2 capabilities").click()
+        await expect(notion_card.get_by_text("notion.search", exact=True)).to_be_visible()
+        await expect(notion_card.get_by_text("notion.fetch", exact=True)).to_be_visible()
+        await expect(page.get_by_role("button", name="Activate", exact=True)).to_have_count(
+            0
+        )
+
+        slack_target = {
+            "target_id": "slack-dm-user-a",
+            "channel": "slack",
+            "display_name": "Slack direct message",
+            "description": "IronClaw bot DM in the connected workspace",
+        }
+        delivery_targets = [
+            {
+                "target": slack_target,
+                "capabilities": {
+                    "final_replies": True,
+                    "gate_prompts": True,
+                    "auth_prompts": True,
+                },
+            }
+        ]
+        delivery_preferences = {
+            "body": {
+                "final_reply_target": slack_target,
+                "final_reply_target_status": "available",
+                "default_modality": "text",
+            }
+        }
+
+        async def fulfill_json(route, payload):
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(payload),
+                headers={"Cache-Control": "no-store"},
+            )
+
+        async def handle_automations(route):
+            path = urlparse(route.request.url).path
+            if path == "/api/webchat/v2/automations" and route.request.method == "GET":
+                await fulfill_json(
+                    route,
+                    {"automations": [], "scheduler_enabled": True},
+                )
+                return
+            await route.continue_()
+
+        async def handle_outbound(route):
+            path = urlparse(route.request.url).path
+            if path == "/api/webchat/v2/outbound/targets":
+                await fulfill_json(route, {"targets": delivery_targets})
+                return
+            if path == "/api/webchat/v2/outbound/preferences":
+                await fulfill_json(route, delivery_preferences["body"])
+                return
+            await route.continue_()
+
+        await page.route("**/api/webchat/v2/automations**", handle_automations)
+        await page.route("**/api/webchat/v2/outbound/**", handle_outbound)
+        await page.goto(
+            f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        delivery_choices = page.get_by_role(
+            "radiogroup", name="Where triggered results are sent"
+        )
+        await expect(delivery_choices).to_be_visible(timeout=5000)
+        await expect(
+            delivery_choices.get_by_text("Slack direct message", exact=True)
+        ).to_be_visible()
+        await expect(
+            delivery_choices.get_by_text(
+                "Web app only (no external delivery)", exact=True
+            )
+        ).to_be_visible()
+
+        # Removing Slack from the caller's extension membership removes its
+        # target from the next authoritative target projection.
+        await page.goto(
+            f"{reborn_v2_server}/extensions/channels?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        slack_card = _card_by_title(page, "Slack")
+        await expect(slack_card).to_be_visible(timeout=5000)
+        await _open_card_menu(slack_card)
+        await page.get_by_role("menuitem", name="Remove", exact=True).click()
+        await _resolve_remove_confirmation(page, "Slack", accept=True)
+        await expect(page.get_by_text("Slack removed")).to_be_visible(timeout=5000)
+        assert harness["remove_requests"] == ["slack"]
+
+        delivery_targets.clear()
+        delivery_preferences["body"] = {
+            "final_reply_target_status": "none_configured",
+            "default_modality": "text",
+        }
+        await page.goto(
+            f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        delivery_choices = page.get_by_role(
+            "radiogroup", name="Where triggered results are sent"
+        )
+        await expect(delivery_choices).to_be_visible(timeout=5000)
+        await expect(
+            delivery_choices.get_by_text("Slack direct message", exact=True)
+        ).to_have_count(0)
+        await expect(page.get_by_text("Current default", exact=True)).to_have_count(0)
+        await expect(
+            delivery_choices.get_by_text(
+                "Web app only (no external delivery)", exact=True
+            )
+        ).to_be_visible()
+
+        _assert_install_requests(
+            harness["install_requests"], "slack", "telegram", "notion-like"
+        )
+        assert not any(path.endswith("/activate") for path in requested_paths)
     finally:
         await harness["context"].close()
 
@@ -2422,7 +2422,7 @@ async def test_reborn_legacy_configure_oauth_localizes_https_authorization_error
         setup_payloads={
             "oauth-tool": {
                 "package_ref": _package_ref("oauth-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2493,8 +2493,10 @@ async def test_reborn_legacy_configure_oauth_localizes_https_authorization_error
         )
         opened = await page.evaluate("() => window.__openedUrls")
         assert opened == ["about:blank"]
-        assert harness["oauth_start_requests"][0]["body"]["provider"] == "google"
-        assert harness["oauth_start_requests"][0]["body"]["scopes"] == ["email"]
+        start_body = harness["oauth_start_requests"][0]["body"]
+        assert start_body["requirement"] == "GOOGLE_AUTH"
+        assert start_body["invocation_id"] == "inv-1"
+        assert start_body["expires_at"]
     finally:
         await harness["context"].close()
 
@@ -2509,7 +2511,7 @@ async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
         setup_payloads={
             "oauth-tool": {
                 "package_ref": _package_ref("oauth-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2573,7 +2575,9 @@ async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
         await expect(
             page.get_by_role("heading", name="Configure OAuth Tool")
         ).to_be_visible()
-        assert harness["oauth_start_requests"][0]["body"]["provider"] == "google"
+        start_body = harness["oauth_start_requests"][0]["body"]
+        assert start_body["requirement"] == "GOOGLE_AUTH"
+        assert start_body["invocation_id"] == "inv-1"
         assert await page.evaluate("() => window.__openedPopups[0].closed") is True
     finally:
         await harness["context"].close()
@@ -2599,7 +2603,7 @@ async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
         setup_payloads={
             "oauth-tool": {
                 "package_ref": _package_ref("oauth-tool"),
-                "phase": "installed",
+                "phase": "setup_needed",
                 "blockers": [],
                 "secrets": [
                     {
@@ -2689,7 +2693,7 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
-        installed=[CHANNEL_READY, INACTIVE_MCP],
+        installed=[CHANNEL_READY, INSTALLED_MCP],
         registry=[AVAILABLE_CHANNEL, REGISTRY_MCP],
         tab="channels",
     )
@@ -2709,7 +2713,7 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
             "() => location.pathname.endsWith('/extensions/tools')",
             timeout=5000,
         )
-        await expect(page.get_by_text("Inactive MCP", exact=True)).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Installed MCP", exact=True)).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Registry MCP Server", exact=True)).to_be_visible()
     finally:
         await harness["context"].close()
