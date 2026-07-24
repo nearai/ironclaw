@@ -2028,7 +2028,10 @@ pub(crate) async fn build_storage_composite(
             }
         }
         StorageMode::Postgres => {
-            let (container, database_url) = start_postgres_testcontainer().await?;
+            let (container, database_url) =
+                start_postgres_testcontainer(provision_postgres_testcontainer)
+                    .await
+                    .map_err(|error| postgres_testcontainer_unavailable(error.to_string()))?;
             let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
                 postgres_pool(&database_url)?,
             ));
@@ -2052,7 +2055,7 @@ pub(crate) async fn build_storage_composite(
 /// Serialize PostgreSQL testcontainer startup within an integration-test
 /// process. Testcontainers can otherwise issue concurrent streamed pulls for
 /// the same image tag, which can terminate one pull early while another succeeds.
-pub(crate) async fn serialize_postgres_testcontainer_start<T>(
+async fn serialize_postgres_testcontainer_start<T>(
     operation: impl std::future::Future<Output = T>,
 ) -> T {
     static START_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -2100,46 +2103,58 @@ where
     }
 }
 
-/// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
-/// a test failure (REL-3): in CI it panics with the docker context; locally
-/// the message names the fix.
-pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
-    >,
-    String,
-)> {
+/// Run the production PostgreSQL testcontainer start pipeline.
+///
+/// The storage builder supplies the real Docker operation; caller-level tests
+/// supply a hermetic operation while driving this same serialization-and-retry
+/// entry point.
+pub(crate) async fn start_postgres_testcontainer<T, E, F, Fut>(operation: F) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    serialize_postgres_testcontainer_start(retry_postgres_testcontainer_start(operation)).await
+}
+
+/// Start one real PostgreSQL testcontainer and discover its connection URL.
+async fn provision_postgres_testcontainer() -> Result<
+    (
+        testcontainers_modules::testcontainers::ContainerAsync<
+            testcontainers_modules::postgres::Postgres,
+        >,
+        String,
+    ),
+    testcontainers_modules::testcontainers::TestcontainersError,
+> {
     use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
 
-    let unavailable = |error: String| -> String {
-        if std::env::var("CI").is_ok() {
-            panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
-        }
-        format!(
-            "StorageMode::Postgres requires a reachable Docker daemon \
-             (locally: `colima start` or start Docker Desktop; a Postgres \
-             skip is a failure per REL-3): {error}"
-        )
-    };
-    let (container, database_url) =
-        serialize_postgres_testcontainer_start(retry_postgres_testcontainer_start(|| async {
-            let container = testcontainers_modules::postgres::Postgres::default()
-                .with_db_name("ironclaw_test")
-                .with_user("postgres")
-                .with_password("postgres")
-                .with_tag("16-alpine")
-                .start()
-                .await?;
-            let host = container.get_host().await?;
-            let port = container.get_host_port_ipv4(5432).await?;
-            Ok::<_, testcontainers_modules::testcontainers::TestcontainersError>((
-                container,
-                format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
-            ))
-        }))
-        .await
-        .map_err(|error| unavailable(error.to_string()))?;
-    Ok((container, database_url))
+    let container = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine")
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    Ok((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
+}
+
+/// A provisioning failure is a test failure (REL-3): in CI it panics with the
+/// Docker context; locally the message names the fix.
+fn postgres_testcontainer_unavailable(error: String) -> String {
+    if std::env::var("CI").is_ok() {
+        panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
+    }
+    format!(
+        "StorageMode::Postgres requires a reachable Docker daemon \
+         (locally: `colima start` or start Docker Desktop; a Postgres \
+         skip is a failure per REL-3): {error}"
+    )
 }
 
 pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {

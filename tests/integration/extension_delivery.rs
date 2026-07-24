@@ -89,7 +89,7 @@ use ironclaw_reborn_composition::{
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{
     RebornIntegrationHarness, StorageMode, retry_postgres_testcontainer_start,
-    serialize_postgres_testcontainer_start,
+    start_postgres_testcontainer,
 };
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -1021,41 +1021,46 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
 }
 
 #[tokio::test]
-async fn postgres_testcontainer_start_operations_are_serialized() {
-    let (first_entered_tx, first_entered_rx) = tokio::sync::oneshot::channel();
-    let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
-    let first = tokio::spawn(serialize_postgres_testcontainer_start(async move {
-        first_entered_tx
-            .send(())
-            .expect("first operation entry receiver remains open");
-        release_first_rx
-            .await
-            .expect("first operation release sender remains open");
+async fn postgres_testcontainer_start_caller_serializes_operations() {
+    let first_entered = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let first = tokio::spawn(start_postgres_testcontainer({
+        let first_entered = Arc::clone(&first_entered);
+        let release_first = Arc::clone(&release_first);
+        move || {
+            let first_entered = Arc::clone(&first_entered);
+            let release_first = Arc::clone(&release_first);
+            async move {
+                first_entered.notify_one();
+                release_first.notified().await;
+                Ok::<_, &'static str>(())
+            }
+        }
     }));
-    first_entered_rx
-        .await
-        .expect("first operation must acquire the start lock");
+    first_entered.notified().await;
 
     assert!(
         tokio::time::timeout(
             Duration::from_millis(50),
-            serialize_postgres_testcontainer_start(async {}),
+            start_postgres_testcontainer(|| async { Ok::<_, &'static str>(()) }),
         )
         .await
         .is_err(),
         "a concurrent PostgreSQL testcontainer start must wait for the active start"
     );
 
-    release_first_tx
-        .send(())
-        .expect("first operation remains parked");
-    first.await.expect("first operation task succeeds");
+    release_first.notify_one();
+    first
+        .await
+        .expect("first operation task succeeds")
+        .expect("first start succeeds");
     tokio::time::timeout(
         Duration::from_secs(1),
-        serialize_postgres_testcontainer_start(async {}),
+        start_postgres_testcontainer(|| async { Ok::<_, &'static str>(()) }),
     )
     .await
-    .expect("a subsequent operation must enter after the first releases the lock");
+    .expect("a subsequent operation must enter after the first releases the lock")
+    .expect("subsequent start succeeds");
 }
 
 #[tokio::test]
