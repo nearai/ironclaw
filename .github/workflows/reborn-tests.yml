@@ -61,7 +61,7 @@ jobs:
         run: |
           echo "docs_only=false" >> "$GITHUB_OUTPUT"
           echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
@@ -98,7 +98,7 @@ jobs:
       buckets: ${{ steps.packages.outputs.buckets }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -209,7 +209,7 @@ jobs:
         bucket: ${{ fromJSON(needs.package-matrix.outputs.buckets) }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -260,7 +260,7 @@ jobs:
 
       - name: Install Node.js for WebUI bundle builds
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -350,7 +350,7 @@ jobs:
           cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
 
       - name: Upload bucket lcov artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-crate-cov-bucket-${{ matrix.bucket.name }}
           path: bucket-${{ matrix.bucket.name }}.lcov
@@ -378,7 +378,7 @@ jobs:
         partition: [0, 1, 2, 3]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -462,7 +462,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -558,7 +558,7 @@ jobs:
         lane: ["0", "1", "2", "3", "groups"]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -626,7 +626,7 @@ jobs:
           scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
 
       - name: Upload lane lcov artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-integration-cov-part-${{ matrix.lane }}
           path: part-${{ matrix.lane }}.lcov
@@ -645,20 +645,20 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Download lane lcov artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: reborn-integration-cov-part-*
           path: coverage-parts
           merge-multiple: true
 
       - name: Download crate bucket lcov artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: reborn-crate-cov-bucket-*
           path: coverage-parts
@@ -721,7 +721,7 @@ jobs:
       # the "real hole list" — kept as an artifact for offline inspection.
       - name: Upload merged coverage report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-integration-coverage-merged
           path: reborn-integration-merged.lcov
@@ -734,13 +734,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Install Node.js
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
 
@@ -768,7 +768,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -819,7 +819,7 @@ jobs:
       - qa-recorded-fixtures
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - name: Check Reborn test result

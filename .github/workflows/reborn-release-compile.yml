@@ -58,7 +58,7 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -70,7 +70,7 @@ jobs:
 
       # The CLI embeds the WebChat v2 frontend during compilation, which requires Node/pnpm.
       - name: Install Node.js for the embedded WebUI
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
 
@@ -153,7 +153,7 @@ jobs:
       # existing release host's artifacts-* download pattern from publishing them.
       - id: upload
         name: Upload compile evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-compile-${{ matrix.target }}
           path: "target/${{ matrix.target }}/dist/${{ matrix.binary }}"
