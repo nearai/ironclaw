@@ -9,11 +9,18 @@ import pytest
 
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
+    COVERAGE_BACKLOG,
     EMULATE_SUPPORTED_TOOLS,
     INTEGRATION_EVIDENCE,
     INTEGRATION_EVIDENCE_CAPABILITY_IDS,
     INVENTORY,
+    JOURNEY_EVIDENCE,
+    JOURNEY_EVIDENCE_CAPABILITY_IDS,
+    READ_CAPABILITY_IDS,
+    REQUIRED_READ_OUTCOME_CLASSES,
     TESTED_CAPABILITY_IDS,
+    WRITE_CAPABILITY_IDS,
+    backlogged_capabilities,
     capability_id_to_wire_name,
 )
 from provider_operation_cases import PROVIDER_OPERATION_CASES
@@ -194,3 +201,153 @@ def test_tested_capabilities_have_executable_evidence_at_the_correct_seam():
         f"Emulate-backed capabilities lack executable evidence: {missing_tested}"
     )
     assert operation_case_tools <= EMULATE_SUPPORTED_TOOLS
+
+
+def _assert_python_symbol_exists(
+    source: str, symbol: str, source_label: str, role: str
+) -> None:
+    declaration = re.compile(
+        rf"^[ \t]*(?:async[ \t]+)?def[ \t]+{re.escape(symbol)}[ \t]*\(",
+        re.MULTILINE,
+    ).search(source)
+    assert declaration, f"{role} {symbol!r} is missing from {source_label}"
+
+
+def _assert_journey_evidence_is_executable(evidence: dict) -> None:
+    required = {"capability", "source", "test", "assertion"}
+    assert set(evidence) == required, (
+        f"journey evidence fields must be exactly {sorted(required)}: {evidence}"
+    )
+    source_path = ROOT / evidence["source"]
+    assert source_path.is_file(), (
+        f"journey evidence source is missing: {evidence['source']}"
+    )
+    source = source_path.read_text()
+    _assert_python_symbol_exists(
+        source, evidence["test"], evidence["source"], "journey evidence test"
+    )
+    # The assertion helper is the part that actually reads provider state back.
+    # Without it the named test still runs but proves nothing about the write.
+    _assert_python_symbol_exists(
+        source,
+        evidence["assertion"],
+        evidence["source"],
+        "journey evidence assertion helper",
+    )
+
+
+def test_journey_evidence_names_an_executable_assertion():
+    """A write may cite a journey only if its readback helper still exists."""
+    capabilities = [entry["capability"] for entry in JOURNEY_EVIDENCE]
+    duplicates = sorted(
+        capability
+        for capability in set(capabilities)
+        if capabilities.count(capability) > 1
+    )
+    assert not duplicates, f"duplicate journey evidence: {duplicates}"
+    assert JOURNEY_EVIDENCE_CAPABILITY_IDS <= TESTED_CAPABILITY_IDS, (
+        "journey evidence for untested capabilities: "
+        f"{sorted(JOURNEY_EVIDENCE_CAPABILITY_IDS - TESTED_CAPABILITY_IDS)}"
+    )
+    for evidence in JOURNEY_EVIDENCE:
+        _assert_journey_evidence_is_executable(evidence)
+
+
+@pytest.mark.parametrize(
+    ("missing_symbol", "remaining_source"),
+    [
+        ("test_journey", "async def _assert_readback(url):\n    ...\n"),
+        ("_assert_readback", "async def test_journey(world):\n    ...\n"),
+    ],
+)
+def test_journey_evidence_rejects_a_vanished_symbol(
+    missing_symbol: str, remaining_source: str
+):
+    """Deleting the readback helper must turn the gate red, not stay green."""
+    with pytest.raises(AssertionError, match=rf"{missing_symbol}.* is missing"):
+        _assert_python_symbol_exists(
+            remaining_source, missing_symbol, "synthetic.py", "journey evidence"
+        )
+
+
+def _covered_capability_outcomes() -> dict[str, set[str]]:
+    """Capability -> outcome classes proven by a typed operation case."""
+    covered: dict[str, set[str]] = {}
+    for case in PROVIDER_OPERATION_CASES:
+        covered.setdefault(case.capability_id, set()).add(case.outcome_class)
+    return covered
+
+
+def test_write_capabilities_are_not_evidenced_by_a_recorded_tool_name():
+    """A recorded tool-call name proves model choice, never a provider mutation.
+
+    `_recorded_tool_evidence` only observes that some harvested trace emitted a
+    call with this name. For an `external_write` capability that says nothing
+    about whether the provider committed the effect, so it cannot stand in for
+    a typed case with provider-side readback.
+    """
+    covered = set(_covered_capability_outcomes())
+    unproven = sorted(
+        WRITE_CAPABILITY_IDS
+        - covered
+        - INTEGRATION_EVIDENCE_CAPABILITY_IDS
+        - JOURNEY_EVIDENCE_CAPABILITY_IDS
+        - backlogged_capabilities("write_requires_operation_case")
+    )
+    assert not unproven, (
+        "write capabilities whose only evidence is a recorded tool-call name; "
+        "add a ProviderOperationCase with provider readback or an owned "
+        f"coverage_backlog entry: {unproven}"
+    )
+
+
+def test_read_capabilities_cover_every_required_outcome_class():
+    """Epic #6524 workstream 5: seeded success *and* empty-result per read."""
+    covered = _covered_capability_outcomes()
+    backlogged = backlogged_capabilities("read_requires_outcome_classes")
+    missing = sorted(
+        f"{capability_id}:{outcome_class}"
+        for capability_id in READ_CAPABILITY_IDS
+        - INTEGRATION_EVIDENCE_CAPABILITY_IDS
+        - backlogged
+        for outcome_class in REQUIRED_READ_OUTCOME_CLASSES
+        - covered.get(capability_id, set())
+    )
+    assert not missing, (
+        "read capabilities missing a required outcome class; add a "
+        "ProviderOperationCase with that outcome_class or an owned "
+        f"coverage_backlog entry: {missing}"
+    )
+
+
+def test_coverage_backlog_entries_are_owned_and_not_stale():
+    """The backlog is a ratchet: it must shrink, and never hide live coverage."""
+    covered = _covered_capability_outcomes()
+    known_rules = {
+        "write_requires_operation_case",
+        "read_requires_outcome_classes",
+    }
+    seen: list[str] = []
+    for entry in COVERAGE_BACKLOG:
+        for field in ("rule", "owner", "reason", "issue", "review_condition"):
+            assert entry.get(field), f"backlog entry is missing {field}: {entry}"
+        assert entry["rule"] in known_rules, (
+            f"unknown backlog rule {entry['rule']!r}: {sorted(known_rules)}"
+        )
+        assert entry["capabilities"], f"backlog entry has no capabilities: {entry}"
+        seen.extend(entry["capabilities"])
+
+    duplicates = sorted({c for c in seen if seen.count(c) > 1})
+    assert not duplicates, f"capabilities backlogged more than once: {duplicates}"
+
+    unknown = sorted(set(seen) - TESTED_CAPABILITY_IDS)
+    assert not unknown, f"backlog names capabilities that do not ship: {unknown}"
+
+    for entry in COVERAGE_BACKLOG:
+        if entry["rule"] != "write_requires_operation_case":
+            continue
+        already_covered = sorted(set(entry["capabilities"]) & set(covered))
+        assert not already_covered, (
+            "backlog entry is stale — these write capabilities now have a "
+            f"typed operation case and must be removed: {already_covered}"
+        )
