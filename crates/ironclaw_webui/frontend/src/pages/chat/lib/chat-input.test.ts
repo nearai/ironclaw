@@ -43,7 +43,9 @@ function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    const name = node.strings[index]?.match(
+      /([A-Za-z][A-Za-z0-9-]*)=\s*$/,
+    )?.[1];
     if (name) props[name] = node.values[index];
   }
   return props;
@@ -52,7 +54,9 @@ function componentProps(node, component) {
 function templateProps(node) {
   const props = {};
   for (let index = 0; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    const name = node.strings[index]?.match(
+      /([A-Za-z][A-Za-z0-9-]*)=\s*$/,
+    )?.[1];
     if (name) props[name] = node.values[index];
   }
   return props;
@@ -165,6 +169,7 @@ test("ChatInput cancel button invokes onCancel and resets cancelling state", asy
 
   const cancelButton = findComponent(tree, components.Button);
   const props = componentProps(cancelButton, components.Button);
+  assert.equal(props["data-testid"], "chat-cancel-run");
   const cancelPromise = props.onClick();
 
   assert.equal(cancelCalls, 1);
