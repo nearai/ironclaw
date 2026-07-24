@@ -30,7 +30,7 @@ export function AutomationsList({
   const hasAutomations = automations.length > 0;
   const selectedAutomation =
     filtered.find((automation) => automation.automation_id === selectedAutomationId) ||
-    filtered[0] ||
+    (isFilterTransition ? null : filtered[0]) ||
     null;
 
   return (

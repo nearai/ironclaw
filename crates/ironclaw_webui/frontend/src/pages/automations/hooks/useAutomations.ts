@@ -113,6 +113,12 @@ export function createAutomationMutationConfig<TData, TVariables>(
   };
 }
 
+/**
+ * Keeps the previous query payload visible while the completed-data query key
+ * changes. In product terms, `isPlaceholderData` therefore means a filter
+ * transition is in progress, not that the Automations page is initially
+ * loading.
+ */
 export function createAutomationsQueryOptions(includeCompleted = false) {
   return {
     queryKey: ["automations", { includeCompleted }] as const,

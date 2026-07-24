@@ -33,6 +33,10 @@ export function AutomationsPage() {
     automationsState.automations.length === 0;
 
   React.useEffect(() => {
+    // Placeholder rows belong to the previous filter. Preserve their current
+    // selection until the new query payload arrives instead of choosing a row
+    // under a filter whose data is not available yet.
+    if (automationsState.isFilterTransition) return;
     if (!automationsState.automations.length) {
       setSelectedAutomationId(null);
       return;
@@ -43,7 +47,11 @@ export function AutomationsPage() {
     if (!stillExists) {
       setSelectedAutomationId(automationsState.automations[0].automation_id);
     }
-  }, [automationsState.automations, selectedAutomationId]);
+  }, [
+    automationsState.automations,
+    automationsState.isFilterTransition,
+    selectedAutomationId,
+  ]);
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
