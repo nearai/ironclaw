@@ -9,6 +9,7 @@ import {
   hasChannelSurface,
   isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
+import { resolveFocusTarget } from "../lib/focus-target";
 
 // Wire-shaped surface fixtures: a channel extension declares a channel
 // surface; a plain tool extension declares only a tool surface.
@@ -120,6 +121,7 @@ function renderModal({
     channelConnection,
     hasChannelSurface,
     isWebGeneratedCodeConnection,
+    resolveFocusTarget,
     window: {
       open: (url, target, features) => {
         if (blockPopup) {
@@ -611,6 +613,105 @@ test("ConfigureModal renders a localized close label through ModalShell", () => 
 
   assert.ok(shell, "the configure modal shell should render");
   assert.match(JSON.stringify(shell), /Localized close/);
+});
+
+test("ModalShell moves, traps, and restores keyboard focus", () => {
+  const { context } = renderModal();
+  const listeners = new Map();
+  const cleanups = [];
+  const document = { activeElement: null };
+
+  function focusable(name, visible = true) {
+    return {
+      name,
+      hidden: false,
+      isConnected: true,
+      tabIndex: 0,
+      checkVisibility: () => visible,
+      getAttribute: () => null,
+      focus() {
+        document.activeElement = this;
+      },
+    };
+  }
+
+  const opener = focusable("opener");
+  const incidentalFocus = focusable("incidental");
+  const visuallyHiddenButton = focusable("visually-hidden", false);
+  const closeButton = focusable("close");
+  const saveButton = focusable("save");
+  const dialog = {
+    contains: (element) =>
+      element === closeButton || element === saveButton || element === dialog,
+    focus() {
+      document.activeElement = this;
+    },
+    querySelectorAll: () => [visuallyHiddenButton, closeButton, saveButton],
+  };
+  document.activeElement = incidentalFocus;
+
+  context.document = document;
+  context.window.addEventListener = (type, handler) => listeners.set(type, handler);
+  context.window.removeEventListener = (type, handler) => {
+    if (listeners.get(type) === handler) listeners.delete(type);
+  };
+  context.React.useRef = () => ({ current: dialog });
+  context.React.useEffect = (effect) => {
+    cleanups.push(effect());
+  };
+
+  let closeCalls = 0;
+  context.globalThis.__testExports.ModalShell({
+    onClose: () => {
+      closeCalls += 1;
+    },
+    returnFocusTo: () => opener,
+    title: "Configure Slack",
+    children: null,
+  });
+
+  assert.equal(
+    document.activeElement,
+    closeButton,
+    "the first visible focusable control receives focus when the modal opens",
+  );
+
+  const handleKey = listeners.get("keydown");
+  assert.equal(typeof handleKey, "function");
+
+  document.activeElement = saveButton;
+  let prevented = false;
+  handleKey({
+    key: "Tab",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(document.activeElement, closeButton, "Tab wraps to the first control");
+
+  prevented = false;
+  handleKey({
+    key: "Tab",
+    shiftKey: true,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(document.activeElement, saveButton, "Shift+Tab wraps to the last control");
+
+  handleKey({ key: "Escape", shiftKey: false, preventDefault() {} });
+  assert.equal(closeCalls, 1, "Escape still closes the modal");
+
+  cleanups[0]();
+  assert.equal(
+    document.activeElement,
+    opener,
+    "closing the modal restores focus to the control that opened it",
+  );
+  assert.equal(listeners.has("keydown"), false);
 });
 
 test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {

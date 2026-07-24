@@ -959,7 +959,7 @@ async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_ava
         await harness["context"].close()
 
 
-async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
+async def test_reborn_v2_install_setup_opens_modal_and_restores_focus_to_installed_card(
     reborn_v2_server, reborn_v2_browser
 ):
     setup_channel = {
@@ -1001,7 +1001,9 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
     )
     try:
         page = harness["page"]
-        card = _card_by_title(page, "Slack Channel")
+        card = page.locator(
+            SEL_V2["extension_card_for"].format(id="slack-channel")
+        )
         await expect(card).to_be_visible(timeout=5000)
 
         await card.get_by_role("button", name="Install").click()
@@ -1021,6 +1023,12 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
         await expect(modal.get_by_role("button", name="Save")).to_be_visible()
         await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
         await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
+
+        return_target = card.locator(SEL_V2["extension_primary_action"])
+        await expect(return_target).to_be_visible()
+        await page.keyboard.press("Escape")
+        await expect(modal).to_have_count(0)
+        await expect(return_target).to_be_focused()
         assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
@@ -1910,6 +1918,79 @@ async def test_reborn_legacy_configure_modal_dismisses_without_saving(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_have_count(0)
 
+        assert harness["setup_submit_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_v2_configure_modal_traps_and_restores_keyboard_focus(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={"config-tool": _manual_config_setup_payload()},
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = page.locator(
+            SEL_V2["extension_card_for"].format(id="config-tool")
+        )
+        await expect(card).to_be_visible(timeout=5000)
+        trigger = card.locator(SEL_V2["extension_primary_action"])
+        await trigger.click()
+
+        dialog_name = SEL_V2["extension_configure_dialog_name_for"].format(
+            name="Config Tool"
+        )
+        dialog = page.get_by_role("dialog", name=dialog_name)
+        await expect(dialog).to_be_visible(timeout=5000)
+        close_button = dialog.get_by_role(
+            "button", name=SEL_V2["extension_dialog_close_name"]
+        )
+        save_button = dialog.get_by_role(
+            "button", name=SEL_V2["extension_dialog_save_name"]
+        )
+        await expect(close_button).to_be_focused()
+
+        await page.keyboard.press("Shift+Tab")
+        await expect(save_button).to_be_focused()
+        await page.keyboard.press("Tab")
+        await expect(close_button).to_be_focused()
+
+        for _ in range(6):
+            await page.keyboard.press("Tab")
+            assert await dialog.evaluate(
+                "(element) => element.contains(document.activeElement)"
+            ), "Tab focus escaped the extension configuration dialog"
+
+        await page.keyboard.press("Escape")
+        await expect(dialog).to_have_count(0)
+        await expect(trigger).to_be_focused()
+
+        harness["update_installed_extension"](
+            "config-tool", installation_state="active"
+        )
+        await page.reload()
+        card = page.locator(
+            SEL_V2["extension_card_for"].format(id="config-tool")
+        )
+        await expect(card).to_be_visible(timeout=5000)
+        overflow_trigger = card.get_by_role(
+            "button", name=SEL_V2["extension_more_actions_name"]
+        )
+        await overflow_trigger.click()
+        await card.get_by_role(
+            "menuitem", name=SEL_V2["extension_reconfigure_name"]
+        ).click()
+
+        dialog = page.get_by_role("dialog", name=dialog_name)
+        await expect(dialog).to_be_visible(timeout=5000)
+        await page.keyboard.press("Escape")
+        await expect(dialog).to_have_count(0)
+        await expect(overflow_trigger).to_be_focused()
         assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()

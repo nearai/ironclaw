@@ -331,6 +331,12 @@ SEL_V2 = {
     "extension_card_for": (
         "[data-testid='extension-card'][data-extension-id='{id}']"
     ),
+    "extension_primary_action": "[data-extension-primary-action]",
+    "extension_more_actions_name": "More actions",
+    "extension_reconfigure_name": "Reconfigure",
+    "extension_configure_dialog_name_for": "Configure {name}",
+    "extension_dialog_close_name": "Close",
+    "extension_dialog_save_name": "Save",
     "pairing_section": "[data-testid='pairing-section']",
     "pairing_code_input": "[data-testid='pairing-code-input']",
     "pairing_submit": "[data-testid='pairing-submit']",

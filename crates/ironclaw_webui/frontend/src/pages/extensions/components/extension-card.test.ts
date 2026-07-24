@@ -239,6 +239,37 @@ test("card class keeps grid siblings at natural height", () => {
   assert.ok(!cardClass.includes("h-full"), "CARD must not stretch to grid row height");
 });
 
+test("RegistryCard passes the Install trigger to the install workflow", () => {
+  let installPayload = null;
+  let installTrigger = null;
+  const context = makeContext();
+  vm.runInNewContext(extensionCardSourceForTest(), context);
+  const { RegistryCard } = context.globalThis.__testExports;
+  const rendered = RegistryCard({
+    entry: {
+      package_ref: { kind: "extension", id: "github" },
+      display_name: "GitHub",
+      runtime: "wasm",
+    },
+    onInstall(payload, trigger) {
+      installPayload = payload;
+      installTrigger = trigger;
+    },
+    isBusy: false,
+  });
+  const [installButton] = findComponentNodes(rendered, context.Button);
+  const trigger = { id: "install-trigger" };
+
+  installButton.props.onClick({ currentTarget: trigger });
+
+  assert.deepEqual(installPayload.packageRef, {
+    kind: "extension",
+    id: "github",
+  });
+  assert.equal(installPayload.displayName, "GitHub");
+  assert.equal(installTrigger, trigger);
+});
+
 test("setup-needed cards never expose a separate Activate action", () => {
   const channel = renderExtensionCard({
     package_ref: { id: "slack" },
@@ -713,6 +744,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     "Reconfigure overflow action invokes onConfigure with the correct payload",
     () => {
       let configurePayload = null;
+      let configureReturnFocusTo = null;
       const context = makeContext();
       vm.runInNewContext(extensionCardSourceWithInternals(), context);
       const { ExtensionCard, OverflowMenu } = context.globalThis.__testExports;
@@ -738,7 +770,10 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       };
       const rendered = ExtensionCard({
         ext,
-        onConfigure(payload) { configurePayload = payload; },
+        onConfigure(payload, returnFocusTo) {
+          configurePayload = payload;
+          configureReturnFocusTo = returnFocusTo;
+        },
         onRemove() {},
         isBusy: false,
       });
@@ -749,10 +784,12 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(reconfigureAction, undefined, "Reconfigure action must exist");
       // A connected channel re-pairs via "Reconnect", not "Reconfigure".
       assert.equal(reconfigureAction.label, "reconnect");
-      reconfigureAction.run();
+      const overflowTrigger = { id: "more-actions-trigger" };
+      reconfigureAction.run(overflowTrigger);
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
       assert.equal(configurePayload.installation_state, "active");
+      assert.equal(configureReturnFocusTo, overflowTrigger);
     },
   );
 });

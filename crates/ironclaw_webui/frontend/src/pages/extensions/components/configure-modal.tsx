@@ -17,9 +17,19 @@ import {
   hasChannelSurface,
   isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
+import { resolveFocusTarget } from "../lib/focus-target";
+import type { FocusTarget } from "../lib/focus-target";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
-export function ConfigureModal({ extension, onClose, onSaved }) {
+/**
+ * @param {{
+ *   extension: any;
+ *   onClose: () => void;
+ *   onSaved?: (result?: unknown) => void;
+ *   returnFocusTo?: FocusTarget | null;
+ * }} props
+ */
+export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
   const { secrets = [], onboarding, isLoading, error } =
@@ -100,6 +110,7 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
     return (
       <ModalShell
         onClose={onClose}
+        returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <PairingWebCodePanel
@@ -114,7 +125,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
   if (isLoading) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <div className="space-y-3">
           {[1, 2].map(
             (i) =>
@@ -130,7 +145,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
   if (error) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <p className="text-sm text-red-200">
           {t("extensions.loadFailed")} {error.message}
         </p>
@@ -140,7 +159,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
   if (secrets.length === 0) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <p className="text-sm text-iron-300">
           {t("extensions.noConfigRequired")}
         </p>
@@ -149,7 +172,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
   }
 
   return (
-    <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+    <ModalShell
+      onClose={onClose}
+      returnFocusTo={returnFocusTo}
+      title={t("extensions.configureName").replace("{name}", extensionName)}
+    >
       {onboarding?.credential_instructions &&
       (
         <p className="mb-4 text-sm leading-6 text-iron-300">
@@ -320,16 +347,100 @@ function httpsUrl(value) {
   }
 }
 
-function ModalShell({ onClose, title, children }) {
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[contenteditable='true']",
+  "[tabindex]:not([tabindex^='-'])",
+].join(",");
+
+function isVisible(element) {
+  if (typeof element.checkVisibility === "function") {
+    return element.checkVisibility({
+      checkOpacity: true,
+      checkVisibilityCSS: true,
+    });
+  }
+
+  const style = window.getComputedStyle(element);
+  return (
+    element.getClientRects().length > 0 &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    style.opacity !== "0"
+  );
+}
+
+function focusableElements(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+    (element) =>
+      element.tabIndex >= 0 &&
+      !element.hidden &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      isVisible(element),
+  );
+}
+
+/**
+ * @param {{
+ *   onClose: () => void;
+ *   returnFocusTo?: FocusTarget | null;
+ *   title: string;
+ *   children: React.ReactNode;
+ * }} props
+ */
+function ModalShell({ onClose, returnFocusTo, title, children }) {
   const t = useT();
   const titleId = React.useId();
+  const dialogRef = React.useRef(null);
   React.useEffect(() => {
+    const returnTarget = returnFocusTo || document.activeElement;
+    const dialog = dialogRef.current;
+    const initialFocus = focusableElements(dialog)[0] || dialog;
+    initialFocus?.focus({ preventScroll: true });
+
     const handleKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const focusable = focusableElements(dialog);
+      if (focusable.length === 0) {
+        e.preventDefault();
+        dialog?.focus({ preventScroll: true });
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement;
+      const focusIsOutside = !dialog?.contains(activeElement);
+      if (e.shiftKey && (activeElement === first || focusIsOutside)) {
+        e.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!e.shiftKey && (activeElement === last || focusIsOutside)) {
+        e.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     };
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      const previouslyFocused = resolveFocusTarget(returnTarget);
+      if (
+        previouslyFocused?.isConnected &&
+        typeof previouslyFocused.focus === "function"
+      ) {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+    };
+  }, [onClose, returnFocusTo]);
 
   return (
     <div
@@ -339,9 +450,11 @@ function ModalShell({ onClose, title, children }) {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
         onClick={(e) => e.stopPropagation()}
       >

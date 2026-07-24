@@ -14,6 +14,11 @@ import {
   authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
+import type {
+  ConfigureFocusHandler,
+  FocusTarget,
+  InstallFocusHandler,
+} from "../lib/focus-target";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
    behind a count disclosure; secondary actions (Configure / Setup / Remove)
@@ -40,11 +45,28 @@ function translatedKnownLabel(t, prefix, value, knownLabels) {
   return knownLabels[value] ? t(`${prefix}.${value}`) : value;
 }
 
-/* Lightweight overflow menu. Real <button>s; closes on outside click. */
+/**
+ * @typedef {{
+ *   id: string;
+ *   label: string;
+ *   icon?: string;
+ *   danger?: boolean;
+ *   run: (returnFocusTo: FocusTarget) => void;
+ * }} FocusAction
+ */
+
+/**
+ * Lightweight overflow menu. Real <button>s; closes on outside click.
+ *
+ * @param {{ actions: FocusAction[]; isBusy: boolean }} props
+ */
 function OverflowMenu({ actions, isBusy }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
+  const triggerRef = React.useRef(
+    /** @type {HTMLButtonElement | null} */ (null),
+  );
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -58,6 +80,7 @@ function OverflowMenu({ actions, isBusy }) {
   return (
     <div ref={ref} className="relative shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         aria-label={t("extensions.moreActions")}
         aria-haspopup="true"
@@ -81,9 +104,9 @@ function OverflowMenu({ actions, isBusy }) {
                 type="button"
                 role="menuitem"
                 disabled={isBusy}
-                onClick={() => {
+                onClick={(event) => {
                   setOpen(false);
-                  action.run();
+                  action.run(triggerRef.current || event.currentTarget);
                 }}
                 className={[
                   "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] disabled:cursor-not-allowed disabled:opacity-50",
@@ -112,6 +135,14 @@ function ChipGrid({ items }) {
   );
 }
 
+/**
+ * @param {{
+ *   ext: any;
+ *   onConfigure: ConfigureFocusHandler<any>;
+ *   onRemove: (extension: any) => void;
+ *   isBusy: boolean;
+ * }} props
+ */
 export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const t = useT();
   const state = extensionLifecycleState(ext);
@@ -158,7 +189,9 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       ? t("extensions.reconfigure")
       : t("extensions.configure");
 
+  /** @type {FocusAction[]} */
   const primaryActions = [];
+  /** @type {FocusAction[]} */
   const overflowActions = [];
   const primaryAction = primaryExtensionAction(ext);
 
@@ -166,7 +199,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
     primaryActions.push({
       id: "configure",
       label: configureLabel,
-      run: () => onConfigure(configurePayload),
+      run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
     });
   }
   if (
@@ -179,7 +212,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       id: "reconfigure",
       label: configureLabel,
       icon: "settings",
-      run: () => onConfigure(configurePayload),
+      run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
     });
   }
   if (canManage) {
@@ -267,7 +300,13 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
         <span className="flex-1"></span>
         {primary &&
         (
-          <Button variant="secondary" size="sm" onClick={primary.run} disabled={isBusy}>
+          <Button
+            variant="secondary"
+            size="sm"
+            data-extension-primary-action="true"
+            onClick={(event) => primary.run(event.currentTarget)}
+            disabled={isBusy}
+          >
             {primary.label}
           </Button>
         )}
@@ -278,6 +317,14 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   );
 }
 
+/**
+ * @param {{
+ *   entry: any;
+ *   onInstall?: InstallFocusHandler | null;
+ *   isBusy: boolean;
+ *   statusLabel?: string;
+ * }} props
+ */
 export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = undefined }) {
   const t = useT();
   const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);
@@ -334,11 +381,11 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           <Button
             variant="outline"
             size="sm"
-            onClick={() =>
+            onClick={(event) =>
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-              })}
+              }, event.currentTarget)}
             disabled={isBusy}
           >
             <Icon name="plus" className="mr-1.5 h-3.5 w-3.5" />
