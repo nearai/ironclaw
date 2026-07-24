@@ -264,13 +264,11 @@ inventory now says so mechanically.** Coverage is counted per
 
 Everything not yet meeting those rules is listed in `coverage_backlog` with an
 owner, reason, issue, and review condition. The backlog is a ratchet: entries
-must be removed as coverage lands, and the gate fails if an entry names a
-capability that already has a case. As of this writing it holds 2 write
-capabilities (`google-sheets.rename_sheet` and `google-sheets.write_values`,
-which one harvested journey issues against a single spreadsheet alongside
-`append_values`, so no assertion isolates either) and 49 read capabilities
-missing an empty-result case. That gap was previously invisible because a
-harvested tool-call name satisfied the old gate.
+must be removed as coverage lands, and the gate fails if an entry names a write
+that now has a case, or a read that now covers every required outcome class. As
+of this writing it holds no write capabilities and 48 read capabilities missing
+an empty-result case. That gap was previously invisible because a harvested
+tool-call name satisfied the old gate.
 
 ### Environment passed to ironclaw in tests
 

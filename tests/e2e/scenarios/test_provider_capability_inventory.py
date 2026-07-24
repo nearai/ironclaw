@@ -213,6 +213,40 @@ def _assert_python_symbol_exists(
     assert declaration, f"{role} {symbol!r} is missing from {source_label}"
 
 
+def _python_function_body(source: str, name: str) -> str:
+    """Source of a module-level function, up to the next module-level def."""
+    lines = source.splitlines()
+    declaration = re.compile(
+        rf"^(?:async[ \t]+)?def[ \t]+{re.escape(name)}[ \t]*\("
+    )
+    start = next(
+        (index for index, line in enumerate(lines) if declaration.match(line)),
+        None,
+    )
+    assert start is not None, f"function {name!r} is not defined at module level"
+    following = re.compile(r"^(?:async[ \t]+)?def[ \t]")
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if following.match(lines[index])
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _assert_python_symbol_called(
+    body: str, symbol: str, caller: str, source_label: str
+) -> None:
+    called = re.search(rf"\b{re.escape(symbol)}[ \t]*\(", body)
+    assert called, (
+        f"journey evidence assertion helper {symbol!r} is never called by "
+        f"{caller!r} in {source_label}; declaring it is not evidence that the "
+        "readback runs"
+    )
+
+
 def _assert_journey_evidence_is_executable(evidence: dict) -> None:
     required = {"capability", "source", "test", "assertion"}
     assert set(evidence) == required, (
@@ -233,6 +267,15 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
         evidence["assertion"],
         evidence["source"],
         "journey evidence assertion helper",
+    )
+    # Declaring the helper is not enough: deleting the call from the test would
+    # leave both symbols and the recorded tool names intact, and the write
+    # would still be credited. Bind the evidence to an actual invocation.
+    _assert_python_symbol_called(
+        _python_function_body(source, evidence["test"]),
+        evidence["assertion"],
+        evidence["test"],
+        evidence["source"],
     )
 
 
@@ -267,6 +310,28 @@ def test_journey_evidence_rejects_a_vanished_symbol(
     with pytest.raises(AssertionError, match=rf"{missing_symbol}.* is missing"):
         _assert_python_symbol_exists(
             remaining_source, missing_symbol, "synthetic.py", "journey evidence"
+        )
+
+
+def test_journey_evidence_rejects_a_declared_but_uncalled_helper():
+    """Both symbols present is not evidence; the test must invoke the readback."""
+    source = (
+        "async def test_journey(world):\n"
+        "    await _something_else(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    # The declaration check passes — this is exactly the hole it cannot see.
+    _assert_python_symbol_exists(
+        source, "_assert_readback", "synthetic.py", "journey evidence"
+    )
+    with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
+        _assert_python_symbol_called(
+            _python_function_body(source, "test_journey"),
+            "_assert_readback",
+            "test_journey",
+            "synthetic.py",
         )
 
 
@@ -343,11 +408,24 @@ def test_coverage_backlog_entries_are_owned_and_not_stale():
     unknown = sorted(set(seen) - TESTED_CAPABILITY_IDS)
     assert not unknown, f"backlog names capabilities that do not ship: {unknown}"
 
+    # The ratchet applies to both rules. A read entry whose capability has since
+    # gained every required outcome class must be deleted too, or the backlog
+    # stops shrinking and the gate quietly stops meaning anything.
     for entry in COVERAGE_BACKLOG:
-        if entry["rule"] != "write_requires_operation_case":
-            continue
-        already_covered = sorted(set(entry["capabilities"]) & set(covered))
-        assert not already_covered, (
-            "backlog entry is stale — these write capabilities now have a "
-            f"typed operation case and must be removed: {already_covered}"
-        )
+        if entry["rule"] == "write_requires_operation_case":
+            already_covered = sorted(set(entry["capabilities"]) & set(covered))
+            assert not already_covered, (
+                "backlog entry is stale — these write capabilities now have a "
+                f"typed operation case and must be removed: {already_covered}"
+            )
+        else:
+            already_covered = sorted(
+                capability
+                for capability in entry["capabilities"]
+                if REQUIRED_READ_OUTCOME_CLASSES <= covered.get(capability, set())
+            )
+            assert not already_covered, (
+                "backlog entry is stale — these read capabilities now cover "
+                f"every required outcome class and must be removed: "
+                f"{already_covered}"
+            )
