@@ -117,8 +117,8 @@ tracing-test = "0.2"
 testcontainers-modules = { version = "0.12", features = ["postgres"] }
 # Cross-process advisory lock used only by the integration harness to keep
 # PostgreSQL testcontainers from competing for Docker and migration resources.
-fs4 = "1.1"
-# Unix `O_NOFOLLOW` hardens that lock file against symlink substitution.
+fs4 = "=1.1.0"
+# Unix `openat` + `O_NOFOLLOW` harden the lock path against symlink substitution.
 libc = "0.2"
 pretty_assertions = "1"
 tempfile = "3"

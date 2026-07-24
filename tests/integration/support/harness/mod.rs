@@ -750,12 +750,11 @@ impl HostRuntimeCapabilityHarness {
         // doc) so their capabilities are genuinely dispatchable, not merely
         // granted at the harness-authority layer.
         for (package, resolved) in &activate_bundled_extensions_for_test {
-            services
+            let publish_result = services
                 .publish_bundled_extension_for_test(package, resolved.as_ref())
                 .await
-                .ok_or(
-                    "local-dev Reborn services missing extension management for test publish",
-                )??;
+                .ok_or("local-dev Reborn services missing extension management for test publish")?;
+            publish_result?;
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
