@@ -42,7 +42,7 @@ ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 # Sliding-window per-route rate limiter (moved from composition's webui_rate_limit).
 lru = "0.18"
 # axum/tower-http middleware stack used by `webui_serve` (moved from composition).
-tower-http = { version = "0.6", features = ["cors", "set-header", "limit", "catch-panic"] }
+tower-http = { version = "0.7", features = ["cors", "set-header", "limit", "catch-panic"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 parking_lot = "0.12"
 rand = "0.10"
