@@ -959,7 +959,7 @@ async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_ava
         await harness["context"].close()
 
 
-async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
+async def test_reborn_v2_install_setup_opens_modal_and_restores_focus_to_installed_card(
     reborn_v2_server, reborn_v2_browser
 ):
     setup_channel = {
@@ -1021,6 +1021,12 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
         await expect(modal.get_by_role("button", name="Save")).to_be_visible()
         await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
         await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
+
+        return_target = card.get_by_role("button", name="Connect")
+        await expect(return_target).to_be_visible()
+        await page.keyboard.press("Escape")
+        await expect(modal).to_have_count(0)
+        await expect(return_target).to_be_focused()
         assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
