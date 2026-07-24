@@ -281,14 +281,14 @@ impl ChannelPairingInstallationSource for StoredPairingInstallationSource {
 /// are parsed once at construction and resolved per read, so a configure
 /// save takes effect on the next mint with no rewiring.
 pub(crate) struct ChannelConfigPairingTemplateValues {
-    channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     extension_id: ExtensionId,
     handles: Vec<String>,
 }
 
 impl ChannelConfigPairingTemplateValues {
     pub(crate) fn new(
-        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+        channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
         extension_id: ExtensionId,
         template: Option<&str>,
     ) -> Self {

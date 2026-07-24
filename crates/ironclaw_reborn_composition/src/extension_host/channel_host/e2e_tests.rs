@@ -89,7 +89,6 @@ use super::{
     ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,
     FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
 };
-use crate::extension_host::channel_config::{ChannelConfigReactivation, ChannelConfigService};
 use crate::extension_host::extension_ingress::{
     ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
     build_extension_ingress, extension_ingress_route_mount,
@@ -97,6 +96,7 @@ use crate::extension_host::extension_ingress::{
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::route_mounts::PublicRouteMount;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigService};
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
@@ -568,7 +568,7 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
     async fn reactivate_if_active(
         &self,
         _extension_id: &ExtensionId,
-    ) -> Result<(), crate::extension_host::channel_config::ChannelConfigReactivationError> {
+    ) -> Result<(), ironclaw_extension_host::ChannelConfigReactivationError> {
         Ok(())
     }
 }

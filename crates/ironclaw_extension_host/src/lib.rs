@@ -32,6 +32,7 @@ pub mod mcp;
 pub mod mcp_discovery;
 pub mod provider_instance_readiness;
 pub mod recipes;
+pub mod removal_cleanup;
 pub mod reply_contexts;
 pub mod resolver;
 pub mod state;
@@ -79,8 +80,8 @@ pub use extension_credential_requirements::{
     package_runtime_credential_auth_requirements, product_auth_credential_source,
 };
 pub use generic_host::{
-    GenericExtensionHost, GenericExtensionHostParams, build_generic_extension_host,
-    effective_resolved_for_package,
+    BootInstallationRecordsError, GenericExtensionHost, GenericExtensionHostParams,
+    boot_installation_records, build_generic_extension_host, effective_resolved_for_package,
 };
 pub use lifecycle::{
     DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,
@@ -95,6 +96,11 @@ pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };
 pub use recipes::{SnapshotAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes};
+pub use removal_cleanup::{
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupAdapterId,
+    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupContext,
+    ExtensionRemovalCleanupRegistry, ExtensionRemovalCleanupRequirement,
+};
 pub use reply_contexts::FilesystemReplyContextStore;
 pub use resolver::SnapshotToolResolver;
 pub use state::{AuthAccountState, InstallationState};

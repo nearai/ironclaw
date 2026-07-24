@@ -91,13 +91,11 @@ impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
 /// Production credential bridge over the same effective configuration
 /// resolver used by setup, OAuth, activation, pairing, and ingress.
 pub(crate) struct ChannelConfigEgressCredentials {
-    channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
 }
 
 impl ChannelConfigEgressCredentials {
-    pub(crate) fn new(
-        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
-    ) -> Self {
+    pub(crate) fn new(channel_config: Arc<ironclaw_extension_host::ChannelConfigService>) -> Self {
         Self { channel_config }
     }
 }

@@ -23,10 +23,10 @@ use ironclaw_secrets::SecretStore;
 use secrecy::SecretString;
 
 use crate::RebornBuildError;
-use crate::extension_host::channel_config::ChannelConfigService;
 use crate::input::{OAuthDcrCallbackConfig, OAuthProviderBackendConfig};
 use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
 use crate::product_auth::oauth::staged_egress::ObligationStagedAuthEgress;
+use ironclaw_extension_host::ChannelConfigService;
 
 /// Display name sent with RFC 7591 dynamic client registration.
 const DCR_CLIENT_NAME: &str = "Ironclaw";

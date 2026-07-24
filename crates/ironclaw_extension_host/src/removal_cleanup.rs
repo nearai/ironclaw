@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(test)]
-pub(crate) use ironclaw_extensions::ExtensionRemovalChannelId;
-pub(crate) use ironclaw_extensions::{
+pub use ironclaw_extensions::ExtensionRemovalChannelId;
+pub use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
@@ -12,13 +11,13 @@ use ironclaw_host_api::{ProductSurfaceError, ResourceScope, UserId};
 use ironclaw_product::ProductSurfaceFailure;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExtensionRemovalCleanupContext {
-    pub(crate) scope: ResourceScope,
-    pub(crate) authenticated_actor: UserId,
+pub struct ExtensionRemovalCleanupContext {
+    pub scope: ResourceScope,
+    pub authenticated_actor: UserId,
 }
 
 impl ExtensionRemovalCleanupContext {
-    pub(crate) fn new(scope: ResourceScope, authenticated_actor: UserId) -> Self {
+    pub fn new(scope: ResourceScope, authenticated_actor: UserId) -> Self {
         Self {
             scope,
             authenticated_actor,
@@ -27,7 +26,7 @@ impl ExtensionRemovalCleanupContext {
 }
 
 #[async_trait]
-pub(crate) trait ExtensionRemovalCleanupAdapter: Send + Sync {
+pub trait ExtensionRemovalCleanupAdapter: Send + Sync {
     fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId;
 
     async fn cleanup(
@@ -37,7 +36,7 @@ pub(crate) trait ExtensionRemovalCleanupAdapter: Send + Sync {
     ) -> Result<(), ProductSurfaceError>;
 }
 
-pub(crate) struct ExtensionRemovalCleanupRegistry {
+pub struct ExtensionRemovalCleanupRegistry {
     adapters: BTreeMap<ExtensionRemovalCleanupAdapterId, Arc<dyn ExtensionRemovalCleanupAdapter>>,
 }
 
@@ -51,13 +50,13 @@ impl std::fmt::Debug for ExtensionRemovalCleanupRegistry {
 }
 
 impl ExtensionRemovalCleanupRegistry {
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             adapters: BTreeMap::new(),
         }
     }
 
-    pub(crate) fn try_from_adapters(
+    pub fn try_from_adapters(
         adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>>,
     ) -> Result<Self, ProductSurfaceFailure> {
         let mut by_id = BTreeMap::new();
@@ -75,7 +74,7 @@ impl ExtensionRemovalCleanupRegistry {
         Ok(Self { adapters: by_id })
     }
 
-    pub(crate) async fn cleanup_requirements(
+    pub async fn cleanup_requirements(
         &self,
         requirements: &[ExtensionRemovalCleanupRequirement],
         context: &ExtensionRemovalCleanupContext,

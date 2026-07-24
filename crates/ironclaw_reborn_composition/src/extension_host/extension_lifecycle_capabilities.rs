@@ -371,7 +371,7 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
         // (`hosted_mcp_discovery.rs` -> `hosted_mcp_discovery_error`), the
         // MODEL-chosen `extension_id` (charset-validated only, e.g. "extension
         // {} is not installed"), and uploaded-zip entry names
-        // (`extension_bundle.rs`). `HostRemediation::new` is a VALUE guard, not
+        // (`ironclaw_extension_host::extension_bundle`). `HostRemediation::new` is a VALUE guard, not
         // a provenance guard — it rejects credential-SHAPED tokens but allows
         // adversarial prose — so routing this whole class onto the trusted
         // channel would stamp `ObservationTrust::HostAuthored` on attacker

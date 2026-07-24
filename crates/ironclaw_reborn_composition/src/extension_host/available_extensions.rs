@@ -18,12 +18,12 @@ use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::sync::Arc;
 use toml::Value;
 
-use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
+use ironclaw_extension_host::ExtensionRemovalCleanupRequirement;
 use ironclaw_extension_host::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,

@@ -15,7 +15,7 @@ use super::available_extensions::{
     bytes_asset, map_binding_error, reserved_host_bundled_extension_id,
     surface_kinds_from_manifest_record,
 };
-use super::extension_bundle::{
+use ironclaw_extension_host::{
     MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
 };
 

@@ -574,7 +574,7 @@ pub struct RebornRuntime {
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) channel_service_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
-    pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     pub(crate) channel_identity_store:
@@ -1375,9 +1375,9 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
         Some(Arc::new(
-            crate::extension_host::channel_config::RebornChannelConfigProductService::new(
-                Arc::clone(&self.channel_config),
-            ),
+            ironclaw_extension_host::RebornChannelConfigProductService::new(Arc::clone(
+                &self.channel_config,
+            )),
         ))
     }
 

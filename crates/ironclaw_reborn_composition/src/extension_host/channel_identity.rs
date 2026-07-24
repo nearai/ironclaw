@@ -32,7 +32,6 @@ use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
 use ironclaw_product::AdapterInstallationId;
 
-use crate::extension_host::channel_config::ChannelConfigService;
 use crate::product_auth::api::auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture,
@@ -42,6 +41,7 @@ use crate::provider_identity::{
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, installation_scoped_provider_user_id,
 };
+use ironclaw_extension_host::ChannelConfigService;
 
 /// The identity claims the OAuth token exchange can prove
 /// ([`OAuthProviderIdentity`]'s optional fields).

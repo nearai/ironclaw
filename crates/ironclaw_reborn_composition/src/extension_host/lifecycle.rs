@@ -226,7 +226,7 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 pub(crate) struct RebornLocalLifecycleService {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
-    channel_config: Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    channel_config: Option<Arc<ironclaw_extension_host::ChannelConfigService>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
@@ -252,7 +252,7 @@ impl RebornLocalLifecycleService {
 
     pub(crate) fn with_channel_config(
         mut self,
-        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+        channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     ) -> Self {
         self.channel_config = Some(channel_config);
         self
@@ -736,9 +736,9 @@ fn parse_channel_config_payload(
 }
 
 fn map_channel_config_error(
-    error: crate::extension_host::channel_config::ChannelConfigError,
+    error: ironclaw_extension_host::ChannelConfigError,
 ) -> ProductSurfaceFailure {
-    use crate::extension_host::channel_config::ChannelConfigError;
+    use ironclaw_extension_host::ChannelConfigError;
     match error {
         ChannelConfigError::Storage { reason } => ProductSurfaceFailure::Transient { reason },
         ChannelConfigError::NotInstalled { .. }

@@ -58,7 +58,6 @@ use ironclaw_product::{
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
 
-use crate::extension_host::channel_config::ChannelConfigService;
 use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -66,6 +65,7 @@ use crate::extension_host::extension_ingress::{
     InboundPayloadClassifier, ManagedRegistrationOutcome, PostAdmissionObserver,
     VerifiedEvidenceMint,
 };
+use ironclaw_extension_host::ChannelConfigService;
 
 const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;

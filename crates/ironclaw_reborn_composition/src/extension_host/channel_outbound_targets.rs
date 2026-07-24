@@ -33,7 +33,6 @@ use ironclaw_product::{
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
-use crate::extension_host::channel_config::ChannelConfigService;
 use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
     handle_declares_field, shared_channel_admission_handles,
@@ -43,6 +42,7 @@ use crate::outbound::{
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
+use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_extension_host::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,

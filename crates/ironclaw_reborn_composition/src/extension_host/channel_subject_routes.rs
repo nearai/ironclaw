@@ -34,7 +34,7 @@ use ironclaw_product::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::extension_host::channel_config::ChannelConfigService;
+use ironclaw_extension_host::ChannelConfigService;
 
 const ALLOWED_CHANNELS_FIELD: &str = "allowed_channels";
 const SUBJECT_ROUTES_FIELD: &str = "subject_routes";
@@ -299,12 +299,11 @@ supports_threads = false
     struct NoopReactivation;
 
     #[async_trait]
-    impl crate::extension_host::channel_config::ChannelConfigReactivation for NoopReactivation {
+    impl ironclaw_extension_host::ChannelConfigReactivation for NoopReactivation {
         async fn reactivate_if_active(
             &self,
             _extension_id: &ExtensionId,
-        ) -> Result<(), crate::extension_host::channel_config::ChannelConfigReactivationError>
-        {
+        ) -> Result<(), ironclaw_extension_host::ChannelConfigReactivationError> {
             Ok(())
         }
     }

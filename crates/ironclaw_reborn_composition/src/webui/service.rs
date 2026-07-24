@@ -258,7 +258,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     // manifest-declared channel-config fields and routes submitted values
     // through it (extension-runtime §6.4).
     api = api.with_channel_config_product_service(Arc::new(
-        crate::extension_host::channel_config::RebornChannelConfigProductService::new(
+        ironclaw_extension_host::RebornChannelConfigProductService::new(
             runtime.channel_config.clone(),
         ),
     ));

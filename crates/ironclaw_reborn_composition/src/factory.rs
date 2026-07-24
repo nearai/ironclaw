@@ -27,7 +27,6 @@ use crate::extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    extension_removal_cleanup::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry},
     first_party::{FirstPartyRegistrarContext, first_party_reserved_extension_ids},
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
@@ -85,6 +84,7 @@ use ironclaw_extension_host::{
     AdminConfigurationService, FilesystemAdminConfigurationStore, ProviderInstanceReadinessInput,
     hosted_http_mcp_runtime, provider_instance_readiness_map,
 };
+use ironclaw_extension_host::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry};
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     FilesystemExtensionInstallationStore, SharedExtensionRegistry,
@@ -397,7 +397,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
-    pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     pub(crate) channel_identity_store:
@@ -4081,12 +4081,12 @@ async fn build_backend_production(
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
     let channel_config_service = Arc::new(
-        crate::extension_host::channel_config::ChannelConfigService::new(
+        ironclaw_extension_host::ChannelConfigService::new(
             extension_management.installation_store_handle(),
             Arc::clone(&secret_store),
             channel_egress_scope.clone(),
             Arc::clone(&extension_management)
-                as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
+                as Arc<dyn ironclaw_extension_host::ChannelConfigReactivation>,
         )
         .with_admin_configuration(
             Arc::clone(&admin_configuration),
@@ -4227,13 +4227,16 @@ async fn build_backend_production(
         });
         let generic_installation_store = extension_management.installation_store_handle();
         let pairing_installation_store = Arc::clone(&generic_installation_store);
-        let boot_installations = crate::extension_host::generic_host::boot_installation_records(
+        let boot_installations = ironclaw_extension_host::boot_installation_records(
             &generic_installation_store,
             Some(&channel_config_for_generic),
         )
-        .await?;
-        let generic = crate::extension_host::generic_host::build_generic_extension_host(
-            crate::extension_host::generic_host::GenericExtensionHostParams {
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension boot installation records could not be loaded: {error}"),
+        })?;
+        let generic = ironclaw_extension_host::build_generic_extension_host(
+            ironclaw_extension_host::GenericExtensionHostParams {
                 binder: services.extension_lane_tool_binder(),
                 native_factories: native_extension_factories,
                 channel_adapters: channel_extension_bindings

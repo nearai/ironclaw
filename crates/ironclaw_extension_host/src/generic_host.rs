@@ -30,7 +30,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{
-    ExtensionInstallationStore, ExtensionManifest, ExtensionPackage, ResolvedExtensionManifest,
+    ExtensionActivationState, ExtensionInstallationError, ExtensionInstallationStore,
+    ExtensionManifest, ExtensionPackage, ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
     ExtensionHostAssemblyConfig, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
@@ -44,10 +45,10 @@ use ironclaw_product::{
 use ironclaw_resources::ResourceGovernor;
 
 use crate::{
-    BindError, DrainController, EgressFactory, ExtensionBindings, ExtensionEntrypoint,
-    ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, InstallationRecord, LoadContext,
-    LoadedExtension, NativeExtensionFactory, RehydratedInstallationRecordStore,
-    SnapshotToolResolver,
+    BindError, ChannelConfigError, ChannelConfigService, DrainController, EgressFactory,
+    ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
+    HookError, InstallationRecord, LoadContext, LoadedExtension, NativeExtensionFactory,
+    RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 
 /// The composed generic host plus the resolver handle composition injects
@@ -68,6 +69,97 @@ pub struct GenericExtensionHostParams {
     pub governor: Arc<dyn ResourceGovernor>,
     pub assembly: ExtensionHostAssemblyConfig,
     pub channel_egress_transport: Option<Arc<dyn crate::egress::ChannelEgressTransport>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootInstallationRecordsError {
+    #[error("extension installations could not be listed: {source}")]
+    ListInstallations {
+        #[source]
+        source: ExtensionInstallationError,
+    },
+    #[error("extension manifest could not be loaded: {source}")]
+    LoadManifest {
+        #[source]
+        source: ExtensionInstallationError,
+    },
+    #[error("effective extension configuration could not be loaded: {source}")]
+    EffectiveChannelConfig {
+        #[source]
+        source: ChannelConfigError,
+    },
+    #[error("extension channel config could not be loaded: {source}")]
+    ChannelConfig {
+        #[source]
+        source: ExtensionInstallationError,
+    },
+}
+
+/// Build the host-owned installation records for every durable enabled
+/// installation. The caller owns boot fail policy; missing manifests are
+/// skipped to preserve the previous composition behavior.
+pub async fn boot_installation_records(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    channel_config: Option<&Arc<ChannelConfigService>>,
+) -> Result<Vec<InstallationRecord>, BootInstallationRecordsError> {
+    let mut records = Vec::new();
+    for installation in installation_store
+        .list_installations()
+        .await
+        .map_err(|source| BootInstallationRecordsError::ListInstallations { source })?
+    {
+        if installation.activation_state() != ExtensionActivationState::Enabled {
+            continue;
+        }
+        let extension_id = installation.extension_id().clone();
+        let Some(manifest_record) = installation_store
+            .get_manifest(&extension_id)
+            .await
+            .map_err(|source| BootInstallationRecordsError::LoadManifest { source })?
+        else {
+            continue;
+        };
+        records.push(boot_installation_record(
+            installation.installation_id().as_str(),
+            &extension_id,
+            manifest_record.resolved(),
+            effective_channel_config(installation_store, channel_config, &extension_id).await?,
+        ));
+    }
+    Ok(records)
+}
+
+async fn effective_channel_config(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    channel_config: Option<&Arc<ChannelConfigService>>,
+    extension_id: &ironclaw_host_api::ExtensionId,
+) -> Result<Vec<(String, String)>, BootInstallationRecordsError> {
+    match channel_config {
+        Some(channel_config) => channel_config
+            .effective_non_secret_config(extension_id)
+            .await
+            .map_err(|source| BootInstallationRecordsError::EffectiveChannelConfig { source }),
+        None => installation_store
+            .channel_config(extension_id)
+            .await
+            .map_err(|source| BootInstallationRecordsError::ChannelConfig { source }),
+    }
+}
+
+fn boot_installation_record(
+    installation_id: &str,
+    extension_id: &ironclaw_host_api::ExtensionId,
+    resolved: &ResolvedExtensionManifest,
+    config: Vec<(String, String)>,
+) -> InstallationRecord {
+    InstallationRecord {
+        extension_id: extension_id.as_str().to_string(),
+        installation_id: installation_id.to_string(),
+        state: crate::InstallationState::Installed,
+        resolved: Arc::new(resolved.clone()),
+        config,
+        last_error: None,
+    }
 }
 
 /// Construct the generic extension host over the host-runtime lanes and

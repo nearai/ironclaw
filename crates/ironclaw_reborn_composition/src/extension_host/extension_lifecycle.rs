@@ -36,7 +36,16 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::RebornProductAuthServices;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
-use crate::extension_host::unzip_extension_bundle;
+
+fn unzip_extension_bundle_for_product(
+    bundle: &[u8],
+) -> Result<Vec<(String, Vec<u8>)>, ProductSurfaceFailure> {
+    ironclaw_extension_host::unzip_extension_bundle(bundle).map_err(|error| {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: error.reason().to_string(),
+        }
+    })
+}
 
 /// Narrow lifecycle-cleanup port over product-auth so extension removal can
 /// revoke the removed extension's exclusively-owned reusable credential without
@@ -84,10 +93,8 @@ use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
     RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
 };
-use crate::extension_host::extension_removal_cleanup::{
-    ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry,
-};
 use crate::extension_host::lifecycle::response_with_payload;
+use ironclaw_extension_host::{ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry};
 use ironclaw_extension_host::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
     manifest_runtime_credential_auth_requirements, package_runtime_credential_auth_requirements,
@@ -129,8 +136,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// Late-bound weak reference to the effective channel-configuration
     /// resolver. Weak ownership avoids the cycle created by that resolver's
     /// reactivation port pointing back to this lifecycle service.
-    channel_config:
-        std::sync::OnceLock<Weak<crate::extension_host::channel_config::ChannelConfigService>>,
+    channel_config: std::sync::OnceLock<Weak<ironclaw_extension_host::ChannelConfigService>>,
     // Late-attached with `generic_host` (both need the fully wired host
     // runtime): stages hosted-MCP discovery authority — the connection
     // credential and the server network policy — under the discovery scope.
@@ -140,7 +146,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     discovery_runtime_ports:
         std::sync::OnceLock<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     /// Bounds concurrent zip decode/validation in `import_bundle`. Each decode
-    /// may expand up to [`crate::extension_host::extension_bundle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
+    /// may expand up to [`ironclaw_extension_host::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
     /// memory, so without a bound N concurrent operator uploads turn the
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
@@ -189,7 +195,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
-/// 2 x [`crate::extension_host::extension_bundle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] caps worst-case decode
+/// 2 x [`ironclaw_extension_host::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] caps worst-case decode
 /// memory at 128 MiB; imports are a rare admin-only operation, so waiting is
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
@@ -476,7 +482,7 @@ impl RebornLocalExtensionManagementPort {
 
     pub(crate) fn attach_channel_config(
         &self,
-        channel_config: &Arc<crate::extension_host::channel_config::ChannelConfigService>,
+        channel_config: &Arc<ironclaw_extension_host::ChannelConfigService>,
     ) {
         let _ = self.channel_config.set(Arc::downgrade(channel_config));
     }
@@ -511,7 +517,7 @@ impl RebornLocalExtensionManagementPort {
                     extension_id.as_str()
                 ),
             })?;
-        let effective = crate::extension_host::generic_host::effective_resolved_for_package(
+        let effective = ironclaw_extension_host::effective_resolved_for_package(
             base.resolved(),
             active_package,
         );
@@ -600,8 +606,7 @@ impl RebornLocalExtensionManagementPort {
                 .clone()
             }
         };
-        let effective =
-            crate::extension_host::generic_host::effective_resolved_for_package(&base, package);
+        let effective = ironclaw_extension_host::effective_resolved_for_package(&base, package);
         // This shortcut deliberately publishes without creating a durable
         // installation. A tool-only package has no channel configuration to
         // resolve, and asking the attached configuration consumer to load its
@@ -1091,7 +1096,7 @@ impl RebornLocalExtensionManagementPort {
     /// CPU/blocking-IO work that must not stall the async runtime) behind a
     /// [`MAX_CONCURRENT_IMPORT_DECODES`]-permit semaphore acquired BEFORE any
     /// lifecycle lock, bounding decode memory instead of letting N concurrent
-    /// uploads each expand [`crate::extension_host::extension_bundle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`].
+    /// uploads each expand [`ironclaw_extension_host::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`].
     pub(crate) async fn import_bundle(
         &self,
         bundle: Vec<u8>,
@@ -1107,7 +1112,7 @@ impl RebornLocalExtensionManagementPort {
         })?;
         let reserved_bundled_ids = self.catalog.read().await.reserved_bundled_ids().to_vec();
         let package = tokio::task::spawn_blocking(move || {
-            let files = unzip_extension_bundle(&bundle)?;
+            let files = unzip_extension_bundle_for_product(&bundle)?;
             imported_extension_package(files, &reserved_bundled_ids)
         })
         .await
@@ -2577,13 +2582,11 @@ impl RebornLocalExtensionManagementPort {
 /// surfaces the typed error and leaves the host record per §6.1
 /// (Installed + typed last error).
 #[async_trait]
-impl crate::extension_host::channel_config::ChannelConfigReactivation
-    for RebornLocalExtensionManagementPort
-{
+impl ironclaw_extension_host::ChannelConfigReactivation for RebornLocalExtensionManagementPort {
     async fn reactivate_if_active(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), crate::extension_host::channel_config::ChannelConfigReactivationError> {
+    ) -> Result<(), ironclaw_extension_host::ChannelConfigReactivationError> {
         let result: Result<(), ProductSurfaceFailure> = async {
             let _operation_guard = self.operation_lock.lock().await;
             let installations = self
@@ -2617,9 +2620,7 @@ impl crate::extension_host::channel_config::ChannelConfigReactivation
         }
         .await;
         result.map_err(|error| {
-            crate::extension_host::channel_config::ChannelConfigReactivationError::new(
-                error.to_string(),
-            )
+            ironclaw_extension_host::ChannelConfigReactivationError::new(error.to_string())
         })
     }
 }
@@ -2950,7 +2951,7 @@ fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> Product
 }
 
 fn map_channel_config_error(
-    error: crate::extension_host::channel_config::ChannelConfigError,
+    error: ironclaw_extension_host::ChannelConfigError,
 ) -> ProductSurfaceFailure {
     tracing::warn!(error = %error, "effective extension configuration resolution failed");
     ProductSurfaceFailure::Transient {
@@ -3361,13 +3362,13 @@ mod tests {
     use crate::extension_host::available_extensions::{
         AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
     };
-    use crate::extension_host::extension_removal_cleanup::{
+    use async_trait::async_trait;
+    use ironclaw_extension_host::{
         ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter,
         ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
         ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry,
         ExtensionRemovalCleanupRequirement,
     };
-    use async_trait::async_trait;
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
         ExtensionManifest, ExtensionRegistry, FilesystemExtensionInstallationStore,
