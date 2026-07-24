@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Multi-stage Dockerfile for the standalone Reborn CLI HTTP service.
 #
 # Build:
@@ -14,7 +16,9 @@
 
 FROM node:22.23.1-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4 AS node_toolchain
 
-FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS chef
+FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS rust_toolchain
+
+FROM rust_toolchain AS chef
 
 COPY --from=node_toolchain /usr/local/bin/node /usr/local/bin/node
 COPY --from=node_toolchain /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
@@ -98,36 +102,109 @@ RUN cargo build \
     --features libsql \
     --bin ironclaw-reborn-extension-ownership-migration
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim AS runtime-base
 
 RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
+        gosu \
+        openssh-server \
         postgresql-client \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
-COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml
 COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
 COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
+COPY docker/reborn/start-sshd.sh /usr/local/bin/ironclaw-reborn-start-sshd
 
 ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_LOG=info \
     IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
 
-RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
+RUN useradd -m -d /home/ironclaw -s /bin/bash -u 1000 ironclaw \
+    && useradd --non-unique --uid 1000 --gid ironclaw --home-dir /workspace --shell /bin/bash agent \
+    && passwd -d agent \
     && mkdir -p /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
-    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint /usr/local/bin/ironclaw-reborn-start-sshd
 
 WORKDIR /workspace
 
-EXPOSE 3000
-
-USER ironclaw
+EXPOSE 3000 2222
 
 ENTRYPOINT ["ironclaw-reborn-entrypoint"]
+
+# Packages a checksum-verified cargo-dist release binary with common development
+# tools for coding and repository-automation workloads. The release workflow
+# stages the binary at this otherwise absent path. Keeping this as a separate
+# target leaves the default hosted runtime minimal.
+FROM runtime-base AS runtime-release-tools
+
+ARG BUN_VERSION=1.3.14
+ARG CLAUDE_CODE_VERSION=2.1.217
+ARG DOCKER_CLI_VERSION=29.6.1-1~debian.12~bookworm
+ARG DOCKER_CLI_SHA256=f8029852215e59f5e906ccbd397a7d916b3f2653d988adb9b2691041b29c70b4
+ARG GH_VERSION=2.96.0
+ARG GH_SHA256=11a731f4e0ca8c3db96ef6d2cc404dcab3d78247ce0e07c53e07117e7627d6a1
+
+RUN apt-get -o Acquire::Retries=3 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        build-essential \
+        curl \
+        git \
+        jq \
+        libssl-dev \
+        openssh-client \
+        pkg-config \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        unzip \
+    && curl -fsSL "https://download.docker.com/linux/debian/dists/bookworm/pool/stable/amd64/docker-ce-cli_${DOCKER_CLI_VERSION}_amd64.deb" -o /tmp/docker-ce-cli.deb \
+    && echo "${DOCKER_CLI_SHA256}  /tmp/docker-ce-cli.deb" | sha256sum --check - \
+    && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.deb" -o /tmp/gh.deb \
+    && echo "${GH_SHA256}  /tmp/gh.deb" | sha256sum --check - \
+    && dpkg --install /tmp/docker-ce-cli.deb /tmp/gh.deb \
+    && rm -rf /var/lib/apt/lists/* /tmp/docker-ce-cli.deb /tmp/gh.deb
+
+COPY --from=node_toolchain /usr/local/bin/node /usr/local/bin/node
+COPY --from=node_toolchain /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+COPY --from=rust_toolchain --chown=ironclaw:ironclaw /usr/local/cargo/ /usr/local/cargo/
+COPY --from=rust_toolchain --chown=ironclaw:ironclaw /usr/local/rustup/ /usr/local/rustup/
+
+ENV CARGO_HOME=/usr/local/cargo \
+    DISABLE_AUTOUPDATER=1 \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    RUSTUP_HOME=/usr/local/rustup
+
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo \
+    && ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc \
+    && ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup \
+    && npm install --global \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "bun@${BUN_VERSION}" \
+    && npm cache clean --force \
+    && bun --version \
+    && claude --version \
+    && docker --version \
+    && gh --version \
+    && cargo --version \
+    && rustc --version
+
+COPY --chmod=0755 docker/reborn/release/ironclaw /usr/local/bin/ironclaw
+
+USER root
+
+# Default source-built hosted runtime.
+FROM runtime-base AS runtime
+
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
+
+USER root
