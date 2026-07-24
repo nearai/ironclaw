@@ -2054,6 +2054,43 @@ async fn product_auth_google_oauth_callback_ignores_incomplete_redirect_scope() 
 }
 
 #[tokio::test]
+async fn product_auth_google_oauth_callback_missing_code_is_rejected_without_exchange() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(dispatcher.events().is_empty());
+    assert!(
+        provider_client.exchanged_scopes().is_empty(),
+        "a callback without an authorization code must not reach token exchange"
+    );
+
+    let flow_id = start_json["flow_id"].as_str().expect("flow id");
+    let invocation_id = start_json["callback_scope"]["invocation_id"]
+        .as_str()
+        .expect("invocation id");
+    let status_response =
+        get_oauth_flow_status(&app, flow_id, &format!("?invocation_id={invocation_id}")).await;
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = read_body_string(status_response).await;
+    let status_json: serde_json::Value = serde_json::from_str(&status_body).expect("status json");
+    assert_eq!(status_json["status"], "pending");
+    assert!(!status_body.contains(&state));
+}
+
+#[tokio::test]
 async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secrets() {
     let (app, dispatcher) = build_app_with_google_oauth();
     let (start_json, state) = start_google_oauth_flow(&app).await;
