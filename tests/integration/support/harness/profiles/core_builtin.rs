@@ -291,13 +291,23 @@ fn core_builtin_tools_from_runtime(
             .collect(),
         capability_ids: core_builtin_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
-        effect_kinds: effect_kinds.clone(),
+        effect_kinds,
         network_policy,
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+        // The memory provider's trust ceiling mirrors production
+        // (production_first_party_trust_policy + the bundled manifest): the
+        // memory tools carry only dispatch + filesystem effects. Granting the
+        // full builtin set here (Network/SpawnProcess/ExecuteCode) would make
+        // the harness ceiling wider than production and mask authority-ceiling
+        // denials production would enforce.
         additional_provider_trust: vec![(
             ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
-            effect_kinds,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
         )],
         user_id,
         invocations: Arc::new(Mutex::new(Vec::new())),

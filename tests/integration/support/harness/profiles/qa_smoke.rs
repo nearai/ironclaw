@@ -113,13 +113,19 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
             .collect(),
         capability_ids: qa_smoke_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
-        effect_kinds: effect_kinds.clone(),
+        effect_kinds,
         network_policy: http_test_policy(),
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+        // Mirror production's memory-provider trust ceiling (dispatch +
+        // filesystem only) — see core_builtin.rs for the rationale.
         additional_provider_trust: vec![(
             ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
-            effect_kinds,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
         )],
         user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
         invocations: Arc::new(Mutex::new(Vec::new())),

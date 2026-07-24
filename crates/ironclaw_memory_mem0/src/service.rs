@@ -443,6 +443,12 @@ impl MemoryService for Mem0MemoryService {
         let snippets = response_items(&response.body)
             .map_err(MemoryServiceError::unavailable_from)?
             .into_iter()
+            // The `kind=profile` record `profile_set` writes shares the owner
+            // namespace (agent/project-less scopes collapse to it), and search
+            // can return it. Profile state has its own read path
+            // (`profile_read`); raw profile JSON must not enter the prompt as
+            // a memory snippet.
+            .filter(|item| item_metadata_str(item, KIND_KEY) != Some(PROFILE_KIND))
             .filter_map(|item| {
                 Some(MemoryServiceContextSnippet {
                     tenant_id: scope.tenant_id.as_str().to_string(),
@@ -806,8 +812,14 @@ mod tests {
 
     #[tokio::test]
     async fn retrieve_context_maps_search_hits_to_snippets() {
+        // The kind=profile record shares the owner namespace with memories, so
+        // search can return it; retrieve_context must drop it (profile state
+        // has its own read path and must not enter the prompt as a snippet).
         let (service, _transport) = service_with(MockMem0Transport::always_ok(json!({
-            "results": [ { "id": "m-1", "memory": "ctx hit", "metadata": { "target": "notes/a.md" } } ]
+            "results": [
+                { "id": "m-1", "memory": "ctx hit", "metadata": { "target": "notes/a.md" } },
+                { "id": "m-2", "memory": "{\"timezone\":\"UTC\"}", "metadata": { "kind": "profile" } }
+            ]
         })));
         let snippets = service
             .retrieve_context(
@@ -820,7 +832,11 @@ mod tests {
             )
             .await
             .expect("retrieve_context should succeed");
-        assert_eq!(snippets.len(), 1);
+        assert_eq!(
+            snippets.len(),
+            1,
+            "the kind=profile record must be filtered out of context snippets"
+        );
         assert_eq!(snippets[0].text, "ctx hit");
         assert_eq!(snippets[0].tenant_id, "tenant-mem0");
         assert_eq!(snippets[0].user_id, "user-mem0");

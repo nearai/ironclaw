@@ -229,14 +229,17 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
         manifests.len(),
         first_party_assets_dir().display()
     );
-    let first_party_manifest_count = manifests.len();
     collect_manifest_tomls(&host_runtime_assets_dir(), &mut manifests);
-    assert!(
-        manifests.len() > first_party_manifest_count,
-        "expected host-bundled manifest assets (ironclaw.memory native/mem0) under {} — did the \
-         assets directory move?",
-        host_runtime_assets_dir().display()
-    );
+    for required in ["memory_native/manifest.toml", "memory_mem0/manifest.toml"] {
+        assert!(
+            manifests
+                .iter()
+                .any(|path| path.ends_with(Path::new(required))),
+            "expected the host-bundled {required} under {} — a missing or moved memory manifest \
+             would silently drop it from this origin-gate scan",
+            host_runtime_assets_dir().display()
+        );
+    }
 
     let allowlist: BTreeSet<&str> = UNGATED_LOOP_RUN_CAPABILITIES.iter().copied().collect();
     let mut violations: Vec<String> = Vec::new();
