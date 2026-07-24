@@ -20,7 +20,6 @@ use ironclaw_product::{
     RebornSkillTrustLevel, SkillsProductFacade,
 };
 
-use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;

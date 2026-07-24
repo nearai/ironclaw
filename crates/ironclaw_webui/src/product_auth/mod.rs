@@ -2724,7 +2724,7 @@ mod tests {
                 .with_flow_record_source(shared)
                 .with_provider_client(engine.clone() as Arc<dyn AuthProviderClient>)
                 .with_auth_engine(engine)
-                .with_oauth_gate_driver(driver),
+                .with_oauth_gate_driver(driver.clone()),
         );
         let state = ProductAuthRouteState::new(
             product_auth.clone(),
@@ -2748,15 +2748,30 @@ mod tests {
             provider_scopes: vec!["items:read".to_string()],
         }];
 
-        let challenge_provider =
-            ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
-                .expect("product-auth challenge provider");
-        let challenge = challenge_provider
-            .challenge_for_gate(&turn_scope, &owner_user_id, run_id, gate_ref, &requirements)
+        let flow_manager = product_auth.flow_manager();
+        let flow_source = product_auth
+            .flow_record_source()
+            .expect("flow record source");
+        let gate_ref = AuthGateRef::new(gate_ref.to_string()).expect("gate ref");
+        let flow = driver
+            .challenge_for_blocked_gate(ironclaw_auth::OAuthGateChallengeRequest {
+                flow_manager: &flow_manager,
+                flow_source: &flow_source,
+                requirements: &requirements,
+                scope: &turn_scope,
+                owner_user_id: &owner_user_id,
+                run_id,
+                gate_ref: &gate_ref,
+            })
             .await
             .expect("challenge lookup")
             .expect("vendor oauth challenge");
-        let authorization_url = challenge.authorization_url.expect("authorization url");
+        let authorization_url = match flow.challenge {
+            Some(AuthChallenge::OAuthUrl {
+                authorization_url, ..
+            }) => authorization_url,
+            other => panic!("expected oauth challenge, got {other:?}"),
+        };
         let parsed_authorization =
             Url::parse(authorization_url.as_str()).expect("authorization URL");
         let state_value = parsed_authorization

@@ -15,9 +15,10 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
-    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
-    deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
+    RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
+    deferred_webui_v2_startup_router, product_auth_route_mount, serve_webui_v2,
+    webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -562,7 +563,7 @@ impl ServeCommand {
                 serve_config = serve_config.with_canonical_host(host);
             }
             {
-                let mut state = ironclaw_reborn_composition::ProductAuthRouteState::new(
+                let mut state = ProductAuthRouteState::new(
                     runtime.product_auth_services(),
                     tenant_id.clone(),
                     Some(default_agent_id.clone()),
@@ -576,9 +577,7 @@ impl ServeCommand {
                         ),
                     );
                 }
-                serve_config = serve_config.with_split_route_mount(
-                    ironclaw_reborn_composition::product_auth_route_mount(state),
-                );
+                serve_config = serve_config.with_split_route_mount(product_auth_route_mount(state));
             }
             // Generic extension channel ingress (extension-runtime P4): one
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`

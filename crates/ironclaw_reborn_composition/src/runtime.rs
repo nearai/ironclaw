@@ -46,8 +46,7 @@ use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
     InvocationId, MountView, Principal, ProductSurface, ProjectId, ResourceScope,
-    RuntimeCredentialAuthRequirement,
-    RuntimeHttpEgress, TenantId, ThreadId, UserId,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
