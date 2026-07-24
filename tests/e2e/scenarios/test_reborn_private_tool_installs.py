@@ -25,6 +25,7 @@ import uuid
 import httpx
 
 from reborn_webui_harness import (
+    client_action_id,
     create_thread,
     enable_reborn_global_auto_approve,
     reborn_bearer_headers,
@@ -62,7 +63,12 @@ async def _import_tool(client: httpx.AsyncClient, base_url: str, zip_path) -> No
 async def _install(client: httpx.AsyncClient, base_url: str, tool_id: str) -> None:
     install = await client.post(
         f"{base_url}{EXTENSIONS_BASE}/install",
-        json={"package_ref": _package_ref(tool_id)},
+        json={
+            "package_ref": _package_ref(tool_id),
+            # #6520 install contract: one distinct install gesture = one
+            # stable client action id (reborn_webui_harness.client_action_id).
+            "client_action_id": client_action_id(),
+        },
         timeout=15,
     )
     assert install.status_code == 200, install.text

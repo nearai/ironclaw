@@ -2023,6 +2023,74 @@ async fn product_auth_google_oauth_callback_accepts_provider_extra_scopes_withou
 }
 
 #[tokio::test]
+async fn product_auth_google_oauth_callback_ignores_incomplete_redirect_scope() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+
+    let callback_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={GOOGLE_GMAIL_READONLY_SCOPE}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let callback_body = read_body_string(callback_response).await;
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+    assert_eq!(
+        provider_client.exchanged_scopes(),
+        vec![vec![
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+            GOOGLE_CALENDAR_READONLY_SCOPE.to_string()
+        ]],
+        "the provider exchange must receive the server-owned request scopes, \
+         not the redirect's non-authoritative scope echo"
+    );
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_missing_code_is_rejected_without_exchange() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(dispatcher.events().is_empty());
+    assert!(
+        provider_client.exchanged_scopes().is_empty(),
+        "a callback without an authorization code must not reach token exchange"
+    );
+
+    let flow_id = start_json["flow_id"].as_str().expect("flow id");
+    let invocation_id = start_json["callback_scope"]["invocation_id"]
+        .as_str()
+        .expect("invocation id");
+    let status_response =
+        get_oauth_flow_status(&app, flow_id, &format!("?invocation_id={invocation_id}")).await;
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = read_body_string(status_response).await;
+    let status_json: serde_json::Value = serde_json::from_str(&status_body).expect("status json");
+    assert_eq!(status_json["status"], "pending");
+    assert!(!status_body.contains(&state));
+}
+
+#[tokio::test]
 async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secrets() {
     let (app, dispatcher) = build_app_with_google_oauth();
     let (start_json, state) = start_google_oauth_flow(&app).await;
@@ -2058,9 +2126,10 @@ async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secret
 }
 
 #[tokio::test]
-async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
-    let (app, dispatcher) = build_app_with_google_oauth();
-    let (_, state) = start_google_oauth_flow(&app).await;
+async fn product_auth_google_oauth_callback_does_not_trust_redirect_scopes_outside_recipe() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
 
     let response = app
         .clone()
@@ -2070,13 +2139,23 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"provider_denied\""));
+    let callback_json: serde_json::Value = serde_json::from_str(&body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
     assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
-    assert!(dispatcher.events().is_empty());
+    assert_eq!(dispatcher.events().len(), 1);
+    assert_eq!(
+        provider_client.exchanged_scopes(),
+        vec![vec![
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+            GOOGLE_CALENDAR_READONLY_SCOPE.to_string()
+        ]],
+        "a redirect scope outside the recipe must not become exchange authority"
+    );
 
     let replay_response = app
         .oneshot(callback_request(format!(
@@ -2094,7 +2173,8 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
 
 #[tokio::test]
 async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
-    let (app, dispatcher) = build_app_with_google_oauth();
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
     let (_, state) = start_google_oauth_flow(&app).await;
 
     let response = app
@@ -2110,6 +2190,10 @@ async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
     assert!(!body.contains(&state));
     assert!(!body.contains("access_denied"));
     assert!(dispatcher.events().is_empty());
+    assert!(
+        provider_client.exchanged_scopes().is_empty(),
+        "an explicit provider denial must not reach token exchange"
+    );
 }
 
 #[tokio::test]
@@ -2133,9 +2217,9 @@ async fn product_auth_google_oauth_callback_unknown_state_is_sanitized() {
 }
 
 #[tokio::test]
-async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
+async fn product_auth_google_oauth_callback_accepts_empty_redirect_scope() {
     let (app, dispatcher) = build_app_with_google_oauth();
-    let (_, state) = start_google_oauth_flow(&app).await;
+    let (start_json, state) = start_google_oauth_flow(&app).await;
 
     let response = app
         .clone()
@@ -2145,12 +2229,14 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"provider_denied\""));
+    let callback_json: serde_json::Value = serde_json::from_str(&body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
-    assert!(dispatcher.events().is_empty());
+    assert_eq!(dispatcher.events().len(), 1);
 
     let replay_response = app
         .oneshot(callback_request(format!(

@@ -1669,6 +1669,18 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
 async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user(
     #[case] storage: StorageMode,
 ) {
+    // Boxed like `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+    // above: inline, this journey's future overflows the 2 MiB test-thread
+    // stack under llvm-cov instrumentation (main's Coverage lanes).
+    Box::pin(
+        unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user_impl(storage),
+    )
+    .await;
+}
+
+async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user_impl(
+    storage: StorageMode,
+) {
     let group = RebornIntegrationGroup::builder()
         .storage(storage)
         .extension_delivery()

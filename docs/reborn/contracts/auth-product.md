@@ -268,10 +268,16 @@ Rules:
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
   provider inputs and completing the flow.
-- Once a callback is tied to a known scoped flow, missing authorization code,
-  missing one-shot PKCE material, or malformed/invalid scope input must durably
-  mark that flow `failed` before discarding callback material. Provider denial
-  is terminal through the same scoped flow boundary.
+- A provider redirect's optional `scope` echo is bounded as untrusted input but
+  is not grant authority: providers may omit, normalize, or return cumulative
+  scopes there. The token response is the authoritative granted-scope source;
+  the auth engine applies the recipe's missing-scope policy and clamps an
+  echoed grant to the unified recipe ceiling before storing it.
+- Once a callback is tied to a known scoped flow, missing authorization code or
+  malformed/oversized callback input must be rejected before token exchange or
+  product effects. A missing authorization code leaves the flow pending for a
+  valid retry. Missing one-shot PKCE material and provider denial are terminal
+  and durably mark the flow `failed` before discarding callback material.
 - Callback completion emits typed continuations; callback routes must not
   directly activate extensions, resume turns, replay messages, or dispatch work.
 - Terminal flows cannot be completed or canceled again.
@@ -514,7 +520,7 @@ tenant/user fields.
 | --- | --- | --- |
 | `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
 | `POST` | `/api/webchat/v2/extensions/{package_id}/setup/oauth/start` | Open an installed extension's manifest-declared OAuth requirement by opaque requirement name; provider, label, scopes, and lifecycle continuation are server-owned. |
-| `GET`  | `/api/reborn/product-auth/oauth/callback/{flow_id}` | Public OAuth callback; validates scope/state hash before any product effect. |
+| `GET`  | `/api/reborn/product-auth/oauth/callback/{provider}` | Public OAuth callback; validates the scoped flow and state hash before any product effect. |
 | `GET` | `/api/reborn/product-auth/oauth/flow/{flow_id}/status` | Observational caller-scoped durable status read. It performs no continuation dispatch, activation, compensation, provider cleanup, or other writes. |
 | `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that retries only a completed flow's unfenced internal continuation. It never repeats provider exchange, revokes a valid credential, or performs uninstall cleanup. |
 | `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
@@ -616,6 +622,15 @@ Rules:
   cleanup quarantine reporting;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.
+
+`ironclaw_reborn_composition` caller-level tests additionally cover:
+
+- an incomplete provider redirect `scope` echo still reaching exchange with the
+  server-owned requested scopes
+  (`webui_v2_product_auth::product_auth_google_oauth_callback_ignores_incomplete_redirect_scope`);
+- a callback without an authorization code being rejected before exchange while
+  the valid flow remains pending for retry
+  (`webui_v2_product_auth::product_auth_google_oauth_callback_missing_code_is_rejected_without_exchange`).
 
 ---
 
