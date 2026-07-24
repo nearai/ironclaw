@@ -28,10 +28,13 @@
 - Modify: `crates/ironclaw_dispatcher/src/lib.rs`
 - Test: `crates/ironclaw_dispatcher/tests/event_dispatch_contract.rs`
 - Modify: `crates/ironclaw_event_projections/src/runtime_projection.rs`
-- Test: `crates/ironclaw_event_projections/tests/replay_projection_contract.rs`
-- Test: `crates/ironclaw_reborn_composition/src/projection/tests/runtime_stream.rs`
+- Test: `crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs`
+- Test: `crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs`
+- Modify: `crates/ironclaw_reborn_composition/src/projection/tests.rs`
+- Test: `crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs`
 - Modify: `docs/reborn/contracts/events.md`
 - Modify: `docs/reborn/contracts/events-projections.md`
+- Modify: `scripts/reborn-e2e-rust.sh`
 
 **Interfaces:**
 - Consumes: `InvocationOrigin::{LoopRun,ScheduledLoopRun}(RunId)`, `RunId::as_uuid`, `InvocationId::from_uuid`, and `RuntimeEvent.parent_invocation_id`.
@@ -59,7 +62,7 @@ Expected: FAIL because current dispatcher events have `parent_invocation_id == N
 
 - [ ] **Step 3: Add failing projection contract tests**
 
-In `crates/ironclaw_event_projections/tests/replay_projection_contract.rs`, append:
+In `crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs`, add snapshot and cursor-resume cases:
 
 1. A parent `ModelStarted` event scoped to the parent invocation.
 2. Child `DispatchRequested`, `RuntimeSelected`, and `DispatchFailed` events scoped to a distinct child invocation and carrying `parent_invocation_id = Some(parent_invocation_id)`.
@@ -82,15 +85,15 @@ assert_eq!(
 );
 ```
 
-In `crates/ironclaw_reborn_composition/src/projection/tests/runtime_stream.rs`, reproduce the same durable event sequence through the real `build_reborn_projection_services(...).product_event_stream().drain(...)` caller path. Assert the product projection contains the completed parent `RunStatus` and failed child `CapabilityActivity`, and contains no failed `RunStatus` for the child invocation.
+In `crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs`, reproduce the same durable event sequence through the real `build_reborn_projection_services(...).product_event_stream().drain(...)` caller path for both snapshots and cursor resumes. Assert the product projection contains the completed parent `RunStatus` and failed child `CapabilityActivity`, and contains no failed `RunStatus` for the child invocation.
 
 - [ ] **Step 4: Run the projection tests to verify RED**
 
 Run:
 
 ```bash
-cargo test -p ironclaw_event_projections --test replay_projection_contract replay_projection_keeps_nested_dispatch_failure_out_of_run_status -- --nocapture
-cargo test -p ironclaw_reborn_composition --lib product_event_stream_does_not_render_nested_dispatch_failure_as_failed_run -- --nocapture
+cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract -- --nocapture
+cargo test -p ironclaw_reborn_composition --lib projection::tests::nested_dispatch_stream -- --nocapture
 ```
 
 Expected: FAIL because the child `DispatchFailed` is currently inserted into `RuntimeProjectionState.runs` and serialized as a failed product run status.
@@ -129,8 +132,8 @@ Run:
 
 ```bash
 cargo test -p ironclaw_dispatcher --test event_dispatch_contract dispatcher_marks_loop_dispatch_events_with_parent_run -- --nocapture
-cargo test -p ironclaw_event_projections --test replay_projection_contract replay_projection_keeps_nested_dispatch_failure_out_of_run_status -- --nocapture
-cargo test -p ironclaw_reborn_composition --lib product_event_stream_does_not_render_nested_dispatch_failure_as_failed_run -- --nocapture
+cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract -- --nocapture
+cargo test -p ironclaw_reborn_composition --lib projection::tests::nested_dispatch_stream -- --nocapture
 ```
 
 Expected: PASS. The child capability remains failed, while only the completed parent appears as a run.
@@ -142,8 +145,10 @@ Update `docs/reborn/contracts/events.md` to state that dispatcher events for loo
 Update `docs/reborn/contracts/events-projections.md` to state that parented dispatcher lifecycle events feed capability activity only and never create run-status rows. Name:
 
 ```text
-crates/ironclaw_event_projections/tests/replay_projection_contract.rs::replay_projection_keeps_nested_dispatch_failure_out_of_run_status
-crates/ironclaw_reborn_composition/src/projection/tests/runtime_stream.rs::product_event_stream_does_not_render_nested_dispatch_failure_as_failed_run
+crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs::runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status
+crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs::runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status
+crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs::product_event_stream_snapshot_keeps_nested_dispatch_failure_out_of_run_status
+crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs::product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run_status
 ```
 
 - [ ] **Step 9: Run task validation**
@@ -187,10 +192,13 @@ git add \
   crates/ironclaw_dispatcher/src/lib.rs \
   crates/ironclaw_dispatcher/tests/event_dispatch_contract.rs \
   crates/ironclaw_event_projections/src/runtime_projection.rs \
-  crates/ironclaw_event_projections/tests/replay_projection_contract.rs \
-  crates/ironclaw_reborn_composition/src/projection/tests/runtime_stream.rs \
+  crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs \
+  crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs \
+  crates/ironclaw_reborn_composition/src/projection/tests.rs \
+  crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs \
   docs/reborn/contracts/events.md \
   docs/reborn/contracts/events-projections.md \
-  docs/superpowers/plans/2026-07-24-nested-dispatch-run-projection.md
+  docs/superpowers/plans/2026-07-24-nested-dispatch-run-projection.md \
+  scripts/reborn-e2e-rust.sh
 git commit -m "fix(reborn): keep tool failures out of run status"
 ```
