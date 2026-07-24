@@ -177,10 +177,12 @@ pub(crate) fn validate_delivery_identity(
     existing: &OutboundDeliveryAttempt,
     incoming: &OutboundDeliveryAttempt,
 ) -> Result<(), OutboundError> {
+    // `attempted_at` records the first reservation and is not part of the
+    // idempotency identity: a replay after reopen necessarily arrives at a
+    // later wall-clock time but must resolve to the same durable attempt.
     if existing.delivery_id != incoming.delivery_id
         || existing.scope != incoming.scope
         || existing.candidate != incoming.candidate
-        || existing.attempted_at != incoming.attempted_at
     {
         return Err(OutboundError::Backend);
     }

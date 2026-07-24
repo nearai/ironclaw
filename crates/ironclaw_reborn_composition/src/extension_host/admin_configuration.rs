@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_host::{AdminConfigurationGroupState, AdminConfigurationService};
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
@@ -16,12 +16,17 @@ use ironclaw_product::{
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse, RebornViewDescriptor,
     RebornViewPage, RebornViewProvider,
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 
 use crate::extension_host::available_extensions::AdminConfigurationCatalogUse;
 
 pub(crate) type ComposedAdminConfigurationService =
-    AdminConfigurationService<dyn RootFilesystem, dyn SecretStore>;
+    AdminConfigurationService<dyn RootFilesystem, dyn SecretStorePort>;
+pub(crate) type ComposedExtensionAdminConfigurationResolver =
+    ironclaw_extension_host::ExtensionAdminConfigurationResolver<
+        dyn RootFilesystem,
+        dyn SecretStorePort,
+    >;
 
 #[derive(Clone, Default)]
 pub(crate) struct AdminConfigurationViewProvider {
@@ -31,14 +36,14 @@ pub(crate) struct AdminConfigurationViewProvider {
 struct AdminConfigurationViewParts {
     service: Arc<ComposedAdminConfigurationService>,
     uses: Arc<Vec<AdminConfigurationCatalogUse>>,
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
 
 impl AdminConfigurationViewProvider {
     pub(crate) fn new(
         service: Arc<ComposedAdminConfigurationService>,
         uses: Vec<AdminConfigurationCatalogUse>,
-        installation_store: Arc<dyn ExtensionInstallationStore>,
+        installation_store: Arc<dyn ExtensionInstallationStorePort>,
     ) -> Self {
         Self {
             parts: Some(Arc::new(AdminConfigurationViewParts {
@@ -172,7 +177,9 @@ fn map_admin_configuration_error(
             tracing::error!(error = %source, "admin-configuration descriptor projection failed");
             ProductSurfaceError::internal_from("admin configuration descriptor is invalid")
         }
-        AdminConfigurationServiceError::Unavailable => {
+        AdminConfigurationServiceError::RuntimeReconciliationFailed
+        | AdminConfigurationServiceError::RuntimeRollbackFailed
+        | AdminConfigurationServiceError::Unavailable => {
             tracing::warn!(error = %source, "admin-configuration query service unavailable");
             ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Unavailable,

@@ -326,7 +326,6 @@ cargo test test_name
 ```
 
 - **채널**: Telegram, Discord 및 기타 채널 설정은 [docs/channels/overview.mdx](docs/channels/overview.mdx)를 참조하세요.
-- **채널 소스 변경**: 업데이트된 WASM이 번들되도록 `cargo build` 전에 `./channels-src/telegram/build.sh`를 실행하세요.
 
 ## OpenClaw 역사
 

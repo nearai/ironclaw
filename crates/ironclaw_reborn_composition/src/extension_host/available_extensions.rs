@@ -6,13 +6,16 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, VendorId, VirtualPath,
+    CapabilityId, CapabilitySurfaceKind, ChannelConnectionDescriptor, ChannelConnectionStrategy,
+    ExtensionId, HostPortCatalog, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    VendorId, VirtualPath,
 };
 use ironclaw_product::{
-    ChannelConnectionRequirement, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+    ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::sync::Arc;
@@ -177,16 +180,88 @@ fn channel_connection_for_package(
     if !directions.inbound {
         return None;
     }
-    let strategy = super::extension_lifecycle::channel_connect_strategy(&package.package);
-    // Catalog projection: descriptor-owned connect copy applies at
-    // activation/status time; the pre-install listing renders the derived
-    // fallback.
-    Some(super::extension_lifecycle::channel_connection_requirement(
-        package_ref.id.as_str(),
+    let connection = package
+        .resolved_manifest
+        .channel
+        .as_ref()
+        .and_then(|channel| channel.connection.as_ref())?;
+    Some(channel_connection_requirement_from_manifest(
+        package_ref,
         &package.package.manifest.name,
-        strategy,
-        None,
+        connection,
     ))
+}
+
+fn channel_connection_requirement_from_manifest(
+    package_ref: &LifecyclePackageRef,
+    display_name: &str,
+    connection: &ChannelConnectionDescriptor,
+) -> ChannelConnectionRequirement {
+    ChannelConnectionRequirement {
+        channel: package_ref.id.to_string(),
+        display_name: display_name.to_string(),
+        strategy: product_connection_strategy(connection.strategy),
+        instructions: connection.instructions.clone(),
+        input_placeholder: connection.input_placeholder.clone(),
+        submit_label: connection.submit_label.clone(),
+        error_message: connection.error_message.clone(),
+    }
+}
+
+fn product_connection_strategy(
+    strategy: ChannelConnectionStrategy,
+) -> RebornChannelConnectStrategy {
+    match strategy {
+        ChannelConnectionStrategy::AdminManagedChannels => {
+            RebornChannelConnectStrategy::AdminManagedChannels
+        }
+        ChannelConnectionStrategy::WebGeneratedCode => {
+            RebornChannelConnectStrategy::WebGeneratedCode
+        }
+        ChannelConnectionStrategy::OAuth => RebornChannelConnectStrategy::OAuth,
+    }
+}
+
+fn account_setup_descriptor_from_manifest(
+    package: &AvailableExtensionPackage,
+) -> Option<ExtensionAccountSetupDescriptor> {
+    let connection = package
+        .resolved_manifest
+        .channel
+        .as_ref()?
+        .connection
+        .as_ref()?;
+    if connection.strategy != ChannelConnectionStrategy::WebGeneratedCode {
+        // OAuth is already declared by the manifest credential/auth recipe;
+        // admin-managed channels have no caller pairing gate. This registry
+        // owns host-generated-code status only and must not recast every
+        // strategy as a synthetic Pairing credential requirement.
+        return None;
+    }
+    Some(ExtensionAccountSetupDescriptor {
+        extension_id: package.resolved_manifest.id.clone(),
+        auth_requirement: RuntimeCredentialAuthRequirement {
+            provider: connection.provider.clone(),
+            setup: RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: package.resolved_manifest.id.clone(),
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: channel_connection_requirement_from_manifest(
+            &package.package_ref,
+            &package.package.manifest.name,
+            connection,
+        ),
+        connection_notices: ChannelConnectionNoticePolicy {
+            connect_required: connection.notices.connect_required.clone(),
+            paired: connection.notices.paired.clone(),
+            already_paired_same_user: connection.notices.already_paired_same_user.clone(),
+            already_bound_to_other_user: connection.notices.already_bound_to_other_user.clone(),
+            expired_or_unknown: connection.notices.expired_or_unknown.clone(),
+        },
+        connection_success_message: connection.connection_success_message.clone(),
+        pairing_deep_link_template: connection.deep_link_template.clone(),
+        pairing_inbound_code_prefixes: connection.inbound_code_prefixes.clone(),
+    })
 }
 
 fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionOnboarding> {
@@ -200,12 +275,12 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
     // MCP credential (config-assembled at runtime; bucket 1 of the DEL-8 debt).
     if is_host_managed_credential_extension(&package.package_ref) {
         return Some(onboarding_message(
-            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
+            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings; installation finishes automatically once setup is ready.",
             Some(
                 "Configure NEAR AI for the assistant with an API key; MCP reuses that credential.",
             ),
             None,
-            "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools.",
+            "After NEAR AI is configured for the assistant, IronClaw finishes installation automatically and publishes its tools.",
         ));
     }
 
@@ -491,12 +566,24 @@ impl AvailableExtensionCatalog {
     }
 
     /// Project deployment-owned configuration directly from every available
-    /// manifest, including packages that have not been installed. The package
-    /// source stamp is preserved during re-resolution, so an uploaded bundle
-    /// cannot gain host-bundled authority through this read-only projection.
+    /// first-party manifest, including packages that have not been installed.
+    ///
+    /// An administrator configuration group is a deployment-owned, trust-gated
+    /// surface (see `parse_v3`'s trust gate). Only host-bundled (first-party)
+    /// packages may contribute one; a filesystem-discovered or otherwise
+    /// non-first-party package is skipped here as defense in depth, so it can
+    /// never collide with a first-party group id (which aborts boot via a
+    /// descriptor conflict) or be registered as a consumer of a first-party
+    /// group's non-secret routing. The parse-time gate already prevents such a
+    /// manifest from resolving an admin group at all; this fold-time filter is
+    /// the second, source-authoritative gate — an uploaded bundle cannot gain
+    /// host-bundled authority through this read-only projection.
     pub(crate) fn admin_configuration_uses(&self) -> Vec<AdminConfigurationCatalogUse> {
         let mut uses = Vec::new();
         for package in &self.packages {
+            if !package.source.allows_first_party() {
+                continue;
+            }
             uses.extend(
                 package
                     .resolved_manifest
@@ -511,6 +598,16 @@ impl AvailableExtensionCatalog {
             );
         }
         uses
+    }
+
+    /// Account-setup behavior is compiled from the same resolved manifests as
+    /// the rest of the catalog. The assembling binary does not maintain a
+    /// second provider-specific registry.
+    pub(crate) fn account_setup_descriptors(&self) -> Vec<ExtensionAccountSetupDescriptor> {
+        self.packages
+            .iter()
+            .filter_map(|package| account_setup_descriptor_from_manifest(package))
+            .collect()
     }
 
     /// Resolved deployment manifests for host-owned surfaces. This is a
@@ -1385,6 +1482,247 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
         }
     }
 
+    #[tokio::test]
+    async fn third_party_admin_configuration_manifest_is_skipped_without_aborting_boot() {
+        // A filesystem-discovered (untrusted) manifest that declares an
+        // `[admin_configuration]` group colliding with the first-party Slack
+        // group. Before the trust gate this either aborted every boot with a
+        // DescriptorConflict or silently registered `rogue` as a consumer of
+        // Slack's routing.
+        const ROGUE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "rogue"
+name = "Rogue"
+version = "0.1.0"
+description = "A third-party manifest that tries to claim a first-party admin group."
+trust = "third_party"
+
+[admin_configuration]
+group_id = "extension.slack"
+display_name = "Rogue Slack override"
+fields = [ { handle = "slack_bot_token", label = "Bot token", secret = true, required = true } ]
+
+[runtime]
+kind = "wasm"
+module = "wasm/rogue.wasm"
+
+[[tools]]
+id = "rogue.noop"
+description = "A no-op tool."
+effects = []
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/rogue/noop.input.v1.json"
+"#;
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/rogue/manifest.toml").unwrap(),
+            ROGUE_MANIFEST.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        // Filesystem discovery is fail-open: the trust-gated `[admin_configuration]`
+        // makes the rogue manifest invalid, so it is skipped rather than aborting
+        // the whole catalog load (and thus boot).
+        let mut catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
+        )
+        .await
+        .expect("catalog load must not abort on an invalid third-party admin manifest");
+        assert_eq!(
+            catalog.search("rogue").count(),
+            0,
+            "a third-party manifest declaring [admin_configuration] must be skipped entirely"
+        );
+
+        // The first-party Slack package still owns the extension.slack group,
+        // and the rogue package contributes nothing — no collision, so the
+        // downstream descriptor fold cannot raise a DescriptorConflict.
+        catalog.extend(AvailableExtensionCatalog::from_first_party_assets().unwrap());
+        let uses = catalog.admin_configuration_uses();
+        let slack_uses = uses
+            .iter()
+            .filter(|usage| usage.descriptor.group_id.as_str() == "extension.slack")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slack_uses.len(),
+            1,
+            "exactly one package may own the extension.slack admin group"
+        );
+        assert_eq!(slack_uses[0].package_id, "slack");
+        assert!(
+            uses.iter().all(|usage| usage.package_id != "rogue"),
+            "the rogue package must never be registered as an admin configuration consumer"
+        );
+    }
+
+    #[test]
+    fn admin_configuration_uses_excludes_non_first_party_sources() {
+        // Defense in depth for the composition fold: even if a package's
+        // resolved manifest carries an admin group, the projection trusts only
+        // host-bundled sources. Model a package whose resolved manifest declares
+        // an admin group but whose source is a non-first-party filesystem stamp
+        // (a shape the parse-time gate itself would never produce) and prove the
+        // fold skips it, so it can never collide or become a consumer.
+        let first_party =
+            admin_config_package("legit", "vendor.legit", ManifestSource::HostBundled);
+        let non_first_party =
+            admin_config_package("rogue", "extension.slack", ManifestSource::InstalledLocal);
+        let catalog = AvailableExtensionCatalog::from_packages(vec![first_party, non_first_party]);
+
+        let uses = catalog.admin_configuration_uses();
+        let groups = uses
+            .iter()
+            .map(|usage| usage.descriptor.group_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups,
+            vec!["vendor.legit".to_string()],
+            "only the host-bundled package may contribute an admin group"
+        );
+        assert!(
+            uses.iter().all(|usage| usage.package_id != "rogue"),
+            "a non-first-party source must never be folded as an admin configuration consumer"
+        );
+    }
+
+    #[test]
+    fn channel_extension_ordinary_user_summary_excludes_admin_configuration() {
+        // The ordinary-user projection (lifecycle/catalog/setup summary) that
+        // reaches the WebChat client must never carry deployment-owned admin
+        // material: no admin field handle, no admin label, no value, and no
+        // allowed-channels / subject-routes routing.
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        for (extension_id, forbidden) in [
+            (
+                "slack",
+                [
+                    "slack_bot_token",
+                    "slack_signing_secret",
+                    "slack_team_id",
+                    "slack_allowed_channels",
+                    "slack_subject_routes",
+                    "Allowed channels (JSON array",
+                    "extension.slack",
+                ]
+                .as_slice(),
+            ),
+            (
+                "telegram",
+                [
+                    "telegram_bot_token",
+                    "telegram_webhook_secret",
+                    "telegram_webhook_url",
+                    "extension.telegram",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
+            let summary = catalog.resolve(&package_ref).unwrap().summary();
+            let rendered =
+                serde_json::to_string(&summary).expect("summary serializes to wire JSON");
+            for needle in forbidden {
+                assert!(
+                    !rendered.contains(needle),
+                    "{extension_id} ordinary-user summary must not leak admin material `{needle}`: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// Build an available package whose resolved manifest declares an admin
+    /// group. The resolved manifest is parsed host-bundled so it carries the
+    /// group; the *package* source is set independently so the fold's
+    /// source gate can be exercised in isolation.
+    fn admin_config_package(
+        id: &str,
+        group_id: &str,
+        source: ManifestSource,
+    ) -> AvailableExtensionPackage {
+        let manifest_toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "admin config fixture"
+trust = "third_party"
+
+[admin_configuration]
+group_id = "{group_id}"
+display_name = "{id} deployment configuration"
+fields = [ {{ handle = "{id}_secret", label = "Secret", secret = true, required = true }} ]
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[tools]]
+id = "{id}.noop"
+description = "A no-op tool."
+effects = []
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{id}/noop.input.v1.json"
+"#
+        );
+        // Parse once through the single v3-capable entry point; the internal
+        // manifest model and the resolved contract both come from that record
+        // (mirrors `bundled_extension_package`). `ExtensionManifest::parse` is
+        // v2-only and would reject the v3 `[[tools]]` shape.
+        let record = ExtensionManifestRecord::from_toml(
+            &manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            None,
+            &capability_provider_contracts(),
+        )
+        .expect("v3 admin fixture parses");
+        let resolved_manifest = Arc::new(record.resolved().clone());
+        let manifest: ExtensionManifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .expect("resolved manifest converts to the internal model");
+        let package = ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{id}")).unwrap(),
+        )
+        .expect("package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id).unwrap(),
+            manifest_toml,
+            resolved_manifest,
+            source,
+            package,
+            cleanup_requirements: Vec::new(),
+            surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_presentation: None,
+            assets: Vec::new(),
+            onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn telegram_account_setup_projects_manifest_declared_code_prefixes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let telegram = catalog
+            .account_setup_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.extension_id.as_str() == "telegram")
+            .expect("Telegram account-setup descriptor");
+
+        assert_eq!(telegram.pairing_inbound_code_prefixes, ["/start"]);
+    }
+
     #[test]
     fn bundled_google_sheet_queries_discover_drive_lookup_tool() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -1546,10 +1884,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                         .as_deref()
                         .is_some_and(|step| {
                             step.starts_with("After authorization completes")
-                                && step.contains("activate")
+                                && step.contains("automatically")
                                 && !step.contains("Install")
+                                && !step.contains("activate")
                         }),
-                    "{extension_id} configure next step should describe post-authorization activation"
+                    "{extension_id} configure next step should describe automatic post-authorization readiness"
                 );
             } else if extension_id == "slack" {
                 assert!(
@@ -1594,10 +1933,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                         .as_deref()
                         .is_some_and(|step| {
                             step.starts_with("After saving")
-                                && step.contains("activate")
+                                && step.contains("automatically")
                                 && !step.contains("Install")
+                                && !step.contains("activate")
                         }),
-                    "{extension_id} configure next step should describe activation after saving credentials"
+                    "{extension_id} configure next step should describe automatic readiness after saving credentials"
                 );
             } else if extension_id == NEARAI_EXTENSION_ID {
                 assert_eq!(
@@ -1609,22 +1949,24 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
                     Some(
-                        "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                        "After NEAR AI is configured for the assistant, IronClaw finishes installation automatically and publishes its tools."
                     )
                 );
             } else if extension_id == "web-access" {
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
-                    Some("Activate Web Access to publish its tools."),
-                    "web-access configure next step should not repeat install-first copy"
+                    Some("IronClaw publishes Web Access tools automatically during installation."),
+                    "web-access copy should describe automatic readiness"
                 );
             } else {
                 assert!(
                     onboarding
                         .credential_next_step
                         .as_deref()
-                        .is_some_and(|step| step.contains("Install") && step.contains("activate")),
-                    "{extension_id} onboarding should preserve install-then-activate ordering"
+                        .is_some_and(
+                            |step| step.contains("automatically") && !step.contains("activate")
+                        ),
+                    "{extension_id} onboarding should describe automatic readiness"
                 );
             }
         }
@@ -1716,17 +2058,18 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     }
 
     #[test]
-    fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
+    fn bundled_slack_tools_extension_projects_manifest_declared_personal_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
-        // Model B: the user-installable tools extension (`slack`) surfaces the
-        // slack_personal OAuth connect requirement, not the hidden bot channel.
+        // The user-installable Slack extension derives its personal OAuth
+        // requirement from the same manifest credential handle used by its
+        // runtime tools. There is no package-specific projection override.
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let summary = catalog.resolve(&package_ref).unwrap().summary();
 
         assert_eq!(summary.credential_requirements.len(), 1);
         let requirement = &summary.credential_requirements[0];
-        assert_eq!(requirement.name, "slack_personal_oauth");
+        assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
         assert!(matches!(

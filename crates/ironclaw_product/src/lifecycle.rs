@@ -13,7 +13,6 @@ use ironclaw_host_api::{
     UserId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use serde_json::Value;
 
 use crate::{ProductCommandContext, ProductWorkflowError, RebornChannelConnectStrategy};
 
@@ -157,17 +156,6 @@ pub enum LifecycleProductAction {
     ExtensionInstall {
         package_ref: LifecyclePackageRef,
     },
-    ExtensionAuth {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionActivate {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionConfigure {
-        package_ref: LifecyclePackageRef,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<Value>,
-    },
     ExtensionRemove {
         package_ref: LifecyclePackageRef,
     },
@@ -190,9 +178,6 @@ pub enum LifecycleCommandKind {
     ExtensionSearch,
     ExtensionList,
     ExtensionInstall,
-    ExtensionAuth,
-    ExtensionActivate,
-    ExtensionConfigure,
     ExtensionRemove,
     SkillSearch,
     SkillInstall,
@@ -200,13 +185,10 @@ pub enum LifecycleCommandKind {
 }
 
 impl LifecycleCommandKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 7] = [
         Self::ExtensionSearch,
         Self::ExtensionList,
         Self::ExtensionInstall,
-        Self::ExtensionAuth,
-        Self::ExtensionActivate,
-        Self::ExtensionConfigure,
         Self::ExtensionRemove,
         Self::SkillSearch,
         Self::SkillInstall,
@@ -218,9 +200,6 @@ impl LifecycleCommandKind {
             Self::ExtensionSearch => "extension_search",
             Self::ExtensionList => "extension_list",
             Self::ExtensionInstall => "extension_install",
-            Self::ExtensionAuth => "extension_auth",
-            Self::ExtensionActivate => "extension_activate",
-            Self::ExtensionConfigure => "extension_configure",
             Self::ExtensionRemove => "extension_remove",
             Self::SkillSearch => "skill_search",
             Self::SkillInstall => "skill_install",
@@ -242,9 +221,6 @@ impl LifecycleProductAction {
             Self::ExtensionSearch { .. } => LifecycleCommandKind::ExtensionSearch,
             Self::ExtensionList => LifecycleCommandKind::ExtensionList,
             Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
-            Self::ExtensionAuth { .. } => LifecycleCommandKind::ExtensionAuth,
-            Self::ExtensionActivate { .. } => LifecycleCommandKind::ExtensionActivate,
-            Self::ExtensionConfigure { .. } => LifecycleCommandKind::ExtensionConfigure,
             Self::ExtensionRemove { .. } => LifecycleCommandKind::ExtensionRemove,
             Self::SkillSearch { .. } => LifecycleCommandKind::SkillSearch,
             Self::SkillInstall { .. } => LifecycleCommandKind::SkillInstall,
@@ -261,9 +237,6 @@ impl LifecycleProductAction {
     pub fn package_ref(&self) -> Option<&LifecyclePackageRef> {
         match self {
             Self::ExtensionInstall { package_ref }
-            | Self::ExtensionAuth { package_ref }
-            | Self::ExtensionActivate { package_ref }
-            | Self::ExtensionConfigure { package_ref, .. }
             | Self::ExtensionRemove { package_ref }
             | Self::SkillRemove { package_ref } => Some(package_ref),
             Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
@@ -308,11 +281,6 @@ pub enum LifecycleProductPayload {
         visible_capability_ids: Vec<String>,
         #[serde(default)]
         next_step: String,
-    },
-    ExtensionActivate {
-        activated: bool,
-        #[serde(default)]
-        visible_capability_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection_required: Option<ChannelConnectionRequirement>,
     },
@@ -386,16 +354,19 @@ pub struct LifecycleSearchExtensionSummary {
     /// The installed state of this catalog result for the caller, or `None`
     /// when the caller has no visible installation of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installation_phase: Option<InstallationState>,
+    pub installation_phase: Option<LifecyclePublicState>,
 }
 
-/// Whether an installed extension is tenant-shared or private to the caller
-/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
-/// `Option` on the summary so pre-#5459 payloads keep deserializing.
+/// Compatibility projection of persisted installation ownership.
+///
+/// Current lifecycle operations always return `Private`: tenant-level admin
+/// configuration is not user membership. `Shared` remains only so a legacy
+/// tenant-owned row can be read and narrowed during restore without changing
+/// the durable wire enum in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleInstallScope {
-    /// Installed for the whole tenant (admin install) — visible to every user.
+    /// Legacy tenant-owned installation; never created by current lifecycle.
     Shared,
     /// Installed privately by the caller — visible only to them.
     Private,
@@ -405,11 +376,49 @@ pub enum LifecycleInstallScope {
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     /// The projected installation state (§6.1) for the caller's installation.
-    pub phase: InstallationState,
+    pub phase: LifecyclePublicState,
     /// `None` only when the caller has no visible installation (projection of
     /// an uninstalled package); list responses always carry `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_scope: Option<LifecycleInstallScope>,
+}
+
+/// The complete public extension lifecycle vocabulary.
+///
+/// Host/runtime checkpoints such as `Installed`, `Configured`, `Disabled`,
+/// `Failed`, and `Removed` are implementation details. Product surfaces must
+/// never expose them as additional user actions or resting states: membership
+/// is absent (`uninstalled`), present but not ready (`setup_needed`), or
+/// present and callable (`active`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePublicState {
+    Uninstalled,
+    SetupNeeded,
+    Active,
+}
+
+impl LifecyclePublicState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uninstalled => "uninstalled",
+            Self::SetupNeeded => "setup_needed",
+            Self::Active => "active",
+        }
+    }
+
+    /// Collapse a host-owned internal checkpoint onto the product contract.
+    pub fn from_host_checkpoint(state: InstallationState) -> Self {
+        match state {
+            InstallationState::Active => Self::Active,
+            InstallationState::Removed => Self::Uninstalled,
+            InstallationState::Installed
+            | InstallationState::Configured
+            | InstallationState::Disabled
+            | InstallationState::Failed
+            | InstallationState::Unsupported => Self::SetupNeeded,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,12 +504,9 @@ pub enum LifecycleSkillSource {
 pub struct LifecycleProductResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<LifecyclePackageRef>,
-    /// The package's resting installation state for a single-package action
-    /// (install → `Installed`, activate → `Active`, remove → `Removed`,
-    /// failure → `Failed` / `Unsupported`). For multi-item responses (search /
-    /// list) this is a neutral `Installed`; the per-item states ride the
-    /// payload.
-    pub phase: InstallationState,
+    /// The package's public lifecycle state. Internal installation/runtime
+    /// checkpoints are deliberately collapsed before crossing this boundary.
+    pub phase: LifecyclePublicState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -512,7 +518,7 @@ pub struct LifecycleProductResponse {
 impl LifecycleProductResponse {
     pub fn projection(
         package_ref: Option<LifecyclePackageRef>,
-        phase: InstallationState,
+        phase: LifecyclePublicState,
         blockers: Vec<LifecycleReadinessBlocker>,
     ) -> Self {
         Self {
@@ -522,6 +528,29 @@ impl LifecycleProductResponse {
             message: None,
             payload: None,
         }
+    }
+
+    /// Return the caller-visible extension packages that are currently
+    /// callable.
+    ///
+    /// This deliberately derives authority from the public, caller-scoped
+    /// lifecycle projection. A provider-global runtime catalog may contain
+    /// tools discovered by another ready member, but only packages projected
+    /// as [`LifecyclePublicState::Active`] for this caller may cross into that
+    /// caller's model-visible or executable capability surface.
+    pub fn callable_extension_package_refs(
+        &self,
+    ) -> Result<Vec<LifecyclePackageRef>, ProductWorkflowError> {
+        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = &self.payload else {
+            return Err(ProductWorkflowError::Transient {
+                reason: "caller extension readiness projection is unavailable".to_string(),
+            });
+        };
+        Ok(extensions
+            .iter()
+            .filter(|extension| extension.phase == LifecyclePublicState::Active)
+            .map(|extension| extension.summary.package_ref.clone())
+            .collect())
     }
 }
 
@@ -624,7 +653,7 @@ impl UnsupportedLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             package_ref,
-            InstallationState::Unsupported,
+            LifecyclePublicState::SetupNeeded,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
             ))?],
@@ -706,4 +735,128 @@ fn validate_optional_ref(
     value: Option<String>,
 ) -> Result<Option<LifecycleBlockerRef>, ProductWorkflowError> {
     value.map(LifecycleBlockerRef::new).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_response_owns_and_serializes_only_public_states() {
+        for (state, expected) in [
+            (LifecyclePublicState::Uninstalled, "uninstalled"),
+            (LifecyclePublicState::SetupNeeded, "setup_needed"),
+            (LifecyclePublicState::Active, "active"),
+        ] {
+            let response = LifecycleProductResponse::projection(None, state, Vec::new());
+            assert_eq!(response.phase, state);
+            assert_eq!(state.as_str(), expected);
+            let wire = serde_json::to_value(response).expect("lifecycle response serializes");
+            assert_eq!(wire["phase"], expected, "public state {state:?}");
+        }
+    }
+
+    #[test]
+    fn public_state_wire_round_trips_as_the_same_public_state() {
+        for (wire, expected_state) in [
+            ("uninstalled", LifecyclePublicState::Uninstalled),
+            ("setup_needed", LifecyclePublicState::SetupNeeded),
+            ("active", LifecyclePublicState::Active),
+        ] {
+            let response: LifecycleProductResponse = serde_json::from_value(serde_json::json!({
+                "phase": wire,
+                "blockers": []
+            }))
+            .expect("public lifecycle response deserializes");
+            assert_eq!(response.phase, expected_state);
+            let serialized = serde_json::to_value(response).expect("response reserializes");
+            assert_eq!(serialized["phase"], wire);
+        }
+    }
+
+    #[test]
+    fn host_checkpoints_collapse_to_the_public_state_vocabulary() {
+        for (checkpoint, expected_state) in [
+            (
+                InstallationState::Removed,
+                LifecyclePublicState::Uninstalled,
+            ),
+            (
+                InstallationState::Installed,
+                LifecyclePublicState::SetupNeeded,
+            ),
+            (
+                InstallationState::Configured,
+                LifecyclePublicState::SetupNeeded,
+            ),
+            (
+                InstallationState::Disabled,
+                LifecyclePublicState::SetupNeeded,
+            ),
+            (InstallationState::Failed, LifecyclePublicState::SetupNeeded),
+            (
+                InstallationState::Unsupported,
+                LifecyclePublicState::SetupNeeded,
+            ),
+            (InstallationState::Active, LifecyclePublicState::Active),
+        ] {
+            assert_eq!(
+                LifecyclePublicState::from_host_checkpoint(checkpoint),
+                expected_state
+            );
+        }
+    }
+
+    #[test]
+    fn callable_extension_packages_are_derived_only_from_active_list_rows() {
+        let response: LifecycleProductResponse = serde_json::from_value(serde_json::json!({
+            "phase": "active",
+            "blockers": [],
+            "payload": {
+                "kind": "extension_list",
+                "extensions": [
+                    {
+                        "summary": {
+                            "package_ref": {"kind": "extension", "id": "ready"},
+                            "name": "Ready",
+                            "version": "1",
+                            "description": "ready",
+                            "source": "host_bundled",
+                            "runtime_kind": "first_party",
+                            "visible_read_only_capability_ids": [],
+                            "credential_requirements": []
+                        },
+                        "phase": "active",
+                        "install_scope": "private"
+                    },
+                    {
+                        "summary": {
+                            "package_ref": {"kind": "extension", "id": "setup-needed"},
+                            "name": "Setup needed",
+                            "version": "1",
+                            "description": "setup needed",
+                            "source": "host_bundled",
+                            "runtime_kind": "first_party",
+                            "visible_read_only_capability_ids": [],
+                            "credential_requirements": []
+                        },
+                        "phase": "setup_needed",
+                        "install_scope": "private"
+                    }
+                ],
+                "count": 2
+            }
+        }))
+        .expect("extension list response");
+
+        assert_eq!(
+            response
+                .callable_extension_package_refs()
+                .expect("callable packages")
+                .into_iter()
+                .map(|package_ref| package_ref.id.into_inner())
+                .collect::<Vec<_>>(),
+            vec!["ready"]
+        );
+    }
 }

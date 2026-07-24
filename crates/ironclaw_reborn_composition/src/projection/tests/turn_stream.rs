@@ -236,7 +236,7 @@ async fn product_event_stream_offers_always_for_typed_approval_gate() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStorePort> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -378,7 +378,7 @@ async fn product_event_stream_projects_network_approval_context() {
         .await
         .unwrap();
 
-    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStorePort> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -495,7 +495,7 @@ async fn product_event_stream_projects_spawn_approval_context() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStorePort> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(

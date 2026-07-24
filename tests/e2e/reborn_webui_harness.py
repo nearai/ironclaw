@@ -423,6 +423,29 @@ def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def fetch_extension_oauth_requirement(
+    client: httpx.AsyncClient,
+    base_url: str,
+    package_id: str,
+) -> dict:
+    """Read the opaque OAuth requirement declared by an installed manifest."""
+    response = await client.get(
+        f"{base_url}/api/webchat/v2/extensions/{package_id}/setup",
+        timeout=15,
+    )
+    response.raise_for_status()
+    requirements = [
+        secret
+        for secret in response.json().get("secrets", [])
+        if (secret.get("setup") or {}).get("kind") == "oauth"
+    ]
+    assert len(requirements) == 1, (
+        f"expected exactly one manifest-declared OAuth requirement for {package_id}; "
+        f"got {requirements}"
+    )
+    return requirements[0]
+
+
 def client_action_id() -> str:
     """Idempotency key accepted by ``product_surface_inbound::parse_client_action_id``."""
     return str(uuid.uuid4())

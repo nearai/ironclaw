@@ -49,8 +49,7 @@ use ironclaw_runner::{
         RuntimeTurnStateStore, build_product_live_planned_runtime,
     },
     subagent::await_edge::{
-        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-        store::FilesystemAwaitEdgeStore,
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     subagent::goal_store::in_memory_backed_subagent_goal_store,
 };
@@ -61,9 +60,9 @@ use ironclaw_threads::{
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CancelRunRequest, FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey,
-    LoopResultRef, SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, GetRunStateRequest, IdempotencyKey, LoopResultRef, SanitizedCancelReason,
+    TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateRowStore,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
         CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
@@ -83,7 +82,7 @@ pub struct ProductLiveAgentLoopHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     thread_service: InMemorySessionThreadService,
-    turn_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    turn_store: Arc<TurnStateRowStore<InMemoryBackend>>,
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
@@ -236,6 +235,12 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
             actor_user_id: user_id.clone(),
             subject_user_id: Some(user_id),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:live-harness")
+                .expect("valid harness source binding ref"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:live-harness",
+            )
+            .expect("valid harness reply target binding ref"),
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
@@ -305,51 +310,51 @@ impl ProductLiveAgentLoopHarness {
         // requirements / fails the exit (#6287 IronLoop). `None` for the
         // non-ProductLive fakes (which do not persist gate records), preserving
         // the executor's tolerant "no store wired" path.
-        let mut turn_executor_gate_store: Option<Arc<dyn ironclaw_run_state::GateRecordStore>> =
+        let mut turn_executor_gate_store: Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> =
             None;
-        let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-            if let Some(capability) = config.host_runtime_capability {
-                // Durable gate-record + replay-payload stores over ONE in-memory
-                // filesystem (production mount view via `wrap_scoped`), shared by
-                // both stores so a raise and its resume round-trip through the
-                // same records.
-                let capability_store_filesystem =
-                    ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
-                let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
-                    Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                        Arc::clone(&capability_store_filesystem),
-                    ));
-                turn_executor_gate_store = Some(Arc::clone(&gate_record_store));
-                let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> =
-                    Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
-                        capability_store_filesystem,
-                    ));
-                Arc::new(ProductLiveHostRuntimeCapabilityFactory {
-                    services: host_runtime_services.expect("host runtime services"),
-                    io: host_runtime_io.expect("host runtime capability io"),
-                    staged_inputs: Arc::clone(&host_runtime_staged_inputs),
-                    invocations: Arc::clone(&capability_invocations),
-                    results: Arc::clone(&capability_results),
-                    capability_id: harness_capability_id(&capability.capability_id),
-                    input: capability.input,
-                    user_id: binding
-                        .subject_user_id
-                        .clone()
-                        .expect("harness subject user id"),
-                    cancellation_factory: cancellation_factory.clone(),
-                    model_provider: config.model_provider.clone(),
-                    model_id: config.model_id.clone(),
-                    gate_record_store,
-                    replay_payload_store,
-                })
-            } else if let Some(capability) = config.capability {
-                Arc::new(RecordingCapabilityFactory {
-                    capability,
-                    invocations: Arc::clone(&capability_invocations),
-                })
-            } else {
-                Arc::new(EmptyCapabilityFactory)
-            };
+        let capability_factory: Arc<dyn LoopCapabilityPortFactory> = if let Some(capability) =
+            config.host_runtime_capability
+        {
+            // Durable gate-record + replay-payload stores over ONE in-memory
+            // filesystem (production mount view via `wrap_scoped`), shared by
+            // both stores so a raise and its resume round-trip through the
+            // same records.
+            let capability_store_filesystem =
+                ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
+            let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
+                ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+            );
+            turn_executor_gate_store = Some(Arc::clone(&gate_record_store));
+            let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> =
+                Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
+                    capability_store_filesystem,
+                ));
+            Arc::new(ProductLiveHostRuntimeCapabilityFactory {
+                services: host_runtime_services.expect("host runtime services"),
+                io: host_runtime_io.expect("host runtime capability io"),
+                staged_inputs: Arc::clone(&host_runtime_staged_inputs),
+                invocations: Arc::clone(&capability_invocations),
+                results: Arc::clone(&capability_results),
+                capability_id: harness_capability_id(&capability.capability_id),
+                input: capability.input,
+                user_id: binding
+                    .subject_user_id
+                    .clone()
+                    .expect("harness subject user id"),
+                cancellation_factory: cancellation_factory.clone(),
+                model_provider: config.model_provider.clone(),
+                model_id: config.model_id.clone(),
+                gate_record_store,
+                replay_payload_store,
+            })
+        } else if let Some(capability) = config.capability {
+            Arc::new(RecordingCapabilityFactory {
+                capability,
+                invocations: Arc::clone(&capability_invocations),
+            })
+        } else {
+            Arc::new(EmptyCapabilityFactory)
+        };
         let model_route_resolver = Arc::new(
             StaticModelRouteResolver::new(ModelRoutePolicy::new(
                 ModelSelectionMode::DeveloperAnyConfigured,
@@ -369,7 +374,7 @@ impl ProductLiveAgentLoopHarness {
             MountPermissions::read_write_list_delete(),
         )])
         .unwrap();
-        let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+        let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::new(
             ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
         )));
         let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
@@ -736,8 +741,8 @@ struct ProductLiveHostRuntimeCapabilityFactory {
     // capability port, so a raise and its later resume round-trip through the
     // SAME store (both built over one in-memory filesystem below). Modeling the
     // production wiring the local-dev path already has (#6287).
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 #[async_trait]

@@ -6,6 +6,8 @@
 //! The ack and text helpers intentionally mirror the chat slice until the two
 //! surfaces share a crate-private normalization module.
 
+// arch-exempt: large_file, mechanical store-port rename churn only, plan #6263
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +28,7 @@ use crate::{
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProjectionRef,
     OpenAiCompatProjectionStreamer, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
     OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort, OpenAiCompatRequestFingerprint,
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
     OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseProjectionStreamRequest, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
@@ -63,7 +65,7 @@ fn openai_product_activity_id(surface: &str, operation_id: &str, public_id: &str
 #[derive(Clone)]
 pub struct OpenAiResponsesWorkflow {
     product_surface: Arc<dyn ProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     projection_reader: Arc<dyn OpenAiResponsesProjectionReader>,
     /// Wired by host composition when OpenAI-compatible streaming is enabled.
     /// When `None`, `stream: true` requests fail closed.
@@ -86,7 +88,7 @@ pub struct OpenAiResponsesWorkflow {
 impl OpenAiResponsesWorkflow {
     pub fn new(
         product_surface: Arc<dyn ProductSurface>,
-        ref_store: Arc<dyn OpenAiCompatRefStore>,
+        ref_store: Arc<dyn OpenAiCompatRefStorePort>,
         projection_reader: Arc<dyn OpenAiResponsesProjectionReader>,
     ) -> Self {
         Self {

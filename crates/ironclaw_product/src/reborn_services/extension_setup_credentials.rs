@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use ironclaw_auth::{AuthProductScope, CredentialAccountUpdateBinding};
+use ironclaw_auth::{AuthProductScope, CredentialAccountStatus, CredentialAccountUpdateBinding};
 use ironclaw_host_api::{ExtensionId, ProductSurfaceError, ProductSurfaceValidationCode};
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -14,6 +14,7 @@ use crate::{
 use super::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest,
     extension_credentials::{
+        ExtensionCredentialReadiness, RequirementCredentialReadiness,
         credential_status_for_requirement, credential_status_for_requirement_strict,
         provider_for_requirement, unique_requirements,
     },
@@ -38,28 +39,54 @@ pub(super) async fn project(
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     requirements: &[LifecycleExtensionCredentialRequirement],
-) -> Result<Vec<RebornExtensionSetupSecret>, ProductSurfaceError> {
+) -> Result<
+    (
+        Vec<RebornExtensionSetupSecret>,
+        ExtensionCredentialReadiness,
+    ),
+    ProductSurfaceError,
+> {
     let mut secrets = Vec::with_capacity(requirements.len());
+    let mut missing_required = false;
+    let mut unknown_required = false;
     for requirement in requirements {
-        let account = match extension_credentials {
+        let (account, readiness) = match extension_credentials {
             Some(service) => {
                 credential_status_for_requirement(service, scope.clone(), extension_id, requirement)
                     .await?
             }
-            None => None,
+            None => (None, RequirementCredentialReadiness::Unknown),
         };
+        if requirement.required {
+            match readiness {
+                RequirementCredentialReadiness::Configured => {}
+                RequirementCredentialReadiness::Missing => missing_required = true,
+                RequirementCredentialReadiness::Unknown => unknown_required = true,
+            }
+        }
         secrets.push(RebornExtensionSetupSecret {
             name: requirement.name.clone(),
             provider: requirement.provider.clone(),
             prompt: credential_prompt(requirement),
             optional: !requirement.required,
-            provided: account.is_some(),
+            provided: account
+                .as_ref()
+                .is_some_and(|account| account.status == CredentialAccountStatus::Configured),
             setup: setup_projection(&scope, extension_id, requirement),
             credential_ref: account.map(|account| account.id.to_string()),
         });
     }
     secrets.sort_by_key(|secret| !secret.provided);
-    Ok(secrets)
+    let readiness = if requirements.is_empty() {
+        ExtensionCredentialReadiness::NotRequired
+    } else if missing_required {
+        ExtensionCredentialReadiness::MissingRequired
+    } else if unknown_required {
+        ExtensionCredentialReadiness::Unknown
+    } else {
+        ExtensionCredentialReadiness::Configured
+    };
+    Ok((secrets, readiness))
 }
 
 /// Parse the setup submit payload (`secrets` + `fields` maps). Shared by the
@@ -136,8 +163,11 @@ async fn submit_manual_token_requirement(
     let existing =
         credential_status_for_requirement_strict(service, scope.clone(), extension_id, requirement)
             .await?;
+    let configured = existing
+        .as_ref()
+        .is_some_and(|account| account.status == CredentialAccountStatus::Configured);
     let Some(raw_secret) = raw_secret else {
-        if requirement.required && existing.is_none() {
+        if requirement.required && !configured {
             return Err(validation_error(
                 "secrets",
                 ProductSurfaceValidationCode::MissingField,
@@ -147,7 +177,7 @@ async fn submit_manual_token_requirement(
     };
     let trimmed = raw_secret.trim();
     if trimmed.is_empty() {
-        if requirement.required && existing.is_none() {
+        if requirement.required && !configured {
             return Err(validation_error(
                 "secrets",
                 ProductSurfaceValidationCode::Blank,
@@ -229,7 +259,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn project_treats_retryable_unavailable_credential_status_as_unconfigured() {
+    async fn project_preserves_retryable_unavailable_credential_status_as_unknown() {
         let service = FailingCredentialSetupService {
             error: ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Unavailable,
@@ -242,7 +272,7 @@ mod tests {
         };
         let extension_id = ExtensionId::new("google-docs").expect("extension id");
 
-        let secrets = project(
+        let (secrets, readiness) = project(
             Some(&service),
             test_scope(),
             &extension_id,
@@ -251,6 +281,7 @@ mod tests {
         .await
         .expect("setup projection should render when credential status is unavailable");
 
+        assert_eq!(readiness, ExtensionCredentialReadiness::Unknown);
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].name, "google_oauth");
         assert_eq!(secrets[0].provider, "google");

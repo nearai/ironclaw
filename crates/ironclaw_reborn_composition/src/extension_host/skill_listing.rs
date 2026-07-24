@@ -5,7 +5,7 @@ use ironclaw_skills::{ManagedSkillSource, SkillManagementError, SkillManagementE
 use crate::RebornBuildError;
 use crate::extension_host::bundled_skills::bundled_reborn_skill_summaries;
 use crate::extension_host::lifecycle::{
-    RebornLocalSkillManagementError, build_existing_local_dev_skill_management_port,
+    SkillManagementPortError, build_existing_local_dev_skill_management_port,
 };
 
 pub async fn list_reborn_local_skills(
@@ -63,14 +63,12 @@ pub enum RebornSkillListError {
     Unavailable { reason: String },
 }
 
-fn map_local_skill_management_error(
-    error: RebornLocalSkillManagementError,
-) -> RebornSkillListError {
+fn map_local_skill_management_error(error: SkillManagementPortError) -> RebornSkillListError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { reason } => {
+        SkillManagementPortError::InvalidContext { reason } => {
             RebornSkillListError::InvalidRequest { reason }
         }
-        RebornLocalSkillManagementError::Skill(error) => map_skill_management_error(error),
+        SkillManagementPortError::Skill(error) => map_skill_management_error(error),
     }
 }
 

@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope,
+    OutboundDeliveryTargetSummary, OutboundError, RunFinalReplyDestination,
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
@@ -100,9 +100,8 @@ impl RebornOutboundPreferencesFacade {
         caller: &ProductSurfaceCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<OutboundDeliveryTargetEntry, ProductSurfaceError> {
-        let target_id = outbound_target_id_from_reborn(target_id)?;
         self.targets
-            .resolve_outbound_delivery_target(&target_scope(caller), &target_id)
+            .resolve_outbound_delivery_target(&target_scope(caller), target_id)
             .await
             .map_err(map_outbound_repository_error)?
             .ok_or_else(outbound_target_not_found)
@@ -143,9 +142,15 @@ impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
             Some(target_id) => Some(self.resolve_final_reply_target(&caller, target_id).await?),
             None => None,
         };
-        let final_reply_target = resolved_final_reply_target
-            .as_ref()
-            .map(|entry| entry.reply_target_binding_ref.clone());
+        let final_reply_target =
+            resolved_final_reply_target
+                .as_ref()
+                .and_then(|entry| match &entry.destination {
+                    RunFinalReplyDestination::External {
+                        reply_target_binding_ref,
+                    } => Some(reply_target_binding_ref.clone()),
+                    RunFinalReplyDestination::WebApp => None,
+                });
         let existing = self
             .preferences
             .load_communication_preference(key)
@@ -209,26 +214,11 @@ fn target_scope(caller: &ProductSurfaceCaller) -> OutboundDeliveryTargetScope {
     OutboundDeliveryTargetScope::new(caller.tenant_id.clone(), caller.user_id.clone())
 }
 
-fn outbound_target_id_from_reborn(
-    target_id: &RebornOutboundDeliveryTargetId,
-) -> Result<OutboundDeliveryTargetId, ProductSurfaceError> {
-    OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|_| ProductSurfaceError {
-        code: ProductSurfaceErrorCode::InvalidRequest,
-        kind: ProductSurfaceErrorKind::Validation,
-        status_code: 400,
-        retryable: false,
-        field: Some("final_reply_target_id".to_string()),
-        validation_code: None,
-    })
-}
-
 fn reborn_summary_from_outbound(
     summary: &OutboundDeliveryTargetSummary,
 ) -> Result<RebornOutboundDeliveryTargetSummary, ProductSurfaceError> {
-    let target_id = RebornOutboundDeliveryTargetId::new(summary.target_id.as_str())
-        .map_err(|_| outbound_target_projection_error())?;
     RebornOutboundDeliveryTargetSummary::new(
-        target_id,
+        summary.target_id.clone(),
         summary.channel.as_str(),
         summary.display_name.as_str(),
         summary
@@ -319,7 +309,7 @@ mod tests {
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
         DeliveryDefaultScope, DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
-        OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry,
+        OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry,
         VersionedCommunicationPreferenceRecord,
     };
 
@@ -398,10 +388,13 @@ mod tests {
             _caller: &OutboundDeliveryTargetScope,
             target: &ReplyTargetBindingRef,
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
-            Ok(
-                (self.entry.reply_target_binding_ref.as_str() == target.as_str())
-                    .then(|| self.entry.clone()),
+            Ok(matches!(
+                &self.entry.destination,
+                RunFinalReplyDestination::External {
+                    reply_target_binding_ref,
+                } if reply_target_binding_ref.as_str() == target.as_str()
             )
+            .then(|| self.entry.clone()))
         }
     }
 
@@ -1401,7 +1394,9 @@ mod tests {
                 auth_prompts: true,
                 modalities: Vec::new(),
             },
-            reply_target_binding_ref: reply_ref(reply_target),
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref: reply_ref(reply_target),
+            },
             // Existing registry-path tests query as tenant-alpha/user-alpha, so
             // fixtures claim that owner and survive the caller-scoping filter.
             owner: OutboundDeliveryTargetOwner::new(tenant("tenant-alpha"), user("user-alpha")),

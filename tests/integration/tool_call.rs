@@ -172,7 +172,7 @@ async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A prior assistant refusal is conversation history, not capability truth.
-/// Once Slack is installed and activated, the refreshed tool definitions must
+/// Once Slack is installed and ready, the refreshed tool definitions must
 /// be authoritative and the same conversation must be able to dispatch a real
 /// bundled `slack.*` capability through the production extension runtime.
 #[tokio::test]
@@ -214,10 +214,6 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "slack"}),
-            ),
             RebornScriptedReply::text("Slack is ready."),
         ])
         .build()
@@ -228,13 +224,13 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
         .await
         .expect("Slack personal credential is seeded with real test material");
     lifecycle
-        .submit_turn("Install and activate Slack")
+        .submit_turn("Install Slack")
         .await
         .expect("Slack lifecycle turn completes");
     lifecycle
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await
-        .expect("Slack activation publishes its capability surface");
+        .expect("Slack install publishes its capability surface once ready");
 
     caller
         .submit_turn("Now list my Slack conversations")
@@ -249,7 +245,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     caller
         .assert_model_tools_contains("slack__list_conversations")
         .await
-        .expect("current model request advertises the activated Slack tool");
+        .expect("current model request advertises the active Slack tool");
     caller
         .assert_system_prompt_contains(
             "The current tool definitions are authoritative for this turn",
@@ -259,7 +255,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
     caller
         .assert_tool_invoked("slack.list_conversations")
         .await
-        .expect("activated Slack capability dispatches through the real runtime");
+        .expect("active Slack capability dispatches through the real runtime");
     caller
         .assert_tool_result_contains("\"conversations\":[]")
         .await

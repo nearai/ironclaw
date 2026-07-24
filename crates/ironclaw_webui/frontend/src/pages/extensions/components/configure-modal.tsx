@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import React from "react";
@@ -11,62 +11,37 @@ import {
 } from "../hooks/useExtensions";
 import {
   extensionIsActive,
-  extensionLifecycleState,
-  setupReadyForActivation,
 } from "../lib/extension-actions";
-import { connectsViaOauth, hasChannelSurface } from "../lib/extensions-schema";
-import { redeemPairingCode } from "../lib/pairing-api";
-import { useQuery } from "@tanstack/react-query";
-import { getExtensionPairingStatus } from "../../../lib/extension-pairing-api";
+import {
+  channelConnection,
+  hasChannelSurface,
+  isWebGeneratedCodeConnection,
+} from "../lib/extensions-schema";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
-import { activateExtension } from "../lib/extensions-api";
-import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
-export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
+export function ConfigureModal({ extension, onClose, onSaved }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
-  const { secrets = [], fields = [], onboarding, isLoading, error } =
+  const { secrets = [], onboarding, isLoading, error } =
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
-  const [fieldValues, setFieldValues] = React.useState({});
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"
       ? extension.packageRef
       : extension?.packageRef?.id || "";
-  const channelId = extension?.channel || packageId;
-  const lifecycleState = extensionLifecycleState(extension);
   const handleOauthConfigured = React.useCallback(async () => {
     onClose();
-    // OAuth connect expresses the user's intent to make the extension live:
-    // best-effort activate any extension whose wire lifecycle state says it
-    // is not active yet, exactly like pairing redemption below.
-    if (packageId && !extensionIsActive(extension)) {
-      try {
-        await activateExtension({ id: packageId });
-      } catch {
-        console.error("extension activation after OAuth failed.");
-      }
-    }
-    // invalidateQueries refetches active queries and resolves when they
-    // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
+    // The server-owned OAuth continuation performs lifecycle activation and
+    // connection fan-out transactionally. The browser only refreshes the
+    // authoritative caller-scoped projection after callback completion.
     await Promise.all(
       [["extensions"], ["extension-registry"], ["extension-setup", packageId]].map(
         (queryKey) => queryClient.invalidateQueries({ queryKey }),
       ),
     );
-    // Broadcast channel-connected (same event pairing redemption sends) so an
-    // open chat card for this channel clears and its parked request resumes —
-    // connecting from the Extensions page must not strand the chat surface.
-    if (hasChannelSurface(extension) && channelId) {
-      try {
-        await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
-      } catch {
-        console.error("channel connection broadcast after OAuth failed.");
-      }
-    }
     if (onSaved) onSaved();
-  }, [channelId, extension, onClose, onSaved, packageId, queryClient]);
+  }, [onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -84,8 +59,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       const trimmed = (val || "").trim();
       if (trimmed) secretPayload[key] = trimmed;
     }
-    submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
-  }, [values, fieldValues, submitMutation]);
+    submitMutation.mutate({ secrets: secretPayload });
+  }, [values, submitMutation]);
   const [popupBlockedError, setPopupBlockedError] = React.useState("");
   const handleOauth = React.useCallback(
     (secret) => {
@@ -105,72 +80,18 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     [oauthMutation, t]
   );
 
-  // Some channel extensions may still use proof-code setup: redeem a code,
-  // then best-effort activate so the channel goes live.
-  const oauthSecrets = secrets.filter(
-    (secret) => (secret.setup?.kind || "manual_token") === "oauth"
-  );
   const manualSecrets = secrets.filter(
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
-  // OAuth-connecting channels (surface connection strategy or an oauth-kind
-  // setup secret) never route to the paste-a-code pairing panel: their
-  // connect affordance is the OAuth secret rendered below.
-  const isPairingChannel =
-    !connectsViaOauth(extension, secrets) &&
+  // The manifest declares whether the user-facing setup is a host-issued
+  // code/deep-link/QR flow. Do not probe a provider route to infer strategy.
+  const connection = channelConnection(extension);
+  const isWebCodeChannel =
     hasChannelSurface(extension) &&
-    (lifecycleState === "pairing" || lifecycleState === "pairing_required");
-  // WebGeneratedCode probe: the backend registers generic pairing routes only
-  // for extensions whose account-setup descriptor declares the web-minted
-  // strategy — a 404 means the channel pairs by pasted proof code instead.
-  // Probed for every non-OAuth channel surface (not just pairing lifecycle
-  // states) so an installed-but-unpaired channel still gets its panel.
-  const probeWebCodePairing =
-    !connectsViaOauth(extension, secrets) && hasChannelSurface(extension);
-  const webCodePairing = useQuery({
-    queryKey: ["extension-pairing-probe", channelId],
-    enabled: Boolean(probeWebCodePairing && channelId),
-    retry: false,
-    staleTime: 60_000,
-    queryFn: () => getExtensionPairingStatus(channelId),
-  });
-  const isWebCodeChannel = Boolean(probeWebCodePairing && webCodePairing.isSuccess);
-  const channelPairingInstructions = t("pairing.instructions");
-  const channelPairingPlaceholder = t("pairing.placeholder");
-  const channelPairingError = t("pairing.error");
-  const [pairingCode, setPairingCode] = React.useState("");
-  const pairingMutation = useMutation({
-    mutationFn: async (code) => {
-      const result = await redeemPairingCode(channelId, code);
-      try {
-        await activateExtension({ id: packageId || channelId });
-      } catch {
-        console.error("channel activation after pairing failed.");
-      }
-      return result;
-    },
-    onSuccess: () => {
-      for (const queryKey of [
-        ["extensions"],
-        ["pairing", channelId],
-      ]) {
-        queryClient.invalidateQueries({ queryKey });
-      }
-      if (onSaved) onSaved();
-      onClose();
-    },
-  });
-  const submitPairing = React.useCallback(() => {
-    const code = pairingCode.trim();
-    if (!code || pairingMutation.isPending) return;
-    pairingMutation.mutate(code);
-  }, [pairingCode, pairingMutation]);
+    isWebGeneratedCodeConnection(connection);
 
-  const canSave = manualSecrets.length > 0 || fields.length > 0;
+  const canSave = manualSecrets.length > 0;
   const isActive = extensionIsActive(extension);
-  const canActivate =
-    !hasChannelSurface(extension) &&
-    setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
   if (isWebCodeChannel) {
@@ -181,43 +102,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         onClose={onClose}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <PairingWebCodePanel extensionId={channelId} displayName={extensionName} compact />
-      </ModalShell>
-    );
-  }
-
-  if (isPairingChannel) {
-    return (
-      <ModalShell
-        onClose={onClose}
-        title={t("extensions.configureName").replace("{name}", extensionName)}
-      >
-        <p className="mb-4 text-sm leading-6 text-iron-300">
-          {channelPairingInstructions}
-        </p>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            type="text"
-            value={pairingCode}
-            onChange={(event) => setPairingCode(event.currentTarget.value)}
-            onKeyDown={(event) => event.key === "Enter" && submitPairing()}
-            placeholder={channelPairingPlaceholder}
-            aria-label={channelPairingPlaceholder}
-            className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
-          />
-          <Button
-            variant="primary"
-            onClick={submitPairing}
-            loading={pairingMutation.isPending}
-            disabled={!pairingCode.trim()}
-          >
-            {pairingMutation.isPending ? t("common.saving") : t("pairing.connect")}
-          </Button>
-        </div>
-        {pairingMutation.isError &&
-        (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">
-          {channelPairingError}
-        </p>)}
+        <PairingWebCodePanel
+          extensionId={packageId}
+          displayName={extensionName}
+          instructions={connection?.instructions || ""}
+          compact
+        />
       </ModalShell>
     );
   }
@@ -248,7 +138,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     );
   }
 
-  if (secrets.length === 0 && fields.length === 0) {
+  if (secrets.length === 0) {
     return (
       <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
         <p className="text-sm text-iron-300">
@@ -351,37 +241,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
             </div>
           )
         )}
-        {fields.map(
-          (field) => (
-            <div key={field.name}>
-              <label
-                className="mb-1.5 flex items-center gap-2 text-sm text-iron-200"
-              >
-                {field.prompt || field.name}
-                {field.optional &&
-                (
-                  <span className="font-mono text-[10px] text-iron-700"
-                    >{t("common.optional") || "optional"}</span
-                  >
-                )}
-              </label>
-              <input
-                type="text"
-                placeholder={field.placeholder || ""}
-                value={fieldValues[field.name] || ""}
-                onChange={(e) => {
-                  const value = e.currentTarget.value;
-                  setFieldValues((prev) => ({
-                    ...prev,
-                    [field.name]: value,
-                  }));
-                }}
-                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
-              />
-            </div>
-          )
-        )}
       </div>
 
       {onboarding?.credential_next_step &&
@@ -436,19 +295,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-        {canActivate &&
-        (
-        <Button
-          variant="primary"
-          onClick={() => onActivate?.(extension)}
-        >
-          {t("extensions.activate")}
-        </Button>
-        )}
         {canSave &&
         (
         <Button
-          variant={canActivate ? "secondary" : "primary"}
+          variant="primary"
           onClick={handleSubmit}
           loading={submitMutation.isPending}
         >

@@ -58,13 +58,13 @@ where
 }
 
 /// Test-only entry point for building a local-dev
-/// [`ironclaw_secrets::FilesystemSecretStore`] without going through the full
+/// [`ironclaw_secrets::SecretStore`] without going through the full
 /// Reborn runtime assembly.
 ///
 /// Mirrors the production wiring in `build_local_runtime` where
 /// `build_secret_store` is called with the scoped filesystem and a
 /// master key resolved from the environment or the root directory's cached key
-/// file. Tests that need a real `FilesystemSecretStore` — for example, to
+/// file. Tests that need a real `SecretStore` — for example, to
 /// verify `put` + `lease_once` + `consume` round-trips against an in-process
 /// backend — can call this instead of wiring a full runtime.
 ///
@@ -72,13 +72,13 @@ where
 /// `SECRETS_MASTER_KEY` env var when set, otherwise from (or generating to)
 /// the `.reborn-local-dev-secrets-master-key` file under `root`. Using the
 /// same `root` across two calls therefore yields the same key, so a second
-/// `FilesystemSecretStore` over the same scoped filesystem can consume a
+/// `SecretStore` over the same scoped filesystem can consume a
 /// secret written by the first. For tests only — zero bytes shipped in
 /// production builds.
 pub async fn build_secret_store_for_test<F>(
     root: &std::path::Path,
     scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
-) -> Result<std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>, crate::RebornBuildError>
+) -> Result<std::sync::Arc<ironclaw_secrets::SecretStore<F>>, crate::RebornBuildError>
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {
@@ -102,7 +102,7 @@ where
 /// `runtime.rs` path with the real type, never a hand-mirrored copy.
 #[cfg(feature = "test-support")]
 pub fn build_approval_gate_evidence_for_test(
-    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
 ) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     crate::runtime::build_approval_gate_evidence_for_test(approval_requests)
 }

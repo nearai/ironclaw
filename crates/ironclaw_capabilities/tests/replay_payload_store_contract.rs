@@ -1,4 +1,4 @@
-//! Contract tests for [`ReplayPayloadStore`] / [`FilesystemReplayPayloadStore`].
+//! Contract tests for [`ReplayPayloadStorePort`] / [`ReplayPayloadStore`].
 //!
 //! The replay payload is the **host-private** raw capability input + estimate a
 //! gate/auth resume replays through (arch-simplification §5.3). It is the exact
@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use ironclaw_capabilities::{
-    FilesystemReplayPayloadStore, ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError,
+    ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError, ReplayPayloadStorePort,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -188,8 +188,8 @@ fn payload_without_prior_approval() -> ReplayPayload {
 }
 
 /// The production replay-payload store over a fresh in-memory backend.
-fn in_mem_replay_payload_store() -> FilesystemReplayPayloadStore<InMemoryBackend> {
-    FilesystemReplayPayloadStore::new(scoped_replay_payload_fs(Arc::new(InMemoryBackend::new())))
+fn in_mem_replay_payload_store() -> ReplayPayloadStore<InMemoryBackend> {
+    ReplayPayloadStore::new(scoped_replay_payload_fs(Arc::new(InMemoryBackend::new())))
 }
 
 /// Build a [`ScopedFilesystem`] exposing the `/replay-payloads` alias under a

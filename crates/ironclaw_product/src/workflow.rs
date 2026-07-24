@@ -1,4 +1,4 @@
-// arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> FilesystemOutboundStateStore helper), no logic change, plan #6168
+// arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> OutboundStateStore helper), no logic change, plan #6168
 //! Host-side product surface implementation.
 //!
 //! This is the top-level product action orchestrator that dispatches inbound
@@ -478,7 +478,7 @@ async fn resolve_projection_subject(
     }
 }
 
-async fn lookup_interaction_binding(
+pub(crate) async fn lookup_interaction_binding(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ConversationBindingService,
 ) -> Result<ResolvedBinding, ProductWorkflowError> {
@@ -1671,11 +1671,16 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 "binding access denied",
             )))
         }
-        ProductWorkflowError::InvalidBindingRequest { reason }
-        | ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
+        ProductWorkflowError::InvalidBindingRequest { reason } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
                 reason.clone(),
+            )))
+        }
+        ProductWorkflowError::ProviderInstanceNotConfigured => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                "extension is unavailable on this instance",
             )))
         }
         ProductWorkflowError::UnsupportedActionKind { kind } => {
@@ -1879,16 +1884,8 @@ mod tests {
 
     #[test]
     fn terminal_ack_for_error_settles_provider_instance_not_configured() {
-        // Shares its match arm with `InvalidBindingRequest` (both map to a
-        // permanent `PolicyDenied` rejection carrying the reason verbatim);
-        // this pins that the shared arm behaves identically for the new
-        // variant.
-        let reason =
-            "ironclaw config set google.client_id <id>.apps.googleusercontent.com".to_string();
-        let ack = terminal_ack_for_error(&ProductWorkflowError::ProviderInstanceNotConfigured {
-            reason: reason.clone(),
-        })
-        .expect("provider instance not configured is terminal");
+        let ack = terminal_ack_for_error(&ProductWorkflowError::ProviderInstanceNotConfigured)
+            .expect("provider instance not configured is terminal");
         match ack {
             ProductInboundAck::Rejected(rejection) => {
                 assert_eq!(rejection.kind, ProductRejectionKind::PolicyDenied);
@@ -1896,7 +1893,10 @@ mod tests {
                     rejection.disposition(),
                     crate::ProductRejectionDisposition::Permanent
                 );
-                assert_eq!(rejection.reason, RedactedString::new(reason));
+                assert_eq!(
+                    rejection.reason,
+                    RedactedString::new("extension is unavailable on this instance")
+                );
             }
             other => panic!("expected rejected ack, got {other:?}"),
         }

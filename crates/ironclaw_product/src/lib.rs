@@ -34,6 +34,8 @@ mod auth_prompt;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
+mod channel_pairing;
+mod channel_workflow_state;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -50,11 +52,13 @@ mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
 mod lifecycle;
+mod lifecycle_auth_continuation;
 mod outbound_delivery;
 mod policy;
 mod product_surface_inbound;
 mod reborn_services;
 mod run_delivery;
+mod trigger_final_reply_target;
 mod workflow;
 
 pub use action::{
@@ -78,7 +82,9 @@ pub use approval_prompt::{
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
-pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_continuation::{
+    ProductAuthContinuationDispatcher, ProductAuthTurnGateResumeDispatcher,
+};
 pub use auth_interaction::{
     AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
     AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,
@@ -89,7 +95,7 @@ pub use auth_interaction::{
 };
 pub use auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
-    auth_prompt_view_for_blocked_auth,
+    PairingAuthChallengeView, auth_prompt_view_for_blocked_auth,
 };
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
@@ -97,7 +103,19 @@ pub use automation_thread_metadata::{
 };
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding, route_kind_for_inbound_payload,
+    ResolveStoredProductReplyTargetRequest, ResolvedBinding, ResolvedStoredProductReplyTarget,
+    StoredProductReplyTargetAccess, route_kind_for_inbound_payload,
+};
+pub use channel_pairing::{
+    ChannelPairingConsumeOutcome, ChannelPairingDirectTargetStore, ChannelPairingError,
+    ChannelPairingIdentityBindOutcome, ChannelPairingIdentityStore,
+    ChannelPairingInstallationSource, ChannelPairingInterception, ChannelPairingInterceptor,
+    ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
+    ChannelPairingStatus, ChannelPairingStore, ChannelPairingTemplateValues,
+};
+pub use channel_workflow_state::{
+    ChannelDisconnectActions, ChannelWorkflowState, ChannelWorkflowStateError,
+    ChannelWorkflowStateService, disconnect_channel_in_order,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
@@ -116,8 +134,10 @@ pub use conversation_binding::{
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 pub use extension_account_setup::{
-    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
+    AccountConnectionStatusError, AccountConnectionStatusSource, CHANNEL_PAIRING_CODE_ALPHABET,
+    CHANNEL_PAIRING_CODE_LEN, ChannelConnectionNoticePolicy, ChannelPairingCode,
+    ChannelPairingCodeError, ChannelPairingIssue, ExtensionAccountSetupDescriptor,
+    ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
@@ -149,15 +169,15 @@ pub use ironclaw_host_api::product_adapter::{
     LinkedThreadActionPayload, MAX_IMMEDIATE_RESPONSE_BYTES, MAX_REPLY_CONTEXT_BYTES,
     NormalizedInboundMessage, OutboundDeliverySink, OutboundEnvelope, OutboundPart, OutboundTarget,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ParsedProductInbound,
-    PartDeliveryOutcome, PreferenceTargetCodec, PreferenceTargetEncodeRequest,
-    ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductCapabilityFlag, ProductCommandResultPayload,
-    ProductControlActionPayload, ProductGateKind, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionReadInput, ProductProjectionState,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductRenderOutcome,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, PairingPromptView,
+    ParsedProductInbound, PartDeliveryOutcome, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, ProductAdapterCapabilities, ProductAdapterError,
+    ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
+    ProductCommandResultPayload, ProductControlActionPayload, ProductGateKind, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionReadInput,
+    ProductProjectionState, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProductRenderOutcome,
     ProductSlashCommandParseError, ProductSourceChannel, ProductSurfaceKind,
     ProductSynchronousResponse, ProductTriggerReason, ProductWorkSummaryPhase,
     ProductWorkflowRejectionKind, ProgressKind, ProgressUpdateView, ProjectionCursor,
@@ -166,7 +186,8 @@ pub use ironclaw_host_api::product_adapter::{
     ProtocolAuthFailure, ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,
     RedactedDebug, RedactedString, ScopedApprovalResolutionPayload, TargetCandidate, TargetQuery,
     TrustedInboundContext, UserMessagePayload, VerifiedAuthClaim, VerifiedInbound,
-    parse_interaction_resolution_text, parse_product_slash_command, strip_wrapping_inline_code,
+    parse_interaction_resolution_text, parse_product_slash_command, render_channel_auth_prompt,
+    strip_wrapping_inline_code,
 };
 #[cfg(feature = "host-auth-mint")]
 pub use ironclaw_host_api::product_adapter::{
@@ -203,6 +224,7 @@ pub mod test_support {
         RecordingProductSurface,
     };
 }
+pub use ironclaw_turns::IdempotencyKey;
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
@@ -212,9 +234,10 @@ pub use lifecycle::{
     LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecyclePublicState, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
+pub use lifecycle_auth_continuation::lifecycle_auth_continuation_dispatcher;
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
@@ -225,15 +248,19 @@ pub use delivery_coordinator::{
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
 // the coordinator; vendor residue enters only through the ports.
+pub use ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID;
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
 pub use run_delivery::{
-    ApprovalPromptContextSource, BlockedAuthPromptSource, DeliveredChannelMessage,
-    RunDeliveryError, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+    ApprovalPromptContextSource, BlockedAuthPromptSource, CurrentDeliveryTarget,
+    CurrentDeliveryTargetResolver, DeliveredChannelMessage, RunDeliveryError,
+    RunDeliveryEventHandler, RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices,
+    TriggeredRunDeliveryChannel, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    TriggeredRunDeliveryRouter, TriggeredRunExternalDeliveryTarget,
 };
+pub use trigger_final_reply_target::{RunFinalReplyRoutingService, TriggerFinalReplyTargetService};
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product facade.
@@ -256,12 +283,11 @@ pub use reborn_services::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
     AutomationProductFacade, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ChannelAuthAccountState,
-    ChannelConfigFacade, ChannelConnectionFacade, ChannelInboundSurfaceAdmission,
-    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
-    ChannelInboundSurfaceRequest, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY,
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
-    EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY,
+    ChannelConnectionFacade, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
+    EXTENSION_IMPORT_CAPABILITY, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     EmptyProductCommandInput, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW,
@@ -314,12 +340,11 @@ pub use reborn_services::{
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupSecret,
     RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
@@ -371,11 +396,12 @@ pub use reborn_services::{
     UnavailableRebornViewProvider, UnsupportedAutomationProductFacade,
     UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
     UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, list_outbound_delivery_targets_for_model,
-    normalize_operator_log_context_value, outbound_delivery_synthetic_provider,
-    outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,
-    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
-    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+    UpsertLlmProviderRequest, install_extension_on_surface,
+    list_outbound_delivery_targets_for_model, normalize_operator_log_context_value,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model, web_app_outbound_delivery_target_option,
 };
 
 pub use product_surface_inbound::{
@@ -383,6 +409,7 @@ pub use product_surface_inbound::{
     ProductCreateThreadRequest, ProductGateResolution, ProductInboundAttachment,
     ProductInboundCommand, ProductListAutomationsRequest, ProductListThreadsRequest,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, product_attachment_capabilities,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, parse_client_action_id,
+    product_attachment_capabilities,
 };
 pub use workflow::DefaultProductSurface;

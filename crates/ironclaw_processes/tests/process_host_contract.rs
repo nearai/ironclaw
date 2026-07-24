@@ -291,7 +291,7 @@ async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process(
     assert!(matches!(hidden, ProcessError::UnknownProcess { process_id: id } if id == process_id));
 }
 
-/// The real `FilesystemProcessResultStore` over a [`FaultInjecting`] backend
+/// The real `ProcessResultStore` over a [`FaultInjecting`] backend
 /// armed to fail the 1st result write — the kill-result write. Replaces the
 /// former whole-trait `FailOnceKillResultStore` fake: the store now runs its
 /// genuine path building, CAS write, and `FilesystemError -> ProcessError`
@@ -300,7 +300,7 @@ async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process(
 /// stand-in. Returns the store plus the fault handle for asserting backend
 /// traffic.
 fn result_store_failing_first_kill_write() -> (
-    Arc<FilesystemProcessResultStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<ProcessResultStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let backend = Arc::new(
@@ -311,9 +311,7 @@ fn result_store_failing_first_kill_write() -> (
                 .backend("injected kill result write failure"),
         ),
     );
-    let store = Arc::new(FilesystemProcessResultStore::new(processes_fs_over(
-        backend.clone(),
-    )));
+    let store = Arc::new(ProcessResultStore::new(processes_fs_over(backend.clone())));
     (store, backend)
 }
 
@@ -381,6 +379,6 @@ fn processes_test_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
     processes_fs_over(Arc::new(InMemoryBackend::new()))
 }
 
-fn in_mem_process_store() -> FilesystemProcessStore<InMemoryBackend> {
-    FilesystemProcessStore::new(processes_test_fs())
+fn in_mem_process_store() -> ProcessStore<InMemoryBackend> {
+    ProcessStore::new(processes_test_fs())
 }

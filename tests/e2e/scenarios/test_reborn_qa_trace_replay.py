@@ -28,7 +28,14 @@ MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
 def _model_cases() -> list[str]:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     no_model = set(manifest["no_model_cases"])
-    return [case for case in manifest["selected_cases"] if case not in no_model]
+    # Quarantined traces encode the retired activation flow; their fixtures
+    # live under quarantined_retired_activation/ and are not replayable here.
+    quarantined = set(manifest.get("quarantined_model_cases", []))
+    return [
+        case
+        for case in manifest["selected_cases"]
+        if case not in no_model and case not in quarantined
+    ]
 
 
 MODEL_CASES = _model_cases()

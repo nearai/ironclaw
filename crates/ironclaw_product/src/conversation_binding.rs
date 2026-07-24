@@ -8,7 +8,8 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
 use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductWorkflowError,
-    ResolveBindingRequest, ResolvedBinding,
+    ResolveBindingRequest, ResolveStoredProductReplyTargetRequest, ResolvedBinding,
+    ResolvedStoredProductReplyTarget, StoredProductReplyTargetAccess,
 };
 
 /// Tenant-scoped installation identity used before external actor/conversation
@@ -717,6 +718,58 @@ impl ConversationBindingService for ProductConversationBindingService {
 
         resolved_binding_from_resolution(resolution, request.route_kind)
     }
+
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredProductReplyTargetRequest,
+    ) -> Result<ResolvedStoredProductReplyTarget, ProductWorkflowError> {
+        let target = self
+            .conversations
+            .resolve_stored_reply_target(ironclaw_conversations::ResolveStoredReplyTargetRequest {
+                tenant_id: request.scope.tenant_id,
+                actor_user_id: request.actor.user_id,
+                current_thread_id: request.scope.thread_id,
+                reply_target_binding_ref: request.reply_target_binding_ref,
+                access: match request.access {
+                    StoredProductReplyTargetAccess::OrdinaryReply => {
+                        ironclaw_conversations::StoredReplyTargetAccess::OrdinaryReply
+                    }
+                    StoredProductReplyTargetAccess::AuthorityBearingPrompt => {
+                        ironclaw_conversations::StoredReplyTargetAccess::ExactOriginActor
+                    }
+                },
+            })
+            .await
+            .map_err(map_conversation_error)?;
+        Ok(ResolvedStoredProductReplyTarget {
+            adapter_id: ProductAdapterId::new(target.adapter_kind.as_str()).map_err(|error| {
+                ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                }
+            })?,
+            installation_id: AdapterInstallationId::new(target.adapter_installation_id.as_str())
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                })?,
+            external_conversation_ref: ExternalConversationRef::new(
+                target.external_conversation_ref.space_id(),
+                target.external_conversation_ref.conversation_id(),
+                target.external_conversation_ref.thread_id(),
+                target.external_conversation_ref.message_id(),
+            )
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            })?,
+            route_kind: match target.route_kind {
+                ironclaw_conversations::ConversationRouteKind::Direct => {
+                    ProductConversationRouteKind::Direct
+                }
+                ironclaw_conversations::ConversationRouteKind::Shared => {
+                    ProductConversationRouteKind::Shared
+                }
+            },
+        })
+    }
 }
 
 fn ensure_existing_shared_binding_matches_current_subject(
@@ -751,6 +804,8 @@ fn resolved_binding_from_resolution(
         tenant_id: resolution.tenant_id,
         actor_user_id,
         subject_user_id,
+        source_binding_ref: resolution.source_binding_ref,
+        reply_target_binding_ref: resolution.reply_target_binding_ref,
         thread_id: resolution.turn_scope.thread_id,
         agent_id: resolution.turn_scope.agent_id,
         project_id: resolution.turn_scope.project_id,

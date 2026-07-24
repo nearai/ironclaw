@@ -236,7 +236,7 @@
         {
           "tool_call_id": "toolu_01WPMJpbWzrZSKWi8yHHwHzX",
           "name": "builtin__http",
-          "content": "{\"artifacts\":[{\"artifact_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.b31ee70a-470c-4f4b-9372-dc8f1d28f784\",\"summary\":\"Stored tool result\"}],\"detail\":{\"byte_len\":1232,\"kind\":\"result_reference\",\"preview\":\"{\\\"auth_hint\\\":\\\"This request was rejected for authentication/authorization. If this host is served by an installable extension, that extension injects the required credentials for you: search for it with builtin.extension_search (by the service or domain name), then builtin.extension_install and builtin.extension_activate, and retry through the extension's tools instead of an unauthenticated builtin.http call.\\\",\\\"body_text\\\":\\\"\\\\r\\\\nRequest forbidden by administrative rules. Please make sure your request has a User-Agent header (https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required). Check https://developer.github.com for other possible causes.\\\\r\\\\n\\\",\\\"headers\\\":[{\\\"name\\\":\\\"cache-control\\\",\\\"value\\\":\\\"no-cache\\\"},{\\\"name\\\":\\\"content-type\\\",\\\"value\\\":\\\"text/html; charset=utf-8\\\"},{\\\"name\\\":\\\"strict-transport-security\\\",\\\"value\\\":\\\"max-age=31536000; includeSubDomains; preload\\\"},{\\\"name\\\":\\\"x-content-type-options\\\",\\\"value\\\":\\\"nosniff\\\"},{\\\"name\\\":\\\"x-frame-options\\\",\\\"value\\\":\\\"deny\\\"},{\\\"name\\\":\\\"x-xss-protection\\\",\\\"value\\\":\\\"0\\\"},{\\\"name\\\":\\\"content-security-policy\\\",\\\"value\\\":\\\"default-src 'none'; style-src 'unsafe-inline'\\\"},{\\\"name\\\":\\\"connection\\\",\\\"value\\\":\\\"close\\\"}],\\\"redaction_applied\\\":false,\\\"request_bytes\\\":0,\\\"response_bytes\\\":252,\\\"status\\\":403}\",\"result_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.b31ee70a-470c-4f4b-9372-dc8f1d28f784\",\"total_bytes\":1232},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
+          "content": "{\"artifacts\":[{\"artifact_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.b31ee70a-470c-4f4b-9372-dc8f1d28f784\",\"summary\":\"Stored tool result\"}],\"detail\":{\"byte_len\":1232,\"kind\":\"result_reference\",\"preview\":\"{\\\"auth_hint\\\":\\\"This request was rejected for authentication/authorization. If this host is served by an installable extension, that extension injects the required credentials for you: search for it with builtin.extension_search (by the service or domain name), then builtin.extension_install, complete any requested setup, and retry through the extension's tools instead of an unauthenticated builtin.http call.\\\",\\\"body_text\\\":\\\"\\\\r\\\\nRequest forbidden by administrative rules. Please make sure your request has a User-Agent header (https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required). Check https://developer.github.com for other possible causes.\\\\r\\\\n\\\",\\\"headers\\\":[{\\\"name\\\":\\\"cache-control\\\",\\\"value\\\":\\\"no-cache\\\"},{\\\"name\\\":\\\"content-type\\\",\\\"value\\\":\\\"text/html; charset=utf-8\\\"},{\\\"name\\\":\\\"strict-transport-security\\\",\\\"value\\\":\\\"max-age=31536000; includeSubDomains; preload\\\"},{\\\"name\\\":\\\"x-content-type-options\\\",\\\"value\\\":\\\"nosniff\\\"},{\\\"name\\\":\\\"x-frame-options\\\",\\\"value\\\":\\\"deny\\\"},{\\\"name\\\":\\\"x-xss-protection\\\",\\\"value\\\":\\\"0\\\"},{\\\"name\\\":\\\"content-security-policy\\\",\\\"value\\\":\\\"default-src 'none'; style-src 'unsafe-inline'\\\"},{\\\"name\\\":\\\"connection\\\",\\\"value\\\":\\\"close\\\"}],\\\"redaction_applied\\\":false,\\\"request_bytes\\\":0,\\\"response_bytes\\\":252,\\\"status\\\":403}\",\"result_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.b31ee70a-470c-4f4b-9372-dc8f1d28f784\",\"total_bytes\":1232},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
         }
       ]
     },
@@ -270,33 +270,6 @@
     {
       "request_hint": {
         "last_user_message_contains": "Use the github extension to read the logs of this failing GitHub Actions job, th",
-        "min_message_count": 10
-      },
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
-            "id": "toolu_01RGnpmz9v2shnLh8vqFxNNB",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "github"
-            }
-          }
-        ],
-        "input_tokens": 19876,
-        "output_tokens": 58
-      },
-      "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_019NoKcQD6WV1XvXckn94gx5",
-          "name": "builtin__extension_install",
-          "content": "{\"artifacts\":[{\"artifact_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.fbfe2c6b-0afa-4e4d-a3e2-731c8562c68a\",\"summary\":\"Stored tool result\"}],\"detail\":{\"byte_len\":1673,\"kind\":\"result_reference\",\"preview\":\"{\\\"package_ref\\\":{\\\"id\\\":\\\"github\\\",\\\"kind\\\":\\\"extension\\\"},\\\"payload\\\":{\\\"installed\\\":true,\\\"kind\\\":\\\"extension_install\\\",\\\"next_step\\\":\\\"Call builtin.extension_activate now with input {\\\\\\\"extension_id\\\\\\\":\\\\\\\"github\\\\\\\"}. Activation publishes the tools and opens the auth gate if credentials are missing.\\\",\\\"visible_capability_ids\\\":[\\\"github.get_repo\\\",\\\"github.create_repo\\\",\\\"github.list_issues\\\",\\\"github.create_issue\\\",\\\"github.update_issue\\\",\\\"github.add_issue_labels\\\",\\\"github.remove_issue_label\\\",\\\"github.add_issue_assignees\\\",\\\"github.remove_issue_assignees\\\",\\\"github.get_issue\\\",\\\"github.list_issue_comments\\\",\\\"github.create_issue_comment\\\",\\\"github.comment_issue\\\",\\\"github.list_pull_requests\\\",\\\"github.create_pull_request\\\",\\\"github.update_pull_request\\\",\\\"github.get_pull_request\\\",\\\"github.get_pull_request_files\\\",\\\"github.create_pr_review\\\",\\\"github.list_pull_request_comments\\\",\\\"github.reply_pull_request_comment\\\",\\\"github.get_pull_request_reviews\\\",\\\"github.list_pull_request_review_threads\\\",\\\"github.resolve_review_thread\\\",\\\"github.unresolve_review_thread\\\",\\\"github.get_combined_status\\\",\\\"github.merge_pull_request\\\",\\\"github.get_authenticated_user\\\",\\\"github.list_repos\\\",\\\"github.search_repositories\\\",\\\"github.search_code\\\",\\\"github.search_issues\\\",\\\"github.search_issues_pull_requests\\\",\\\"github.list_branches\\\",\\\"github.create_branch\\\",\\\"github.get_file_content\\\",\\\"github.create_or_update_file\\\",\\\"github.delete_file\\\",\\\"github.list_releases\\\",\\\"github.create_release\\\",\\\"github.trigger_workflow\\\",\\\"github.get_workflow_runs\\\",\\\"github.get_workflow_run_jobs\\\",\\\"github.get_job_logs\\\",\\\"github.get_workflow_run_artifacts\\\",\\\"github.rerun_failed_workflow_run_jobs\\\",\\\"github.rerun_workflow_job\\\",\\\"github.fork_repo\\\",\\\"github.handle_webhook\\\"]},\\\"phase\\\":\\\"installed\\\"}\",\"result_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.fbfe2c6b-0afa-4e4d-a3e2-731c8562c68a\",\"total_bytes\":1673},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview contains the full result.\",\"trust\":\"untrusted_tool_output\"}"
-        }
-      ]
-    },
-    {
-      "request_hint": {
-        "last_user_message_contains": "Use the github extension to read the logs of this failing GitHub Actions job, th",
         "min_message_count": 12
       },
       "response": {
@@ -314,14 +287,7 @@
         ],
         "input_tokens": 40655,
         "output_tokens": 99
-      },
-      "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_01RGnpmz9v2shnLh8vqFxNNB",
-          "name": "builtin__extension_activate",
-          "content": "{\"artifacts\":[{\"artifact_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.df5c4a0e-a635-43c4-8867-91df4717864e\",\"summary\":\"Stored tool result\"}],\"detail\":{\"byte_len\":3354,\"kind\":\"result_reference\",\"next_offset\":2048,\"preview\":\"{\\\"message\\\":\\\"Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true. These tools are now callable by exact name — invoke one directly with tool_call(name=\\\\\\\"<tool>\\\\\\\", arguments={ ... }), or tool_describe(name=\\\\\\\"<tool>\\\\\\\") first if you need its full schema. Do NOT call tool_search for these; you already have their names: github.get_repo, github.create_repo, github.list_issues, github.create_issue, github.update_issue, github.add_issue_labels, github.remove_issue_label, github.add_issue_assignees, github.remove_issue_assignees, github.get_issue, github.list_issue_comments, github.create_issue_comment, github.comment_issue, github.list_pull_requests, github.create_pull_request, github.update_pull_request, github.get_pull_request, github.get_pull_request_files, github.create_pr_review, github.list_pull_request_comments, github.reply_pull_request_comment, github.get_pull_request_reviews, github.list_pull_request_review_threads, github.resolve_review_thread, github.unresolve_review_thread, github.get_combined_status, github.merge_pull_request, github.get_authenticated_user, github.list_repos, github.search_repositories, github.search_code, github.search_issues, github.search_issues_pull_requests, github.list_branches, github.create_branch, github.get_file_content, github.create_or_update_file, github.delete_file, github.list_releases, github.create_release, github.trigger_workflow, github.get_workflow_runs, github.get_workflow_run_jobs, github.get_job_logs, github.get_workflow_run_artifacts, github.rerun_failed_workflow_run_jobs, github.rerun_workflow_job, github.fork_repo, github.handle_webhook.\\\",\\\"package_ref\\\":{\\\"id\\\":\\\"github\\\",\\\"kind\\\":\\\"extension\\\"},\\\"payload\\\":{\\\"activated\\\":true,\\\"kind\\\":\\\"extension_activate\\\",\\\"visible_capability_ids\\\":[\\\"github.get_repo\\\",\\\"github.create_repo\\\",\\\"github.list_issues\",\"result_ref\":\"result:92cf239a-ed8c-40ff-81a3-0ef75d18f87e.df5c4a0e-a635-43c4-8867-91df4717864e\",\"total_bytes\":3354},\"schema_version\":1,\"status\":\"success\",\"summary\":\"Tool completed; preview truncated, use result_read with the result reference and offset 2048 for more output.\",\"trust\":\"untrusted_tool_output\"}"
-        }
-      ]
+      }
     },
     {
       "request_hint": {

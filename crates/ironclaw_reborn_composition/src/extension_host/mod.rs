@@ -15,7 +15,6 @@ pub(crate) mod admin_configuration_capability;
 pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
-pub(crate) mod channel_config;
 pub(crate) mod channel_connection;
 pub(crate) mod channel_delivery;
 pub(crate) mod channel_dm_provisioning;
@@ -62,13 +61,13 @@ pub(crate) use extension_bundle::unzip_extension_bundle;
 
 #[cfg(test)]
 pub(crate) async fn filesystem_installation_store_for_test()
--> ironclaw_extensions::FilesystemExtensionInstallationStore {
+-> ironclaw_extensions::ExtensionInstallationStore {
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{HostPortCatalog, VirtualPath};
 
-    ironclaw_extensions::FilesystemExtensionInstallationStore::load_at(
+    ironclaw_extensions::ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
         HostPortCatalog::empty(),

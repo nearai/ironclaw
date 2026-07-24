@@ -39,7 +39,7 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
   stack; the table is locked by `tests/webui_v2_descriptors_contract.rs`.
 - ~60 routes across sessions, threads/timeline, message send, SSE + WebSocket
   event streams, logs, automations, connectable channels, extensions
-  (install/import/activate/setup lifecycle), LLM config, tool-approval settings,
+  (install/import/setup/remove lifecycle), LLM config, tool-approval settings,
   operator setup/config/diagnostics, admin user management, and trace credits.
   The full table lives in `CLAUDE.md`.
 - **Streaming:** `stream_events` (SSE) and `stream_events_ws` (WebSocket) share

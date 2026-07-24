@@ -42,8 +42,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, FilesystemCheckpointStateStore, HostIdentityContextBuildError,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, CheckpointStateStore,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
     HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
@@ -84,11 +84,10 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_runner::subagent::{
     await_edge::{
-        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-        store::FilesystemAwaitEdgeStore,
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
-    goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
+    goal_store::{SubagentGoalStore, in_memory_backed_subagent_goal_store},
 };
 use ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriver;
 use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
@@ -111,16 +110,16 @@ use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
-    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, FilesystemTurnStateRowStore,
-    GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, InMemoryTurnEventSink, LoopBlocked, LoopBlockedKind,
-    LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
-    RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
-    TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    CheckpointStateStorePort, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnEventSink, LoopBlocked, LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore,
+    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
+    LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, RunProfileId, RunProfileRequest, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnAdmissionPolicy, TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateRowStore,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
@@ -162,7 +161,7 @@ fn driver_requirements_for(
 }
 
 fn turn_state_store_dyn(
-    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: &Arc<TurnStateRowStore<InMemoryBackend>>,
 ) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
@@ -178,7 +177,7 @@ fn turn_state_store_dyn(
 /// to `Arc<dyn AwaitDependentRunEvidenceStore>`) as that port's fourth
 /// argument, in place of the deleted `BoundedSubagentGateResolutionStore`.
 type TestAwaitEdgeTrio = (
-    Arc<FilesystemAwaitEdgeStore<InMemoryBackend>>,
+    Arc<AwaitEdgeStore<InMemoryBackend>>,
     Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>>,
     Arc<ScopeRecoveryDriver<InMemorySessionThreadService, InMemoryBackend>>,
 );
@@ -199,7 +198,7 @@ fn build_test_await_edge_trio(
         Arc::new(InMemoryBackend::new()),
         mounts,
     ));
-    let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
+    let store = Arc::new(AwaitEdgeStore::new(fs));
     let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&store),
         goal_store,
@@ -214,7 +213,7 @@ fn build_test_await_edge_trio(
     (store, resolver, driver)
 }
 
-fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
+fn in_memory_subagent_goal_store() -> Arc<SubagentGoalStore<InMemoryBackend>> {
     Arc::new(in_memory_backed_subagent_goal_store())
 }
 
@@ -224,7 +223,7 @@ fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBa
 /// answers `has_awaited_child_gate` as `false`, matching the deleted
 /// `BoundedSubagentGateResolutionStore`'s always-empty behavior at these
 /// call sites (none of them spawn subagents).
-fn in_memory_await_edge_evidence_store() -> Arc<FilesystemAwaitEdgeStore<InMemoryBackend>> {
+fn in_memory_await_edge_evidence_store() -> Arc<AwaitEdgeStore<InMemoryBackend>> {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").unwrap(),
         VirtualPath::new("/turns").unwrap(),
@@ -235,7 +234,7 @@ fn in_memory_await_edge_evidence_store() -> Arc<FilesystemAwaitEdgeStore<InMemor
         Arc::new(InMemoryBackend::new()),
         mounts,
     ));
-    Arc::new(FilesystemAwaitEdgeStore::new(fs))
+    Arc::new(AwaitEdgeStore::new(fs))
 }
 
 use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
@@ -1766,7 +1765,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
     )
     .await;
     let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
-    let original_turn_store = FilesystemTurnStateRowStore::new(scoped.clone());
+    let original_turn_store = TurnStateRowStore::new(scoped.clone());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -1782,7 +1781,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
     .await;
     drop(original_turn_store);
 
-    let reopened_turn_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
+    let reopened_turn_store = Arc::new(TurnStateRowStore::new(scoped.clone()));
     let mut registry = DriverRegistry::new();
     registry
         .register_driver(
@@ -2189,7 +2188,7 @@ async fn build_libsql_thread_service(
     ironclaw_threads::FilesystemSessionThreadService::new(scoped)
 }
 
-/// Construct a [`FilesystemTurnStateRowStore`] backed by [`LibSqlRootFilesystem`]
+/// Construct a [`TurnStateRowStore`] backed by [`LibSqlRootFilesystem`]
 /// over the supplied libSQL database. The on-disk shape is the same single
 /// `/turns/state.json` snapshot the production composition uses; the libSQL
 /// backend just provides durability for the underlying filesystem record.
@@ -2198,7 +2197,7 @@ async fn build_libsql_thread_service(
 /// `MountView` shape lines up with the production wiring.
 async fn libsql_filesystem_turn_store(
     db: Arc<libsql::Database>,
-) -> ironclaw_turns::FilesystemTurnStateRowStore<ironclaw_filesystem::LibSqlRootFilesystem> {
+) -> ironclaw_turns::TurnStateRowStore<ironclaw_filesystem::LibSqlRootFilesystem> {
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
@@ -2211,7 +2210,7 @@ async fn libsql_filesystem_turn_store(
     )])
     .unwrap();
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view));
-    ironclaw_turns::FilesystemTurnStateRowStore::new(scoped)
+    ironclaw_turns::TurnStateRowStore::new(scoped)
 }
 
 #[tokio::test]
@@ -4945,7 +4944,7 @@ async fn text_only_host_factory_fails_fast_when_model_route_snapshot_required_wi
 async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store() {
     let fixture = HostFixture::new("thread-host-turn-state-e2e", "hello durable host").await;
     let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
-    let turn_state_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
+    let turn_state_store = Arc::new(TurnStateRowStore::new(scoped.clone()));
     let host = fixture
         .factory_with_loop_checkpoint_store(turn_state_store.clone())
         .build_text_only_host(RebornLoopDriverHostRequest {
@@ -5017,7 +5016,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
     // is a durability barrier) — drain before reopening so its journal append
     // has landed.
     turn_state_store.drain().await.expect("drain checkpoint");
-    let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
+    let reopened = TurnStateRowStore::new(scoped.clone());
     let checkpoint_record = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {
             scope: fixture.context.scope.clone(),
@@ -8542,7 +8541,7 @@ struct CapabilityHostFactory {
     thread_service: Arc<InMemorySessionThreadService>,
     thread_scope: ThreadScope,
     model_gateway: Arc<RecordingGateway>,
-    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    checkpoint_state_store: Arc<CheckpointStateStore<InMemoryBackend>>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     runtime: Arc<dyn HostRuntime + Send + Sync>,
@@ -8835,7 +8834,7 @@ fn driver_host_error(
 
 fn loop_exit_applier_for_fixture(
     fixture: &HostFixture,
-    turn_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    turn_store: Arc<TurnStateRowStore<InMemoryBackend>>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let evidence = Arc::new(
@@ -8928,7 +8927,7 @@ impl TurnStateStore for StaticTurnStateStore {
 
 async fn queue_fixture_turn(
     fixture: &HostFixture,
-    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
+    turn_store: &TurnStateRowStore<InMemoryBackend>,
     resolver: &dyn RunProfileResolver,
     idempotency_key: &str,
 ) -> TurnRunId {
@@ -8982,9 +8981,9 @@ async fn queue_fixture_turn(
 
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    checkpoint_state_store: Arc<CheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    loop_checkpoint_store: Arc<TurnStateRowStore<InMemoryBackend>>,
     gateway: Arc<RecordingGateway>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -9342,7 +9341,7 @@ impl LoopCheckpointStore for FailingLoopCheckpointStore {
 struct DiskFullCheckpointStateStore;
 
 #[async_trait]
-impl CheckpointStateStore for DiskFullCheckpointStateStore {
+impl CheckpointStateStorePort for DiskFullCheckpointStateStore {
     async fn put_checkpoint_state(
         &self,
         _request: PutCheckpointStateRequest,
@@ -9363,13 +9362,13 @@ impl CheckpointStateStore for DiskFullCheckpointStateStore {
 }
 
 struct NthPutUnavailableCheckpointStateStore {
-    inner: Arc<dyn CheckpointStateStore>,
+    inner: Arc<dyn CheckpointStateStorePort>,
     fail_on_put_attempt: usize,
     put_attempts: AtomicUsize,
 }
 
 impl NthPutUnavailableCheckpointStateStore {
-    fn new(inner: Arc<dyn CheckpointStateStore>, fail_on_put_attempt: usize) -> Self {
+    fn new(inner: Arc<dyn CheckpointStateStorePort>, fail_on_put_attempt: usize) -> Self {
         Self {
             inner,
             fail_on_put_attempt,
@@ -9383,7 +9382,7 @@ impl NthPutUnavailableCheckpointStateStore {
 }
 
 #[async_trait]
-impl CheckpointStateStore for NthPutUnavailableCheckpointStateStore {
+impl CheckpointStateStorePort for NthPutUnavailableCheckpointStateStore {
     async fn put_checkpoint_state(
         &self,
         request: PutCheckpointStateRequest,
@@ -9406,14 +9405,14 @@ impl CheckpointStateStore for NthPutUnavailableCheckpointStateStore {
 }
 
 struct SlowHeartbeatTransitionPort {
-    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: Arc<TurnStateRowStore<InMemoryBackend>>,
     heartbeat_delay: std::time::Duration,
     heartbeat_attempts: AtomicUsize,
     notify_heartbeat_attempt: Notify,
 }
 
 impl SlowHeartbeatTransitionPort {
-    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
+    fn new(store: Arc<TurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             heartbeat_delay: std::time::Duration::ZERO,

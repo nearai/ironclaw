@@ -27,9 +27,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
-    AdvanceSubscriptionCursorRequest, FilesystemOutboundStateStore, LoadSubscriptionCursorRequest,
+    AdvanceSubscriptionCursorRequest, OutboundStateStore, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundError, OutboundPushKind, OutboundPushPlan,
-    OutboundPushTargetRequest, OutboundStateStore, ProjectionSubscriptionRecord,
+    OutboundPushTargetRequest, OutboundStateStorePort, ProjectionSubscriptionRecord,
     ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,
     UpdateDeliveryStatusRequest,
 };

@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
+// arch-exempt: large_file, mechanical OutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -9,12 +9,12 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, FilesystemOutboundStateStore,
-    OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundStateStore,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunNotificationContext,
-    RunNotificationEventKind, RunNotificationOrigin, ThreadProjectionAccessClaim,
-    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, OutboundDeliveryAttempt, OutboundError,
+    OutboundPolicyService, OutboundStateStore, OutboundStateStorePort, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_product::{
@@ -203,7 +203,7 @@ fn trigger_context() -> ironclaw_outbound::TriggerCommunicationContext {
 }
 
 fn configured_policy<'a>(
-    store: &'a FilesystemOutboundStateStore<InMemoryBackend>,
+    store: &'a OutboundStateStore<InMemoryBackend>,
     validator: &'a FakeReplyTargetBindingValidator,
 ) -> OutboundPolicyService<'a> {
     OutboundPolicyService::new(store, &ACCESS_POLICY, validator)
@@ -263,13 +263,13 @@ struct ScriptedChannelAdapter {
     reports: Mutex<VecDeque<Result<DeliveryReport, ChannelError>>>,
     envelopes: Mutex<Vec<OutboundEnvelope>>,
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
 }
 
 impl ScriptedChannelAdapter {
     fn new(
-        store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+        store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
         scope: TurnScope,
         reports: Vec<Result<DeliveryReport, ChannelError>>,
     ) -> Self {
@@ -375,11 +375,11 @@ fn retryable_part() -> PartDeliveryOutcome {
 }
 
 fn coordinator_over(
-    store: &Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: &Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     adapter: &Arc<ScriptedChannelAdapter>,
 ) -> DeliveryCoordinator {
     DeliveryCoordinator::new(
-        Arc::clone(store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::clone(store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
@@ -498,6 +498,80 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn coordinator_suppresses_the_same_projection_after_reopen() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-reopen")],
+        })],
+    ));
+    let delivery = delivery_request(scope.clone());
+
+    let first = coordinator_over(&store, &adapter);
+    let first_outcome = first
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery: delivery.clone(),
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+            },
+        )
+        .await
+        .expect("first delivery succeeds");
+    assert!(matches!(
+        first_outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+
+    // A new coordinator models a reopened process over the same durable
+    // store. The stable projection identity resolves to the same attempt, and
+    // the atomic Prepared -> Sending claim cannot be acquired twice.
+    let reopened = coordinator_over(&store, &adapter);
+    let replay_outcome = reopened
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+            },
+        )
+        .await
+        .expect("replay is safely suppressed");
+
+    assert!(matches!(
+        replay_outcome,
+        CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1);
+    assert_eq!(store.list_delivery_attempts(scope).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -773,7 +847,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Vec::new(),
     ));
     let coordinator = DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
@@ -1062,7 +1136,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Vec::new(),
     ));
     let coordinator = DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,

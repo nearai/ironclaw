@@ -96,7 +96,7 @@ standard (which already fails closed).
 - Add `PartialEq` to `StoredThreadRecord`.
 - Map `CasUpdateError` into `SessionThreadError::Backend`.
 
-### `ironclaw_secrets` (`filesystem_store.rs`) — Arc leak
+### `ironclaw_secrets` (`secret_store.rs`) — Arc leak
 - Route `consume`/`revoke`/`consume_session_use` through `cas_update`. DELETE the
   read-only lock in `validate_session` (pure read needs no serializer). DELETE
   `FILESYSTEM_RECORD_LOCKS` + `filesystem_secret_lock*` (the `Arc`-not-`Weak`
@@ -109,7 +109,7 @@ standard (which already fails closed).
 - Map `CasUpdateError` into `SecretStoreError`/`CredentialBrokerError`
   (`*Unavailable` for Timeout/RetriesExhausted/CasUnsupported, backend for Backend).
 
-### `ironclaw_turns` (`filesystem_store.rs`) — re-home the local copy
+### `ironclaw_turns` (`turn_state_row_store.rs`) — re-home the local copy
 - Replace the local `apply_with_retry` loop, `put_with_cas`, `PutError`, and
   `cas_retry_backoff` with `cas_update`. Keep the 500ms `SNAPSHOT_READ_CACHE_TTL`
   read cache as a separate layer wrapping the read-only path — it does NOT thread

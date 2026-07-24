@@ -6,8 +6,7 @@
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
 use ironclaw_reborn_composition::{
-    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOAuthSetup,
-    FirstPartyPackageOnboarding,
+    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
 };
 
 /// The GSuite family's catalog search aliases, folded into the neutral bundle so
@@ -60,11 +59,11 @@ pub(crate) fn bundled_first_party_bundles() -> Vec<FirstPartyPackageBundle> {
                     setup_url: copy.setup_url,
                     credential_next_step: copy.credential_next_step,
                 }),
-                oauth_setup: bundle.oauth_setup.map(|setup| FirstPartyPackageOAuthSetup {
-                    requirement_name: setup.requirement_name,
-                    provider: setup.provider,
-                    scopes: setup.scopes,
-                }),
+                // #6442×#6520 reconciliation: the source `PackageBundle` no
+                // longer carries a bespoke `oauth_setup` override (#6520 folded
+                // first-party OAuth setup into the manifest credential
+                // requirements); the manifest-derived requirement is authoritative.
+                oauth_setup: None,
                 trust_effects: bundle.trust_effects,
                 search_aliases,
             }

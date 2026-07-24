@@ -21,7 +21,7 @@
 - Loop-exit protocol: `LoopExit`/`LoopCompleted`/`LoopFailed`/`LoopBlocked`/`LoopCancelled`, evidence ports, applier, mapping, validation (`loop_exit`).
 - Lifecycle events + projection: `TurnLifecycleEvent`, `TurnEventKind`, `TurnEventSink`, projection service/cursor/source (`events`).
 - Status/error vocabulary: `TurnStatus`/`TurnRunState`/`TurnError`/`TurnErrorCategory`, admission rejections, sanitized failure/cancel reasons (`status`).
-- Turn/checkpoint state stores: `TurnStateStore` + records (turn/run/checkpoint/idempotency/active-lock, persistence snapshot) (`store`); checkpoint + loop-checkpoint state stores (`checkpoint_state`); in-memory (`memory`) and filesystem (`filesystem_store`) backends.
+- Turn/checkpoint state stores: `TurnStateStore` + records (turn/run/checkpoint/idempotency/active-lock, persistence snapshot) (`store`); checkpoint + loop-checkpoint state stores (`checkpoint_state`); in-memory (`memory`) and filesystem (`turn_state_row_store`) backends.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

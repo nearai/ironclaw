@@ -63,6 +63,24 @@ async fn mcp_lane_client_failure_releases_reservation() {
 }
 
 #[tokio::test]
+async fn mcp_lane_invalid_tool_catalog_remains_typed_and_releases_reservation() {
+    let client = RecordingMcpClient::new(Err(McpClientError::invalid_tool_catalog(
+        "tools/list response violated the bounded catalog contract",
+    )));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let (governor, account) = mcp_governor();
+
+    let error = runtime
+        .execute_extension_json(&governor, mcp_request(json!({"query":"fail"})))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, McpError::InvalidToolCatalog { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
 async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_reservation() {
     let client = RecordingMcpClient::new(Err(McpClientError::AuthRequired));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);

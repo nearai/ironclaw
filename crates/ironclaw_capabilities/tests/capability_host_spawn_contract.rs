@@ -420,7 +420,7 @@ impl RecordingProcessManager {
 }
 
 struct FailCompleteRunStateStore {
-    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailCompleteRunStateStore {
@@ -432,7 +432,7 @@ impl FailCompleteRunStateStore {
 }
 
 #[async_trait]
-impl RunStateStore for FailCompleteRunStateStore {
+impl RunStateStorePort for FailCompleteRunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.inner.start(start).await
     }

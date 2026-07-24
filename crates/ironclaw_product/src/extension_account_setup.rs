@@ -1,18 +1,90 @@
-//! Product-owned account-setup declarations for extension activation.
+//! Product-owned account-setup declarations for extension readiness.
 //!
-//! Extension owners declare immutable setup metadata during composition and
-//! connect the corresponding status source when their host surface is mounted.
-//! Keeping those transitions separate makes a declared-but-unmounted host fail
-//! closed without teaching the generic lifecycle about a concrete extension.
+//! Resolved extension manifests supply immutable setup metadata; composition
+//! connects the corresponding status source when the declared host surface is
+//! mounted. Keeping those transitions separate makes a declared-but-unmounted
+//! host fail closed without teaching the generic lifecycle concrete providers.
 
 use std::collections::{BTreeMap, btree_map::Entry as MapEntry};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{ExtensionId, RuntimeCredentialAuthRequirement, UserId};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ChannelConnectionRequirement;
+
+/// Human-friendly unambiguous alphabet (no `0/O`, no `1/I`) shared by the
+/// canonical pairing issuer and every boundary parser.
+pub const CHANNEL_PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+pub const CHANNEL_PAIRING_CODE_LEN: usize = 8;
+
+/// Canonical validated pairing-code value. External text is normalized
+/// exactly once at parse (trim + uppercase).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ChannelPairingCode(String);
+
+impl ChannelPairingCode {
+    pub fn new(value: impl Into<String>) -> Result<Self, ChannelPairingCodeError> {
+        let normalized = value.into().trim().to_ascii_uppercase();
+        Self::validate(&normalized)?;
+        Ok(Self(normalized))
+    }
+
+    fn validate(value: &str) -> Result<(), ChannelPairingCodeError> {
+        if value.len() == CHANNEL_PAIRING_CODE_LEN
+            && value
+                .bytes()
+                .all(|byte| CHANNEL_PAIRING_CODE_ALPHABET.contains(&byte))
+        {
+            Ok(())
+        } else {
+            Err(ChannelPairingCodeError)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ChannelPairingCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for ChannelPairingCode {
+    type Error = ChannelPairingCodeError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ChannelPairingCode> for String {
+    fn from(value: ChannelPairingCode) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid channel pairing code")]
+pub struct ChannelPairingCodeError;
+
+/// Product-safe presentation of one live pairing challenge. The product
+/// workflow owns challenge generation and durable transition policy; WebUI
+/// and external-channel prompts consume this shared typed boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelPairingIssue {
+    pub code: ChannelPairingCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_link: Option<String>,
+    pub expires_at: DateTime<Utc>,
+}
 
 /// A connection-status read failed inside the extension-owned host service.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -73,12 +145,15 @@ pub struct ExtensionAccountSetupDescriptor {
     pub auth_requirement: RuntimeCredentialAuthRequirement,
     pub connection_requirement: ChannelConnectionRequirement,
     pub connection_notices: ChannelConnectionNoticePolicy,
-    pub activation_success_message: String,
+    pub connection_success_message: String,
     /// `WebGeneratedCode` presentation: an optional deep-link template with
-    /// `{code}` plus non-secret `[channel.config]` field-handle placeholders
+    /// `{code}` plus non-secret administrator-configuration field-handle placeholders
     /// (e.g. `https://vendor.example/{bot_username}?start={code}`). `None`
     /// presents the minted code alone.
     pub pairing_deep_link_template: Option<String>,
+    /// Manifest-authorized message prefixes the generic inbound parser may
+    /// strip before validating a pairing code. Bare codes remain valid.
+    pub pairing_inbound_code_prefixes: Vec<String>,
 }
 
 /// Sanitized lifecycle classification for an unavailable setup host or status
@@ -201,5 +276,25 @@ fn write_entries(
     match entries.write() {
         Ok(entries) => entries,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_code_new_normalizes_then_validates() {
+        let code = ChannelPairingCode::new("  abcd2345  ").expect("valid pairing code");
+        assert_eq!(code.as_str(), "ABCD2345");
+        assert!(ChannelPairingCode::new("ABCD2305").is_err());
+        assert!(ChannelPairingCode::new("TOO-SHORT").is_err());
+    }
+
+    #[test]
+    fn pairing_code_try_from_uses_the_canonical_constructor() {
+        let code = ChannelPairingCode::try_from("  abcd2345  ".to_string())
+            .expect("TryFrom accepts the canonical normalized value");
+        assert_eq!(code.as_str(), "ABCD2345");
     }
 }

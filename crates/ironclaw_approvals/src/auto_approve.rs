@@ -74,7 +74,7 @@ pub struct AutoApproveSettingInput {
 }
 
 #[async_trait]
-pub trait AutoApproveSettingStore: Send + Sync {
+pub trait AutoApproveSettingStorePort: Send + Sync {
     /// Create or update the per-(tenant, user) auto-approve toggle.
     async fn set(
         &self,
@@ -97,7 +97,7 @@ pub trait AutoApproveSettingStore: Send + Sync {
     }
 }
 
-pub struct FilesystemAutoApproveSettingStore<F>
+pub struct AutoApproveSettingStore<F>
 where
     F: RootFilesystem,
 {
@@ -105,7 +105,7 @@ where
     mutation_locks: Mutex<HashMap<AutoApproveSettingKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl<F> FilesystemAutoApproveSettingStore<F>
+impl<F> AutoApproveSettingStore<F>
 where
     F: RootFilesystem,
 {
@@ -122,7 +122,7 @@ where
 }
 
 #[async_trait]
-impl<F> AutoApproveSettingStore for FilesystemAutoApproveSettingStore<F>
+impl<F> AutoApproveSettingStorePort for AutoApproveSettingStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -172,7 +172,7 @@ where
     }
 }
 
-impl<F> FilesystemAutoApproveSettingStore<F>
+impl<F> AutoApproveSettingStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -340,8 +340,8 @@ mod tests {
 
     // The single production store, exercised over the in-memory filesystem
     // backend — the seam that replaced the deleted `InMemoryAutoApproveSettingStore`.
-    fn memory_store() -> FilesystemAutoApproveSettingStore<InMemoryBackend> {
-        FilesystemAutoApproveSettingStore::new(scoped_fs(
+    fn memory_store() -> AutoApproveSettingStore<InMemoryBackend> {
+        AutoApproveSettingStore::new(scoped_fs(
             Arc::new(InMemoryBackend::new()),
             "tenant-a",
             "alice",
@@ -417,12 +417,12 @@ mod tests {
     async fn filesystem_setting_survives_restart() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemAutoApproveSettingStore::new(Arc::clone(&scoped));
+        let store = AutoApproveSettingStore::new(Arc::clone(&scoped));
         let scope = scope("alice", None, None);
 
         store.set(input(scope.clone(), true)).await.unwrap();
 
-        let reloaded = FilesystemAutoApproveSettingStore::new(scoped);
+        let reloaded = AutoApproveSettingStore::new(scoped);
         assert!(reloaded.is_enabled(&scope).await.unwrap());
     }
 

@@ -10,11 +10,6 @@
     "google",
     "slides"
   ],
-  "source": {
-    "dir": "tools-src/google-slides",
-    "capabilities": "google-slides-tool.capabilities.json",
-    "crate_name": "google-slides-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-google-slides-0.2.1-wasm32-wasip2.tar.gz",

@@ -18,7 +18,7 @@ use sha2::Sha256;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
     InboundSink, InboundSinkError, IngressPortError, IngressRateLimitConfig, IngressRequest,
-    IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStore,
+    IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStorePort,
     VerificationCandidate, canonical_ingress_path,
 };
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
@@ -54,6 +54,11 @@ version = "0.1.0"
 description = "router contract fixture"
 trust = "third_party"
 
+[admin_configuration]
+group_id = "extension.acme-chat"
+display_name = "Acme Chat deployment configuration"
+fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true, required = false } ]
+
 [runtime]
 kind = "wasm"
 module = "wasm/acme_chat.wasm"
@@ -84,9 +89,6 @@ signed_payload = [
   { literal = ":" },
   { body = true },
 ]
-
-[channel.config]
-fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]
 scheme = "https"
@@ -293,7 +295,7 @@ struct TestReplyContextStore {
 }
 
 #[async_trait::async_trait]
-impl ReplyContextStore for TestReplyContextStore {
+impl ReplyContextStorePort for TestReplyContextStore {
     async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError> {
         let mut entries = self.entries.lock().expect("reply-context fake lock");
         entries.retain(|(existing, _)| existing != &key);
@@ -379,7 +381,7 @@ async fn harness(options: HarnessOptions) -> Harness {
                 mode: options.sink_mode,
                 admitted: Arc::clone(&admitted),
             }),
-            reply_context: Arc::clone(&reply_context) as Arc<dyn ReplyContextStore>,
+            reply_context: Arc::clone(&reply_context) as Arc<dyn ReplyContextStorePort>,
         },
         options.config,
     );

@@ -5,16 +5,13 @@ use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{CredentialStageError, ResourceScope, RuntimeCredentialAuthRequirement};
 use ironclaw_product::ProductWorkflowError;
 
+pub(crate) use ironclaw_extension_host::activation_transaction::ExtensionActivationCredentialReadiness;
+
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
+    runtime_credential_accounts_and_missing_requirements,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExtensionActivationCredentialReadiness {
-    Ready,
-    Missing(Vec<RuntimeCredentialAuthRequirement>),
-}
 
 #[async_trait]
 pub(crate) trait ExtensionActivationCredentialGate: Send + Sync {
@@ -28,7 +25,7 @@ pub(crate) trait ExtensionActivationCredentialGate: Send + Sync {
         package: &ExtensionPackage,
     ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
         self.ensure_credentials(package).await?;
-        Ok(ExtensionActivationCredentialReadiness::Ready)
+        Ok(ExtensionActivationCredentialReadiness::Ready(Vec::new()))
     }
 }
 
@@ -69,7 +66,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
         package: &ExtensionPackage,
     ) -> Result<(), ProductWorkflowError> {
         match self.credential_readiness(package).await? {
-            ExtensionActivationCredentialReadiness::Ready => Ok(()),
+            ExtensionActivationCredentialReadiness::Ready(_) => Ok(()),
             ExtensionActivationCredentialReadiness::Missing(_) => {
                 Err(missing_activation_credentials_error(package))
             }
@@ -80,12 +77,17 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
         &self,
         package: &ExtensionPackage,
     ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
-        let missing = self
-            .missing_requirements(package_runtime_credential_auth_requirements(package))
-            .await
-            .map_err(map_activation_credential_stage_error)?;
+        let (selected_accounts, missing) = runtime_credential_accounts_and_missing_requirements(
+            self.credential_accounts.as_ref(),
+            &self.scope,
+            package_runtime_credential_auth_requirements(package),
+        )
+        .await
+        .map_err(map_activation_credential_stage_error)?;
         if missing.is_empty() {
-            Ok(ExtensionActivationCredentialReadiness::Ready)
+            Ok(ExtensionActivationCredentialReadiness::Ready(
+                selected_accounts,
+            ))
         } else {
             Ok(ExtensionActivationCredentialReadiness::Missing(missing))
         }
@@ -112,7 +114,7 @@ impl ExtensionActivationCredentialGate for UnavailableExtensionActivationCredent
     ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
         let missing = package_runtime_credential_auth_requirements(package);
         if missing.is_empty() {
-            Ok(ExtensionActivationCredentialReadiness::Ready)
+            Ok(ExtensionActivationCredentialReadiness::Ready(Vec::new()))
         } else {
             Ok(ExtensionActivationCredentialReadiness::Missing(missing))
         }

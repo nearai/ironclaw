@@ -80,12 +80,12 @@ pub use refs::{
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProductActionRef,
     OpenAiCompatProjectionRef, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
     OpenAiCompatRefError, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort,
     OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatResourceKind,
     OpenAiCompatResourceMapping, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
     OpenAiResponseId, unix_timestamp_now,
 };
-pub use refs_storage::FilesystemOpenAiCompatRefStore;
+pub use refs_storage::OpenAiCompatRefStore;
 pub use refs_storage::RebornLibSqlOpenAiCompatRefStore;
 pub use refs_storage::RebornPostgresOpenAiCompatRefStore;
 pub use responses::{

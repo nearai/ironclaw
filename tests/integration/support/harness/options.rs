@@ -34,11 +34,12 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// runtime construction. The runtime warms the system-skill descriptor cache
     /// during build, so system fixtures must exist before `build_runtime`.
     pub(crate) system_skill_fixtures: Vec<SystemSkillFixture>,
-    /// Injected outbound-delivery facade double + `target_set` approval flag,
-    /// when this harness surfaces the synthetic `outbound_delivery_*`
-    /// capabilities (C-SYNTH outbound seam). Only `outbound_target_tools()` sets
-    /// this. `new_with_options` pairs the facade with the local-dev settings
-    /// stores captured from `RebornServices` to build `OutboundTargetToolsParts`.
+    /// Injected outbound-delivery facade double + `target_set` approval flag
+    /// for the synthetic list/set test seam. The current-run router is a normal
+    /// first-party capability and is not backed by this double. Only
+    /// `outbound_target_tools()` sets this. `new_with_options` pairs the facade
+    /// with the local-dev settings stores captured from `RebornServices` to
+    /// build `OutboundTargetToolsParts`.
     pub(crate) outbound_target_facade: Option<(
         Arc<super::super::outbound_preferences::FakeOutboundPreferencesFacade>,
         bool,
@@ -55,7 +56,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// directly into the local-dev active-extension registry at construction
     /// time, via `RebornServices::publish_bundled_extension_for_test`
     /// (reaches the SAME `ActiveExtensionPublisher::publish` step
-    /// `builtin.extension_activate` calls). Without this, a bundled package's
+    /// `builtin.extension_install` calls). Without this, a bundled package's
     /// capabilities are granted/trusted at the harness-authority layer
     /// (`capability_ids`/`additional_provider_trust`) but NOT present in the
     /// runtime's own dispatchable registry, so dispatch silently no-ops (the
@@ -80,9 +81,6 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// same seam the binary uses for Slack's WASM-runtime package).
     pub(crate) channel_extension_bindings:
         Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
-    /// Binary-parity account-setup declarations (extension-runtime §5.5),
-    /// the `RebornHostBindings::with_account_setup_descriptors` seam.
-    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     /// Typed handle for the recording network egress when the profile wants
     /// `captured_network_requests` assertions (the dyn seam alone loses the
     /// recorder type).
@@ -144,7 +142,6 @@ impl HostRuntimeHarnessOptions {
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
-            account_setup_descriptors: Vec::new(),
             recording_network_egress: None,
             project_service_fault_injection: false,
             durable_capability_io: false,
@@ -251,17 +248,6 @@ impl HostRuntimeHarnessOptions {
         binding: ironclaw_reborn_composition::ChannelExtensionBinding,
     ) -> Self {
         self.channel_extension_bindings.push(binding);
-        self
-    }
-
-    /// Binary-parity account-setup declaration (extension-runtime §5.5):
-    /// mirrors `RebornHostBindings::with_account_setup_descriptors` the same
-    /// way the native factories mirror the CLI assembly.
-    pub(crate) fn with_account_setup_descriptor(
-        mut self,
-        descriptor: ironclaw_product::ExtensionAccountSetupDescriptor,
-    ) -> Self {
-        self.account_setup_descriptors.push(descriptor);
         self
     }
 

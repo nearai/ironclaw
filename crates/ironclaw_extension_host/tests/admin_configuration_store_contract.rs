@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use ironclaw_extension_host::{
     AdminConfigurationIdempotencyKey, AdminConfigurationRequestDigest,
-    AdminConfigurationReserveOutcome, AdminConfigurationStoreError, AdminConfigurationValueRef,
-    FilesystemAdminConfigurationStore,
+    AdminConfigurationReserveOutcome, AdminConfigurationStore, AdminConfigurationStoreError,
+    AdminConfigurationValueRef,
 };
 use ironclaw_extensions::AdminConfigurationGroupId;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
@@ -268,7 +268,7 @@ async fn repeated_large_saves_do_not_multiply_values_inside_the_group_record() {
 #[tokio::test]
 async fn stored_tenant_mismatch_is_not_disclosed() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::clone(&backend)));
+    let store = AdminConfigurationStore::new(scoped_admin_fs(Arc::clone(&backend)));
     let tenant_a = sample_scope("tenant-a", "operator-a");
     let tenant_b = sample_scope("tenant-b", "operator-b");
     let group_id = group_id("vendor.example");
@@ -303,8 +303,8 @@ fn values_for_revision(
     ])
 }
 
-fn in_memory_store() -> FilesystemAdminConfigurationStore<InMemoryBackend> {
-    FilesystemAdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())))
+fn in_memory_store() -> AdminConfigurationStore<InMemoryBackend> {
+    AdminConfigurationStore::new(scoped_admin_fs(Arc::new(InMemoryBackend::new())))
 }
 
 fn scoped_admin_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
@@ -345,7 +345,7 @@ fn request_digest(discriminator: u8) -> AdminConfigurationRequestDigest {
 }
 
 async fn reserve<F>(
-    store: &FilesystemAdminConfigurationStore<F>,
+    store: &AdminConfigurationStore<F>,
     scope: &ResourceScope,
     group_id: &AdminConfigurationGroupId,
     key: &str,

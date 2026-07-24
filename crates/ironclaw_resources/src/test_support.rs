@@ -10,20 +10,20 @@
 //! store persists its `/resources/budget-gates.json` snapshot under) — so tests
 //! instantiate the same store a deployment runs.
 //!
-//! Note on isolation: [`FilesystemBudgetGateStore`] serializes a single snapshot
+//! Note on isolation: [`BudgetGateStore`] serializes a single snapshot
 //! file per `/resources` mount, keyed internally by `BudgetGateId`; it carries no
 //! scope in the path, so tenant/user isolation lives entirely in the
 //! `MountView`. The single fixed mount below therefore behaves exactly like the
 //! deleted `InMemoryBudgetGateStore` did — one shared snapshot regardless of the
 //! per-op `ResourceScope` — which is what the single-scope gate-lifecycle tests
 //! (open/get/resolve/list/expire under one scope) need. Cross-tenant isolation is
-//! exercised by the per-tenant-mount tests in `filesystem_store.rs`.
+//! exercised by the per-tenant-mount tests in `resource_store.rs`.
 //!
 //! Terminal retention is disabled ([`with_terminal_retention(None)`]) so tests
 //! can inspect resolved/expired gates without a time window — matching the
 //! retain-forever semantics of the deleted in-memory store. Production
 //! composition keeps the default bounded retention via plain
-//! [`FilesystemBudgetGateStore::new`].
+//! [`BudgetGateStore::new`].
 //!
 //! Gated behind `#[cfg(any(test, feature = "test-support"))]` and disabled by
 //! default. Downstream crates should enable `test-support` only from their
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::FilesystemBudgetGateStore;
+use crate::BudgetGateStore;
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounting `/resources` —
 /// the in-memory backend seam the budget-gate store persists under.
@@ -54,7 +54,6 @@ pub fn in_memory_backed_resources_filesystem() -> Arc<ScopedFilesystem<InMemoryB
 /// The production budget-gate store over a fresh in-memory backend — the drop-in
 /// replacement for the deleted `InMemoryBudgetGateStore`. Terminal retention is
 /// disabled so tests can inspect resolved/expired gates.
-pub fn in_memory_backed_budget_gate_store() -> FilesystemBudgetGateStore<InMemoryBackend> {
-    FilesystemBudgetGateStore::new(in_memory_backed_resources_filesystem())
-        .with_terminal_retention(None)
+pub fn in_memory_backed_budget_gate_store() -> BudgetGateStore<InMemoryBackend> {
+    BudgetGateStore::new(in_memory_backed_resources_filesystem()).with_terminal_retention(None)
 }

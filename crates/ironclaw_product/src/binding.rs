@@ -12,6 +12,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_turns::{ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProductWorkflowError;
@@ -35,6 +36,8 @@ pub struct ResolvedBinding {
     /// are rejected before turn submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_user_id: Option<UserId>,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub thread_id: ThreadId,
     /// Required for user-message turn submission because Reborn `ThreadScope`
     /// and `TurnScope` are agent-scoped. Product bindings that are only
@@ -53,6 +56,8 @@ mod tests {
             "tenant_id": "tenant:legacy",
             "user_id": "user:legacy-actor",
             "subject_user_id": "user:legacy-subject",
+            "source_binding_ref": "source:legacy",
+            "reply_target_binding_ref": "reply:legacy",
             "thread_id": "thread:legacy",
             "agent_id": "agent:legacy",
             "project_id": "project:legacy"
@@ -87,6 +92,28 @@ pub enum ProductConversationRouteKind {
     Direct,
     /// A shared channel/group route where allowed participants may post.
     Shared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredProductReplyTargetAccess {
+    OrdinaryReply,
+    AuthorityBearingPrompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveStoredProductReplyTargetRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub access: StoredProductReplyTargetAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedStoredProductReplyTarget {
+    pub adapter_id: ProductAdapterId,
+    pub installation_id: AdapterInstallationId,
+    pub external_conversation_ref: ExternalConversationRef,
+    pub route_kind: ProductConversationRouteKind,
 }
 
 /// Whether an inbound user message may create a new product conversation
@@ -181,6 +208,15 @@ pub trait ConversationBindingService: Send + Sync {
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductWorkflowError>;
+
+    /// Resolve a message-scoped reply target already sealed onto durable run
+    /// state. Hosts without an external-delivery resolver fail closed.
+    async fn resolve_stored_reply_target(
+        &self,
+        _request: ResolveStoredProductReplyTargetRequest,
+    ) -> Result<ResolvedStoredProductReplyTarget, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingAccessDenied)
+    }
 }
 
 #[async_trait]
@@ -200,5 +236,12 @@ where
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductWorkflowError> {
         self.as_ref().lookup_binding(request).await
+    }
+
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredProductReplyTargetRequest,
+    ) -> Result<ResolvedStoredProductReplyTarget, ProductWorkflowError> {
+        self.as_ref().resolve_stored_reply_target(request).await
     }
 }

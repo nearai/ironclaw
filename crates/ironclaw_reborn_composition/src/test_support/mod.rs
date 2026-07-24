@@ -83,6 +83,8 @@ mod user_profile;
 #[cfg(feature = "test-support")]
 pub use automation::{
     local_dev_automation_product_facade_for_test, local_dev_trigger_active_run_lookup_for_test,
+    register_static_source_delivery_target_for_test,
+    set_local_dev_trigger_source_turn_state_for_test,
 };
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,

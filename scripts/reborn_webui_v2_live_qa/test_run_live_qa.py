@@ -1107,7 +1107,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             required_capabilities = extra_details["required_capabilities"]
             self.assertIn(run_live_qa.EXTENSION_SEARCH_CAPABILITY_ID, required_capabilities)
             self.assertIn(run_live_qa.EXTENSION_INSTALL_CAPABILITY_ID, required_capabilities)
-            self.assertIn(run_live_qa.EXTENSION_ACTIVATE_CAPABILITY_ID, required_capabilities)
+            self.assertEqual(len(required_capabilities), 2)
             for capability_id in verification_caps:
                 self.assertNotIn(capability_id, required_capabilities)
             self.assertEqual(
@@ -3888,7 +3888,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["delivery_target_present"], True)
         self.assertIn("preflight", result.details)
 
-    def test_start_reborn_server_sets_slack_oauth_redirect(self):
+    def test_start_reborn_server_does_not_seed_retired_slack_redirect_env(self):
         captured: dict[str, object] = {}
 
         class FakeProcess:
@@ -3929,83 +3929,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["health_url"], "http://127.0.0.1:38555/api/health")
         env = captured["env"]
         self.assertIsInstance(env, dict)
-        self.assertEqual(
-            env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
-            (
-                "http://127.0.0.1:38555"
-                "/api/reborn/product-auth/oauth/slack/callback"
-            ),
-        )
-
-    def test_start_reborn_server_sets_slack_redirect_from_persisted_oauth_client_id(self):
-        captured: dict[str, object] = {}
-
-        class FakeProcess:
-            pass
-
-        def fake_popen(*_args, **kwargs):
-            captured["env"] = kwargs["env"]
-            kwargs["stdout"].close()
-            kwargs["stderr"].close()
-            return FakeProcess()
-
-        async def fake_wait_for_ready(url: str, *, timeout: float) -> None:
-            captured["health_url"] = url
-            captured["timeout"] = timeout
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            reborn_home = root / "reborn-home"
-            reborn_home.mkdir()
-            (reborn_home / "config.toml").write_text(
-                "[slack]\nenabled = true\n",
-                encoding="utf-8",
-            )
-            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-            run_live_qa._root_filesystem_create_table(db_path)
-            run_live_qa._put_root_filesystem_json(
-                db_path,
-                "/tenants/reborn-cli/shared/slack-setup/installation.json",
-                {
-                    "installation_id": "local-dev-installation",
-                    "team_id": "T123",
-                    "api_app_id": "A123",
-                    "oauth_client_id": "persisted-client-id",
-                },
-            )
-            env = {
-                "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID": "",
-                "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID_PATH": "",
-                "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI": "",
-                "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI_PATH": "",
-            }
-            with (
-                patch.dict(os.environ, env, clear=False),
-                patch.object(run_live_qa, "reserve_loopback_port", return_value=38555),
-                patch.object(run_live_qa.subprocess, "Popen", side_effect=fake_popen),
-                patch.object(run_live_qa, "wait_for_ready", side_effect=fake_wait_for_ready),
-            ):
-                proc, base_url = asyncio.run(
-                    run_live_qa.start_reborn_server(
-                        root / "ironclaw",
-                        reborn_home,
-                        root / "out",
-                        {
-                            "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "slack-secret",
-                        },
-                    )
-                )
-
-        self.assertIsInstance(proc, FakeProcess)
-        self.assertEqual(base_url, "http://127.0.0.1:38555")
-        env = captured["env"]
-        self.assertIsInstance(env, dict)
-        self.assertEqual(
-            env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
-            (
-                "http://127.0.0.1:38555"
-                "/api/reborn/product-auth/oauth/slack/callback"
-            ),
+        self.assertNotIn(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+            env,
         )
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
@@ -4013,13 +3939,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             {
                 "extension_search": ["completed", "failed", "completed"],
                 "extension_install": ["running"],
-                "extension_activate": [],
+                "extension_remove": [],
             }
         )
 
         self.assertEqual(counts["extension_search"], 2)
         self.assertEqual(counts["extension_install"], 0)
-        self.assertEqual(counts["extension_activate"], 0)
+        self.assertEqual(counts["extension_remove"], 0)
 
     def test_qa_7c_prepares_bug_logging_sheet_before_sheet_prompt(self):
         captured_fixture: dict[str, object] = {}
@@ -5942,6 +5868,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "extensions": [
                                 {
                                     "package_ref": {"kind": "extension", "id": "slack"},
+                                    "installation_state": (
+                                        "active" if list_count > 1 else "setup_needed"
+                                    ),
                                     "active": list_count > 1,
                                     "authenticated": list_count > 1,
                                     "needs_setup": list_count <= 1,
@@ -5953,13 +5882,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             async def post(self, url, *, json=None, **_kwargs):
                 requests.append(("POST", url, json))
-                if url.endswith("/activate"):
-                    return FakeResponse(
-                        200,
-                        {"success": True, "activated": True, "message": "Slack activated"},
-                    )
                 configured = {
                     **setup_projection,
+                    "phase": "active",
                     "secrets": [
                         {"name": secret["name"], "provided": True}
                         for secret in setup_projection["secrets"]
@@ -6041,11 +5966,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     },
                 ),
                 (
-                    "POST",
-                    "http://127.0.0.1:38555/api/webchat/v2/extensions/slack/activate",
-                    {},
-                ),
-                (
                     "GET",
                     "http://127.0.0.1:38555/api/webchat/v2/extensions",
                     None,
@@ -6074,9 +5994,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "slack_team_id",
             ],
         )
-        self.assertTrue(result["activation"]["verified_active"])
+        self.assertTrue(result["read_back"]["verified_active"])
 
-    def test_slack_setup_api_requires_fully_ready_activation_projection(self):
+    def test_slack_setup_api_requires_fully_ready_lifecycle_projection(self):
         class FakeResponse:
             def __init__(self, body: dict[str, object]):
                 self.status_code = 200
@@ -6109,6 +6029,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                         "kind": "extension",
                                         "id": "slack",
                                     },
+                                    "installation_state": (
+                                        "active" if list_count > 1 else "setup_needed"
+                                    ),
                                     "active": list_count > 1,
                                     "authenticated": False,
                                     "needs_setup": True,
@@ -6132,12 +6055,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
 
             async def post(self, url, **_kwargs):
-                if url.endswith("/activate"):
-                    return FakeResponse({"success": True, "activated": True})
                 return FakeResponse(
                     {
                         "package_ref": {"kind": "extension", "id": "slack"},
-                        "phase": "installed",
+                        "phase": "active",
                         "secrets": [
                             {
                                 "name": "slack_bot_token",

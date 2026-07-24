@@ -27,7 +27,7 @@ use ironclaw_turns::{
         RelinquishRunRequest, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
-use ironclaw_turns::{FilesystemTurnStateRowStore, TurnStateStoreLimits};
+use ironclaw_turns::{TurnStateRowStore, TurnStateStoreLimits};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -119,9 +119,9 @@ fn resolver() -> InMemoryRunProfileResolver {
     InMemoryRunProfileResolver::default()
 }
 
-/// The in-memory turn-state store double: a `FilesystemTurnStateRowStore` over a
+/// The in-memory turn-state store double: a `TurnStateRowStore` over a
 /// volatile `InMemoryBackend` at the synchronous WriteThrough default.
-type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+type TurnStore = TurnStateRowStore<InMemoryBackend>;
 
 /// An effectively-unlimited store. The row store keeps no incremental running
 /// counter — `running_trigger_count`/`running_conversation_count` rebuild a
@@ -783,14 +783,14 @@ async fn snapshot_rebuild_restores_origin_class_counter() {
     // old snapshot reload). Both stores enable a cap so the row store's
     // per-read counter rebuild is populated (it is skipped when uncapped).
     let scoped = in_memory_turns_filesystem();
-    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let store = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default()
             .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(1024).expect("nonzero cap")),
     );
     let run_id = submit_trigger(&store, "orig-snapshot", "orig-snapshot").await;
 
     // Reopen BEFORE claiming (run is still Queued).
-    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let restored = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default()
             .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(1024).expect("nonzero cap")),
     );
@@ -908,7 +908,7 @@ async fn trigger_cap_is_per_tenant_not_global() {
 #[tokio::test]
 async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
     let scoped = in_memory_turns_filesystem();
-    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let store = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default()
             .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     );
@@ -924,7 +924,7 @@ async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
 
     // Reopen WHILE the run is Running with a trigger cap enabled so the rebuild
     // loop executes — counter must already be 1 without claiming again.
-    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+    let restored = TurnStateRowStore::new(scoped.clone()).with_limits(
         TurnStateStoreLimits::default()
             .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     );

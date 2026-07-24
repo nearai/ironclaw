@@ -1,0 +1,661 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_4c_github_release_live_chat",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nearai/ironclaw.\"\nExpected result: summary of the most recent release"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_39d79167978045bc9a68b3f1",
+            "name": "builtin__skill_activate",
+            "arguments": {
+              "names": [
+                "github"
+              ]
+            }
+          },
+          {
+            "id": "call_632c80b992734a49ba7608f0",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "github"
+            }
+          }
+        ],
+        "input_tokens": 13413,
+        "output_tokens": 98
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_23f0a7b125bf498b992682f6",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "github"
+            }
+          }
+        ],
+        "input_tokens": 16003,
+        "output_tokens": 64
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 7
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_5513a70c67d24d7bbe49e290",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "github"
+            }
+          }
+        ],
+        "input_tokens": 16647,
+        "output_tokens": 49
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 9
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ccf9974c6601489fa5fc6116",
+            "name": "github__list_releases",
+            "arguments": {
+              "limit": 1,
+              "owner": "nearai",
+              "repo": "ironclaw"
+            }
+          }
+        ],
+        "input_tokens": 36785,
+        "output_tokens": 97
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 11
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_2c84cb46e14a485bb0e6e1bf",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 40000,
+              "offset": 24576,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.4e65cde6-7d87-481e-bfbc-14297c79e6a7"
+            }
+          }
+        ],
+        "input_tokens": 46296,
+        "output_tokens": 148
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 13
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_d0522ef56d7945b1a39fb954",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 24000,
+              "offset": 24576,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.4e65cde6-7d87-481e-bfbc-14297c79e6a7"
+            }
+          }
+        ],
+        "input_tokens": 46550,
+        "output_tokens": 134
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 15
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0763550ad35a465080f1bbe6",
+            "name": "builtin__http",
+            "arguments": {
+              "method": "GET",
+              "url": "https://api.github.com/repos/nearai/ironclaw/releases/latest"
+            }
+          }
+        ],
+        "input_tokens": 55871,
+        "output_tokens": 102
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 17
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a808040413ea491ba7a494c2",
+            "name": "github__get_repo",
+            "arguments": {
+              "owner": "nearai",
+              "repo": "ironclaw"
+            }
+          }
+        ],
+        "input_tokens": 56063,
+        "output_tokens": 107
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 19
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a299847e3ae34caa9752b22b",
+            "name": "builtin__http",
+            "arguments": {
+              "method": "get",
+              "url": "https://api.github.com/repos/nearai/ironclaw/releases/tags/ironclaw-v1.0.0-rc.1"
+            }
+          }
+        ],
+        "input_tokens": 58417,
+        "output_tokens": 128
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 21
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_494128a838ac4f248fbd4eaa",
+            "name": "github__list_releases",
+            "arguments": {
+              "limit": 1,
+              "owner": "nearai",
+              "repo": "ironclaw"
+            }
+          }
+        ],
+        "input_tokens": 58985,
+        "output_tokens": 117
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 23
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_efb2a5103bfd40b48463f335",
+            "name": "builtin__json",
+            "arguments": {
+              "data": "[{\"tag_name\":\"ironclaw-v1.0.0-rc.1\",\"name\":\"IronClaw v1.0.0-rc.1\",\"created_at\":\"2026-07-21T03:57:47Z\",\"published_at\":\"2026-07-21T03:57:47Z\",\"prerelease\":true,\"draft\":false,\"target_commitish\":\"main\",\"body\":\"... could not find full body so checking now\"}]",
+              "operation": "validate"
+            }
+          }
+        ],
+        "input_tokens": 68494,
+        "output_tokens": 176
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 25
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_810f445416394fcd84e1b8e0",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 0,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.f7fa4dc9-498f-47fe-8f9a-c97cd3dc888b"
+            }
+          }
+        ],
+        "input_tokens": 68779,
+        "output_tokens": 187
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 27
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_9507a91fe6c34be9a048d537",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 4000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.f7fa4dc9-498f-47fe-8f9a-c97cd3dc888b"
+            }
+          }
+        ],
+        "input_tokens": 70559,
+        "output_tokens": 132
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 29
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_a2875260363a4bd68b076788",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 62000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.f7fa4dc9-498f-47fe-8f9a-c97cd3dc888b"
+            }
+          }
+        ],
+        "input_tokens": 72311,
+        "output_tokens": 158
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 31
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ab078e1749a74a71a06af126",
+            "name": "builtin__http",
+            "arguments": {
+              "method": "get",
+              "url": "https://api.github.com/repos/nearai/ironclaw/releases/357105729"
+            }
+          }
+        ],
+        "input_tokens": 73559,
+        "output_tokens": 81
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 33
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_552819c08d3d4542a823af56",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 58000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.f7fa4dc9-498f-47fe-8f9a-c97cd3dc888b"
+            }
+          }
+        ],
+        "input_tokens": 74115,
+        "output_tokens": 132
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 35
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_80fe0e8f4adf45cfbe769d60",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 58000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.f7fa4dc9-498f-47fe-8f9a-c97cd3dc888b"
+            }
+          }
+        ],
+        "input_tokens": 74298,
+        "output_tokens": 132
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 37
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b6a0c9009c5645fca0b14d3e",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 58000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.4e65cde6-7d87-481e-bfbc-14297c79e6a7"
+            }
+          }
+        ],
+        "input_tokens": 74481,
+        "output_tokens": 134
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 39
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_5fba4acdefa24ba7a375fe93",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 4000,
+              "offset": 58000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.f7fa4dc9-498f-47fe-8f9a-c97cd3dc888b"
+            }
+          }
+        ],
+        "input_tokens": 74683,
+        "output_tokens": 132
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 42
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_09518f9f3f0b4a0da20d84ea",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 5000,
+              "offset": 62000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.4e65cde6-7d87-481e-bfbc-14297c79e6a7"
+            }
+          }
+        ],
+        "input_tokens": 74915,
+        "output_tokens": 152
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 44
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_eb708a7897eb4011a85ebebf",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 5000,
+              "offset": 58000,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.4e65cde6-7d87-481e-bfbc-14297c79e6a7"
+            }
+          }
+        ],
+        "input_tokens": 76167,
+        "output_tokens": 134
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 46
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_0a499ac557bf41d58d4e25e3",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 5000,
+              "offset": 48576,
+              "result_ref": "result:0a481bc3-7cec-41d8-81a8-f93b8049830c.4e65cde6-7d87-481e-bfbc-14297c79e6a7"
+            }
+          }
+        ],
+        "input_tokens": 45870,
+        "output_tokens": 134
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_77bcbf17b58742168b9fe448",
+            "name": "github__list_releases",
+            "arguments": {
+              "limit": 1,
+              "owner": "nearai",
+              "repo": "ironclaw"
+            }
+          }
+        ],
+        "input_tokens": 32503,
+        "output_tokens": 94
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_dff401541cc94885824e4360",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 40000,
+              "offset": 24576,
+              "result_ref": "result:fe83babd-0df8-4598-9da3-a7dde2db12a7.d93be5dc-878c-4fb0-8d6e-e48c53c6f411"
+            }
+          }
+        ],
+        "input_tokens": 42013,
+        "output_tokens": 145
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_251c7c625fb347e4a7da2419",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 24576,
+              "offset": 24576,
+              "result_ref": "result:fe83babd-0df8-4598-9da3-a7dde2db12a7.d93be5dc-878c-4fb0-8d6e-e48c53c6f411"
+            }
+          }
+        ],
+        "input_tokens": 42266,
+        "output_tokens": 133
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_1b6eb87ac08d44d9a91b6417",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 24576,
+              "offset": 0,
+              "result_ref": "result:fe83babd-0df8-4598-9da3-a7dde2db12a7.d93be5dc-878c-4fb0-8d6e-e48c53c6f411"
+            }
+          }
+        ],
+        "input_tokens": 51777,
+        "output_tokens": 143
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4d196759264f4ac780539cbb",
+            "name": "builtin__shell",
+            "arguments": {
+              "command": "cat <<'EOF' | python3 -c \"\nimport json, sys\ndata = json.load(sys.stdin)\nr = data[0]\nprint('Tag:', r.get('tag_name'))\nprint('Name:', r.get('name'))\nprint('Published:', r.get('published_at'))\nprint('Prerelease:', r.get('prerelease'))\nprint('Draft:', r.get('draft'))\nprint('Body:', (r.get('body') or '')[:2000])\n\"\nEOF"
+            }
+          }
+        ],
+        "input_tokens": 61306,
+        "output_tokens": 166
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 12
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_8b305026a99745c5807638ef",
+            "name": "builtin__result_read",
+            "arguments": {
+              "max_bytes": 24576,
+              "offset": 0,
+              "result_ref": "result:fe83babd-0df8-4598-9da3-a7dde2db12a7.e4f886df-3d3e-4f86-a164-8ff31f7f5d76"
+            }
+          }
+        ],
+        "input_tokens": 61569,
+        "output_tokens": 133
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 14
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ba47e8f8cac74a959be1b597",
+            "name": "builtin__shell",
+            "arguments": {
+              "command": "python3 -c \"\nimport json, sys\n# Extract the release data from the first chunk of the result\ndata = json.loads(sys.stdin.read())\nr = data[0]\nprint('Tag:', r.get('tag_name'))\nprint('Name:', r.get('name'))\nprint('Published:', r.get('published_at'))\nprint('Prerelease:', r.get('prerelease'))\nprint('Draft:', r.get('draft'))\nbody = r.get('body') or ''\nprint('Body (first 3000 chars):')\nprint(body[:3000])\n\" <<'PYEOF'\n[{\"assets_url\": \"https://api.github.com/repos/nearai/ironclaw/releases/357105729/assets\", \"author\": {\"login\": \"github-actions[bot]\"}, \"body\": \"placeholder\", \"created_at\": \"2026-07-21T03:57:43Z\", \"draft\": false, \"html_url\": \"https://github.com/nearai/ironclaw/releases/tag/ironclaw-v1.0.0-rc.1\", \"id\": 357105729, \"name\": \"ironclaw v1.0.0-rc.1\", \"prerelease\": true, \"published_at\": \"2026-07-21T03:57:54Z\", \"tag_name\": \"ironclaw-v1.0.0-rc.1\", \"target_commitish\": \"main\", \"url\": \"https://api.github.com/repos/nearai/ironclaw/releases/357105729\"}\nPYEOF"
+            }
+          }
+        ],
+        "input_tokens": 61818,
+        "output_tokens": 390
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"summarize the latest release from https://github.com/nea",
+        "min_message_count": 16
+      },
+      "response": {
+        "type": "text",
+        "content": "Here's the summary of the latest release from **nearai/ironclaw**:\n\n---\n\n## ironclaw v1.0.0-rc.1 (Release Candidate 1)\n\n**Published:** July 21, 2026  \n**Tag:** `ironclaw-v1.0.0-rc.1`  \n**Status:** ⚠️ **Pre-release** (not a stable release yet)\n\nThis is the first release candidate for IronClaw v1.0.0, published by the CI pipeline.\n\n### Assets available for all platforms:\n\n| Platform | Format |\n|---|---|\n| **macOS (Apple Silicon)** | `.tar.gz` (42.9 MB) + self-update binary |\n| **macOS (Intel)** | `.tar.gz` (44.7 MB) + self-update binary |\n| **Linux x86_64 (glibc)** | `.tar.gz` (48.6 MB) + self-update binary |\n| **Linux x86_64 (musl)** | `.tar.gz` (49.0 MB) + self-update binary |\n| **Linux aarch64 (glibc)** | `.tar.gz` (45.9 MB) + self-update binary |\n| **Linux aarch64 (musl)** | `.tar.gz` (45.4 MB) + self-update binary |\n| **Windows x86_64** | `.msi` (48.1 MB) + `.tar.gz` + self-update binary |\n| **All platforms** | Shell installer (`ironclaw-installer.sh`), PowerShell installer (`ironclaw-installer.ps1`), source tarball, SHA256 checksums, and a distribution manifest |\n\n**Note:** The release body just contains \"placeholder\" — the full release notes haven't been authored yet. The actual changelog would require inspecting commits between this tag and the previous release.",
+        "input_tokens": 62314,
+        "output_tokens": 400
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "github.list_releases"
+    ]
+  }
+}

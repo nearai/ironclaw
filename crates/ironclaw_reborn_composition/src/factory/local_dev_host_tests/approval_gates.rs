@@ -4,12 +4,12 @@ use std::{
 };
 
 use ironclaw_approvals::{
-    ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore,
-    CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, PersistentApprovalAction,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyStore, ToolPermissionOverride,
+    ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStorePort,
+    CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput,
 };
-use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
+use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, Principal,
@@ -19,7 +19,7 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
     RuntimeApprovalGate, RuntimeCapabilityOutcome, RuntimeFailureKind, SHELL_CAPABILITY_ID,
 };
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
+use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus};
 
 use super::*;
 use crate::builtin_capability_policy::builtin_one_shot_lease_approval;

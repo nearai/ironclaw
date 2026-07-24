@@ -711,13 +711,16 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         panic!("auth gate must carry replay metadata, got {auth_blocked:?}");
     };
     let auth_resume = CapabilityAuthResume {
-        resume_token: CapabilityResumeToken::new(
-            blocked
-                .resume_token()
-                .expect("auth gate must carry a resume token")
-                .as_str(),
-        )
-        .expect("valid resume token"),
+        resume_token: Some(
+            CapabilityResumeToken::new(
+                blocked
+                    .resume_token()
+                    .expect("auth gate must carry a resume token")
+                    .as_str(),
+            )
+            .expect("valid resume token"),
+        ),
+        disposition: None,
         prior_approval: None,
     };
     assert_eq!(
@@ -753,6 +756,200 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         serde_json::json!({"query": "is:unread", "max_results": 10}),
         "auth resume runtime request must receive the original input"
     );
+}
+
+#[tokio::test]
+async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let runtime = Arc::new(
+        QueuedHostRuntime::new(Vec::new(), Vec::new()).with_auth_decline_outcomes(vec![
+            Err(HostRuntimeError::unavailable(
+                "run-state filesystem unavailable",
+            )),
+            Ok(RuntimeCapabilityOutcome::Failed(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::GateDeclined,
+                    Some("auth gate denied by user".to_string()),
+                ),
+            )),
+        ]),
+    );
+    let result_writer = Arc::new(RecordingResultWriter::default());
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        runtime.clone(),
+        result_writer.clone(),
+        milestone_sink.clone(),
+        "thread-auth-decline",
+    )
+    .await;
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("current surface without the removed capability");
+    let activity_id = ironclaw_turns::CapabilityActivityId::new();
+    let expected_invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    let invocation = LoopRequest {
+        activity_id,
+        surface_version: surface.version,
+        capability_id: capability_id.clone(),
+        input_ref: CapabilityInputRef::new("input:removed-capability-denial")
+            .expect("valid input ref"),
+        approval_resume: None,
+        auth_resume: Some(CapabilityAuthResume::denied()),
+    };
+
+    let unavailable = port
+        .invoke_capability(invocation.clone())
+        .await
+        .expect_err("transient decline failure must remain retryable");
+    assert!(matches!(
+        unavailable.kind,
+        AgentLoopHostErrorKind::Unavailable
+    ));
+    assert_eq!(runtime.auth_decline_requests().len(), 1);
+    assert!(
+        result_writer.failure_previews().is_empty(),
+        "transient decline failure must not stage a terminal result"
+    );
+    assert!(
+        !milestone_sink.milestones().iter().any(|milestone| matches!(
+            &milestone.kind,
+            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed { .. }
+        )),
+        "transient decline failure must not record a terminal milestone"
+    );
+
+    let outcome = port
+        .invoke_capability(invocation)
+        .await
+        .expect("exact denied auth resume remains retryable");
+
+    assert!(matches!(
+        &outcome,
+        Resolution::Done(done)
+            if done.verdict.error_kind() == Some(&FailureKind::GateDeclined)
+    ));
+    let requests = runtime.auth_decline_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].0.invocation_id, expected_invocation_id);
+    assert_eq!(
+        requests[1].0.resource_scope.invocation_id,
+        expected_invocation_id
+    );
+    assert_eq!(requests[1].1, capability_id);
+    let failure_previews = result_writer.failure_previews();
+    assert_eq!(failure_previews.len(), 1);
+    assert_eq!(failure_previews[0].0, expected_invocation_id);
+    assert_eq!(failure_previews[0].1, capability_id);
+    assert!(failure_previews[0].2.contains("denied"));
+    assert!(milestone_sink.milestones().iter().any(|milestone| matches!(
+        &milestone.kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            activity_id,
+            capability_id: failed_capability_id,
+            reason_kind: CapabilityFailureKind::GateDeclined,
+            ..
+        } if *activity_id == ironclaw_turns::CapabilityActivityId::from_uuid(
+            expected_invocation_id.as_uuid()
+        ) && failed_capability_id == &capability_id
+    )));
+
+    let replay = LoopRequest {
+        activity_id,
+        surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
+            "surface-after-removal",
+        )
+        .expect("valid surface version"),
+        capability_id: capability_id.clone(),
+        input_ref: CapabilityInputRef::new("input:changed-after-removal").expect("valid input ref"),
+        approval_resume: None,
+        auth_resume: Some(CapabilityAuthResume::denied()),
+    };
+    let replay_outcome = port
+        .invoke_capability(replay)
+        .await
+        .expect("denial replay remains terminal after surface and input drift");
+    assert!(matches!(
+        &replay_outcome,
+        Resolution::Done(done)
+            if done.verdict.error_kind() == Some(&FailureKind::GateDeclined)
+    ));
+    assert_eq!(
+        runtime.auth_decline_requests().len(),
+        2,
+        "denial replay must reuse the terminal result without calling runtime again"
+    );
+    assert_eq!(
+        result_writer.failure_previews().len(),
+        1,
+        "denial replay must not restage the terminal failure preview"
+    );
+}
+
+#[tokio::test]
+async fn denied_auth_resume_rejects_mismatched_optional_token_before_runtime() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let runtime = Arc::new(QueuedHostRuntime::new(Vec::new(), Vec::new()));
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        runtime.clone(),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        "thread-auth-decline-token-mismatch",
+    )
+    .await;
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("current empty surface");
+    let activity_id = ironclaw_turns::CapabilityActivityId::new();
+    let error = port
+        .invoke_capability(LoopRequest {
+            activity_id,
+            surface_version: surface.version,
+            capability_id,
+            input_ref: CapabilityInputRef::new("input:malformed-auth-denial")
+                .expect("valid input ref"),
+            approval_resume: None,
+            auth_resume: Some(CapabilityAuthResume {
+                resume_token: Some(resume_token_for_different_activity(activity_id)),
+                disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+                prior_approval: None,
+            }),
+        })
+        .await
+        .expect_err("mismatched denied resume token must fail closed");
+
+    assert!(matches!(
+        error.kind,
+        AgentLoopHostErrorKind::InvalidInvocation
+    ));
+    assert!(
+        runtime.auth_decline_requests().is_empty(),
+        "malformed denied resume must fail before runtime"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_default_auth_decline_fails_closed_as_unavailable() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let error = NoopHostRuntime
+        .decline_auth_capability((
+            execution_context("thread-default-auth-decline"),
+            capability_id,
+        ))
+        .await
+        .expect_err("runtime without durable decline support must fail closed");
+
+    assert!(matches!(error, HostRuntimeError::Unavailable { .. }));
 }
 
 #[tokio::test]
@@ -1165,7 +1362,8 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             input_ref: first_invocation.input_ref.clone(),
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
-                resume_token: resume.resume_token.clone(),
+                resume_token: Some(resume.resume_token.clone()),
+                disposition: None,
                 // Carry the prior approval so the port restores the original
                 // correlation identifier onto the invocation context.
                 prior_approval: Some(ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
@@ -1502,6 +1700,8 @@ struct QueuedHostRuntime {
     outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
     auth_resume_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
     auth_resume_requests: Mutex<Vec<RuntimeAuthResume>>,
+    auth_decline_outcomes: Mutex<VecDeque<Result<RuntimeCapabilityOutcome, HostRuntimeError>>>,
+    auth_decline_requests: Mutex<Vec<ironclaw_host_runtime::RuntimeAuthDecline>>,
 }
 
 impl QueuedHostRuntime {
@@ -1514,6 +1714,8 @@ impl QueuedHostRuntime {
             outcomes: Mutex::new(VecDeque::from(outcomes)),
             auth_resume_outcomes: Mutex::new(VecDeque::new()),
             auth_resume_requests: Mutex::new(Vec::new()),
+            auth_decline_outcomes: Mutex::new(VecDeque::new()),
+            auth_decline_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -1532,6 +1734,24 @@ impl QueuedHostRuntime {
         self.auth_resume_requests
             .lock()
             .expect("auth resume requests lock")
+            .clone()
+    }
+
+    fn with_auth_decline_outcomes(
+        self,
+        outcomes: Vec<Result<RuntimeCapabilityOutcome, HostRuntimeError>>,
+    ) -> Self {
+        *self
+            .auth_decline_outcomes
+            .lock()
+            .expect("auth decline outcomes lock") = VecDeque::from(outcomes);
+        self
+    }
+
+    fn auth_decline_requests(&self) -> Vec<ironclaw_host_runtime::RuntimeAuthDecline> {
+        self.auth_decline_requests
+            .lock()
+            .expect("auth decline requests lock")
             .clone()
     }
 }
@@ -1569,6 +1789,21 @@ impl HostRuntime for QueuedHostRuntime {
             .expect("auth resume outcomes lock")
             .pop_front()
             .expect("queued host runtime auth resume outcome")
+    }
+
+    async fn decline_auth_capability(
+        &self,
+        request: ironclaw_host_runtime::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.auth_decline_requests
+            .lock()
+            .expect("auth decline requests lock")
+            .push(request);
+        self.auth_decline_outcomes
+            .lock()
+            .expect("auth decline outcomes lock")
+            .pop_front()
+            .expect("queued host runtime auth decline outcome")
     }
 
     async fn visible_capabilities(

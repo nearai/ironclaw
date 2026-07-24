@@ -111,6 +111,20 @@ def cargo_build() -> None:
     )
 
 
+def cargo_build_reborn() -> None:
+    run(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "ironclaw",
+            "--bin",
+            "ironclaw",
+        ],
+        cwd=ROOT,
+    )
+
+
 def env_str(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(name, default)
     if value is None:
@@ -542,6 +556,132 @@ async def start_gateway_stack(
             channels_dir=str(channels_tmp.name),
         )
     except Exception:
+        stop_process(mock_llm_proc)
+        for tempdir in tempdirs:
+            tempdir.cleanup()
+        raise
+
+
+async def start_reborn_gateway_stack(
+    *,
+    venv_dir: Path,
+    owner_user_id: str,
+    temp_prefix: str,
+    gateway_token_prefix: str,
+    extra_gateway_env: dict[str, str] | None = None,
+    rewrite_google_oauth: bool = False,
+    log_dir: Path | None = None,
+) -> GatewayStack:
+    """Start the shipping Reborn binary for v2 lifecycle live canaries."""
+    python = venv_python(venv_dir)
+    mock_llm_proc = subprocess.Popen(
+        [str(python), str(E2E_DIR / "mock_llm.py"), "--port", "0"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    tempdirs = [
+        tempfile.TemporaryDirectory(prefix=f"{temp_prefix}-home-"),
+        tempfile.TemporaryDirectory(prefix=f"{temp_prefix}-runtime-"),
+    ]
+    home_tmp, runtime_tmp = tempdirs
+    gateway_proc: subprocess.Popen[str] | None = None
+
+    try:
+        match = wait_for_port_line(
+            mock_llm_proc,
+            re.compile(r"MOCK_LLM_PORT=(\d+)"),
+            timeout=30.0,
+        )
+        mock_llm_url = f"http://127.0.0.1:{match.group(1)}"
+        await wait_for_ready(f"{mock_llm_url}/v1/models", timeout=30.0)
+        if log_dir is not None and mock_llm_proc.stdout is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _drain_to_file(mock_llm_proc.stdout, log_dir / "mock_llm.log")
+
+        gateway_port = reserve_loopback_port()
+        gateway_token = f"{gateway_token_prefix}-{uuid.uuid4().hex}"
+        home_dir = Path(home_tmp.name)
+        reborn_home = Path(runtime_tmp.name) / "reborn-home"
+        reborn_home.mkdir(parents=True, exist_ok=True)
+        config_path = reborn_home / "config.toml"
+        config_path.write_text(
+            f"""api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "local-dev"
+
+[identity]
+default_owner = "{owner_user_id}"
+tenant = "auth-live-canary"
+default_agent = "auth-live-canary-agent"
+
+[webui]
+env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+
+[llm.default]
+provider_id = "openai"
+model = "mock-model"
+api_key_env = "MOCK_LLM_API_KEY"
+base_url = "{mock_llm_url}/v1"
+""",
+            encoding="utf-8",
+        )
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home_dir),
+            "IRONCLAW_REBORN_HOME": str(reborn_home),
+            "IRONCLAW_REBORN_PROFILE": "local-dev",
+            "IRONCLAW_REBORN_WEBUI_TOKEN": gateway_token,
+            "IRONCLAW_REBORN_WEBUI_USER_ID": owner_user_id,
+            "MOCK_LLM_API_KEY": "mock-api-key",
+            "NO_PROXY": "127.0.0.1,localhost,::1",
+            "no_proxy": "127.0.0.1,localhost,::1",
+            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
+            "RUST_BACKTRACE": "1",
+        }
+        if extra_gateway_env:
+            env.update(extra_gateway_env)
+        if rewrite_google_oauth:
+            env["IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP"] = (
+                f"oauth2.googleapis.com={mock_llm_url.removeprefix('http://')}"
+            )
+        gateway_proc = subprocess.Popen(
+            [
+                str(ROOT / "target" / "debug" / "ironclaw"),
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(gateway_port),
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        if log_dir is not None and gateway_proc.stdout is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _drain_to_file(gateway_proc.stdout, log_dir / "gateway.log")
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
+        return GatewayStack(
+            base_url=base_url,
+            gateway_token=gateway_token,
+            db_path=reborn_home,
+            mock_llm_url=mock_llm_url,
+            gateway_proc=gateway_proc,
+            mock_llm_proc=mock_llm_proc,
+            tempdirs=tempdirs,
+        )
+    except Exception:
+        if gateway_proc is not None:
+            stop_process(gateway_proc)
         stop_process(mock_llm_proc)
         for tempdir in tempdirs:
             tempdir.cleanup()

@@ -65,19 +65,11 @@ pub enum ProductWorkflowError {
     /// A provider's OPERATOR-level instance configuration (e.g. no OAuth
     /// backend registered on this build at all) is missing entirely — a
     /// static, build-time fact distinct from a per-user missing/expired
-    /// credential account. `reason` is a plain, host-authored `String` (not a
-    /// composition type — this crate sits below `composition` in the
-    /// dependency graph) carrying the exact remediation text (e.g. the
-    /// `ironclaw config set` commands to run). Two independent consumers read
-    /// this variant differently: the WebUI facade
-    /// (`reborn_services::map_lifecycle_error`) discards `reason` and maps
-    /// the DISCRIMINANT alone to a sanitized 400 (no free text crosses the
-    /// wire contract); the LLM tool path
-    /// (`extension_lifecycle_capabilities::lifecycle_error`) forwards
-    /// `reason` verbatim onto the diagnostic-detail channel so the exact
-    /// `config set` commands reach the model.
-    #[error("provider instance not configured: {reason}")]
-    ProviderInstanceNotConfigured { reason: String },
+    /// credential account. This carries no field handles, labels, values, or
+    /// remediation text: deployment configuration is visible only through the
+    /// operator-authorized Admin Configuration surface.
+    #[error("provider instance is unavailable")]
+    ProviderInstanceNotConfigured,
 
     /// Turn coordinator rejected the submission before typed turn errors were available.
     #[error("turn submission rejected: {reason}")]
@@ -182,12 +174,12 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                     reason: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
+            ProductWorkflowError::ProviderInstanceNotConfigured => {
                 ProductAdapterError::WorkflowRejected {
                     kind: ProductWorkflowRejectionKind::InvalidRequest,
                     status_code: 400,
                     retryable: false,
-                    reason: RedactedString::new(reason),
+                    reason: RedactedString::new("extension is unavailable on this instance"),
                 }
             }
             ProductWorkflowError::TurnSubmissionRejected { reason } => {
@@ -366,12 +358,7 @@ mod tests {
 
     #[test]
     fn provider_instance_not_configured_maps_to_workflow_rejected() {
-        let reason =
-            "ironclaw config set google.client_id <id>.apps.googleusercontent.com".to_string();
-        let err: ProductAdapterError = ProductWorkflowError::ProviderInstanceNotConfigured {
-            reason: reason.clone(),
-        }
-        .into();
+        let err: ProductAdapterError = ProductWorkflowError::ProviderInstanceNotConfigured.into();
         match err {
             ProductAdapterError::WorkflowRejected {
                 kind,
@@ -382,7 +369,10 @@ mod tests {
                 assert_eq!(kind, ProductWorkflowRejectionKind::InvalidRequest);
                 assert_eq!(status_code, 400);
                 assert!(!retryable);
-                assert_eq!(mapped_reason, RedactedString::new(reason));
+                assert_eq!(
+                    mapped_reason,
+                    RedactedString::new("extension is unavailable on this instance")
+                );
             }
             other => panic!("expected typed workflow rejection, got {other:?}"),
         }

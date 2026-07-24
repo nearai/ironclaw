@@ -1,6 +1,6 @@
 //! Reborn integration test — secret store durability over LibSql.
 //!
-//! Store-level durability proof: writes a secret to a `FilesystemSecretStore`
+//! Store-level durability proof: writes a secret to a `SecretStore`
 //! backed by a libSQL composite, then reopens a genuinely fresh store over the
 //! same on-disk database file and reads the secret back — real on-disk
 //! durability, without the turn/model layer.
@@ -21,7 +21,7 @@ use ironclaw_reborn_composition::test_support::{
     build_secret_store_for_test, mount_local_dev_database_roots_for_test,
 };
 use ironclaw_reborn_composition::wrap_scoped;
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
 use secrecy::ExposeSecret;
 
 use reborn_support::harness::test_product_scope;
@@ -151,7 +151,7 @@ async fn secret_read_back_fails_for_unknown_handle() {
 /// Prove secrets don't leak across tenants: leasing a secret under a scope
 /// that differs ONLY in `tenant_id` must fail with the same
 /// `UnknownSecret` error as the unknown-handle case — `same_scope_owner`
-/// (`FilesystemSecretStore::read_secret`) treats any scope-field mismatch as
+/// (`SecretStore::read_secret`) treats any scope-field mismatch as
 /// "not found" rather than a distinct "forbidden" branch. The non-vacuity
 /// check below proves the store isn't just broadly broken.
 ///

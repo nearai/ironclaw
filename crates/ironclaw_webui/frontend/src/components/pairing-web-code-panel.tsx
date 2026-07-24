@@ -16,14 +16,6 @@ const POLL_INTERVAL_MS = 2000;
 const COUNTDOWN_INTERVAL_MS = 1000;
 const COPIED_RESET_MS = 1500;
 
-// Messenger deep links commonly carry the bot handle as the first path
-// segment (`https://t.me/<bot_username>?start=<code>`); other vendors simply
-// get no copyable handle row.
-export function pairingBotUsernameFromDeepLink(deepLink) {
-  const match = /^https:\/\/t\.me\/([^/?#]+)/i.exec(String(deepLink || "").trim());
-  return match ? match[1] : "";
-}
-
 // "m:ss" until expiry, clamped at 0:00.
 export function formatPairingCountdown(remainingMs) {
   const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
@@ -321,8 +313,6 @@ export function PairingWebCodePanel({
     );
   }
 
-  const botUsername = pairingBotUsernameFromDeepLink(deepLink);
-
   return (
     <div data-testid="pairing-web-code-panel" className={containerClass}>
       {!compact &&
@@ -374,18 +364,6 @@ export function PairingWebCodePanel({
               {t("pairing.web.openIn", { name: displayName || extensionId })}
             </Button>
           </div>)}
-          {botUsername &&
-          (
-            <button
-              type="button"
-              onClick={() => copyText("username", `@${botUsername}`)}
-              title={t("pairing.web.copyUsername")}
-              data-testid="pairing-bot-username"
-              className="font-mono text-xs text-iron-300 underline-offset-2 hover:text-iron-100 hover:underline"
-            >
-              {copiedTarget === "username" ? t("common.copiedToClipboard") : `@${botUsername}`}
-            </button>
-          )}
           <p data-testid="pairing-countdown" className="text-[11px] text-iron-400">
             {t("pairing.web.expiresIn", {
               time: formatPairingCountdown(expiresAtMs - now),

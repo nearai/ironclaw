@@ -1,7 +1,7 @@
 // arch-exempt: large_file, Slice-C `authorize()` extraction is a behavior-preserving step in the capability-path collapse (doc §9); net additions are transitional and shrink as later slices route dispatch through the sealed `Authorized` witness and retire the mirror request DTOs, plan #6175
 use chrono::Utc;
 use ironclaw_authorization::{
-    CapabilityLease, CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+    CapabilityLease, CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
@@ -14,8 +14,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
-    RunStateStore, RunStatus,
+    ApprovalRequestStorePort, ApprovalStatus, RunStart, RunStateApprovalStorePort, RunStateError,
+    RunStateStorePort, RunStatus,
 };
 use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use ironclaw_safety::shell_command_display_text;
@@ -61,10 +61,10 @@ where
     /// relocation of host_runtime's `credential_preflight_check`. Facts only:
     /// the kernel maps them to the verdict; the port never decides.
     policy_facts: &'a dyn HostPolicyFacts,
-    run_state: Option<&'a dyn RunStateStore>,
-    approval_requests: Option<&'a dyn ApprovalRequestStore>,
-    run_state_approval_store: Option<&'a dyn RunStateApprovalStore>,
-    capability_leases: Option<&'a dyn CapabilityLeaseStore>,
+    run_state: Option<&'a dyn RunStateStorePort>,
+    approval_requests: Option<&'a dyn ApprovalRequestStorePort>,
+    run_state_approval_store: Option<&'a dyn RunStateApprovalStorePort>,
+    capability_leases: Option<&'a dyn CapabilityLeaseStorePort>,
     process_manager: Option<&'a dyn ProcessManager>,
     obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
 }
@@ -84,7 +84,7 @@ impl<'a, D> CapabilityAuthorizer for CapabilityHost<'a, D> where D: CapabilityDi
 /// `authorize_dispatch_with_trust` returns `Allow` — keeping the lease `Active`
 /// if authorization is denied.
 struct PendingClaimAfterAuth<'r> {
-    leases: &'r dyn CapabilityLeaseStore,
+    leases: &'r dyn CapabilityLeaseStorePort,
     grant_id: CapabilityGrantId,
     fingerprint: InvocationFingerprint,
     /// The approval lease's frozen expiry, carried from the full grant so the
@@ -121,7 +121,7 @@ enum ResumedLeaseState<'r> {
     /// bounce.  Used by `auth_resume_json` when the invocation previously passed
     /// an approval gate; reuses the existing `Claimed` lease without a second
     /// approval prompt.
-    AlreadyClaimed(&'r dyn CapabilityLeaseStore, Box<CapabilityLease>),
+    AlreadyClaimed(&'r dyn CapabilityLeaseStorePort, Box<CapabilityLease>),
     /// No prior approval lease is in play.  Used by `auth_resume_json` when
     /// `approval_request_id` is `None` (the invocation never passed an approval
     /// gate before hitting the auth gate).
@@ -132,7 +132,7 @@ enum ResumedLeaseState<'r> {
 /// and `auth_resume_json`.  All fields are resolved by the respective
 /// method preamble before the shared tail begins.
 struct ResumedDispatchParams<'r> {
-    run_state: &'r dyn RunStateStore,
+    run_state: &'r dyn RunStateStorePort,
     scope: ResourceScope,
     invocation_id: InvocationId,
     capability_id: CapabilityId,
@@ -302,7 +302,7 @@ where
     /// transition the run record to `Failed` instead of being silently
     /// dropped. Without it, error paths still return the right user-facing
     /// error but no run record is persisted.
-    pub fn with_run_state(mut self, run_state: &'a dyn RunStateStore) -> Self {
+    pub fn with_run_state(mut self, run_state: &'a dyn RunStateStorePort) -> Self {
         self.run_state = Some(run_state);
         self.run_state_approval_store = None;
         self
@@ -316,7 +316,7 @@ where
     /// than blocking for human review.
     pub fn with_approval_requests(
         mut self,
-        approval_requests: &'a dyn ApprovalRequestStore,
+        approval_requests: &'a dyn ApprovalRequestStorePort,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
         self.run_state_approval_store = None;
@@ -327,7 +327,10 @@ where
     /// pending approval and transition the invocation to `BlockedApproval` in one
     /// transaction. Production composition should prefer this over separate
     /// stores when both records live in the same backend.
-    pub fn with_run_state_approval_store(mut self, store: &'a dyn RunStateApprovalStore) -> Self {
+    pub fn with_run_state_approval_store(
+        mut self,
+        store: &'a dyn RunStateApprovalStorePort,
+    ) -> Self {
         self.run_state = Some(store);
         self.approval_requests = Some(store);
         self.run_state_approval_store = Some(store);
@@ -340,7 +343,7 @@ where
     /// `spawn_json`.
     pub fn with_capability_leases(
         mut self,
-        capability_leases: &'a dyn CapabilityLeaseStore,
+        capability_leases: &'a dyn CapabilityLeaseStorePort,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
         self
@@ -1700,6 +1703,68 @@ where
         .await
     }
 
+    /// Terminalize an invocation whose auth gate was explicitly denied.
+    ///
+    /// This is the denial half of [`Self::auth_resume_json`]: it validates the
+    /// same sealed invocation identity and actor scope, transitions only the
+    /// matching `BlockedAuth` record to `Failed`, and never authorizes or
+    /// dispatches the capability.
+    pub async fn decline_auth_json(
+        &self,
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+    ) -> Result<(), CapabilityInvocationError> {
+        let run_state =
+            self.run_state
+                .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
+                    capability: capability_id.clone(),
+                    store: "run_state",
+                })?;
+        let invocation_id = context.invocation_id;
+        let scope = context.resource_scope.clone();
+        if context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+                detail: None,
+            });
+        }
+        let run_record = run_state
+            .get(&scope, invocation_id)
+            .await?
+            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.authenticated_actor_user_id != context.authenticated_actor_user_id {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id,
+                reason: DenyReason::PolicyDenied,
+                detail: None,
+            });
+        }
+        if run_record.status != RunStatus::BlockedAuth {
+            return Err(CapabilityInvocationError::ResumeNotBlocked {
+                capability: capability_id,
+                status: run_record.status,
+            });
+        }
+        if run_record.capability_id != capability_id {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ResumeContextMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ResumeContextMismatch {
+                capability: capability_id,
+                kind: resume_context_mismatch_kind(true, false),
+            });
+        }
+        run_state
+            .fail(&scope, invocation_id, "GateDeclined".to_string())
+            .await?;
+        Ok(())
+    }
+
     pub async fn resume_spawn_json(
         &self,
         context: ExecutionContext,
@@ -2741,7 +2806,7 @@ where
         // relocated from host_runtime's former `auth_resume_capability` call to
         // `apply_persistent_approval_policy`. The loop rebuilds a grant-less
         // context after the credential gate; a capability authorized only by a
-        // persistent grant (e.g. `extension_activate` under admin-config trust)
+        // persistent grant (e.g. `extension_install` under admin-config trust)
         // would otherwise be re-authorized grant-less and denied. Excluded for
         // `resume_json` (`PendingClaim`), which always carries a fresh approval
         // lease and never had persistent-approval applied — preserving behavior.
@@ -2926,37 +2991,37 @@ where
         //
         // For `auth_resume_json` with no prior approval (`NoPriorLease`), there
         // is no lease to claim or consume.
-        let claimed_lease: Option<(&dyn CapabilityLeaseStore, CapabilityLease)> = match lease_state
-        {
-            ResumedLeaseState::PendingClaim(pc) => {
-                let grant_id = pc.grant_id;
-                match pc.leases.claim(&scope, grant_id, &pc.fingerprint).await {
-                    Ok(claimed) => Some((pc.leases, claimed)),
-                    Err(error) => {
-                        if claim_error_may_be_concurrent_resume(&error) {
-                            warn!(
-                                lease_id = %grant_id,
-                                invocation_id = %invocation_id,
-                                capability_id = %capability_id,
-                                error_kind = capability_lease_error_kind(&error),
-                                "approval lease claim lost to a concurrent resume; leaving run state unchanged",
-                            );
-                        } else {
-                            fail_run_if_configured(
-                                Some(run_state),
-                                &scope,
-                                invocation_id,
-                                "ApprovalLeaseClaim",
-                            )
-                            .await;
+        let claimed_lease: Option<(&dyn CapabilityLeaseStorePort, CapabilityLease)> =
+            match lease_state {
+                ResumedLeaseState::PendingClaim(pc) => {
+                    let grant_id = pc.grant_id;
+                    match pc.leases.claim(&scope, grant_id, &pc.fingerprint).await {
+                        Ok(claimed) => Some((pc.leases, claimed)),
+                        Err(error) => {
+                            if claim_error_may_be_concurrent_resume(&error) {
+                                warn!(
+                                    lease_id = %grant_id,
+                                    invocation_id = %invocation_id,
+                                    capability_id = %capability_id,
+                                    error_kind = capability_lease_error_kind(&error),
+                                    "approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                                );
+                            } else {
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalLeaseClaim",
+                                )
+                                .await;
+                            }
+                            return Err(CapabilityInvocationError::Lease(Box::new(error)));
                         }
-                        return Err(CapabilityInvocationError::Lease(Box::new(error)));
                     }
                 }
-            }
-            ResumedLeaseState::AlreadyClaimed(leases, lease) => Some((leases, *lease)),
-            ResumedLeaseState::NoPriorLease => None,
-        };
+                ResumedLeaseState::AlreadyClaimed(leases, lease) => Some((leases, *lease)),
+                ResumedLeaseState::NoPriorLease => None,
+            };
 
         let obligation_outcome = match self
             .prepare_obligations(
@@ -3425,7 +3490,7 @@ fn add_capability_input_display_hint(
 /// `revoke_context` names the failure site ("obligation failure" or
 /// "dispatch failure") and is included in the revoke warn message.
 async fn cleanup_claimed_lease_after_resume_error(
-    capability_leases: &dyn CapabilityLeaseStore,
+    capability_leases: &dyn CapabilityLeaseStorePort,
     scope: &ResourceScope,
     claimed_grant_id: CapabilityGrantId,
     invocation_id: InvocationId,
@@ -4210,7 +4275,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     }
 
     #[async_trait::async_trait]
-    impl CapabilityLeaseStore for PendingClaimLeaseStore {
+    impl CapabilityLeaseStorePort for PendingClaimLeaseStore {
         async fn issue(
             &self,
             _lease: CapabilityLease,
@@ -4293,7 +4358,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     struct CompletionRunStateStore;
 
     #[async_trait::async_trait]
-    impl RunStateStore for CompletionRunStateStore {
+    impl RunStateStorePort for CompletionRunStateStore {
         async fn start(
             &self,
             _start: RunStart,

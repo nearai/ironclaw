@@ -26,7 +26,6 @@ ironclaw doctor
 ironclaw extension search github
 ironclaw extension search github --json
 ironclaw extension install github-mcp
-ironclaw extension activate github-mcp
 ironclaw extension remove github-mcp
 ironclaw hooks list                 # disabled — errors, see below
 ironclaw hooks list --json          # disabled — errors, see below
@@ -282,7 +281,6 @@ Searches and manages local-dev Reborn extensions through the same lifecycle faca
 cargo run -q -p ironclaw --bin ironclaw -- extension search github
 cargo run -q -p ironclaw --bin ironclaw -- extension search github --json
 cargo run -q -p ironclaw --bin ironclaw -- extension install github-mcp
-cargo run -q -p ironclaw --bin ironclaw -- extension activate github-mcp
 cargo run -q -p ironclaw --bin ironclaw -- extension remove github-mcp
 ```
 
@@ -294,7 +292,9 @@ Expected fields include:
 - `package_ref.id` for package-specific commands
 - `payload.kind`
 - `payload.count` and `payload.extensions[].package_ref.id` for search
-- `payload.installed`, `payload.activated`, or `payload.removed` for lifecycle mutations
+- `payload.installed` or `payload.removed` for lifecycle mutations. Install
+  establishes membership; host-owned readiness reconciliation derives
+  `setup_needed` or `active`, so there is no separate public activation command.
 
 ### `completion`
 

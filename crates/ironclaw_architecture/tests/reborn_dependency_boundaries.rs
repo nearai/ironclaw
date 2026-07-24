@@ -1997,6 +1997,34 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 }
 
 #[test]
+fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
+    let root = workspace_root();
+    let factory =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
+            .expect("composition factory source must be readable");
+    let owner_transaction = std::fs::read_to_string(
+        root.join("crates/ironclaw_extension_host/src/activation_transaction.rs"),
+    )
+    .expect("extension-host activation transaction source must be readable");
+
+    for forbidden in [
+        "reconcile_hosted_mcp_runtime_readiness",
+        "reconcile_hosted_mcp_startup",
+    ] {
+        assert!(
+            !factory.contains(forbidden),
+            "composition startup must not invoke hosted-MCP discovery through `{forbidden}`; \
+             discovery requires a real caller/run ResourceScope"
+        );
+        assert!(
+            !owner_transaction.contains(forbidden),
+            "extension-host must not expose ambient hosted-MCP startup probing through \
+             `{forbidden}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let forbidden = [
         ForbiddenUse {
@@ -2595,7 +2623,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // FilesystemOpenAiCompatRefStore lives behind the
+                // OpenAiCompatRefStore lives behind the
                 // `storage`/`libsql`/`postgres` features and persists opaque refs
                 // through the universal RootFilesystem port.
                 "ironclaw_gateway",
@@ -2851,7 +2879,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemResourceGovernorStore
+                // ironclaw_filesystem is permitted: ResourceGovernorStore
                 // routes the resource-governor snapshot through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3057,7 +3085,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemOutboundStateStore
+                // ironclaw_filesystem is permitted: OutboundStateStore
                 // routes outbound persistence through ScopedFilesystem under
                 // the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3152,8 +3180,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemSecretStore /
-                // FilesystemCredentialBroker route secret + credential
+                // ironclaw_filesystem is permitted: SecretStore /
+                // CredentialBroker route secret + credential
                 // persistence through ScopedFilesystem under the
                 // universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3297,7 +3325,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
+                // ironclaw_filesystem is permitted: TurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).

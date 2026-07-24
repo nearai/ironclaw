@@ -205,7 +205,7 @@ pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_rec
 /// `(user_id, name)`.
 ///
 /// Production storage code reaches this through the higher-level
-/// `SecretStore` / `SecretsStore` API and never needs to call it directly.
+/// `SecretStorePort` / `SecretsStore` API and never needs to call it directly.
 /// It is `pub` so contract tests and integration fixtures that bypass the
 /// store and write directly to `reborn_secret_records` can construct
 /// ciphertext the production code will accept.
@@ -340,7 +340,7 @@ pub fn credential_session_aad(scope: &ResourceScope, session_id: CredentialSessi
 pub fn filesystem_secret_aad(scope: &ResourceScope, handle: &SecretHandle) -> Vec<u8> {
     // The filesystem secret store keys by *owner scope*
     // (`tenant/user/agent/project`) — see `secret_path` and
-    // `same_scope_owner` in `filesystem_store.rs`. The AAD must match the
+    // `same_scope_owner` in `secret_store.rs`. The AAD must match the
     // storage scope: previously this bound `mission_id`/`thread_id`/
     // `invocation_id` too, so a secret written by one invocation could be
     // *read* by another invocation under the same owner (the path layer

@@ -9,9 +9,10 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::warn;
 
 use crate::{
-    FilesystemResourceGovernorStore, ResourceAccount, ResourceError, ResourceEstimate,
-    ResourceGovernorStore, ResourceLimits, ResourceState, ResourceUsage, account_snapshot_in_state,
-    reconcile_in_state, release_in_state, reserve_with_outcome_in_state, set_limit_in_state,
+    ResourceAccount, ResourceError, ResourceEstimate, ResourceGovernorStore,
+    ResourceGovernorStorePort, ResourceLimits, ResourceState, ResourceUsage,
+    account_snapshot_in_state, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
+    set_limit_in_state,
 };
 
 use super::{fs_error, storage_error};
@@ -383,7 +384,7 @@ fn busy_retry_delay(attempt: usize, policy: BusyRetryPolicy) -> Duration {
 }
 
 pub(super) fn compact_resource_governor_snapshot<F>(
-    snapshot_store: FilesystemResourceGovernorStore<F>,
+    snapshot_store: ResourceGovernorStore<F>,
     filesystem: Arc<ScopedFilesystem<F>>,
 ) -> Result<(), ResourceError>
 where

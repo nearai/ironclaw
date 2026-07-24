@@ -46,6 +46,25 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
+        "schemas/builtin/outbound_delivery_target_route_current.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "target_id": {
+                    "type": "string",
+                    "description": "Opaque target id returned by builtin__outbound_delivery_targets_list."
+                }
+            },
+            "required": ["target_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/outbound_delivery_target_route_current.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "routed": { "type": "boolean", "const": true }
+            },
+            "required": ["routed"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/memory_search.input.v1.json" => json!({
             "type": "object",
@@ -434,7 +453,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/extension_install.input.v1.json"
-        | "schemas/builtin/extension_activate.input.v1.json"
         | "schemas/builtin/extension_remove.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -712,7 +730,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "delivery_target_id": {
                     "type": "string",
-                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the user's default outbound delivery target at fire time is used. Prefer setting this whenever the user names a destination for this trigger's results."
+                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the host inherits the current source run's authorized delivery route when one exists; otherwise the user's default outbound delivery target at fire time is used. This is resolved from trusted run state, never prompt parsing. Prefer setting this whenever the user names a destination for this trigger's results."
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",

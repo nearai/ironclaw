@@ -1,4 +1,4 @@
-//! Cross-cutting [`ProcessStore`] decorators.
+//! Cross-cutting [`ProcessStorePort`] decorators.
 //!
 //! - [`EventingProcessStore`] wraps any inner store and emits redacted
 //!   `RuntimeEvent`s on every lifecycle transition.
@@ -18,11 +18,11 @@ use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_host_api::{ProcessId, ResourceReservationId, ResourceScope, ResourceUsage};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 
-use crate::types::{ProcessError, ProcessKey, ProcessRecord, ProcessStart, ProcessStore};
+use crate::types::{ProcessError, ProcessKey, ProcessRecord, ProcessStart, ProcessStorePort};
 
 /// RAII guard that releases a reservation on `Drop` unless explicitly
 /// [`defuse`](Self::defuse)d. Used to ensure a panic inside
-/// [`ProcessStore::start`] does not leak the just-acquired reservation.
+/// [`ProcessStorePort::start`] does not leak the just-acquired reservation.
 struct ReservationDropGuard<G>
 where
     G: ResourceGovernor + ?Sized,
@@ -60,7 +60,7 @@ where
 
 pub struct EventingProcessStore<S>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
 {
     inner: S,
     event_sink: Arc<dyn EventSink>,
@@ -68,7 +68,7 @@ where
 
 impl<S> EventingProcessStore<S>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
 {
     pub fn new(inner: S, event_sink: Arc<dyn EventSink>) -> Self {
         Self { inner, event_sink }
@@ -80,9 +80,9 @@ where
 }
 
 #[async_trait]
-impl<S> ProcessStore for EventingProcessStore<S>
+impl<S> ProcessStorePort for EventingProcessStore<S>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
 {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.start(start).await?;
@@ -171,7 +171,7 @@ where
 
 pub struct ResourceManagedProcessStore<S, G>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
     G: ResourceGovernor + ?Sized,
 {
     inner: S,
@@ -182,7 +182,7 @@ where
 
 impl<S, G> ResourceManagedProcessStore<S, G>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
     G: ResourceGovernor + ?Sized,
 {
     pub fn new(inner: S, governor: Arc<G>) -> Self {
@@ -289,9 +289,9 @@ where
 }
 
 #[async_trait]
-impl<S, G> ProcessStore for ResourceManagedProcessStore<S, G>
+impl<S, G> ProcessStorePort for ResourceManagedProcessStore<S, G>
 where
-    S: ProcessStore,
+    S: ProcessStorePort,
     G: ResourceGovernor + ?Sized,
 {
     async fn start(&self, mut start: ProcessStart) -> Result<ProcessRecord, ProcessError> {

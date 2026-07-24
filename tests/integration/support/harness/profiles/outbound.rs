@@ -6,12 +6,13 @@ use super::super::super::outbound_preferences::FakeOutboundPreferencesFacade;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness};
 
-/// C-SYNTH outbound: harness surfacing the two local-dev synthetic
-/// `outbound_delivery_*` capabilities over an injected
-/// [`FakeOutboundPreferencesFacade`] double.
-/// `create_capability_port` injects them via
-/// `apply_synthetic_capability_wrappers` because
-/// `outbound_target_tools` is `Some`. `target_set` runs with
+/// Outbound-target harness surfacing the local-dev synthetic list/set
+/// capabilities over an injected [`FakeOutboundPreferencesFacade`] double,
+/// plus the normal first-party current-run routing capability backed by the
+/// production registry, product routing service, and outbound state store.
+/// `create_capability_port` injects list/set via synthetic wrappers because
+/// `outbound_target_tools` is `Some`; route-current stays on the mediated
+/// first-party lane. `target_set` runs with
 /// `requires_approval = true`, so its settings decision is exercised for
 /// real: global auto-approve (default ON) → `Allow`; a `Disabled` tool
 /// override (`disable_outbound_target_set_tool`) → `Deny`; auto-approve
@@ -27,6 +28,9 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
             )?,
             CapabilityId::new(
                 ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+            )?,
+            CapabilityId::new(
+                ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
             )?,
         ],
         effect_kinds: vec![

@@ -11,7 +11,7 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId};
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
@@ -55,7 +55,7 @@ pub(crate) use provider::UnavailableAuthProviderClient;
 ///
 /// Records live under the caller's scoped `/secrets/product-auth` tree. Raw
 /// provider tokens and manual token values are stored only through
-/// [`SecretStore`] and represented here by opaque secret handles.
+/// [`SecretStorePort`] and represented here by opaque secret handles.
 //
 // TODO(#4175 follow-up): project completed product-auth accounts into
 // `ironclaw_secrets::CredentialAccountStore` so the runtime credential
@@ -91,7 +91,7 @@ where
     /// `list_refresh_candidates` returns an empty vec in that case (safe: no
     /// accounts are refreshed, which is benign for local/test deployments).
     root: Option<Arc<F>>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -102,7 +102,7 @@ where
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
     ) -> Self {
         Self {
             filesystem,
@@ -121,7 +121,7 @@ where
     pub(crate) fn new_with_root(
         filesystem: Arc<ScopedFilesystem<F>>,
         root: Arc<F>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
     ) -> Self {
         Self {
             filesystem,

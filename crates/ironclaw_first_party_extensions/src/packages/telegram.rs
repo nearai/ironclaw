@@ -20,7 +20,6 @@ pub(super) fn bundle() -> PackageBundle {
         onboarding: None,
         // Channel-only package: trust comes from the extension registry, not an
         // admin local-manifest effect grant.
-        oauth_setup: None,
         trust_effects: None,
     }
 }

@@ -5,7 +5,7 @@
 //! are authored in markdown (`**bold**`, backticks) so adapters can render
 //! them into their native markup.
 
-use crate::{ApprovalPromptContextView, AuthPromptView, GatePromptView};
+use crate::{ApprovalPromptContextView, AuthPromptChallengeKind, AuthPromptView, GatePromptView};
 use ironclaw_outbound::RunNotificationEventKind;
 use ironclaw_turns::{GateRef, TurnRunId};
 
@@ -13,14 +13,15 @@ use crate::is_approval_gate_ref;
 
 pub(crate) const WORKING_MESSAGE: &str = "Ironclaw is thinking...";
 pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
-/// Posted when a run blocks on a credential-entry (non-OAuth) auth
-/// challenge: entering a secret in chat is a security risk, so it must be
-/// done in the web app.
-pub(crate) const AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
-pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
-    "This is taking longer than expected — check the WebUI for the result.";
-pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
-    "Something went wrong delivering the result here. Check the WebUI.";
+/// Posted when a run has no channel-serviceable auth challenge. This stays
+/// deliberately generic because missing/unknown challenge metadata cannot
+/// safely imply a credential type or setup recipe.
+pub(crate) const AUTH_UNAVAILABLE_MESSAGE: &str = "This authentication step can't be completed in chat. Open the Ironclaw web app to review it, then ask me again here.";
+/// Posted for a typed credential-entry challenge. It explicitly redirects
+/// secret entry to the private WebUI surface without echoing prompt material.
+pub(crate) const MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
+pub(crate) const PAIRING_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to connect or pair this extension in a private setup surface, then ask me again here.";
+pub(crate) const OAUTH_PRIVATE_SETUP_MESSAGE: &str = "Open the Ironclaw web app to complete this private authorization step, then ask me again here.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
@@ -99,28 +100,47 @@ fn gate_prompt_reply_instruction(direct_message: bool, gate_ref: &str) -> String
     }
 }
 
-/// Render an auth prompt into its channel-neutral message text. The
-/// `authorization_url`, when present, is appended as a trailing setup link;
-/// callers strip it BEFORE this point for non-private targets.
-pub(crate) fn auth_prompt_text(view: &AuthPromptView, direct_message: bool) -> String {
-    let mut text = format!(
-        "{}\n\n{}\n\n{}",
-        view.headline,
-        view.body,
-        auth_prompt_reply_instruction(direct_message, &view.auth_request_ref)
-    );
-    if let Some(url) = &view.authorization_url {
-        text.push_str("\n\nSetup link: ");
-        text.push_str(url);
+pub(crate) fn actionable_auth_prompt_body(view: &AuthPromptView) -> String {
+    match view.challenge_kind {
+        Some(AuthPromptChallengeKind::ManualToken) => {
+            MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE.to_string()
+        }
+        Some(AuthPromptChallengeKind::Pairing) => view
+            .pairing
+            .as_ref()
+            .map(|pairing| pairing.instructions.clone())
+            .unwrap_or_else(|| PAIRING_PRIVATE_SETUP_MESSAGE.to_string()),
+        Some(AuthPromptChallengeKind::Other) => AUTH_UNAVAILABLE_MESSAGE.to_string(),
+        Some(AuthPromptChallengeKind::OAuthUrl) | None => view.body.clone(),
     }
-    text
 }
 
-fn auth_prompt_reply_instruction(direct_message: bool, auth_request_ref: &str) -> String {
-    if direct_message {
-        format!("Reply `auth deny {auth_request_ref}` here to cancel this run.")
-    } else {
-        format!("Mention me with `auth deny {auth_request_ref}` in this thread to cancel this run.")
+pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
+    match view.challenge_kind {
+        Some(AuthPromptChallengeKind::OAuthUrl) => view
+            .authorization_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+        Some(AuthPromptChallengeKind::Pairing) => view.pairing.as_ref().is_some_and(|pairing| {
+            !pairing.channel.trim().is_empty()
+                && !pairing.display_name.trim().is_empty()
+                && !pairing.instructions.trim().is_empty()
+                && !pairing.code.trim().is_empty()
+        }),
+        Some(AuthPromptChallengeKind::ManualToken | AuthPromptChallengeKind::Other) => false,
+        // Compatibility for prompt rows created before challenge_kind became
+        // part of the additive wire contract.
+        None => view
+            .authorization_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty()),
+    }
+}
+
+pub(crate) fn unserviceable_auth_prompt_message(view: Option<&AuthPromptView>) -> &'static str {
+    match view.and_then(|view| view.challenge_kind) {
+        Some(AuthPromptChallengeKind::ManualToken) => MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
+        _ => AUTH_UNAVAILABLE_MESSAGE,
     }
 }
 

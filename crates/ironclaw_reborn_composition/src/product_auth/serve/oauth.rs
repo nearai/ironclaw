@@ -50,6 +50,7 @@ pub(super) async fn oauth_start_handler(
                 pkce_verifier_hash,
                 pkce_verifier: pkce_verifier.clone(),
                 update_binding: None,
+                continuation: AuthContinuationRef::SetupOnly,
                 expires_at: request.expires_at,
             }),
     )
@@ -104,10 +105,39 @@ pub(super) async fn oauth_flow_status_handler(
     Ok(Json(OAuthFlowStatusResponse { status }))
 }
 
-/// Recipe-driven extension OAuth start: the requested vendor resolves to its
-/// manifest recipe and the engine constructs the authorization URL (host-owned
-/// state/PKCE/redirect; requested scopes validated against the recipe ceiling,
-/// empty meaning the full ceiling).
+/// Authenticated, caller-scoped retry of an OAuth flow's unacknowledged
+/// internal continuation.
+///
+/// This command never repeats provider exchange. It exists for the browser's
+/// origin-independent completion watcher: a transient runtime-discovery
+/// failure can leave OAuth durably completed while readiness reconciliation is
+/// still pending. Re-driving the exact durable continuation converges that
+/// state without a public Activate action or another OAuth round-trip.
+pub(super) async fn oauth_flow_reconcile_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(flow_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
+) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    let flow_id = AuthFlowId::from_uuid(
+        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+    );
+    let fields = ScopeFields {
+        session_id: None,
+        thread_id: None,
+        invocation_id: query.invocation_id,
+    };
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
+    let status =
+        run_with_backend_timeout(state.product_auth.reconcile_oauth_flow(&scope, flow_id)).await?;
+    Ok(Json(OAuthFlowStatusResponse { status }))
+}
+
+/// Recipe-driven extension OAuth start: the browser selects one opaque
+/// manifest requirement key, then the server resolves that installed
+/// extension's vendor, label, and scopes before the engine constructs the
+/// authorization URL. The global recipe catalog remains only the provider
+/// protocol/config ceiling; it is not extension authority.
 pub(super) async fn extension_oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<ProductSurfaceCaller>,
@@ -128,12 +158,19 @@ pub(super) async fn extension_oauth_start_handler(
         return Err(ProductAuthRouteFailure::invalid_request());
     }
 
+    let requirement = state
+        .resolve_extension_oauth_requirement(
+            &caller,
+            &requester_extension,
+            request.requirement.as_str(),
+        )
+        .await?;
     let engine = state.auth_engine()?;
-    let provider = AuthProviderId::new(request.provider)
+    let provider = AuthProviderId::new(requirement.provider)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let account_label = CredentialAccountLabel::new(request.account_label)
+    let account_label = CredentialAccountLabel::new(requirement.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let requested_scopes = request
+    let requested_scopes = requirement
         .scopes
         .into_iter()
         .map(ProviderScope::new)
@@ -164,19 +201,27 @@ pub(super) async fn extension_oauth_start_handler(
     ))
     .await?;
 
-    let flow = run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
-        RebornOAuthStartFlowRequest {
-            flow_id: Some(flow_id),
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: prepared.authorization_url.clone(),
-            opaque_state_hash: prepared.opaque_state_hash.clone(),
-            pkce_verifier_hash: prepared.pkce_verifier_hash.clone(),
-            pkce_verifier: prepared.pkce_verifier.clone(),
-            update_binding,
-            expires_at: request.expires_at,
-        },
-    ))
+    let flow = run_with_backend_timeout(
+        state
+            .product_auth
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                flow_id: Some(flow_id),
+                scope: scope.clone(),
+                provider: provider.clone(),
+                authorization_url: prepared.authorization_url.clone(),
+                opaque_state_hash: prepared.opaque_state_hash.clone(),
+                pkce_verifier_hash: prepared.pkce_verifier_hash.clone(),
+                pkce_verifier: prepared.pkce_verifier.clone(),
+                update_binding,
+                continuation: AuthContinuationRef::LifecycleActivation {
+                    package_ref: ironclaw_auth::LifecyclePackageRef::new(
+                        requester_extension.as_str(),
+                    )
+                    .map_err(|_| ProductAuthRouteFailure::invalid_request())?,
+                },
+                expires_at: request.expires_at,
+            }),
+    )
     .await?;
     // Same-process fast path only; the durable per-flow copy written by
     // `start_setup_oauth_flow` is the source of truth across restarts.
@@ -419,33 +464,11 @@ async fn vendor_oauth_callback_attempt(
                 return Err(error);
             }
         };
-    // Vendor-echoed granted scopes: when the redirect carries a scope list it
-    // must include everything requested (else the user narrowed the consent —
-    // denied); when absent the requested scopes ride to the exchange, where
-    // the token-response scope extraction applies the recipe's rule.
-    let callback_scopes =
-        match resolve_callback_scopes(callback_state.requested_scopes(), query.scopes.as_deref()) {
-            Ok(CallbackScopeOutcome::Scopes(scopes)) => scopes,
-            Ok(CallbackScopeOutcome::ProviderDenied) => {
-                state
-                    .forget_pkce_verifier_everywhere(callback_scope, flow_id)
-                    .await;
-                let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
-                    RebornOAuthCallbackRequest {
-                        scope: callback_scope.clone(),
-                        flow_id,
-                        opaque_state_hash: state_hash.clone(),
-                        outcome: RebornOAuthCallbackOutcome::ProviderDenied,
-                    },
-                ))
-                .await;
-                return oauth_callback_route_result_response(headers, response);
-            }
-            Err(error) => {
-                state.remove_pkce_verifier(flow_id);
-                return Err(error);
-            }
-        };
+    // The redirect's optional `scope` echo is non-authoritative: providers may
+    // omit, normalize, or return a cumulative grant there. The token response
+    // is the authoritative granted-scope source; the auth engine clamps it to
+    // the unified recipe ceiling before storing it.
+    let requested_scopes = callback_state.requested_scopes().to_vec();
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
@@ -463,7 +486,7 @@ async fn vendor_oauth_callback_attempt(
                 pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
                     .map_err(ProductAuthRouteFailure::from)?,
                 pkce_verifier_hash,
-                scopes: callback_scopes,
+                scopes: requested_scopes,
             },
         },
     };
@@ -497,45 +520,6 @@ async fn vendor_oauth_callback_attempt(
     };
 
     Ok(oauth_callback_response(headers, response))
-}
-
-enum CallbackScopeOutcome {
-    Scopes(Vec<ProviderScope>),
-    ProviderDenied,
-}
-
-/// Generic scope-echo rule: a vendor that echoes granted scopes on the
-/// redirect must have granted everything requested; a vendor that echoes
-/// nothing leaves scope resolution to the token response (recipe-driven).
-fn resolve_callback_scopes(
-    requested_scopes: &[ProviderScope],
-    query_scopes: Option<&str>,
-) -> Result<CallbackScopeOutcome, ProductAuthRouteFailure> {
-    let Some(raw) = query_scopes else {
-        return Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()));
-    };
-    if raw.trim() != raw {
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    }
-    if raw.is_empty() {
-        return Ok(CallbackScopeOutcome::ProviderDenied);
-    }
-    let echoed = raw
-        .split([' ', ','])
-        .filter(|scope| !scope.is_empty())
-        .map(|scope| {
-            ProviderScope::new(scope.to_string())
-                .map_err(|_| ProductAuthRouteFailure::malformed_callback())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if requested_scopes
-        .iter()
-        .all(|requested| echoed.iter().any(|scope| scope == requested))
-    {
-        Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()))
-    } else {
-        Ok(CallbackScopeOutcome::ProviderDenied)
-    }
 }
 
 // Formats the success shape only; `Err` propagates so the handler wrapper
@@ -655,6 +639,9 @@ fn oauth_callback_failure_html(
         }
         AuthErrorCode::ProviderIdentityAlreadyConnected => {
             "This account is already connected to another Reborn user. Disconnect it from that other account, then try again."
+        }
+        AuthErrorCode::LifecycleActivationFailed => {
+            "Authorization completed, but the extension could not finish setup. Return to IronClaw to review the extension's setup requirements."
         }
         _ => "Authorization failed. Please return to Reborn and retry authorization.",
     };

@@ -226,12 +226,6 @@ network = "default"
 
 [[grants]]
 capability = "builtin.extension_install"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "system_extensions_lifecycle"
-network = "default"
-
-[[grants]]
-capability = "builtin.extension_activate"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "system_extensions_lifecycle"
 network = "dev_wildcard"
@@ -358,6 +352,12 @@ network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.outbound_delivery_target_set"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.outbound_delivery_target_route_current"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"

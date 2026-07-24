@@ -86,21 +86,21 @@ pub(crate) fn channel_dm_target_mount_view(
 }
 
 /// The generic filesystem-backed channel DM-target store.
-pub(crate) struct FilesystemChannelDmTargetStore {
+pub(crate) struct ChannelDmTargetStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
 }
 
-impl std::fmt::Debug for FilesystemChannelDmTargetStore {
+impl std::fmt::Debug for ChannelDmTargetStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FilesystemChannelDmTargetStore")
+            .debug_struct("ChannelDmTargetStore")
             .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
 }
 
-impl FilesystemChannelDmTargetStore {
+impl ChannelDmTargetStore {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         tenant_id: TenantId,
@@ -223,8 +223,8 @@ mod tests {
 
     use super::*;
 
-    fn store() -> FilesystemChannelDmTargetStore {
-        FilesystemChannelDmTargetStore::new(
+    fn store() -> ChannelDmTargetStore {
+        ChannelDmTargetStore::new(
             Arc::new(InMemoryBackend::new()),
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("operator").expect("user"),

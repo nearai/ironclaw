@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     AgentId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, TenantId,
     ThreadId, UserId,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId};
 
 use crate::action::{ActionFingerprintKey, ProductInboundAction};
 use crate::binding::{
@@ -140,6 +140,16 @@ impl FakeConversationBindingService {
                     }
                 })?,
             ),
+            source_binding_ref: SourceBindingRef::new("source:fake-binding").map_err(|e| {
+                ProductWorkflowError::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?,
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:fake-binding").map_err(
+                |e| ProductWorkflowError::BindingResolutionFailed {
+                    reason: e.to_string(),
+                },
+            )?,
             thread_id: ThreadId::new(format!(
                 "thread:{}:{}",
                 request.installation_id.as_str(),
@@ -595,6 +605,16 @@ impl FakeInboundTurnService {
                     reason: e.to_string(),
                 }
             })?),
+            source_binding_ref: SourceBindingRef::new("source:fake").map_err(|e| {
+                ProductWorkflowError::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?,
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:fake").map_err(|e| {
+                ProductWorkflowError::BindingResolutionFailed {
+                    reason: e.to_string(),
+                }
+            })?,
             thread_id: ThreadId::new("thread:fake").map_err(|e| {
                 ProductWorkflowError::BindingResolutionFailed {
                     reason: e.to_string(),
@@ -655,7 +675,7 @@ impl InboundTurnService for FakeInboundTurnService {
     ) -> Result<crate::inbound_turn::InboundUserMessageDispatch, ProductWorkflowError> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(crate::inbound_turn::InboundUserMessageDispatch::Accepted(
-                outcome,
+                Box::new(outcome),
             ));
         }
 
@@ -689,6 +709,7 @@ impl InboundTurnService for FakeInboundTurnService {
         };
 
         self.accept_fresh_user_message(envelope_for_turn)
+            .map(Box::new)
             .map(crate::inbound_turn::InboundUserMessageDispatch::Accepted)
     }
 }

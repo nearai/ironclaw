@@ -19,8 +19,10 @@ use ironclaw_extension_host::test_support::{
     tool_and_channel_manifest,
 };
 use ironclaw_extension_host::{
-    ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
-    InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
+    BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
+    ExtensionHostDeps, ExtensionLoader, InstallationRecord, InstallationRecordStore,
+    InstallationState, LifecycleError, LoadContext, LoadedExtension,
+    RehydratedInstallationRecordStore,
 };
 use ironclaw_host_api::ToolAdapter;
 use ironclaw_product::ChannelAdapter;
@@ -29,6 +31,38 @@ struct Harness {
     host: ExtensionHost,
     store: Arc<RehydratedInstallationRecordStore>,
     load_calls: Arc<AtomicUsize>,
+}
+
+struct ConfigRejectingLoader {
+    bindings: ExtensionBindings,
+}
+
+#[async_trait::async_trait]
+impl ExtensionLoader for ConfigRejectingLoader {
+    async fn load(&self, _ctx: &LoadContext) -> Result<LoadedExtension, BindError> {
+        Ok(LoadedExtension::new(Box::new(ConfigRejectingEntrypoint {
+            bindings: self.bindings.clone(),
+        })))
+    }
+}
+
+struct ConfigRejectingEntrypoint {
+    bindings: ExtensionBindings,
+}
+
+impl ExtensionEntrypoint for ConfigRejectingEntrypoint {
+    fn bind(&self, ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+        if ctx
+            .config
+            .iter()
+            .any(|(key, value)| key == "reject" && value == "true")
+        {
+            return Err(BindError::Load {
+                reason: "scripted candidate rejection".to_string(),
+            });
+        }
+        Ok(self.bindings.clone())
+    }
 }
 
 async fn harness_with(bindings: ExtensionBindings, _channel: Arc<FakeChannelAdapter>) -> Harness {
@@ -52,6 +86,26 @@ async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
+    Harness {
+        host,
+        store,
+        load_calls,
+    }
+}
+
+async fn config_rejecting_harness(bindings: ExtensionBindings) -> Harness {
+    let store = Arc::new(RehydratedInstallationRecordStore::default());
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let host = ExtensionHost::new(ExtensionHostDeps {
+        store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
+        loader: Arc::new(ConfigRejectingLoader { bindings }),
+        drain: Arc::new(RecordingDrain::default()) as Arc<_>,
+        egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
+        hook_deadline: Duration::from_secs(5),
+    })
+    .await;
     Harness {
         host,
         store,
@@ -206,6 +260,38 @@ async fn activation_publishes_and_resolves() {
     assert_eq!(h.load_calls.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn failed_candidate_refresh_keeps_prior_record_and_snapshot_generation() {
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = config_rejecting_harness(tool_and_channel_bindings(channel)).await;
+    let mut initial = record("acme", tool_and_channel_manifest());
+    initial.config = vec![("reject".to_string(), "false".to_string())];
+    h.host
+        .publish_candidate(initial)
+        .await
+        .expect("initial candidate publishes");
+    let before = h.host.snapshot().await;
+
+    let mut rejected = record("acme", tool_and_channel_manifest());
+    rejected.config = vec![("reject".to_string(), "true".to_string())];
+    let error = h
+        .host
+        .publish_candidate(rejected)
+        .await
+        .expect_err("invalid refresh candidate must not replace the live generation");
+
+    assert!(matches!(error, LifecycleError::Bind(_)), "{error:?}");
+    let after = h.host.snapshot().await;
+    assert_eq!(after.generation(), before.generation());
+    assert!(after.extension("acme").is_some());
+    let stored = h.store.get("acme").await.unwrap().unwrap();
+    assert_eq!(stored.state, InstallationState::Active);
+    assert_eq!(
+        stored.config,
+        vec![("reject".to_string(), "false".to_string())]
+    );
+}
+
 // -------------------------------------------------------------------------
 // LIFE-14: duplicate capability id across active extensions fails activation
 // -------------------------------------------------------------------------
@@ -351,6 +437,9 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
         .adapter
         .dispatch_json(ironclaw_dispatcher::CapabilityDispatchRequest {
             run_id: None,
+            origin: ironclaw_host_api::InvocationOrigin::Product(
+                ironclaw_host_api::ProductKind::new("test").unwrap(),
+            ),
             capability_id: ping.clone(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::ResourceEstimate::default(),
@@ -412,6 +501,9 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         .adapter
         .dispatch_json(ironclaw_dispatcher::CapabilityDispatchRequest {
             run_id: None,
+            origin: ironclaw_host_api::InvocationOrigin::Product(
+                ironclaw_host_api::ProductKind::new("test").unwrap(),
+            ),
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::ResourceEstimate::default(),

@@ -56,7 +56,7 @@ pub(crate) fn wrap_result_read_capability_for_test(
         None,
         // `result_read` never raises an approval gate, so its resume path never
         // loads a replay payload; an in-memory store keeps the seam wired.
-        Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+        Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
             crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
         )),
     )
