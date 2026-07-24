@@ -166,6 +166,12 @@ dispatch_failed
 
 `MissingRuntimeBackend`, unknown capability, runtime mismatch, unsupported runtime, and runtime execution failures all emit a failed event without leaking internal paths or secret values.
 
+For non-process loop-origin capability calls, every dispatcher lifecycle event
+(`dispatch_requested`, `runtime_selected`, `dispatch_succeeded`, or
+`dispatch_failed`) carries the enclosing loop run as `parent_invocation_id`.
+The dispatched capability invocation remains the event scope; the parent field
+preserves its relationship to the authoritative loop run.
+
 Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure.
 
 ---
