@@ -1001,7 +1001,9 @@ async def test_reborn_v2_install_setup_opens_modal_and_restores_focus_to_install
     )
     try:
         page = harness["page"]
-        card = _card_by_title(page, "Slack Channel")
+        card = page.locator(
+            SEL_V2["extension_card_for"].format(id="slack-channel")
+        )
         await expect(card).to_be_visible(timeout=5000)
 
         await card.get_by_role("button", name="Install").click()
@@ -1022,7 +1024,7 @@ async def test_reborn_v2_install_setup_opens_modal_and_restores_focus_to_install
         await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
         await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
 
-        return_target = card.get_by_role("button", name="Connect")
+        return_target = card.locator(SEL_V2["extension_primary_action"])
         await expect(return_target).to_be_visible()
         await page.keyboard.press("Escape")
         await expect(modal).to_have_count(0)
@@ -1933,15 +1935,24 @@ async def test_reborn_v2_configure_modal_traps_and_restores_keyboard_focus(
     )
     try:
         page = harness["page"]
-        card = _card_by_title(page, "Config Tool")
+        card = page.locator(
+            SEL_V2["extension_card_for"].format(id="config-tool")
+        )
         await expect(card).to_be_visible(timeout=5000)
-        trigger = card.get_by_role("button", name="Configure")
+        trigger = card.locator(SEL_V2["extension_primary_action"])
         await trigger.click()
 
-        dialog = page.get_by_role("dialog", name="Configure Config Tool")
+        dialog_name = SEL_V2["extension_configure_dialog_name_for"].format(
+            name="Config Tool"
+        )
+        dialog = page.get_by_role("dialog", name=dialog_name)
         await expect(dialog).to_be_visible(timeout=5000)
-        close_button = dialog.get_by_role("button", name="Close")
-        save_button = dialog.get_by_role("button", name="Save")
+        close_button = dialog.get_by_role(
+            "button", name=SEL_V2["extension_dialog_close_name"]
+        )
+        save_button = dialog.get_by_role(
+            "button", name=SEL_V2["extension_dialog_save_name"]
+        )
         await expect(close_button).to_be_focused()
 
         await page.keyboard.press("Shift+Tab")
@@ -1963,13 +1974,19 @@ async def test_reborn_v2_configure_modal_traps_and_restores_keyboard_focus(
             "config-tool", installation_state="active"
         )
         await page.reload()
-        card = _card_by_title(page, "Config Tool")
+        card = page.locator(
+            SEL_V2["extension_card_for"].format(id="config-tool")
+        )
         await expect(card).to_be_visible(timeout=5000)
-        overflow_trigger = card.get_by_role("button", name="More actions")
+        overflow_trigger = card.get_by_role(
+            "button", name=SEL_V2["extension_more_actions_name"]
+        )
         await overflow_trigger.click()
-        await card.get_by_role("menuitem", name="Reconfigure").click()
+        await card.get_by_role(
+            "menuitem", name=SEL_V2["extension_reconfigure_name"]
+        ).click()
 
-        dialog = page.get_by_role("dialog", name="Configure Config Tool")
+        dialog = page.get_by_role("dialog", name=dialog_name)
         await expect(dialog).to_be_visible(timeout=5000)
         await page.keyboard.press("Escape")
         await expect(dialog).to_have_count(0)
