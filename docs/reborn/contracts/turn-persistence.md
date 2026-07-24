@@ -72,8 +72,9 @@ verify the row projection before enabling row-store-only production traffic.
 - Active-lock key is the canonical `TurnScope`: tenant, agent, optional project, and thread.
 - The key excludes `TurnActor.user_id`, channel IDs, source binding refs, and reply binding refs.
 - A lock stores the current owning `TurnRunId`, explicit `TurnStatus`, monotonically increasing `TurnLockVersion`, `acquired_at`, and `updated_at`.
-- Queued, running, cancel-requested, blocked, and recovery-required runs keep the lock.
-- Terminal runs release the lock exactly once.
+- Queued, running, cancel-requested, and blocked runs keep the lock.
+- Current terminal transitions release their owned lock exactly once through `Inner::release_active_lock` in `crates/ironclaw_turns/src/filesystem_store/turn_state_engine/transitions.rs`.
+- A persisted legacy `RecoveryRequired` run is terminal and does not keep effective active-lock ownership. `Inner::from_persistence_snapshot` in `crates/ironclaw_turns/src/filesystem_store/turn_state_engine/snapshot.rs` rehydrates the status; `TurnStatus::keeps_active_lock` and `Inner::thread_busy` then make any stale matching lock row non-blocking. New submissions may replace that stale row.
 - Runner claim/resume/block/cancel-request transitions update the lock status/version while keeping ownership with the same run.
 
 ---
@@ -99,7 +100,7 @@ A duplicate idempotency key must replay prior accepted submit and admission-reje
 - Submit admission policy checks that can reject unauthorized/profile-invalid requests run before returning same-thread busy metadata; same-thread busy is still checked before capacity reservation and never consumes admission slots.
 - Capacity denial returns one deterministic safe `AdmissionRejected` payload with axis kind, total/class bucket, admission class when applicable, limit, active count, and optional retry hint. It must not expose foreign bucket IDs or raw provider internals.
 - Missing limits mean unlimited. A non-AllowAll provider that is unavailable fails closed with `AdmissionRejectionReason::Unavailable` and creates no run/reservation.
-- Queued, running, blocked, cancel-requested, and recovery-required runs keep reservations. Resume reuses the existing reservation.
+- Queued, running, blocked, and cancel-requested runs keep reservations. Resume reuses the existing reservation.
 - Terminal transitions (`Completed`, `Failed`, `Cancelled`, and future terminal states) release reservations exactly once. Released reservation evidence is retained only while the corresponding terminal run remains within the bounded terminal-record retention window; active capacity accounting must not scan unbounded released history.
 - Limit changes do not evict existing runs; new admissions are denied until active reservations drop below the configured limit.
 - Snapshot/DB loaders must synthesize unreleased reservation evidence for legacy non-terminal runs that predate persisted reservation rows so active capacity is not bypassed after migration/restart.
@@ -109,9 +110,12 @@ A duplicate idempotency key must replay prior accepted submit and admission-reje
 ## 6. Runner lease and checkpoint rules
 
 - Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, records `last_heartbeat_at`, records `lease_expires_at`, and updates active-lock metadata.
-- Heartbeats only renew metadata for matching, unexpired runner ID/lease token; successful heartbeats refresh `last_heartbeat_at` and extend `lease_expires_at`.
+- Heartbeats only renew metadata for matching, unexpired runner ID/lease token on actively `Running` work; heartbeat requests are rejected once the run is `CancelRequested`. Successful heartbeats refresh `last_heartbeat_at` and extend `lease_expires_at`.
 - Physical adapters may split high-churn runner lease metadata from lower-churn turn snapshots/tables, as long as all read, recovery, and terminal transition APIs expose one logical run state. Liveness decisions must use durable lease metadata, not require one lifecycle event per heartbeat.
-- Expired `Running` and `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted recovery event, and keep the active lock so uncertain side-effecting work is not auto-retried.
+- An expired `CancelRequested` lease becomes terminal `Cancelled`, clears runner ownership, and releases its active lock and admission reservation.
+- An expired `Running` lease with any loop checkpoint becomes terminal `Failed(lease_expired)`, with its latest resumable checkpoint attached when one exists; it clears runner ownership and releases its active lock and admission reservation.
+- An expired checkpointless `Running` lease below `max_crash_recovery_reclaims` clears runner ownership and returns to `Queued`, retaining its active lock, admission reservation, and `claim_count`. At the reclaim bound it instead becomes terminal `Failed(crash_retry_exhausted)` and releases the lock and reservation.
+- `RecoveryRequired` remains readable as a legacy terminal status, follows the non-blocking legacy-row rule in §3, and is not produced by current lease recovery.
 - Blocking a running run requires a matching, unexpired lease, writes a checkpoint record, stores the latest checkpoint/gate refs on the run, clears current lease ownership, and keeps the active lock.
 - Loop-driver resume payloads are staged in a host-owned `CheckpointStateStore` before a public checkpoint record is written. The store returns an opaque `LoopCheckpointStateRef`; callers cannot choose arbitrary refs for durable records.
 - Checkpoint-state records are scoped by `TurnScope`, `TurnId`, and `TurnRunId`. Reads with a matching ref but foreign scope or run return no state, preserving tenant/thread/run isolation.
