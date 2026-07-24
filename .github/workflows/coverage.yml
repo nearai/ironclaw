@@ -63,7 +63,7 @@ jobs:
       # This job's scope is the union, so it takes the larger of the two. The
       # depth lives in shared harness code, so per-test Box::pin only moves the
       # crash to the next-deepest test.
-      # Pinned by tests/coverage_lane_stack_headroom.rs.
+      # Pinned by tests/reborn_coverage_lane_stack_headroom.rs.
       RUST_MIN_STACK: "67108864"
     permissions:
       id-token: write
