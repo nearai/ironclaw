@@ -238,12 +238,16 @@ mod tests {
         ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, VirtualPath};
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        HostPortCatalog, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        ResourceScope, VirtualPath,
+    };
     use ironclaw_product::ProductConversationRouteKey;
-    use ironclaw_secrets::SecretStore;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
+    use crate::{AdminConfigurationService, FilesystemAdminConfigurationStore};
 
     /// Invented channel extension declaring the admission fields by the
     /// handle-suffix convention.
@@ -276,7 +280,9 @@ kind = "shared_secret_header"
 secret_handle = "vendorx_webhook_secret"
 header = "X-VendorX-Secret"
 
-[channel.config]
+[admin_configuration]
+group_id = "vendorx.channel"
+display_name = "VendorX channel"
 fields = [
   { handle = "vendorx_webhook_secret", label = "Webhook secret", secret = true },
   { handle = "vendorx_allowed_channels", label = "Allowed channels", secret = false },
@@ -365,12 +371,43 @@ supports_threads = false
             InvocationId::new(),
         )
         .expect("resource scope");
-        let channel_config = Arc::new(ChannelConfigService::new(
-            store,
-            Arc::new(SecretStore::ephemeral()),
-            scope,
-            Arc::new(NoopReactivation),
-        ));
+        let secrets = Arc::new(SecretStore::ephemeral());
+        let admin_secrets: Arc<dyn SecretStorePort> =
+            Arc::clone(&secrets) as Arc<dyn SecretStorePort>;
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let manifest = store
+            .get_manifest(&extension_id)
+            .await
+            .expect("manifest read")
+            .expect("manifest installed");
+        let admin = Arc::new(
+            AdminConfigurationService::new(
+                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                    filesystem,
+                    |_scope| {
+                        MountView::new(vec![MountGrant::new(
+                            MountAlias::new("/extension-admin-configuration")
+                                .expect("valid mount alias"),
+                            VirtualPath::new("/tenants/test/shared/admin-configuration")
+                                .expect("valid virtual path"),
+                            MountPermissions::read_write_list_delete(),
+                        )])
+                    },
+                ))),
+                admin_secrets,
+                manifest.resolved().admin_configuration.clone(),
+            )
+            .expect("admin configuration service"),
+        );
+        let channel_config = Arc::new(
+            ChannelConfigService::new(
+                store,
+                Arc::clone(&secrets) as Arc<dyn SecretStorePort>,
+                scope.clone(),
+                Arc::new(NoopReactivation),
+            )
+            .with_admin_configuration(admin, scope),
+        );
         let handles = SharedChannelAdmissionHandles {
             allowed_channels: Some("vendorx_allowed_channels".to_string()),
             subject_routes: Some("vendorx_subject_routes".to_string()),

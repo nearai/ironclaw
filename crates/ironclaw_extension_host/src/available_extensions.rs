@@ -1544,10 +1544,10 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                         .as_deref()
                         .is_some_and(|step| {
                             step.starts_with("After authorization completes")
-                                && step.contains("activate")
+                                && step.contains("publishes")
                                 && !step.contains("Install")
                         }),
-                    "{extension_id} configure next step should describe post-authorization activation"
+                    "{extension_id} configure next step should describe post-authorization tool publication"
                 );
             } else if extension_id == "slack" {
                 assert!(
@@ -1592,10 +1592,10 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                         .as_deref()
                         .is_some_and(|step| {
                             step.starts_with("After saving")
-                                && step.contains("activate")
+                                && step.contains("publishes its tools")
                                 && !step.contains("Install")
                         }),
-                    "{extension_id} configure next step should describe activation after saving credentials"
+                    "{extension_id} configure next step should describe published tools after saving credentials"
                 );
             } else if extension_id == NEARAI_EXTENSION_ID {
                 assert_eq!(
@@ -1613,7 +1613,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             } else if extension_id == "web-access" {
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
-                    Some("Activate Web Access to publish its tools."),
+                    Some("IronClaw publishes Web Access tools automatically during installation."),
                     "web-access configure next step should not repeat install-first copy"
                 );
             } else {
@@ -1724,7 +1724,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
 
         assert_eq!(summary.credential_requirements.len(), 1);
         let requirement = &summary.credential_requirements[0];
-        assert_eq!(requirement.name, "slack_personal_oauth");
+        assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
         assert!(matches!(

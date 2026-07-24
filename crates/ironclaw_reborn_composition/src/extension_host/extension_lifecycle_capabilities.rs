@@ -7,8 +7,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    EffectKind, HostApiError, OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate,
-    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError, InstallationState,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -30,7 +31,13 @@ pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_inst
 pub(crate) const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub(crate) const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 
-pub(crate) const EXTENSION_LIFECYCLE_CAPABILITY_IDS: [&str; 4] = [
+pub(crate) const EXTENSION_LIFECYCLE_CAPABILITY_IDS: [&str; 3] = [
+    EXTENSION_SEARCH_CAPABILITY_ID,
+    EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REMOVE_CAPABILITY_ID,
+];
+
+const EXTENSION_LIFECYCLE_HANDLER_IDS: [&str; 4] = [
     EXTENSION_SEARCH_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_ACTIVATE_CAPABILITY_ID,
@@ -48,40 +55,40 @@ pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
+        runtime_http_egress,
     });
-    for capability_id in EXTENSION_LIFECYCLE_CAPABILITY_IDS {
+    for capability_id in EXTENSION_LIFECYCLE_HANDLER_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
     }
     Ok(())
 }
 
 fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
-    Ok(vec![
+    let manifests = vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, pair, authenticate, or integrate requests, use this for discovery only, then continue with builtin.extension_install or builtin.extension_activate for the matching extension instead of asking the user to configure credentials from search results. For routine, trigger, or notification delivery, prefer configured outbound delivery targets before activating an external channel.",
+            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, pair, authenticate, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results. For routine, trigger, or notification delivery, prefer configured outbound delivery targets before installing an external channel.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a searched Reborn extension into durable local-dev lifecycle state. Installation does not require credentials. After install succeeds, immediately call builtin.extension_activate for the same extension so activation can publish tools or raise the auth gate. If install fails because the extension is already installed, use builtin.extension_activate instead.",
+            "Install a searched Reborn extension into durable local-dev lifecycle state. Installation also attempts activation: when an extension does not require credentials or credentials are already available it publishes tools immediately, and when credentials are missing it raises the auth gate. If install reports the extension is already installed, report the installed state or credential gate it returns instead of calling a separate activation tool.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
-        lifecycle_manifest(
+        lifecycle_manifest_with_visibility(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request. If activation fails with instance-configuration remediation (naming ironclaw config set commands), relay those exact commands verbatim to the user instead of the credential/OAuth guidance above.",
-            vec![
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::Network,
-            ],
+            "Internal extension activation adapter retained for product/API continuations. Model callers use builtin.extension_install, which performs install-driven activation.",
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
+            CapabilityVisibility::Api,
+            EXTENSION_INSTALL_CAPABILITY_ID,
         )?,
         lifecycle_manifest(
             EXTENSION_REMOVE_CAPABILITY_ID,
@@ -89,7 +96,16 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
-    ])
+    ];
+    debug_assert_eq!(
+        manifests
+            .iter()
+            .filter(|manifest| manifest.visibility == CapabilityVisibility::Model)
+            .map(|manifest| manifest.id.as_str())
+            .collect::<Vec<_>>(),
+        EXTENSION_LIFECYCLE_CAPABILITY_IDS
+    );
+    Ok(manifests)
 }
 
 fn lifecycle_manifest(
@@ -98,13 +114,34 @@ fn lifecycle_manifest(
     effects: Vec<EffectKind>,
     default_permission: PermissionMode,
 ) -> Result<CapabilityManifest, ExtensionError> {
-    let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
+    lifecycle_manifest_with_visibility(
+        id,
+        description,
+        effects,
+        default_permission,
+        CapabilityVisibility::Model,
+        id,
+    )
+}
+
+fn lifecycle_manifest_with_visibility(
+    id: &str,
+    description: &str,
+    effects: Vec<EffectKind>,
+    default_permission: PermissionMode,
+    visibility: CapabilityVisibility,
+    schema_id: &str,
+) -> Result<CapabilityManifest, ExtensionError> {
+    let schema_name = schema_id
+        .strip_prefix("builtin.")
+        .unwrap_or(schema_id)
+        .replace('.', "-");
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
         description: description.to_string(),
         effects,
         default_permission,
-        visibility: CapabilityVisibility::Model,
+        visibility,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
@@ -142,6 +179,7 @@ fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +200,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         let started = Instant::now();
+        let mut connection_preview_source = None;
         let response = match request.capability_id.as_str() {
             EXTENSION_SEARCH_CAPABILITY_ID => {
                 let input: SearchInput = parse_input(request.input)?;
@@ -183,16 +222,84 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                let package_ref = extension_package_ref(input.extension_id)?;
                 // The dispatch scope carries the ACTING user, so a chat-driven
                 // install derives the same owner the WebUI path would (#5459
                 // P1): operator → tenant-shared, member → private.
-                self.extension_management
-                    .install(
-                        extension_package_ref(input.extension_id)?,
+                let install_response = self
+                    .extension_management
+                    .install(package_ref.clone(), &request.scope.user_id)
+                    .await
+                    .map_err(lifecycle_error)?;
+                let requirements = self
+                    .extension_management
+                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
+                    .await
+                    .map_err(install_activation_readiness_error)?;
+                let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+                    request.scope.clone(),
+                    Arc::clone(&self.credential_accounts),
+                );
+                let missing_requirements = credential_gate
+                    .missing_requirements(requirements)
+                    .await
+                    .map_err(credential_stage_error)?;
+                if !missing_requirements.is_empty() {
+                    return Err(FirstPartyCapabilityError::auth_required_for_credentials(
+                        missing_requirements,
+                    )
+                    .with_usage(resource_usage(started)));
+                }
+                let mode = ExtensionActivationMode::from_dispatch_context(
+                    request.scope.clone(),
+                    request
+                        .services
+                        .runtime_http_egress
+                        .clone()
+                        .or_else(|| self.runtime_http_egress.clone()),
+                );
+                match self
+                    .extension_management
+                    .activate_with_credential_gate(
+                        package_ref.clone(),
+                        mode,
+                        credential_gate,
                         &request.scope.user_id,
                     )
                     .await
-                    .map_err(lifecycle_error)
+                {
+                    Ok(activation_response)
+                        if activation_response.phase == InstallationState::Active =>
+                    {
+                        connection_preview_source = Some(activation_response.clone());
+                        Ok(install_response_with_activation(
+                            install_response,
+                            &activation_response,
+                        ))
+                    }
+                    Ok(activation_response)
+                        if activation_response_has_credential_blocker(&activation_response) =>
+                    {
+                        let requirements = self
+                            .extension_management
+                            .activation_credential_requirements(
+                                &package_ref,
+                                &request.scope.user_id,
+                            )
+                            .await
+                            .map_err(install_activation_readiness_error)?;
+                        if requirements.is_empty() {
+                            Ok(install_response)
+                        } else {
+                            Err(FirstPartyCapabilityError::auth_required_for_credentials(
+                                requirements,
+                            )
+                            .with_usage(resource_usage(started)))
+                        }
+                    }
+                    Ok(_) => Ok(install_response),
+                    Err(error) => install_activation_error(error, install_response),
+                }
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -251,7 +358,9 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         // An inbound-channel activation carries a structured connection
         // requirement; surface it as a display preview so WebChat opens the
         // in-chat OAuth connection panel from structured state.
-        let connection_preview = channel_connection_display_preview(&response);
+        let connection_preview = channel_connection_display_preview(
+            connection_preview_source.as_ref().unwrap_or(&response),
+        );
         let output = serde_json::to_value(without_model_visible_connection_chrome(response))
             .map_err(|error| {
                 tracing::debug!(
@@ -337,6 +446,90 @@ fn display_channel_name(channel: &str) -> String {
     }
 }
 
+fn install_response_with_activation(
+    mut install_response: LifecycleProductResponse,
+    activation_response: &LifecycleProductResponse,
+) -> LifecycleProductResponse {
+    install_response.phase = activation_response.phase;
+    install_response.blockers = activation_response.blockers.clone();
+    install_response.message = activation_response.message.clone();
+
+    let activation_visible_capability_ids = match activation_response.payload.as_ref() {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            visible_capability_ids,
+            ..
+        }) => Some(visible_capability_ids.clone()),
+        _ => None,
+    };
+    if let Some(LifecycleProductPayload::ExtensionInstall {
+        visible_capability_ids,
+        next_step,
+        ..
+    }) = install_response.payload.as_mut()
+    {
+        if let Some(activation_visible_capability_ids) = activation_visible_capability_ids {
+            *visible_capability_ids = activation_visible_capability_ids;
+        }
+        *next_step = if activation_response.phase == InstallationState::Active {
+            "Activation completed; model-visible extension tools are ready.".to_string()
+        } else {
+            "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
+        };
+    }
+    install_response
+}
+
+fn activation_response_has_credential_blocker(response: &LifecycleProductResponse) -> bool {
+    matches!(
+        response.payload.as_ref(),
+        Some(LifecycleProductPayload::ExtensionActivate {
+            activated: false,
+            ..
+        })
+    )
+}
+
+fn install_activation_readiness_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
+    match error {
+        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+            provider_instance_unavailable_error()
+        }
+        error => lifecycle_error(error),
+    }
+}
+
+fn install_activation_error(
+    error: ProductSurfaceFailure,
+    install_response: LifecycleProductResponse,
+) -> Result<LifecycleProductResponse, FirstPartyCapabilityError> {
+    match error {
+        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+            Err(provider_instance_unavailable_error())
+        }
+        ProductSurfaceFailure::Transient { reason } => {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                %reason,
+                "post-install activation reconciliation failed; returning installed lifecycle state"
+            );
+            Ok(install_response)
+        }
+        ProductSurfaceFailure::InvalidBindingRequest { reason }
+            if reason.starts_with("hosted MCP discovery failed:")
+                || reason
+                    == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
+        {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                %reason,
+                "post-install hosted MCP discovery failed; returning installed lifecycle state"
+            );
+            Ok(install_response)
+        }
+        error => Err(lifecycle_error(error)),
+    }
+}
+
 fn resource_usage(started: Instant) -> ResourceUsage {
     ResourceUsage::default()
         .set_wall_clock_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
@@ -362,8 +555,21 @@ where
 fn extension_package_ref(
     id: impl Into<String>,
 ) -> Result<LifecyclePackageRef, FirstPartyCapabilityError> {
-    LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
+    let id = id.into();
+    LifecyclePackageRef::new(LifecyclePackageKind::Extension, id.clone()).map_err(|_| {
+        FirstPartyCapabilityError::invalid_input_issues(
+            "extension id is invalid",
+            vec![
+                DispatchInputIssue::new("extension_id", DispatchInputIssueCode::InvalidValue)
+                    .expected("a non-empty extension id")
+                    .received(if id.is_empty() {
+                        "empty"
+                    } else {
+                        "invalid extension id"
+                    }),
+            ],
+        )
+    })
 }
 
 /// Fixed, host-authored, validator-safe headline for the
@@ -374,6 +580,16 @@ fn extension_package_ref(
 /// `safe_summary` stays this short fixed literal.
 const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
     "extension activation requires host instance configuration";
+const PROVIDER_INSTANCE_UNAVAILABLE_SAFE_SUMMARY: &str =
+    "extension is unavailable on this instance";
+
+fn provider_instance_unavailable_error() -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::dispatch_with_diagnostic(
+        RuntimeDispatchErrorKind::OperationFailed,
+        Some(PROVIDER_INSTANCE_UNAVAILABLE_SAFE_SUMMARY.to_string()),
+        PROVIDER_INSTANCE_UNAVAILABLE_SAFE_SUMMARY,
+    )
+}
 
 fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
     match error {
@@ -450,7 +666,10 @@ mod tests {
     use crate::OAuthClientConfig;
     use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use ironclaw_host_api::InstallationState;
-    use ironclaw_product::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
+    use ironclaw_product::{
+        ChannelConnectionRequirement, LifecyclePackageKind, LifecyclePackageRef,
+        RebornChannelConnectStrategy,
+    };
 
     /// Dummy but well-formed Google OAuth backend config for tests below that
     /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
@@ -492,12 +711,12 @@ mod tests {
         }
     }
 
-    /// §5.3 S3 (behavior-neutral): the four extension-lifecycle capabilities
+    /// §5.3 S3 (behavior-neutral): the public extension-lifecycle capabilities
     /// declare an `origin_gate_matrix`. `extension_search` is read-only and thus
-    /// Ungated for LoopRun (it is in the reviewed allowlist); install/activate/
-    /// remove carry write/network effects and gate for LoopRun. The direct
-    /// WebUI ProductSurface path is consent-sufficient for install/activate/
-    /// remove; automation remains deny-by-default.
+    /// Ungated for LoopRun (it is in the reviewed allowlist); install/remove and
+    /// the API-only activation continuation carry write effects and gate for
+    /// LoopRun. The direct WebUI ProductSurface path is consent-sufficient for
+    /// install/activate/remove; automation remains deny-by-default.
     #[test]
     fn extension_lifecycle_capabilities_declare_behavior_neutral_origin_gate_matrix() {
         let manifests = manifests().expect("lifecycle manifests build");
@@ -641,8 +860,8 @@ mod tests {
 
         assert!(ids.contains(&EXTENSION_SEARCH_CAPABILITY_ID));
         assert!(ids.contains(&EXTENSION_INSTALL_CAPABILITY_ID));
-        assert!(ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID));
         assert!(ids.contains(&EXTENSION_REMOVE_CAPABILITY_ID));
+        assert!(!ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID));
 
         let search = descriptor_for(&surface, EXTENSION_SEARCH_CAPABILITY_ID);
         assert_eq!(search.default_permission, PermissionMode::Allow);
@@ -657,9 +876,6 @@ mod tests {
                 && search.description.contains("discovery only")
                 && search.description.contains("external channel")
                 && search.description.contains("outbound delivery targets")
-                && search
-                    .description
-                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID)
                 && search.description.contains(EXTENSION_INSTALL_CAPABILITY_ID),
             "extension_search description should teach the model to discover bundled or inactive integrations from generic service names: {}",
             search.description
@@ -674,37 +890,15 @@ mod tests {
         assert_eq!(install.default_permission, PermissionMode::Ask);
         assert!(
             install.description.contains("already installed")
-                && install
-                    .description
-                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID)
                 && install.description.contains("does not require credentials")
-                && install.description.contains("immediately call"),
-            "extension_install description should route successful installs and already-installed failures to activation: {}",
+                && install.description.contains("attempts activation")
+                && install.description.contains("auth gate"),
+            "extension_install description should route installs through install-driven activation: {}",
             install.description
         );
         assert_eq!(
             install.parameters_schema["required"],
             serde_json::json!(["extension_id"])
-        );
-
-        let activate = descriptor_for(&surface, EXTENSION_ACTIVATE_CAPABILITY_ID);
-        assert!(
-            activate.description.contains("credential/auth gate")
-                && activate.description.contains("do not ask the user")
-                && activate.description.contains("activated=true")
-                && activate.description.contains("visible_capability_ids")
-                && activate.description.contains("external channel")
-                && activate.description.contains("app/bot")
-                && activate.description.contains("WebChat connection panel")
-                && activate
-                    .description
-                    .contains("continue the original request"),
-            "extension_activate description should teach the model to raise auth through activation and route channel pairing through UI: {}",
-            activate.description
-        );
-        assert!(
-            activate.effects.contains(&EffectKind::Network),
-            "hosted MCP activation needs runtime HTTP egress for discovery"
         );
     }
 
@@ -771,7 +965,10 @@ mod tests {
         assert!(
             telegram["channel_connection"]["instructions"]
                 .as_str()
-                .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
+                .is_some_and(
+                    |instructions| instructions.contains("Open Telegram's app or bot")
+                        && instructions.contains("pairing code")
+                ),
             "generated-code connection guidance must remain model-visible: {telegram}"
         );
         assert!(
@@ -829,8 +1026,13 @@ mod tests {
                 .exists()
         );
 
-        let before_activate = active_extension_capability_ids(&extension_management).await;
-        assert!(!before_activate.iter().any(|id| id == "web-access.search"));
+        let after_install = active_extension_capability_ids(&extension_management).await;
+        assert!(after_install.iter().any(|id| id == "web-access.search"));
+        assert!(
+            after_install
+                .iter()
+                .any(|id| id == "web-access.get_content")
+        );
 
         let activate = invoke_json(
             &services,
@@ -894,13 +1096,7 @@ mod tests {
         .await
         .expect("local-dev services build");
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
-        )
-        .await
-        .expect("install succeeds");
+        install_inactive(&services, "github").await;
         let context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account(&services, &context.resource_scope, "github").await;
         let activate = invoke_json(
@@ -923,13 +1119,7 @@ mod tests {
 
         // Re-install (bundled, free) then attempt to re-activate: the revoked
         // credential must force a fresh auth gate rather than silently re-adding.
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
-        )
-        .await
-        .expect("reinstall succeeds");
+        install_inactive(&services, "github").await;
         let outcome = invoke_outcome(
             &services,
             EXTENSION_ACTIVATE_CAPABILITY_ID,
@@ -964,13 +1154,7 @@ mod tests {
         .expect("local-dev services build");
 
         for extension_id in ["gmail", "google-calendar"] {
-            invoke_json(
-                &services,
-                EXTENSION_INSTALL_CAPABILITY_ID,
-                serde_json::json!({ "extension_id": extension_id }),
-            )
-            .await
-            .expect("install succeeds");
+            install_inactive(&services, extension_id).await;
         }
         let context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         // One reusable Google credential covering both extensions' scopes.
@@ -1037,13 +1221,7 @@ mod tests {
             .extension_management
             .clone();
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
-        )
-        .await
-        .expect("install succeeds");
+        install_inactive(&services, "github").await;
 
         let outcome = invoke_outcome(
             &services,
@@ -1121,13 +1299,7 @@ mod tests {
             "available GitHub model-visible search results must not expose PAT setup onboarding before activation"
         );
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
-        )
-        .await
-        .expect("install succeeds");
+        install_inactive(&services, "github").await;
 
         let installed_search = invoke_json(
             &services,
@@ -1146,12 +1318,12 @@ mod tests {
         assert_eq!(installed_github["installation_phase"], "installed");
         let installed_message = installed_search["message"]
             .as_str()
-            .expect("installed inactive search should carry activation guidance");
+            .expect("installed inactive search should carry install guidance");
         assert!(
             installed_message.contains("installed but not activated")
                 && installed_message.contains("not currently callable tools")
-                && installed_message.contains(EXTENSION_ACTIVATE_CAPABILITY_ID),
-            "installed inactive GitHub search must not imply tools are active, got {installed_search}"
+                && installed_message.contains(EXTENSION_INSTALL_CAPABILITY_ID),
+            "installed inactive GitHub search must guide install-driven activation, got {installed_search}"
         );
         assert!(
             installed_github.get("credential_requirements").is_none(),
@@ -1174,16 +1346,11 @@ mod tests {
         .expect("configured search succeeds");
         let configured_message = configured_search["message"]
             .as_str()
-            .expect("configured inactive search should carry activation guidance");
+            .expect("configured ready search should carry readiness guidance");
         assert!(
-            configured_message.contains("installed but not activated")
-                && configured_message.contains("configured only means")
-                && configured_message.contains("not currently callable tools"),
-            "configured GitHub search must not report activation before activation, got {configured_search}"
-        );
-        assert!(
-            !configured_message.contains("ready"),
-            "configured-but-inactive GitHub search must not be marked ready, got {configured_search}"
+            configured_message.contains("active installed extension results")
+                && configured_message.contains("ready for this connection request"),
+            "configured GitHub search must report ready active tools, got {configured_search}"
         );
         let extensions = configured_search["payload"]["extensions"]
             .as_array()
@@ -1192,14 +1359,14 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
-        assert_eq!(github["installation_phase"], "configured");
+        assert_eq!(github["installation_phase"], "active");
         assert!(
             github.get("credential_requirements").is_none(),
-            "configured GitHub model-visible search results must not expose satisfied PAT requirements"
+            "ready GitHub model-visible search results must not expose satisfied PAT requirements"
         );
         assert!(
             github.get("onboarding").is_none(),
-            "configured GitHub model-visible search results must not expose stale PAT setup onboarding"
+            "ready GitHub model-visible search results must not expose stale PAT setup onboarding"
         );
 
         let activate = invoke_json(
@@ -1263,13 +1430,7 @@ mod tests {
             .extension_management
             .clone();
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "google-calendar"}),
-        )
-        .await
-        .expect("install succeeds");
+        install_inactive(&services, "google-calendar").await;
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account_with_scopes(
             &services,
@@ -1330,13 +1491,7 @@ mod tests {
             .extension_management
             .clone();
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "gmail"}),
-        )
-        .await
-        .expect("install succeeds");
+        install_inactive(&services, "gmail").await;
 
         let outcome = invoke_outcome(
             &services,
@@ -1391,13 +1546,7 @@ mod tests {
             .extension_management
             .clone();
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "github"}),
-        )
-        .await
-        .expect("install succeeds");
+        install_inactive(&services, "github").await;
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account_with_scopes(
             &services,
@@ -1459,13 +1608,6 @@ mod tests {
             .extension_management
             .clone();
 
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "notion"}),
-        )
-        .await
-        .expect("install succeeds");
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account(&services, &activate_context.resource_scope, "notion").await;
         // The account's access token must exist as real material: discovery
@@ -1488,12 +1630,12 @@ mod tests {
 
         let activate = invoke_json(
             &services,
-            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            EXTENSION_INSTALL_CAPABILITY_ID,
             serde_json::json!({"extension_id": "notion"}),
         )
-        .await
-        .expect("hosted MCP activation succeeds");
-        assert_eq!(activate["payload"]["activated"], true);
+        .await;
+        let activate = activate.expect("install-driven hosted MCP activation succeeds");
+        assert_eq!(activate["phase"], "active");
 
         // Live discovery ran through the staged pipeline: the discovered
         // tool is model-visible.
@@ -1639,6 +1781,27 @@ mod tests {
             })
             .await
             .expect("create configured account");
+    }
+
+    async fn install_inactive(services: &RebornRuntimeStores, extension_id: &str) {
+        let context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        install_inactive_for_user(services, extension_id, &context.resource_scope.user_id).await;
+    }
+
+    async fn install_inactive_for_user(
+        services: &RebornRuntimeStores,
+        extension_id: &str,
+        caller: &UserId,
+    ) {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+            .expect("valid extension package ref");
+        services
+            .local_runtime_for_test()
+            .expect("local runtime substrate")
+            .extension_management
+            .install(package_ref, caller)
+            .await
+            .expect("durable inactive install succeeds");
     }
 
     async fn active_extension_capability_ids(

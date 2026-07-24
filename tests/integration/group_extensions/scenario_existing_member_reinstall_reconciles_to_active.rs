@@ -1,11 +1,11 @@
-//! The public Activate action is gone (#6520): `setup_needed -> active` is
+//! The public Activate action is gone (#6520): `installed -> active` is
 //! reconciled by an EXISTING member re-entering the idempotent install action
 //! after their personal setup completes (`extension_lifecycle.rs`'s
 //! `Some(existing)` same-caller arm). This scenario drives that successor
-//! path on the shared store — install, observe `setup_needed` cross-thread,
+//! path on the shared store — install, observe `installed` cross-thread,
 //! complete setup, re-install the SAME membership with no remove in between,
 //! observe `active` cross-thread. It is also the only scenario that
-//! positively observes the intermediate `setup_needed` phase at this tier;
+//! positively observes the intermediate `installed` phase at this tier;
 //! both arms were retired alongside the Activate vocabulary.
 //!
 //! Runs as a DISTINCT actor (`with_actor_id`, E-MULTIUSER seam) so github is
@@ -24,7 +24,7 @@ const ACTOR: &str = "reconcile-member-actor";
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 1: first install for THIS caller — parks the normal
     // per-account credential gate; denial leaves the joined membership
-    // resting at setup_needed (removal is the sole reset action). ───────────
+    // resting at installed (removal is the sole reset action). ──────────────
     let installer = g
         .thread("ext-reconcile-phase-install")
         .with_actor_id(ACTOR)
@@ -46,7 +46,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
 
     // ── Phase 2: cross-thread view — the membership positively reads
-    // setup_needed. Only this caller's github entry can carry a phase (their
+    // installed. Only this caller's github entry can carry a phase (their
     // sole installation), so the value assert is entry-precise. ─────────────
     let pending_viewer = g
         .thread("ext-reconcile-phase-pending-viewer")
@@ -64,7 +64,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_invoked("builtin.extension_search")
         .await?;
     pending_viewer
-        .assert_tool_result_contains(r#""installation_phase":"setup_needed""#)
+        .assert_tool_result_contains(r#""installation_phase":"installed""#)
         .await?;
 
     // ── Phase 3: personal setup completes out-of-band for this caller. ─────

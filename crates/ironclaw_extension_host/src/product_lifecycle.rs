@@ -580,12 +580,12 @@ impl ExtensionLifecycleManager {
         );
         if extension_search_has_installed_external_channel_result(response.payload.as_ref()) {
             response.message = Some(
-                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_activate for the matching extension id so channel-specific connection/setup instructions can be surfaced. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available; do not activate the channel just to send to an already configured delivery target."
+                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_install for the matching extension id so install-driven activation can publish tools or surface channel-specific connection/setup instructions. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available; do not reconnect the channel just to send to an already configured delivery target."
                     .to_string(),
             );
         } else if extension_search_has_inactive_installed_result(response.payload.as_ref()) {
             response.message = Some(
-                "Search found installed extension results that are not active yet. Report these as installed but not activated; configured only means required credentials appear present, not that tools are published. Any visible_capability_ids on inactive results are catalog capabilities only, not currently callable tools. To make the extension available, call builtin.extension_activate for the matching extension id."
+                "Search found installed extension results that are not active yet. Report these as installed but not activated; configured only means required credentials appear present, not that tools are published. Any visible_capability_ids on inactive results are catalog capabilities only, not currently callable tools. To make the extension available, call builtin.extension_install for the matching extension id; install is idempotent and attempts activation."
                     .to_string(),
             );
         } else if extension_search_has_ready_result(response.payload.as_ref()) {
@@ -1007,7 +1007,7 @@ impl ExtensionLifecycleManager {
                     .map(|id| id.as_str().to_string())
                     .collect(),
                 next_step: format!(
-                    "Call builtin.extension_activate now with input {{\"extension_id\":\"{}\"}}. Activation publishes the tools and opens the auth gate if credentials are missing.",
+                    "Installation will attempt activation for extension_id \"{}\". If credentials are missing, the install response opens the auth gate; otherwise the tools are published.",
                     package_ref.id.as_str()
                 ),
             },
@@ -2665,6 +2665,12 @@ async fn search_installation_phase(
     has_last_error: bool,
 ) -> Result<InstallationState, ProductSurfaceFailure> {
     let phase = installation_state_for_activation(installation.activation_state(), has_last_error);
+    if phase == InstallationState::Active
+        && !package_runtime_credential_auth_requirements(&extension.package).is_empty()
+        && !search_credentials_configured(extension, credential_gate).await?
+    {
+        return Ok(InstallationState::Installed);
+    }
     if phase != InstallationState::Installed {
         return Ok(phase);
     }

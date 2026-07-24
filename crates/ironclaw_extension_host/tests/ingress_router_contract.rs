@@ -85,7 +85,9 @@ signed_payload = [
   { body = true },
 ]
 
-[channel.config]
+[admin_configuration]
+group_id = "acme.chat"
+display_name = "Acme Chat channel"
 fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]

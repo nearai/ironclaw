@@ -965,7 +965,9 @@ kind = "shared_secret_header"
 secret_handle = "acmechat_webhook_secret"
 header = "X-AcmeChat-Secret"
 
-[channel.config]
+[admin_configuration]
+group_id = "acmechat.channel"
+display_name = "AcmeChat channel"
 fields = [
   { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
   { handle = "acmechat_team_id", label = "Workspace ID", secret = false },
@@ -1122,7 +1124,9 @@ kind = "shared_secret_header"
 secret_handle = "pairchat_webhook_secret"
 header = "X-PairChat-Secret"
 
-[channel.config]
+[admin_configuration]
+group_id = "pairchat.channel"
+display_name = "PairChat channel"
 fields = [
   { handle = "pairchat_bot_token", label = "Bot token", secret = true },
   { handle = "pairchat_webhook_secret", label = "Webhook secret", secret = true },

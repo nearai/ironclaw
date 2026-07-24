@@ -2120,35 +2120,12 @@ mod tests {
             assert_eq!(grant.constraints.mounts, system_extensions_lifecycle_mounts);
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
-        let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
-        assert_eq!(
-            extension_activate_grant.constraints.allowed_effects,
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::Network
-            ]
-        );
-        assert_eq!(
-            extension_activate_grant.constraints.mounts,
-            system_extensions_lifecycle_mounts
-        );
-        assert_eq!(
-            extension_activate_grant
-                .constraints
-                .network
-                .allowed_targets
-                .iter()
-                .map(|target| target.host_pattern.as_str())
-                .collect::<Vec<_>>(),
-            vec!["*"]
-        );
         assert!(
-            extension_activate_grant
-                .constraints
-                .network
-                .deny_private_ip_ranges
+            grants
+                .grants
+                .iter()
+                .all(|grant| grant.capability.as_str() != EXTENSION_ACTIVATE_CAPABILITY_ID),
+            "retired extension_activate must not be granted to the model surface"
         );
 
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);

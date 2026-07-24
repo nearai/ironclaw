@@ -8,12 +8,11 @@ use ironclaw_host_api::{
     Principal, ResourceScope, RunId, RuntimeCredentialAccountSetup, RuntimeKind, TenantId,
     ThreadId, TrustClass, UserId,
 };
-use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
+use ironclaw_host_runtime::RuntimeCapabilityOutcome;
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::extension_host::extension_lifecycle_capabilities::{
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
-};
+use crate::extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
 use crate::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
@@ -36,14 +35,9 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
     let auth_scope_resource = webui_gate_resource_scope();
     let activate_scope = webui_gate_resource_scope();
 
-    invoke_json_with_context(
-        &services,
-        EXTENSION_INSTALL_CAPABILITY_ID,
-        execution_context_for_scope(install_scope, [EXTENSION_INSTALL_CAPABILITY_ID]),
-        serde_json::json!({"extension_id": "github"}),
-    )
-    .await
-    .expect("install succeeds");
+    install_inactive_for_user(&services, "github", &install_scope.user_id)
+        .await
+        .expect("durable inactive install succeeds");
 
     let auth_scope = AuthProductScope::new(auth_scope_resource.clone(), AuthSurface::Callback);
     let product_auth = services.product_auth.as_ref();
@@ -252,21 +246,6 @@ async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_f
     );
 }
 
-async fn invoke_json_with_context(
-    services: &RebornRuntimeStores,
-    capability_id: &str,
-    context: ExecutionContext,
-    input: serde_json::Value,
-) -> Result<serde_json::Value, RuntimeFailureKind> {
-    crate::approval_test_support::invoke_json_with_local_dev_approval(
-        services,
-        capability_id,
-        context,
-        input,
-    )
-    .await
-}
-
 async fn invoke_outcome_with_context(
     services: &RebornRuntimeStores,
     capability_id: &str,
@@ -292,6 +271,22 @@ async fn active_extension_capability_ids(
         .into_iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect()
+}
+
+async fn install_inactive_for_user(
+    services: &RebornRuntimeStores,
+    extension_id: &str,
+    caller: &UserId,
+) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+        .expect("valid extension package ref");
+    services
+        .local_runtime_for_test()
+        .expect("local runtime substrate")
+        .extension_management
+        .install(package_ref, caller)
+        .await
+        .map(|_| ())
 }
 
 fn execution_context_for_scope<'a>(

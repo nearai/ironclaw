@@ -36,10 +36,10 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId,
-    ThreadId, UserId,
+    AgentId, ApprovalRequestId, ExtensionId, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
@@ -64,7 +64,7 @@ use ironclaw_product::{
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest,
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
@@ -96,7 +96,10 @@ use crate::extension_host::extension_ingress::{
 };
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
-use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigService};
+use ironclaw_extension_host::{
+    AdminConfigurationService, ChannelConfigReactivation, ChannelConfigService,
+    FilesystemAdminConfigurationStore,
+};
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
@@ -507,6 +510,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
         &product_extension_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
     )
     .expect("bundled channel manifest resolves"); // safety: compile-time bundled manifest is valid.
+    let admin_configuration = record.resolved().admin_configuration.clone();
     let extension_id = ExtensionId::new("slack").expect("extension id"); // safety: static id is valid.
     installation_store
         .upsert_manifest_and_installation(
@@ -532,17 +536,55 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
         thread_id: None,
         invocation_id: InvocationId::new(),
     };
-    let channel_config = Arc::new(ChannelConfigService::new(
-        installation_store,
-        Arc::new(SecretStore::ephemeral()),
-        scope,
-        Arc::new(NoopChannelConfigReactivation),
-    ));
+    let secrets = Arc::new(SecretStore::ephemeral());
+    let admin_secrets: Arc<dyn SecretStorePort> = Arc::clone(&secrets) as Arc<dyn SecretStorePort>;
+    let admin_filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let admin = Arc::new(
+        AdminConfigurationService::new(
+            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                admin_filesystem,
+                |_scope| {
+                    MountView::new(vec![MountGrant::new(
+                        MountAlias::new("/extension-admin-configuration")
+                            .expect("valid mount alias"),
+                        VirtualPath::new(format!("/tenants/{TENANT}/shared/admin-configuration"))
+                            .expect("valid virtual path"),
+                        MountPermissions::read_write_list_delete(),
+                    )])
+                },
+            ))),
+            admin_secrets,
+            admin_configuration,
+        )
+        .expect("admin configuration service"),
+    );
+    let channel_config = Arc::new(
+        ChannelConfigService::new(
+            installation_store,
+            Arc::clone(&secrets) as Arc<dyn SecretStorePort>,
+            scope.clone(),
+            Arc::new(NoopChannelConfigReactivation),
+        )
+        .with_admin_configuration(admin, scope),
+    );
     channel_config
         .save(
             &extension_id,
             vec![
+                ("slack_bot_token".to_string(), "xoxb-e2e".to_string()),
                 ("slack_signing_secret".to_string(), SECRET.to_string()),
+                ("slack_team_id".to_string(), TEAM.to_string()),
+                ("slack_api_app_id".to_string(), "A-E2E".to_string()),
+                ("slack_installation_id".to_string(), "I-E2E".to_string()),
+                ("slack_bot_user_id".to_string(), "U-BOT-E2E".to_string()),
+                (
+                    "slack_oauth_client_id".to_string(),
+                    "e2e-slack-client".to_string(),
+                ),
+                (
+                    "slack_oauth_client_secret".to_string(),
+                    "e2e-slack-client-secret".to_string(),
+                ),
                 // Shared-channel admission (§5.3): the manifest declares the
                 // `*_allowed_channels` convention, so unrouted shared
                 // conversations fail closed — the harness admits the one

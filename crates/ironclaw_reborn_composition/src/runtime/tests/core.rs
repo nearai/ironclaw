@@ -175,6 +175,16 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
                 ),
                 ("slack_team_id".to_string(), "T-RUNTIME".to_string()),
                 ("slack_api_app_id".to_string(), "A-RUNTIME".to_string()),
+                ("slack_installation_id".to_string(), "I-RUNTIME".to_string()),
+                ("slack_bot_user_id".to_string(), "U-BOT-RUNTIME".to_string()),
+                (
+                    "slack_oauth_client_id".to_string(),
+                    "runtime-slack-client".to_string(),
+                ),
+                (
+                    "slack_oauth_client_secret".to_string(),
+                    "runtime-slack-client-secret".to_string(),
+                ),
             ],
         )
         .await
@@ -5367,8 +5377,27 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
     ));
     let google_setup =
         query_webui_extension_setup(bundle.as_ref(), caller.clone(), "google-calendar").await;
-    assert_eq!(google_setup.secrets.len(), 1);
-    let google_secret = &google_setup.secrets[0];
+    let expected_google_scopes = [
+        GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+        GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let google_secret = google_setup
+        .secrets
+        .iter()
+        .find(|secret| match &secret.setup {
+            RebornExtensionCredentialSetup::OAuth { scopes, .. } => {
+                secret.provider == "google"
+                    && scopes
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        == expected_google_scopes
+            }
+            _ => false,
+        })
+        .expect("Google Calendar setup should include its OAuth credential");
     assert_eq!(google_secret.provider, "google");
     assert!(!google_secret.provided);
     let RebornExtensionCredentialSetup::OAuth { scopes, .. } = &google_secret.setup else {
@@ -5379,15 +5408,9 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
             .iter()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        [
-            GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
-            GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
-        ]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
+        expected_google_scopes
     );
-    let google_setup_json =
-        serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
+    let google_setup_json = serde_json::to_value(google_secret).expect("serialize setup secret");
     assert_eq!(google_setup_json["setup"]["kind"], "oauth");
     assert!(
         matches!(

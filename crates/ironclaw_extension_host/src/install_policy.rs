@@ -52,9 +52,9 @@ pub fn ensure_caller_may_operate(
 }
 
 /// Membership rules for an extension id whose installation row already
-/// exists. `Err` is always "already installed": under membership the
-/// outcome of installing never depends on whether OTHER users hold the
-/// tool, so there is no ownership state left to mask on this path.
+/// exists. A same-member reinstall is idempotent so the model-facing install
+/// action can reconcile setup-complete installs after the public Activate action
+/// was retired. Tenant-shared duplicates are still "already installed".
 pub fn decide_install_on_existing(
     extension_id: &ironclaw_host_api::ExtensionId,
     existing_owner: &InstallationOwner,
@@ -75,7 +75,7 @@ pub fn decide_install_on_existing(
                 // the shared install.
                 Ok(InstallationOwner::Tenant)
             } else if user_ids.contains(caller) {
-                Err(already_installed())
+                Ok(existing_owner.clone())
             } else {
                 // JOIN: the caller becomes a member alongside the others.
                 let mut user_ids = user_ids.clone();
@@ -226,11 +226,10 @@ mod tests {
         };
         assert!(evicted.is_tenant());
 
-        // Real duplicates are "already installed" — and never leak members.
+        // Tenant-wide duplicates are "already installed" — and never leak members.
         for (existing, caller) in [
             (InstallationOwner::Tenant, user("alice")),
             (InstallationOwner::Tenant, operator.clone()),
-            (members(&["alice"]), user("alice")),
         ] {
             let error = decide_install_on_existing(&extension_id, &existing, &caller, &operator)
                 .expect_err("duplicate install rejected");
@@ -240,6 +239,15 @@ mod tests {
                 "unexpected: {rendered}"
             );
         }
+
+        let same_member = decide_install_on_existing(
+            &extension_id,
+            &members(&["alice"]),
+            &user("alice"),
+            &operator,
+        )
+        .expect("same-member reinstall is idempotent");
+        assert!(same_member.visible_to(&user("alice")));
     }
 
     #[test]

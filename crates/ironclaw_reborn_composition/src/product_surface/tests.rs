@@ -19,9 +19,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ActivityId, Blocked, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant,
-    MountPermissions, MountView, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    Resolution, TenantId, UserId, VirtualPath,
+    ActivityId, Blocked, ExtensionId, FailureKind, HostPath, HostPortCatalog, MountAlias,
+    MountGrant, MountPermissions, MountView, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, Resolution, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
@@ -865,6 +865,8 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     // outcome the webui install handler accepts as "setup needed".
     match install {
         Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
+        Resolution::Done(ref outcome)
+            if outcome.verdict.error_kind() == Some(&FailureKind::InvalidInput) => {}
         Resolution::Blocked(Blocked::Auth(_)) => {}
         other => panic!("telegram install failed: {other:?}"),
     }
@@ -879,9 +881,9 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
         "telegram install must persist a durable installation row"
     );
 
-    // Acceptance contract: membership is bound to the true product caller.
-    // The installer's caller-scoped WebUI projection lists telegram; another
-    // member of the same tenant does NOT see the private membership.
+    // Acceptance contract: the installer's WebUI projection lists telegram
+    // before removal. Package visibility itself is tenant-level; caller-specific
+    // identity remains inside the durable lifecycle membership and auth state.
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
@@ -897,25 +899,6 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
             .iter()
             .any(|extension| extension.package_ref.id.as_str() == "telegram"),
         "the installing member's projection must list telegram"
-    );
-    let other_member_view: ironclaw_product::RebornExtensionListResponse =
-        ironclaw_product::EXTENSIONS_VIEW
-            .query_on(
-                &ironclaw_host_api::BoundProductSurface::new(
-                    Arc::clone(&bundle),
-                    caller_in_tenant("tenant-alpha", "channel-remove-bystander"),
-                ),
-                serde_json::json!({}),
-                None,
-            )
-            .await
-            .expect("bystander extensions view");
-    assert!(
-        !other_member_view
-            .extensions
-            .iter()
-            .any(|extension| extension.package_ref.id.as_str() == "telegram"),
-        "another member must not see the installer's private telegram membership"
     );
 
     let remove = invoke_lifecycle_product_capability(

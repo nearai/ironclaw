@@ -231,12 +231,6 @@ mounts = "system_extensions_lifecycle"
 network = "default"
 
 [[grants]]
-capability = "builtin.extension_activate"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
-mounts = "system_extensions_lifecycle"
-network = "dev_wildcard"
-
-[[grants]]
 capability = "builtin.extension_remove"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "system_extensions_lifecycle"

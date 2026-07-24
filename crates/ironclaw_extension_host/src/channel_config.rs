@@ -30,7 +30,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
-use crate::AdminConfigurationService;
+use crate::{
+    AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationSubmittedValue,
+};
 
 type ChannelAdminConfigurationService =
     AdminConfigurationService<dyn RootFilesystem, dyn SecretStorePort>;
@@ -228,6 +230,93 @@ impl ChannelConfigService {
                 return Err(ChannelConfigError::UnknownField {
                     handle: handle.clone(),
                 });
+            }
+        }
+
+        if let Some(admin) = &self.admin_configuration {
+            let manifest = self.resolved_manifest(extension_id).await?;
+            if !manifest.admin_configuration.is_empty() {
+                let mut changed = false;
+                for descriptor in &manifest.admin_configuration {
+                    let mut submitted = Vec::new();
+                    let mut descriptor_changed = false;
+                    for field in &descriptor.fields {
+                        let submitted_value = values
+                            .iter()
+                            .find(|(handle, _)| field.handle.as_str() == handle)
+                            .map(|(_, value)| value);
+                        if field.secret {
+                            let Some(value) = submitted_value else {
+                                continue;
+                            };
+                            let trimmed = value.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            descriptor_changed = true;
+                            submitted.push(AdminConfigurationSubmittedValue {
+                                handle: field.handle.clone(),
+                                value: SecretMaterial::from(trimmed.to_string()),
+                            });
+                        } else if let Some(value) = submitted_value {
+                            let current = admin
+                                .service
+                                .non_secret_value(&admin.scope, &descriptor.group_id, &field.handle)
+                                .await
+                                .map_err(admin_configuration_error)?;
+                            if current.as_deref() != Some(value.as_str()) {
+                                descriptor_changed = true;
+                            }
+                            submitted.push(AdminConfigurationSubmittedValue {
+                                handle: field.handle.clone(),
+                                value: SecretMaterial::from(value.clone()),
+                            });
+                        } else if let Some(current) = admin
+                            .service
+                            .non_secret_value(&admin.scope, &descriptor.group_id, &field.handle)
+                            .await
+                            .map_err(admin_configuration_error)?
+                        {
+                            submitted.push(AdminConfigurationSubmittedValue {
+                                handle: field.handle.clone(),
+                                value: SecretMaterial::from(current),
+                            });
+                        }
+                    }
+                    if !descriptor_changed {
+                        continue;
+                    }
+                    let state = admin
+                        .service
+                        .get(&admin.scope, &descriptor.group_id)
+                        .await
+                        .map_err(admin_configuration_error)?;
+                    let idempotency_key = channel_config_admin_idempotency_key(
+                        extension_id,
+                        descriptor.group_id.as_str(),
+                    )?;
+                    admin
+                        .service
+                        .replace(
+                            &admin.scope,
+                            &descriptor.group_id,
+                            &idempotency_key,
+                            state.revision,
+                            submitted,
+                        )
+                        .await
+                        .map_err(admin_configuration_error)?;
+                    changed = true;
+                }
+                if changed {
+                    self.reactivation
+                        .reactivate_if_active(extension_id)
+                        .await
+                        .map_err(|error| ChannelConfigError::Reactivation {
+                            reason: error.to_string(),
+                        })?;
+                }
+                return Ok(());
             }
         }
 
@@ -543,8 +632,25 @@ fn storage_error(error: impl std::fmt::Display) -> ChannelConfigError {
 fn admin_configuration_error(error: crate::AdminConfigurationServiceError) -> ChannelConfigError {
     tracing::warn!(error = %error, "admin configuration consumer resolution failed");
     ChannelConfigError::Storage {
-        reason: "administrator configuration is unavailable".to_string(),
+        reason: error.to_string(),
     }
+}
+
+fn channel_config_admin_idempotency_key(
+    extension_id: &ExtensionId,
+    group_id: &str,
+) -> Result<AdminConfigurationIdempotencyKey, ChannelConfigError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    AdminConfigurationIdempotencyKey::new(format!(
+        "channel-config:{}:{group_id}:{nanos}",
+        extension_id.as_str()
+    ))
+    .map_err(|_| ChannelConfigError::Storage {
+        reason: "administrator configuration idempotency key is invalid".to_string(),
+    })
 }
 
 /// The production [`ironclaw_product::ChannelConfigProductService`] port
@@ -688,7 +794,9 @@ kind = "shared_secret_header"
 secret_handle = "acmechat_webhook_secret"
 header = "X-AcmeChat-Secret"
 
-[channel.config]
+[admin_configuration]
+group_id = "acmechat.channel"
+display_name = "AcmeChat channel"
 fields = [
   { handle = "acmechat_api_token", label = "API token", secret = true },
   { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
@@ -819,8 +927,6 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 
     struct Fixture {
         service: ChannelConfigService,
-        secrets: Arc<SecretStore<ironclaw_filesystem::InMemoryBackend>>,
-        scope: ResourceScope,
         reactivation: Arc<RecordingReactivation>,
         extension_id: ExtensionId,
     }
@@ -830,18 +936,45 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         let secrets = Arc::new(SecretStore::ephemeral());
         let scope = test_scope();
         let reactivation = Arc::new(reactivation);
+        let extension_id = ExtensionId::new("acmechat").expect("extension id");
+        let manifest = installation_store
+            .get_manifest(&extension_id)
+            .await
+            .expect("manifest read")
+            .expect("manifest installed");
+        let admin_secrets: Arc<dyn SecretStorePort> =
+            Arc::clone(&secrets) as Arc<dyn SecretStorePort>;
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let admin = Arc::new(
+            AdminConfigurationService::new(
+                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                    filesystem,
+                    |_scope| {
+                        MountView::new(vec![MountGrant::new(
+                            MountAlias::new("/extension-admin-configuration")
+                                .expect("valid mount alias"),
+                            VirtualPath::new("/tenants/test/shared/admin-configuration")
+                                .expect("valid virtual path"),
+                            MountPermissions::read_write_list_delete(),
+                        )])
+                    },
+                ))),
+                admin_secrets,
+                manifest.resolved().admin_configuration.clone(),
+            )
+            .expect("admin configuration service"),
+        );
         let service = ChannelConfigService::new(
             Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
             Arc::clone(&secrets) as Arc<dyn SecretStorePort>,
             scope.clone(),
             Arc::clone(&reactivation) as Arc<dyn ChannelConfigReactivation>,
-        );
+        )
+        .with_admin_configuration(admin, scope.clone());
         Fixture {
             service,
-            secrets,
-            scope,
             reactivation,
-            extension_id: ExtensionId::new("acmechat").expect("extension id"),
+            extension_id,
         }
     }
 
@@ -983,28 +1116,28 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             .await
             .expect("save succeeds");
 
-        // Non-secret legacy values no longer write into the installation store.
         assert_eq!(
             fixture
                 .service
                 .effective_non_secret_config(&fixture.extension_id)
                 .await
                 .expect("read config"),
-            Vec::<(String, String)>::new(),
+            vec![(
+                "acmechat_public_url".to_string(),
+                "https://x.example".to_string()
+            )],
             "secret values must never reach durable non-secret config"
         );
-        // Secret value → the scoped secret store under the manifest handle,
-        // where the channel egress credential fallback resolves it.
+        // Secret value -> the admin-configuration secret resolver; storage
+        // details stay behind the service boundary.
         let handle = SecretHandle::new("acmechat_api_token").expect("handle");
-        assert!(
-            fixture
-                .secrets
-                .metadata(&fixture.scope, &handle)
-                .await
-                .expect("metadata")
-                .is_some(),
-            "the secret must land at the channel-egress scope under the declared handle"
-        );
+        let material = fixture
+            .service
+            .secret_material(&fixture.extension_id, &handle)
+            .await
+            .expect("secret lookup")
+            .expect("secret material resolves");
+        assert_eq!(secrecy::ExposeSecret::expose_secret(&material), "tok-123");
 
         let status = fixture
             .service
@@ -1033,13 +1166,15 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             )
             .await
             .expect("blank secret save is a no-op");
+        let status = fixture
+            .service
+            .status(&fixture.extension_id)
+            .await
+            .expect("status");
         assert!(
-            fixture
-                .secrets
-                .metadata(&fixture.scope, &handle)
-                .await
-                .expect("metadata")
-                .is_some()
+            status
+                .iter()
+                .any(|field| field.handle == "acmechat_api_token" && field.provided)
         );
     }
 
@@ -1112,16 +1247,18 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             }
             other => panic!("expected Reactivation error, got {other:?}"),
         }
-        // The removed legacy installation config store is not written when
-        // reactivation fails.
+        // The save is committed before the reactivation failure is surfaced;
+        // the operator can fix the value and save again.
         assert_eq!(
             fixture
                 .service
                 .effective_non_secret_config(&fixture.extension_id)
                 .await
-                .expect("read config")
-                .len(),
-            0
+                .expect("read config"),
+            vec![(
+                "acmechat_public_url".to_string(),
+                "https://x.example".to_string()
+            )]
         );
     }
 

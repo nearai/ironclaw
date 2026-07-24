@@ -1713,11 +1713,10 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "google-docs");
-    // #6520 three-state lifecycle: a catalog package that is not yet
-    // installed projects the honest "uninstalled" public state (the
-    // "discovered"/"installed" wire literals are retired), never a
-    // transient phase string.
-    assert_eq!(setup_body["phase"], "uninstalled");
+    // Setup lookup now installs the package shell before projecting credential
+    // requirements, so the public phase is installed even before OAuth is
+    // complete.
+    assert_eq!(setup_body["phase"], "installed");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1776,11 +1775,10 @@ async fn webui_v2_github_api_key_setup_projects_manual_token_secret() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "github");
-    // #6520 three-state lifecycle: a catalog package that is not yet
-    // installed projects the honest "uninstalled" public state (the
-    // "discovered"/"installed" wire literals are retired), never a
-    // transient phase string.
-    assert_eq!(setup_body["phase"], "uninstalled");
+    // Setup lookup now installs the package shell before projecting credential
+    // requirements, so the public phase is installed even before the manual
+    // token is provided.
+    assert_eq!(setup_body["phase"], "installed");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1822,21 +1820,6 @@ async fn webui_v2_github_api_key_setup_projects_manual_token_secret() {
 #[tokio::test]
 async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
     let harness = build_harness().await;
-
-    let package_ref = json!({"kind": "extension", "id": "google-drive"});
-    let install = harness
-        .router
-        .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/install",
-            json!({
-                "package_ref": package_ref,
-                "client_action_id": "webui-v2-google-drive-install-before-setup"
-            }),
-        ))
-        .await
-        .expect("install Google Drive oneshot");
-    assert_eq!(install.status(), StatusCode::OK);
 
     let setup = harness
         .router

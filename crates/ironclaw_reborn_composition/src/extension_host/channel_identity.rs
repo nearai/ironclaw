@@ -454,7 +454,9 @@ kind = "shared_secret_header"
 secret_handle = "acmechat_webhook_secret"
 header = "X-AcmeChat-Secret"
 
-[channel.config]
+[admin_configuration]
+group_id = "acmechat.channel"
+display_name = "AcmeChat channel"
 fields = [
   { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
   { handle = "acmechat_team_id", label = "Workspace ID", secret = false },
