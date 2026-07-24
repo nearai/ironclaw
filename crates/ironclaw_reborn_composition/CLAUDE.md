@@ -9,10 +9,12 @@
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
 - Production and migration-dry-run profiles must fail closed on local-only or missing required handles.
-- Product auth composition must only wire `ironclaw_auth` services, recipes,
-  stores, secrets, network clients, and runtime/product adapters. Product-auth
-  contracts, durable services, continuations, refresh, cleanup, recipes, and
-  fakes live in `ironclaw_auth`; HTTP route serving lives in `ironclaw_webui`.
+- Product auth composition must only wire `RebornProductAuthServices` through
+  the composition runtime entrypoint (`assemble_runtime`/`RebornRuntime`) with
+  configured stores, secrets, network clients, and generic runtime/product
+  adapters. Product-auth contracts, durable services, continuations, refresh,
+  cleanup, recipes, and fakes live in `ironclaw_auth`; HTTP route serving lives
+  behind `ironclaw_webui::product_auth_route_mount`.
   Do not wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
 - Product auth refresh and lifecycle cleanup callers should use

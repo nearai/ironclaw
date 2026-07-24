@@ -80,7 +80,7 @@ pub struct RuntimeCredentialAccountSelectionRequest {
 }
 
 #[async_trait]
-pub trait RuntimeCredentialAccountRefreshPort: Send + Sync {
+pub(crate) trait RuntimeCredentialAccountRefreshPort: Send + Sync {
     async fn refresh_credential_account(
         &self,
         request: CredentialRefreshRequest,
@@ -165,7 +165,7 @@ async fn configured_runtime_credential_account(
     }
 }
 
-pub struct ProductAuthRuntimeCredentialAccountSelector {
+pub(crate) struct ProductAuthRuntimeCredentialAccountSelector {
     accounts: Arc<dyn CredentialAccountRecordSource>,
     visibility_policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy>,
 }
@@ -179,7 +179,7 @@ impl ProductAuthRuntimeCredentialAccountSelector {
         }
     }
 
-    pub fn new_with_visibility(
+    pub(crate) fn new_with_visibility(
         accounts: Arc<dyn CredentialAccountRecordSource>,
         visibility_policy: Arc<dyn RuntimeCredentialAccountVisibilityPolicy>,
     ) -> Self {
@@ -208,7 +208,7 @@ pub trait RuntimeCredentialAccountVisibilityPolicy: Send + Sync {
 /// requester extension. Strictly more restrictive than any extension-family
 /// policy an injected [`RuntimeCredentialAccountVisibilityPolicy`] may widen to,
 /// so a build that injects no policy fails closed.
-pub struct DefaultRuntimeCredentialAccountVisibilityPolicy;
+pub(crate) struct DefaultRuntimeCredentialAccountVisibilityPolicy;
 
 impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccountVisibilityPolicy {
     fn account_visible_to_requester(
@@ -220,13 +220,13 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
     }
 }
 
-pub struct ProductAuthRuntimeCredentialAccountRefresher {
+pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
     refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
-    pub fn new(
+    pub(crate) fn new(
         refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
         secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     ) -> Self {

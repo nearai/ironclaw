@@ -130,7 +130,7 @@ deletions.
 | `crates/ironclaw_reborn_composition/src/slack/slack_outbound_targets.rs` | 24 | mutable generic outbound registry + generic channel target provider | re-expressed generically |
 | `crates/ironclaw_auth/tests/auth_product_contract/oauth_helpers_contract.rs` | 22 | split auth-engine/provider contract suites | re-expressed across owner modules |
 | `crates/ironclaw_reborn_composition/src/slack/slack_channel_routes.rs` | 21 | generic admin configuration and subject-route store | re-expressed generically |
-| `crates/ironclaw_auth/src/product_auth/durable/tests.rs` | 20 | split durable auth modules/tests | review by auth contract owner; not ratified wholesale |
+| `crates/ironclaw_reborn_composition/src/product_auth/durable/tests.rs` | 20 | split into `ironclaw_auth` durable modules/tests | review by auth contract owner; not ratified wholesale |
 | `crates/ironclaw_wasm_product_adapters/src/auth_verifier.rs` | 20 | channel adapter/host auth boundary | retired runtime; security behavior must remain in generic conformance |
 | `crates/ironclaw_telegram_extension/src/setup/tests.rs` | 19 | manifest admin configuration + generic pairing | re-expressed by generic lifecycle; no Telegram admin form in user UI |
 | `crates/ironclaw_telegram_extension/src/ingress/tests.rs` | 17 | generic extension ingress + Telegram conformance | re-expressed; webhook auth/limits still require caller-level coverage |

@@ -65,6 +65,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 `ironclaw_host_ingress` (Axum route-mount carriers),
 `ironclaw_auth` (product-auth service facade and route DTOs),
+`ironclaw_common` (shared hashing primitive used to redact auth-token samples),
 `ironclaw_product` (wire DTOs and product command/view descriptors),
 `ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
 newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
