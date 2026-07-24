@@ -1013,10 +1013,42 @@ async def _apply_extension_setup_api_after_start(
             )
             catalog_response.raise_for_status()
             revision = 0
+            declared_handles: set[str] = set()
             for group in catalog_response.json().get("groups", []):
                 if isinstance(group, dict) and group.get("group_id") == f"extension.{package_id}":
                     revision = int(group.get("revision") or 0)
+                    for descriptor in group.get("fields") or []:
+                        handle = descriptor.get("handle") if isinstance(descriptor, dict) else None
+                        if isinstance(handle, str) and handle:
+                            declared_handles.add(handle)
                     break
+            # The capability rejects handles the group does not declare. The
+            # setup payload uses bare source names (team_id, bot_user_id, ...);
+            # map each onto the group's declared handle with the same
+            # exact-or-`_{name}`-suffix rule the secrets matcher uses, send
+            # only mapped ones, and surface leftovers loudly so a real gap
+            # fails later at the group-complete/setup assertions with context.
+            declared: dict[str, object] = {}
+            undeclared: list[str] = []
+            for source_name, value in fields.items():
+                if source_name in declared_handles:
+                    declared[source_name] = value
+                    continue
+                matches = [
+                    handle
+                    for handle in declared_handles
+                    if handle.endswith(f"_{source_name}")
+                ]
+                if len(matches) == 1:
+                    declared[matches[0]] = value
+                else:
+                    undeclared.append(source_name)
+            undeclared = sorted(undeclared)
+            if undeclared:
+                print(
+                    "[reborn-webui-v2-live-qa] WARNING: skipping values undeclared by "
+                    f"extension.{package_id} admin group: {undeclared}"
+                )
             admin_response = await client.put(
                 admin_url,
                 headers=headers,
@@ -1025,7 +1057,7 @@ async def _apply_extension_setup_api_after_start(
                     # entries, not a map (Vec<ExtensionAdminConfigurationValue>).
                     "values": [
                         {"handle": handle, "value": value}
-                        for handle, value in fields.items()
+                        for handle, value in declared.items()
                     ],
                     "expected_revision": revision,
                     "idempotency_key": f"live-qa-{uuid.uuid4()}",
@@ -1034,7 +1066,8 @@ async def _apply_extension_setup_api_after_start(
             if admin_response.status_code != 200:
                 raise LiveQaError(
                     "Operator extension-configuration save failed: "
-                    f"HTTP {admin_response.status_code}: {admin_response.text[:300]}"
+                    f"HTTP {admin_response.status_code}: {admin_response.text[:300]}; "
+                    f"sent_handles={sorted(declared)} undeclared_skipped={undeclared}"
                 )
         response = await client.post(
             setup_url,
