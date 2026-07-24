@@ -35,6 +35,7 @@ clap_complete = "4.5.0"
 # second terminal-masking dependency.
 crossterm = "0.29"
 dotenvy = "0.15"
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_operator = { path = "../ironclaw_operator", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
@@ -43,8 +44,8 @@ ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.
 # DEL-7: the binary is the one generic-side crate allowed to link the concrete
 # first-party extensions; it converts the package inventory into composition's
 # neutral bundle set and supplies the GSuite/web-access capability registrars.
-# Host-api / host-runtime / auth types are reached through composition facade
-# re-exports, not direct deps.
+# Host-runtime / auth types are reached through composition facade re-exports,
+# not direct deps. Host API is direct only for neutral operator DTO contracts.
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", version = "0.1.0" }
 ironclaw_slack_extension = { path = "../ironclaw_slack_extension", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", version = "0.1.0" }

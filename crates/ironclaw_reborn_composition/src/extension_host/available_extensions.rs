@@ -27,11 +27,10 @@ use crate::extension_host::extension_credential_requirements::{
 };
 use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
-use crate::llm_admin::nearai_mcp::{
-    NearAiMcpEndpoint, durable_product_auth_storage_enabled, nearai_mcp_endpoint_from_base,
-    nearai_mcp_endpoint_from_env,
+use ironclaw_operator::llm_admin::nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
+    nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
-use ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig;
 
 pub(crate) use super::available_extension_import::{
     imported_extension_package, inline_extension_dir_assets, materialize_available_extension,

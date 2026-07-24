@@ -45,11 +45,11 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 - **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
   `ironclaw_product` / `ironclaw_reborn_composition`.
-- **A direct `ironclaw_product` dependency**, or any lower substrate /
-  runtime / DB crate. Reach that surface through composition's public facade
-  (e.g. `mark_bearer_token_verified_for_tenant` is re-exported from composition,
-  not imported from adapters). The architecture boundary test forbids the direct
-  edge.
+- **Product service or domain dependencies.** `ironclaw_product` is allowed here
+  only for wire DTOs and product command/view descriptors. Do not import product
+  workflow services, facades, lower substrates, runtime, or DB crates; reach
+  execution through `ProductSurface` supplied by host assembly. The architecture
+  boundary test enforces this DTO/descriptor-only edge.
 - **v1 anything** — no `src/` (monolith) import, no `ironclaw_engine`, no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
   surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
@@ -58,11 +58,10 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 ## Allowed dependencies
 
-`ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
-mount builders + `WebuiAuthenticator` trait + mount vocabulary),
 `ironclaw_product` (wire DTOs and product command/view descriptors),
-`ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, and identity
-newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+`ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
+newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
+carriers), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test

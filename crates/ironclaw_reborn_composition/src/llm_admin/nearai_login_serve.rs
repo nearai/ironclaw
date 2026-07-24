@@ -4,7 +4,7 @@ use ironclaw_operator::llm_admin::llm_config_service::NearAiLoginStateStore;
 use ironclaw_reborn_config::RebornBootConfig;
 
 use crate::RebornBuildError;
-use crate::webui::route_mounts::PublicRouteMount;
+use ironclaw_host_ingress::PublicRouteMount;
 
 pub(crate) fn nearai_login_callback_mount(
     session: Arc<ironclaw_llm::SessionManager>,

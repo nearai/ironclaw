@@ -1568,7 +1568,7 @@ the core of #6168:
 
 | Surface | Split across today | Target |
 | --- | --- | --- |
-| **WebUI** | `ironclaw_webui_v2` (routes, ~7.2K) + `ironclaw_reborn_webui_ingress` (listen/auth/serve, ~6.2K) + `ironclaw_webui_v2_static` (SPA) + `composition/src/webui/` (~4.6K) + `web_access.rs` / `host_ingress.rs` | one `WebUiProductAdapter` over `ProductSurface` (SPA stays an asset bundle) |
+| **WebUI** | `ironclaw_webui` (routes/listen/auth/serve/static) + neutral Axum route-mount carriers in `ironclaw_host_ingress` (`crates/ironclaw_host_ingress/src/lib.rs` defines `PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount`); descriptor vocabulary remains in `ironclaw_host_api`; product-auth and runtime-built route mounts are supplied by host assembly over `ProductSurface` (`RebornRuntime::product_surface`, `crates/ironclaw_reborn_composition/src/runtime.rs`) | one `WebUiProductAdapter` over `ProductSurface` (SPA stays an asset bundle) |
 | **Slack** | `ironclaw_slack_v2_adapter` (protocol, ~3K) + `composition/src/slack/` (**~40.6K** host: serve / delivery / egress / setup / identity) | `ironclaw_slack_extension::SlackChannelAdapter` under the generic extension/channel host (#6116) |
 | **Telegram** | `ironclaw_telegram_v2_adapter` (~2.7K) + ~69 refs in composition | `ironclaw_telegram_extension::TelegramChannelAdapter` under the generic extension/channel host (#6116) |
 | **OpenAI-compat API** | `ironclaw_reborn_openai_compat` (~7.5K) + ~441 refs in composition | one OpenAI-compat terminal over product workflow / `ProductSurface` |

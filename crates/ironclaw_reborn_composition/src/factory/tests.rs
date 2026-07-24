@@ -1931,7 +1931,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     .expect("second NEAR AI MCP bootstrap");
     assert_eq!(
         outcome,
-        crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
+        ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
     );
     let accounts = first
         .product_auth
@@ -2004,7 +2004,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     .expect("bootstrap should reinstall discovered extension");
     assert_eq!(
         outcome,
-        crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
+        ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
     );
     // #6520 lifecycle projection is caller-scoped and takes the production
     // credential gate; the owner is the operator this runtime was built with.

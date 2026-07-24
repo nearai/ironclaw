@@ -138,14 +138,14 @@ async fn build_webui_runtime_context(
             max_total: Duration::from_secs(10),
         });
     let runtime = build_reborn_runtime(runtime_input).await?;
-    let bundle = build_webui_services(&runtime, None)?;
+    let product_surface = runtime.product_surface(None)?;
     let config = WebuiServeConfig::new(
         tenant_id,
         Arc::new(LatencyWebuiAuthenticator),
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(agent_id);
-    let router = webui_v2_app(bundle, config)?;
+    let router = webui_v2_app(product_surface, config)?;
     Ok(WebuiRuntimeContext {
         router,
         _runtime: runtime,

@@ -76,8 +76,7 @@ impl NearAiLoginStateStore {
         state
     }
 
-    #[allow(dead_code)]
-    pub async fn consume(&self, state: &str) -> bool {
+    pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
         let now = Instant::now();
         prune_expired(&mut states, now);

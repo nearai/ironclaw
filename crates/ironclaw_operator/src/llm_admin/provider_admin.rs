@@ -539,6 +539,8 @@ fn active_selection_from_env(
     let resolved = match ironclaw_llm::resolve_provider_config_from_env(providers_path) {
         Ok(resolved) => resolved?,
         Err(error) => {
+            // silent-ok: provider list/status display degrades env-resolution
+            // failure to "no active provider" instead of blocking settings UI.
             tracing::debug!(%error, "active provider env resolution failed; reporting none");
             return None;
         }

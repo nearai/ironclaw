@@ -29,16 +29,15 @@ futures = "0.3"
 hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 # Folded up from the former `ironclaw_webui_v2` crate: the v2 handlers consume
 # only the `ProductSurface` facade + ingress/error vocabulary.
-ironclaw_product = { path = "../ironclaw_product" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition"}
-# The moved `webui_v2_app` auth middleware stamps an `OpenAiCompatActorScope`
-# onto verified callers for the protected OpenAI-compatible route mounts, which
-# are always compiled in. The tenant-scoped bearer evidence it pairs with the
-# scope comes from `ironclaw_product` via composition's
-# facade (`ironclaw_reborn_composition::mark_bearer_token_verified_for_tenant`) —
-# ingress must not depend on product_adapters directly (architecture boundary).
+ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
+# The `webui_v2_app` auth middleware stamps an `OpenAiCompatActorScope`
+# onto verified callers for protected OpenAI-compatible route mounts. The
+# tenant-scoped bearer evidence it pairs with the scope comes from
+# `ironclaw_product`; ingress must not depend on product_adapters directly
+# (architecture boundary).
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 # Sliding-window per-route rate limiter (moved from composition's webui_rate_limit).
 lru = "0.18"
@@ -74,11 +73,6 @@ http-body-util = "0.1"
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
 # Handler contract test (moved from ironclaw_webui_v2) constructs
 # `ProductOutboundEnvelope` fixtures through the product facade re-export.
-# The serve/auth integration tests (`tests/serve_loop.rs`, `tests/auth_route_contract.rs`,
-# `tests/session_round_trip.rs`, …) build a local-dev runtime through composition's
-# public builders, so they need composition's `test-support` + `libsql` seams plus
-# the model-gateway / capability-port traits.
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 tempfile = "3"
 ironclaw_threads = { path = "../ironclaw_threads" }

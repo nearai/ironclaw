@@ -5,7 +5,7 @@
 //! stub `ProductSurface`, this test stands up a real local-dev
 //! `RebornRuntime`, overrides its LLM gateway with a scripted
 //! tool-calling fake, composes the v2 router through
-//! [`build_webui_services`] + [`webui_v2_app`], and exercises it from
+//! [`runtime.product_surface`] + [`webui_v2_app`], and exercises it from
 //! the browser side over HTTP (`tower::ServiceExt::oneshot`).
 //!
 //! The point is to prove the full chain — bearer auth → caller scope →
@@ -43,7 +43,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    build_reborn_runtime, build_webui_services,
+    build_reborn_runtime,
 };
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -733,7 +733,7 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         })
         .await
         .expect("enable global auto-approve for e2e dispatch");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(ValidTokenForUser::new(authenticated_user_id)),
@@ -745,7 +745,7 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
     Harness {
         runtime,
@@ -796,14 +796,14 @@ async fn build_two_user_harness(
         })
         .await
         .expect("enable global auto-approve for user A");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(TwoUserTokens),
         vec![HeaderValue::from_static("http://localhost:0")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
     Harness {
         runtime,
@@ -1946,7 +1946,7 @@ async fn untrusted_request_body_cannot_inject_system_scope() {
 // ─── operator LLM-config smoke (issue #4673) ──────────────────────────
 //
 // Stands up the same real local-dev runtime as the chat e2e, but with a boot
-// config (so the WebUI facade composes the operator LLM-config service) and an
+// config (so the product surface composes the operator LLM-config service) and an
 // operator-scoped authenticator (so the `/api/webchat/v2/llm/providers` routes
 // mount). Saving the built-in NEAR AI provider stores its API key under the
 // system scope; the regression was that the system-scoped secret serialized but
@@ -2007,14 +2007,14 @@ mod operator_llm_config {
         .with_boot_config(boot);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let bundle = runtime.product_surface(None).expect("product surface");
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OperatorToken),
             vec![HeaderValue::from_static("http://localhost:0")],
         )
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-        let router = webui_v2_app(bundle, config).expect("webui v2 app");
+        let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
         Harness {
             runtime,

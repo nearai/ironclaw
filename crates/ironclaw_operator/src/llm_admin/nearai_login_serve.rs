@@ -32,12 +32,12 @@ use crate::route_mounts::OperatorPublicRouteMount;
 
 const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,
-    // SAFETY: 60 is a non-zero literal rate-limit window.
+    // Invariant: 60 is a non-zero literal rate-limit window.
     None => unreachable!(),
 };
 const NEARAI_CALLBACK_RATE_MAX: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,
-    // SAFETY: 60 is a non-zero literal rate limit.
+    // Invariant: 60 is a non-zero literal rate limit.
     None => unreachable!(),
 };
 const NEARAI_LOGIN_SUCCESS_REDIRECT: &str = "/chat";

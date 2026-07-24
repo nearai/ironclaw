@@ -8,11 +8,8 @@ use ironclaw_host_api::{
     ExtensionId, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ResourceScope,
 };
-use ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig;
-pub(crate) use ironclaw_operator::llm_admin::nearai_mcp::{
-    NearAiMcpBootstrapOutcome, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
-    nearai_mcp_bootstrap_config_from_llm_config, nearai_mcp_endpoint_from_base,
-    nearai_mcp_endpoint_from_env,
+use ironclaw_operator::llm_admin::nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapOutcome, durable_product_auth_storage_enabled,
 };
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,

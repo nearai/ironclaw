@@ -16,8 +16,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    ChannelConnectionRequirement, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    ProductWorkflowError,
 };
 use serde::Deserialize;
 
@@ -293,11 +293,8 @@ fn channel_connection_display_preview(
 }
 
 /// Structured channel connection requirements carry render chrome for WebUI.
-/// Strip UI-authored copy from model-visible lifecycle output so static
-/// fallback copy is never mistaken for live connection state. Generated-code
-/// channels keep the typed strategy signal because the model needs to choose
-/// the pairing path, but manifest-authored presentation strings stay out of the
-/// tool result.
+/// Strip it from model-visible lifecycle output so manifest-authored
+/// presentation strings and fallback copy stay on the WebUI display path.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -308,35 +305,12 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                let Some(connection) = extension.summary.channel_connection.as_mut() else {
-                    continue;
-                };
-                if connection.strategy
-                    == ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
-                {
-                    *connection = model_visible_generated_code_connection(connection);
-                } else {
-                    extension.summary.channel_connection = None;
-                }
+                extension.summary.channel_connection = None;
             }
         }
         _ => {}
     }
     response
-}
-
-fn model_visible_generated_code_connection(
-    connection: &ChannelConnectionRequirement,
-) -> ChannelConnectionRequirement {
-    ChannelConnectionRequirement {
-        channel: connection.channel.clone(),
-        display_name: display_channel_name(&connection.channel),
-        strategy: connection.strategy,
-        instructions: String::new(),
-        input_placeholder: String::new(),
-        submit_label: String::new(),
-        error_message: String::new(),
-    }
 }
 
 fn display_channel_name(channel: &str) -> String {
@@ -707,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_visible_extension_search_omits_channel_connection_failure_copy() {
+    async fn model_visible_extension_search_omits_channel_connection_chrome() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
             "extension-search-model-output-owner",
@@ -745,6 +719,30 @@ mod tests {
                 .expect("search response serializes")
                 .contains("Slack OAuth connection failed"),
             "static OAuth failure copy must not be presented as live model-visible state"
+        );
+
+        let search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "telegram"}),
+        )
+        .await
+        .expect("Telegram search succeeds");
+        let telegram = search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array")
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "telegram")
+            .expect("Telegram search result");
+        assert!(
+            telegram["surface_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
+            "model-visible search must still identify Telegram as a channel: {telegram}"
+        );
+        assert!(
+            telegram.get("channel_connection").is_none(),
+            "generated-code connection chrome must stay out of model-visible lifecycle output: {telegram}"
         );
     }
 

@@ -84,6 +84,20 @@ async fn projection_outbound_store_mount_is_tenant_user_scoped() {
         &thread_id,
         InvocationId::new(),
     );
+    let same_tenant_other_user = resource_scope(
+        &scope_a.tenant_id,
+        &UserId::new("projection-outbound-user-c").unwrap(),
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let other_tenant_same_user = resource_scope(
+        &TenantId::new("projection-outbound-tenant-c").unwrap(),
+        &scope_a.user_id,
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
     let path = ScopedPath::new("/outbound/subscriptions/shared-key.json").unwrap();
 
     scoped
@@ -96,6 +110,20 @@ async fn projection_outbound_store_mount_is_tenant_user_scoped() {
     assert!(
         scoped.read_bytes(&scope_b, &path).await.is_err(),
         "same outbound alias path must not cross tenant/user mount roots"
+    );
+    assert!(
+        scoped
+            .read_bytes(&same_tenant_other_user, &path)
+            .await
+            .is_err(),
+        "same outbound alias path must not cross user mount roots"
+    );
+    assert!(
+        scoped
+            .read_bytes(&other_tenant_same_user, &path)
+            .await
+            .is_err(),
+        "same outbound alias path must not cross tenant mount roots"
     );
 }
 

@@ -401,6 +401,7 @@ async fn contract_github_notifications_onboards_the_github_extension() {
     // A github task with no credential seeded routes through extension
     // onboarding rather than failing outright.
     let trace = load_qa_trace(GITHUB_NOTIFICATIONS.fixture);
+    assert_tool_called_with(&trace, "builtin.skill_activate", &["github"]);
     assert_tool_called_with(&trace, "builtin.extension_install", &["github"]);
     assert_tool_not_called(&trace, "builtin.extension_activate");
 }
@@ -408,6 +409,9 @@ async fn contract_github_notifications_onboards_the_github_extension() {
 #[tokio::test]
 async fn contract_investigate_ci_job_reads_the_pinned_job_logs() {
     let trace = load_qa_trace(INVESTIGATE_CI_JOB.fixture);
+    // The recorded model selected the listed GitHub skill by its exact name
+    // before using its extension workflow.
+    assert_tool_called_with(&trace, "builtin.skill_activate", &["github"]);
     // Investigation routes through the first-party GitHub extension...
     assert_tool_called_with(&trace, "builtin.extension_install", &["github"]);
     assert_tool_not_called(&trace, "builtin.extension_activate");
