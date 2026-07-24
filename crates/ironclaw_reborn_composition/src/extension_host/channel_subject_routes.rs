@@ -240,7 +240,7 @@ mod tests {
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, ResourceScope};
     use ironclaw_product::ProductConversationRouteKey;
-    use ironclaw_secrets::{SecretStore, SecretStore};
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;

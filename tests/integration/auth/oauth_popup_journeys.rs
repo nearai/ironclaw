@@ -54,7 +54,7 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     };
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
-        ExtensionManifestRecord, ExtensionManifestRef, ExtensionInstallationStore,
+        ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
     use ironclaw_filesystem::InMemoryBackend;

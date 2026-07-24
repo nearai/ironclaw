@@ -18,10 +18,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    OutboundError, OutboundPolicyService, OutboundStateStore, PrepareCommunicationDeliveryRequest,
-    ProjectionUpdateRef, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    RunFinalReplyDestination, RunFinalReplyHandoffRecord, RunFinalReplyTargetRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
+    OutboundError, OutboundPolicyService, OutboundStateStorePort,
+    PrepareCommunicationDeliveryRequest, ProjectionUpdateRef, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, RunFinalReplyDestination, RunFinalReplyHandoffRecord,
+    RunFinalReplyTargetRequest, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, SourceRouteContext,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
 use ironclaw_turns::{

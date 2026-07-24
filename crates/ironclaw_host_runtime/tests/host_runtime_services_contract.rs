@@ -14,7 +14,7 @@ use std::{
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
@@ -40,8 +40,8 @@ use ironclaw_host_runtime::{
     RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_processes::{
-    BackgroundProcessManager, ProcessResultStore, ProcessStore, ProcessError,
-    ProcessHost, ProcessManager, ProcessResultStore, ProcessStatus, ProcessStore,
+    BackgroundProcessManager, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
+    ProcessResultStorePort, ProcessStatus, ProcessStore, ProcessStorePort,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
@@ -51,15 +51,13 @@ use ironclaw_resources::{
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
 use ironclaw_run_state::{
-    ApprovalRequestStore, RunRecord, RunStart, RunStateError, RunStateStore, RunStatus,
+    ApprovalRequestStorePort, RunRecord, RunStart, RunStateError, RunStateStorePort, RunStatus,
 };
 use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
-use ironclaw_secrets::{
-    SecretStore, InMemoryCredentialBroker, SecretMaterial, SecretStore,
-};
+use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
-use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
+use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
     InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator, TurnStateStore,
 };
@@ -203,7 +201,7 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             ProductionWiringIssueKind::Missing
         ),
         "missing secret store should be reported: {report:?}"
@@ -224,14 +222,14 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::ProcessStore,
+            ProductionWiringComponent::ProcessStorePort,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "in-memory process store should be reported as local-only: {report:?}"
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::ProcessResultStore,
+            ProductionWiringComponent::ProcessResultStorePort,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "in-memory process result store should be reported as local-only: {report:?}"
@@ -1123,7 +1121,7 @@ async fn host_http_egress_helper_requires_graph_secret_store() {
     };
 
     assert!(report.contains(
-        ProductionWiringComponent::SecretStore,
+        ProductionWiringComponent::SecretStorePort,
         ProductionWiringIssueKind::Missing
     ));
 }
@@ -2324,9 +2322,7 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
 async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
-    let inner_process_store = Arc::new(ProcessStore::new(Arc::clone(
-        &processes_filesystem,
-    )));
+    let inner_process_store = Arc::new(ProcessStore::new(Arc::clone(&processes_filesystem)));
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(SecretStore::ephemeral()),
@@ -3178,9 +3174,7 @@ struct FailOnceAuthDeclineRunStateStore {
 
 impl FailOnceAuthDeclineRunStateStore {
     fn new(
-        inner: Arc<
-            ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
-        >,
+        inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
     ) -> Self {
         Self {
             inner,
@@ -3190,7 +3184,7 @@ impl FailOnceAuthDeclineRunStateStore {
 }
 
 #[async_trait::async_trait]
-impl RunStateStore for FailOnceAuthDeclineRunStateStore {
+impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.inner.start(start).await
     }

@@ -15,7 +15,7 @@ use ironclaw_extension_host::activation_transaction::{
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStorePort,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
     InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
@@ -3266,9 +3266,8 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_extensions::{
-        ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
-        ExtensionManifest, ExtensionRegistry, ExtensionInstallationStore,
-        SharedExtensionRegistry,
+        ExtensionInstallationStore, ExtensionLifecycleEvent, ExtensionLifecycleEventSink,
+        ExtensionLifecycleService, ExtensionManifest, ExtensionRegistry, SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
         DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend,
@@ -9255,7 +9254,7 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[async_trait]
-    impl ExtensionInstallationStore for DeleteInstallationFailingStore {
+    impl ExtensionInstallationStorePort for DeleteInstallationFailingStore {
         async fn list_manifests(
             &self,
         ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -9371,7 +9370,7 @@ output_schema_ref = "schemas/search.output.json"
         active_registry: &SharedExtensionRegistry,
         installation_store: &S,
     ) where
-        S: ExtensionInstallationStore + ?Sized,
+        S: ExtensionInstallationStorePort + ?Sized,
     {
         let extension_id = ExtensionId::new("fixture").expect("valid extension id");
         let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");

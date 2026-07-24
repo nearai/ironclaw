@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
     ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifest,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    ExtensionInstallationStore, ManifestSource,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionInstallationStorePort,
+    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
+    ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
@@ -259,7 +259,7 @@ async fn filesystem_installation_store() -> ExtensionInstallationStore {
 }
 
 #[async_trait]
-impl ExtensionInstallationStore for OwnerReadFailingStore {
+impl ExtensionInstallationStorePort for OwnerReadFailingStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {

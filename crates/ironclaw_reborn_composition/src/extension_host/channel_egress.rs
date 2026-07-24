@@ -380,7 +380,7 @@ mod tests {
     };
     use ironclaw_processes::in_memory_backed_process_services;
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::SecretStore;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
     use secrecy::SecretString;
 
     use super::*;

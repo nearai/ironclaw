@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
 use ironclaw_product::AdapterInstallationId;
 
@@ -180,12 +180,10 @@ impl ChannelIdentityBindingConfig {
         rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         values: Vec<(String, String)>,
     ) -> Result<Self, String> {
-        use ironclaw_extension_host::{
-            AdminConfigurationService, AdminConfigurationStore,
-        };
+        use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
         use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
         use ironclaw_host_api::{InvocationId, ResourceScope};
-        use ironclaw_secrets::{SecretStore, SecretStore};
+        use ironclaw_secrets::{SecretStore, SecretStorePort};
 
         let manifests = installation_store
             .list_manifests()
@@ -669,12 +667,12 @@ mod tests {
 
     use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
     use ironclaw_extensions::{
-        ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, ExtensionInstallationStore, ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, ResourceScope};
-    use ironclaw_secrets::{SecretStore, SecretStore};
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;

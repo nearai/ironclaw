@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{ResourceScope, RunId};
 use ironclaw_outbound::{
-    OutboundError, OutboundStateStore, RouteCurrentRunFinalReply, RouteCurrentRunFinalReplyError,
-    RouteCurrentRunFinalReplyRequest, RunFinalReplyDestination, RunFinalReplyTargetRecord,
-    RunFinalReplyTargetRequest, WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+    OutboundError, OutboundStateStorePort, RouteCurrentRunFinalReply,
+    RouteCurrentRunFinalReplyError, RouteCurrentRunFinalReplyRequest, RunFinalReplyDestination,
+    RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
 };
 use ironclaw_triggers::{
     TriggerDeliveryTargetId, TriggerError, TriggerRecordValidationKind,

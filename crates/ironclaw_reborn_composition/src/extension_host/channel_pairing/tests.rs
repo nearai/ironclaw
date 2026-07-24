@@ -18,7 +18,7 @@ use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelPairingCode, ChannelPairingConsumeOutcome,
     ChannelPairingError, ChannelPairingInstallationSource, ChannelPairingInterception,
     ChannelPairingInterceptor, ChannelPairingService, ChannelPairingServiceDependencies,
-    ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, ChannelPairingStore,
+    ChannelPairingStore, ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor,
 };
 use ironclaw_product::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,

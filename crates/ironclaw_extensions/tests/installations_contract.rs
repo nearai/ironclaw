@@ -5,9 +5,9 @@ use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    ExtensionInstallationStore, HostApiContractRegistry, InstallationOwner,
-    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
+    ExtensionManifestRef, HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION,
+    ManifestHash, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::{Filter, InMemoryBackend, Page, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath};

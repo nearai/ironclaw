@@ -150,7 +150,7 @@ pub enum LlmKeyStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::SecretStore;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     fn store() -> LlmKeyStore {
         LlmKeyStore::new(Arc::new(SecretStore::ephemeral()))

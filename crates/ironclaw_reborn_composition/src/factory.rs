@@ -76,8 +76,7 @@ use crate::{
     RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
-    AutoApproveSettingStore, PersistentApprovalPolicyStore,
-    ToolPermissionOverrideStore,
+    AutoApproveSettingStore, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
 };
 use ironclaw_auth::{AuthProductScope, AuthSurface};
 use ironclaw_authorization::CapabilityLeaseStore;
@@ -89,8 +88,8 @@ use ironclaw_conversations::{
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
 use ironclaw_extensions::{
-    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
-    ExtensionInstallationStore, SharedExtensionRegistry,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionLifecycleService,
+    ExtensionRegistry, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
@@ -119,25 +118,25 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_host::CheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
-use ironclaw_outbound::OutboundStateStore;
-use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
+use ironclaw_outbound::{
+    DeliveredGateRouteStore, OutboundStateStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
+};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::{
     ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
-    CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry, ChannelPairingStore,
+    ChannelPairingStore, CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry,
     LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
     ProductAuthTurnGateResumeDispatcher, ProjectService, RunFinalReplyRoutingService,
 };
 use ironclaw_projects::ProjectRepository;
-use ironclaw_resources::BudgetGateStore;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_resources::{
-    BroadcastBudgetEventSink, BudgetGateStore, FilesystemResourceGovernor, ResourceGovernor,
+    BroadcastBudgetEventSink, BudgetGateStore, BudgetGateStorePort, FilesystemResourceGovernor,
+    ResourceGovernor,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_secrets::CredentialBroker;
-use ironclaw_secrets::SecretStore;
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_threads::FilesystemSessionThreadService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::{
@@ -146,10 +145,10 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::InMemoryRunProfileResolver;
+use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
-    CheckpointStateStore, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
+    CheckpointStateStorePort, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
 };
 
 /// Output of [`build_local_runtime_root_filesystem`]: the composed local-dev
@@ -233,11 +232,9 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 
 type ComposedResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
 
-pub(crate) type ComposedApprovalRequestStore =
-    ApprovalRequestStore<CompositeRootFilesystem>;
+pub(crate) type ComposedApprovalRequestStore = ApprovalRequestStore<CompositeRootFilesystem>;
 
-pub(crate) type ComposedCapabilityLeaseStore =
-    CapabilityLeaseStore<CompositeRootFilesystem>;
+pub(crate) type ComposedCapabilityLeaseStore = CapabilityLeaseStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedPersistentApprovalPolicyStore =
     PersistentApprovalPolicyStore<CompositeRootFilesystem>;
@@ -245,8 +242,7 @@ pub(crate) type ComposedPersistentApprovalPolicyStore =
 pub(crate) type ComposedToolPermissionOverrideStore =
     ToolPermissionOverrideStore<CompositeRootFilesystem>;
 
-pub(crate) type ComposedAutoApproveSettingStore =
-    AutoApproveSettingStore<CompositeRootFilesystem>;
+pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<CompositeRootFilesystem>;
 
 fn apply_post_edit_check_from_env<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
@@ -254,8 +250,8 @@ fn apply_post_edit_check_from_env<F, G, S, R>(
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
-    S: ironclaw_processes::ProcessStore + 'static,
-    R: ironclaw_processes::ProcessResultStore + 'static,
+    S: ironclaw_processes::ProcessStorePort + 'static,
+    R: ironclaw_processes::ProcessResultStorePort + 'static,
 {
     match PostEditCheckConfig::from_env() {
         Ok(Some(post_edit_check)) => Ok(services.with_post_edit_check(post_edit_check)),
@@ -304,8 +300,8 @@ fn require_product_auth_runtime_ports<F, G, S, R>(
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
-    S: ironclaw_processes::ProcessStore + 'static,
-    R: ironclaw_processes::ProcessResultStore + 'static,
+    S: ironclaw_processes::ProcessStorePort + 'static,
+    R: ironclaw_processes::ProcessResultStorePort + 'static,
 {
     services
         .product_auth_provider_runtime_ports()
@@ -320,8 +316,8 @@ fn attach_hosted_mcp_runtime<F, G, S, R>(
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
-    S: ironclaw_processes::ProcessStore + 'static,
-    R: ironclaw_processes::ProcessResultStore + 'static,
+    S: ironclaw_processes::ProcessStorePort + 'static,
+    R: ironclaw_processes::ProcessResultStorePort + 'static,
 {
     // Soft-disable when host runtime HTTP egress is absent. Builds without
     // egress — in-memory test services, minimal compositions — must still
@@ -348,8 +344,8 @@ fn attach_wasm_runtime<F, G, S, R>(
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
-    S: ironclaw_processes::ProcessStore + 'static,
-    R: ironclaw_processes::ProcessResultStore + 'static,
+    S: ironclaw_processes::ProcessStorePort + 'static,
+    R: ironclaw_processes::ProcessResultStorePort + 'static,
 {
     services
         .try_with_default_wasm_runtime()
@@ -365,8 +361,8 @@ pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
-    S: ironclaw_processes::ProcessStore + 'static,
-    R: ironclaw_processes::ProcessResultStore + 'static,
+    S: ironclaw_processes::ProcessStorePort + 'static,
+    R: ironclaw_processes::ProcessResultStorePort + 'static,
 {
     match binding {
         RebornRuntimeProcessBinding::None => services,
@@ -686,15 +682,13 @@ pub(crate) fn filesystem_reborn_identity_store<F>(
 where
     F: RootFilesystem + 'static,
 {
-    Arc::new(
-        ironclaw_reborn_identity::RebornIdentityStore::new(
-            scoped_filesystem,
-            tenant_id,
-            actor_user_id,
-            agent_id,
-            project_id,
-        ),
-    )
+    Arc::new(ironclaw_reborn_identity::RebornIdentityStore::new(
+        scoped_filesystem,
+        tenant_id,
+        actor_user_id,
+        agent_id,
+        project_id,
+    ))
 }
 
 pub(crate) async fn build_runtime_substrate(
@@ -1625,13 +1619,7 @@ pub(crate) async fn build_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
-) -> Result<
-    (
-        Arc<SecretStore<F>>,
-        Arc<ironclaw_secrets::SecretsCrypto>,
-    ),
-    RebornBuildError,
->
+) -> Result<(Arc<SecretStore<F>>, Arc<ironclaw_secrets::SecretsCrypto>), RebornBuildError>
 where
     F: RootFilesystem + 'static,
 {
@@ -1644,10 +1632,7 @@ where
     // share the SAME master key — secrets written admin-side decrypt under the
     // user's own store and vice versa.
     let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
-    let store = Arc::new(SecretStore::new(
-        scoped_filesystem,
-        Arc::clone(&crypto),
-    ));
+    let store = Arc::new(SecretStore::new(scoped_filesystem, Arc::clone(&crypto)));
     Ok((store, crypto))
 }
 
@@ -3352,12 +3337,10 @@ where
     .await?;
     let resource_governor = warm_resource_governor_for_composition(resource_governor).await?;
     let governor = Arc::new(resource_governor);
-    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(
+    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_filesystem)));
+    let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(Arc::clone(
         &scoped_filesystem,
     )));
-    let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(
-        Arc::clone(&scoped_filesystem),
-    ));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
 
     let services = with_shared_host_runtime_wiring!(
@@ -3523,9 +3506,7 @@ impl ProductionStoreBundle {
     ) -> Result<Self, RebornBuildError> {
         validate_reborn_runtime_storage(&filesystem).await?;
         let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-        let leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(
-            &scoped_filesystem,
-        )));
+        let leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_filesystem)));
         let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(
             Arc::clone(&scoped_filesystem),
         ));
@@ -3554,9 +3535,7 @@ impl ProductionStoreBundle {
     ) -> Result<Self, RebornBuildError> {
         validate_reborn_runtime_storage(&filesystem).await?;
         let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-        let leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(
-            &scoped_filesystem,
-        )));
+        let leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_filesystem)));
         let persistent_approval_policies = Arc::new(PersistentApprovalPolicyStore::new(
             Arc::clone(&scoped_filesystem),
         ));
@@ -3768,13 +3747,14 @@ async fn build_backend_production(
         &stores.scoped_filesystem,
     )));
     let persistent_approval_policies_for_settings: Arc<
-        dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     > = Arc::clone(&stores.persistent_approval_policies)
-        as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>;
+        as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>;
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
         Arc::clone(&tool_permission_overrides)
-            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
-        Arc::clone(&auto_approve_settings) as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
+            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        Arc::clone(&auto_approve_settings)
+            as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         persistent_approval_policies_for_settings,
     ));
     let runtime_policy = production_wiring.runtime_policy.clone();
@@ -3837,9 +3817,8 @@ async fn build_backend_production(
             .with_event_sink(Arc::clone(&budget_event_sink)),
     );
     let production_resource_governor: Arc<dyn ResourceGovernor> = resource_governor.clone();
-    let budget_gate_store: Arc<dyn BudgetGateStorePort> = Arc::new(BudgetGateStore::new(
-        Arc::clone(&stores.scoped_filesystem),
-    ));
+    let budget_gate_store: Arc<dyn BudgetGateStorePort> =
+        Arc::new(BudgetGateStore::new(Arc::clone(&stores.scoped_filesystem)));
     let event_stores = ironclaw_reborn_event_store::build_reborn_event_stores(
         profile.to_event_store_profile(),
         stores.event_store,
@@ -4224,11 +4203,9 @@ async fn build_backend_production(
                 reason: format!("extension host API contracts could not be loaded: {error}"),
             }
         })?;
-    let extension_installation_state_path =
-        ExtensionInstallationStore::default_state_path().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("extension installation state path is invalid: {error}"),
-            }
+    let extension_installation_state_path = ExtensionInstallationStore::default_state_path()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state path is invalid: {error}"),
         })?;
     let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
         ExtensionInstallationStore::load_at(
@@ -4380,16 +4357,17 @@ async fn build_backend_production(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
     })?;
-    let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        Arc::clone(&auto_approve_settings) as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>;
+    let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
+        Arc::clone(&auto_approve_settings)
+            as Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>;
     let operator_tool_permission_overrides: Arc<
-        dyn ironclaw_approvals::ToolPermissionOverrideStore,
+        dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
     > = Arc::clone(&tool_permission_overrides)
-        as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>;
+        as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>;
     let operator_persistent_approval_policies: Arc<
-        dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     > = Arc::clone(&stores.persistent_approval_policies)
-        as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>;
+        as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>;
     let operator_synthetic_tools = {
         let provider = outbound_delivery_synthetic_provider().map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -4686,7 +4664,7 @@ async fn build_backend_production(
                 );
                 let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
                     Arc::clone(&outbound_stores.outbound_state)
-                        as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+                        as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
                     Arc::clone(&resolver),
                     Arc::new(
                         crate::extension_host::channel_delivery::IngressReplyContextSource::new(

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use ironclaw_extensions::{AdminConfigurationGroupId, ResolvedExtensionManifest};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::{AdminConfigurationIdempotencyKey, AdminConfigurationSubmittedValue};
@@ -52,7 +52,7 @@ enum IndexedField {
 pub struct ExtensionAdminConfigurationResolver<F, S>
 where
     F: RootFilesystem + ?Sized,
-    S: SecretStore + ?Sized,
+    S: SecretStorePort + ?Sized,
 {
     service: Arc<AdminConfigurationService<F, S>>,
     scope: ResourceScope,
@@ -63,7 +63,7 @@ where
 impl<F, S> ExtensionAdminConfigurationResolver<F, S>
 where
     F: RootFilesystem + ?Sized,
-    S: SecretStore + ?Sized,
+    S: SecretStorePort + ?Sized,
 {
     pub fn new(
         service: Arc<AdminConfigurationService<F, S>>,

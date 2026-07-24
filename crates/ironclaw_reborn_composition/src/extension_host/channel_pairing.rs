@@ -18,7 +18,7 @@ use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthFlowId};
 use ironclaw_conversations::{
     AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
 };
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 #[cfg(test)]
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(test)]

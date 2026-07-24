@@ -36,7 +36,7 @@ use ironclaw_extension_host::{
     RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 use ironclaw_extensions::{
-    ExtensionHealthStatus, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,
+    ExtensionHealthStatus, ExtensionInstallationStorePort, ExtensionManifest, ExtensionPackage,
     ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
@@ -515,9 +515,9 @@ mod tests {
     use ironclaw_extension_host::test_support::{FakeEntrypoint, FakeToolAdapter};
     use ironclaw_extensions::{
         ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus,
-        ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, ExtensionRegistry, ExtensionInstallationStore,
-        MANIFEST_SCHEMA_VERSION, ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, MANIFEST_SCHEMA_VERSION,
+        ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::ids::ExtensionId;

@@ -24,7 +24,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountStatus, SecretCleanupAction,
     SecretCleanupReport, SecretCleanupRequest,
 };
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
     ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ResourceScope, TenantId,
 };

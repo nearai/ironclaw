@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock, Weak};
 use async_trait::async_trait;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{OutboundDeliveryTargetProvider, OutboundError, RunFinalReplyDestination};
 use ironclaw_product::{
@@ -41,8 +41,8 @@ use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
 use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::extension_host::channel_dm_targets::{
-    ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
-    ChannelDmTargetStore,
+    ChannelDmTargetRecord, ChannelDmTargetStore, DM_TARGET_CONVERSATION_ID_KEY,
+    DM_TARGET_SPACE_ID_KEY,
 };
 use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{

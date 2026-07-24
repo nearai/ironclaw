@@ -20,7 +20,7 @@ use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ChannelPairingDirectTargetStore,
     ChannelPairingIdentityBindOutcome, ChannelPairingIdentityStore,
     ChannelPairingInstallationSource, ChannelPairingService, ChannelPairingServiceDependencies,
-    ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, ChannelPairingStore,
+    ChannelPairingStore, ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductAuthContinuationDispatcher,
     RebornChannelConnectStrategy,
 };

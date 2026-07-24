@@ -15,10 +15,10 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore,
-    OutboundStateStore, RunDeliveryCleanupRequest, RunFinalReplyDestination,
-    RunFinalReplyTargetRecord, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
+    RunDeliveryCleanupRequest, RunFinalReplyDestination, RunFinalReplyTargetRecord,
+    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptChallengeKind, AuthPromptView, AuthRequirement,
@@ -1252,9 +1252,7 @@ fn build_triggered_harness_with_prompt(
     }
 }
 
-async fn seed_preference(
-    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
-) {
+async fn seed_preference(store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>) {
     store
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant(), user()),

@@ -54,6 +54,7 @@ pub use ids::{
     OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
     TriggerOriginRef,
 };
+pub use outbound_state_store::OutboundStateStore;
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
 };
@@ -63,7 +64,6 @@ pub use run_final_reply_target::{
     RunFinalReplyDestination, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
     WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
 };
-pub use outbound_state_store::OutboundStateStore;
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };

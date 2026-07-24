@@ -720,7 +720,7 @@ impl FailingOutboundStore {
 }
 
 #[async_trait]
-impl OutboundStateStore for FailingOutboundStore {
+impl OutboundStateStorePort for FailingOutboundStore {
     async fn put_run_delivery_cleanup(
         &self,
         _record: ironclaw_outbound::RunDeliveryCleanupRecord,

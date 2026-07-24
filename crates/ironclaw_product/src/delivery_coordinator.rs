@@ -33,7 +33,7 @@ use ironclaw_host_api::RestrictedEgress;
 use ironclaw_outbound::{
     ClaimDeliveryAttemptForSendRequest, CommunicationPreferenceRepository, DeliveryFailureKind,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
-    OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStore,
+    OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
     PrepareCommunicationDeliveryRequest, RecoverInterruptedDeliveryRequest,
     UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };

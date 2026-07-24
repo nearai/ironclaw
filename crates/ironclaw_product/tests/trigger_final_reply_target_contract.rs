@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, RunId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
-use ironclaw_outbound::{OutboundStateStore, RunFinalReplyDestination, RunFinalReplyTargetRecord};
+use ironclaw_outbound::{
+    OutboundStateStorePort, RunFinalReplyDestination, RunFinalReplyTargetRecord,
+};
 use ironclaw_product::{
     CurrentDeliveryTarget, CurrentDeliveryTargetResolver, ProductWorkflowError,
     RebornOutboundDeliveryTargetId, TriggerFinalReplyTargetService,

@@ -49,7 +49,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, DeliveryDefaultScope,
-    DeliveryFailureKind, OutboundDeliveryStatus, OutboundStateStore, RunFinalReplyDestination,
+    DeliveryFailureKind, OutboundDeliveryStatus, OutboundStateStorePort, RunFinalReplyDestination,
     RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, TriggerCommunicationContext,
     TriggerFireSlot, TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore, WriteCommunicationPreferenceRequest,
@@ -602,8 +602,7 @@ struct TriggeredWireFixture {
     event_router: Arc<RunDeliveryEventRouter>,
     egress: Arc<RecordingBotEgress>,
     outbound_store: Arc<dyn OutboundStateStorePort>,
-    outcome_store:
-        Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    outcome_store: Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     target_resolver: Arc<MatrixTargetResolver>,
 }
 

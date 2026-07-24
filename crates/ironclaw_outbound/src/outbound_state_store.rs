@@ -70,7 +70,7 @@ use crate::{
     CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
     DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt,
-    OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStore,
+    OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStorePort,
     ProjectionSubscriptionId, ProjectionSubscriptionRecord, RunDeliveryCleanupRecord,
     RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
     RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
@@ -541,7 +541,7 @@ where
 }
 
 #[async_trait]
-impl<F> OutboundStateStore for OutboundStateStore<F>
+impl<F> OutboundStateStorePort for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -2038,9 +2038,7 @@ mod tests {
         user_id: &UserId,
     ) -> OutboundStateStore<InMemoryBackend> {
         let backend = Arc::new(InMemoryBackend::new());
-        OutboundStateStore::new(build_scoped_fs_for_gate_routes(
-            backend, tenant_id, user_id,
-        ))
+        OutboundStateStore::new(build_scoped_fs_for_gate_routes(backend, tenant_id, user_id))
     }
 
     /// Build a minimal `DeliveredGateRouteRecord` for the given identities.
@@ -2735,9 +2733,8 @@ mod tests {
             tenant_id,
             user_id,
         ));
-        let store_b = OutboundStateStore::new(build_scoped_fs_for_gate_routes(
-            backend, tenant_id, user_id,
-        ));
+        let store_b =
+            OutboundStateStore::new(build_scoped_fs_for_gate_routes(backend, tenant_id, user_id));
         (store_a, store_b)
     }
 

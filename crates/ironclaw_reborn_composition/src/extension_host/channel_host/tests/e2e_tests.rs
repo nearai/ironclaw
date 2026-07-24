@@ -32,12 +32,12 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_extension_host::{
-    AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationSubmittedValue,
-    AdminConfigurationStore,
+    AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationStore,
+    AdminConfigurationSubmittedValue,
 };
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionInstallationStore,
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
     InstallationOwner, ManifestSource,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
@@ -48,7 +48,7 @@ use ironclaw_host_api::{
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundStateStorePort, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -68,7 +68,7 @@ use ironclaw_product::{
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, RunDeliveryEventRouter,
     RunDeliveryServices, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
-use ironclaw_secrets::{SecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
@@ -244,8 +244,7 @@ struct Harness {
     /// The harness's outbound state store — the SAME allocation the
     /// assembly's delivery deps read communication preferences from, so
     /// tests can seed the creator's personal preference.
-    outbound:
-        Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    outbound: Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -4199,9 +4198,7 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
 // ─── Generic outbound-delivery targets + generic triggered hook (P6 c-rest) ─
 
-use crate::extension_host::channel_dm_targets::{
-    ChannelDmTargetStore, dm_target_payload,
-};
+use crate::extension_host::channel_dm_targets::{ChannelDmTargetStore, dm_target_payload};
 use crate::extension_host::channel_outbound_targets::{
     ChannelOutboundTargetIdentity, GenericChannelOutboundTargetDeps,
     GenericChannelOutboundTargetProvider,
