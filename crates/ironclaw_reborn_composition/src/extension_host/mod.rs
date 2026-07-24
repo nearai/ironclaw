@@ -1,11 +1,8 @@
 //! Reborn extension-host cluster.
 //!
-//! Groups the extension/skill host surface — first-party extension catalog
-//! (`available_extensions`, `bundled_skills`, `gsuite`), activation plumbing
-//! (`extension_activation_credentials`, `webui_extension_credentials`), the
-//! lifecycle command/capability stack (`extension_lifecycle`,
-//! `extension_lifecycle_capabilities`, `extension_lifecycle_command`,
-//! `lifecycle`, `skill_learning`, `skill_listing`) behind one internal module.
+//! Groups the extension/skill host surface that remains in composition:
+//! product-auth credential adapters, WebUI/CLI lifecycle command handlers, skill
+//! surfaces, and compatibility wiring around the host-owned lifecycle manager.
 //! The crate root re-exports the same public items from here so the crate's
 //! public API is unchanged.
 

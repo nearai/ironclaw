@@ -1130,14 +1130,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/projection/display_preview.rs",
         "web-access",
     ),

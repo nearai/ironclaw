@@ -43,6 +43,7 @@ impl HostedMcpDiscoveryEgress {
         self
     }
 
+    #[allow(dead_code)]
     pub(crate) fn methods(&self) -> Vec<String> {
         self.methods
             .lock()
@@ -50,6 +51,7 @@ impl HostedMcpDiscoveryEgress {
             .clone()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn credential_counts(&self) -> Vec<usize> {
         self.credential_counts
             .lock()

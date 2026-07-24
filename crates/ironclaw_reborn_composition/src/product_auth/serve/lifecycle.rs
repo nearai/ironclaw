@@ -7,7 +7,7 @@
 //! selects the caller's reusable per-provider personal credentials and never
 //! cancels other flows on the provider. Full uninstall cleanup (exclusive
 //! personal-credential revocation) lives in
-//! `extension_host/extension_lifecycle.rs::revoke_exclusive_credentials`.
+//! `ironclaw_extension_host::ExtensionLifecycleManager` credential cleanup.
 //! Canceled turn-gate denials and setup-PKCE-verifier deletion are handled
 //! server-side inside `cleanup_credentials_for_lifecycle` before the report
 //! is serialized; the `#[serde(skip)]` handoff fields never cross this

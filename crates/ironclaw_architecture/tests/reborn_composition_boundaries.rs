@@ -331,6 +331,7 @@ const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
     "mcp_discovery",
     "nearai_mcp",
     "provider_instance_readiness",
+    "product_lifecycle",
     "reply_contexts",
 ];
 

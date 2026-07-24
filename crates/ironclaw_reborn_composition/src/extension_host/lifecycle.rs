@@ -367,8 +367,11 @@ impl RebornLocalLifecycleService {
                 } else {
                     None
                 };
+                let credential_gate = credential_gate.as_ref().map(|gate| {
+                    gate as &dyn ironclaw_extension_host::ExtensionActivationCredentialGate
+                });
                 extension_management
-                    .search(&query, credential_gate.as_ref(), &caller)
+                    .search(&query, credential_gate, &caller)
                     .await
             }
             LifecycleProductAction::ExtensionList => {

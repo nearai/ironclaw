@@ -13,6 +13,7 @@
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
 
+mod activation_credentials;
 pub mod active;
 mod active_publication;
 mod admin_configuration_service;
@@ -43,6 +44,7 @@ pub mod loaders;
 pub mod mcp;
 pub mod mcp_discovery;
 pub mod nearai_mcp;
+pub mod product_lifecycle;
 pub mod provider_instance_readiness;
 pub mod recipes;
 pub mod removal_cleanup;
@@ -54,6 +56,11 @@ pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use activation_credentials::{
+    ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
+    PrecheckedExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
+    missing_activation_credentials_error,
+};
 pub use active::{
     ActiveExtension, ActiveSnapshot, BoundExtension, Generation, ResolvedToolBinding,
     SnapshotConflict,
@@ -152,6 +159,7 @@ pub use nearai_mcp::{
     NearAiMcpEndpoint, durable_product_auth_storage_enabled, nearai_mcp_endpoint_from_base,
     nearai_mcp_endpoint_from_env,
 };
+pub use product_lifecycle::{ExtensionCredentialCleanup, ExtensionLifecycleManager};
 pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };

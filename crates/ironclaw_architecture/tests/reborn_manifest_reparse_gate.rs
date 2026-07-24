@@ -77,7 +77,7 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "install/restore-time compile of the installed manifest into its resolved record",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
+        "crates/ironclaw_extension_host/src/product_lifecycle.rs",
         1,
         ReparseCategory::Compiler,
         "activation-time compile of the installed manifest into its resolved record",

@@ -2,12 +2,10 @@
 //!
 //! Assembly only: this module constructs the generic lifecycle host with
 //! concrete loaders over the host-runtime lanes and injects its snapshot
-//! resolver into the dispatch chain. The lifecycle service
-//! (`extension_lifecycle.rs`) remains the durable-lifecycle owner and the
-//! production caller — it drives the host at its choke points
-//! (activation commit, removal, boot restore), so the active snapshot always
-//! mirrors what the service published. Durable seven-state ownership and the
-//! host-owned removal order move here when the service collapses (P6).
+//! resolver into the dispatch chain. The durable lifecycle manager in
+//! [`crate::product_lifecycle`] drives this host at install, activation,
+//! removal, and restore choke points, so the active snapshot mirrors durable
+//! lifecycle state.
 //!
 //! Loader dispatch, by the resolved contract's runtime kind:
 //! - `first_party` with a binary-assembled [`NativeExtensionFactory`] → the

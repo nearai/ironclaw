@@ -171,7 +171,14 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(&input.query, Some(&credential_gate), &request.scope.user_id)
+                    .search(
+                        &input.query,
+                        Some(
+                            &credential_gate
+                                as &dyn ironclaw_extension_host::ExtensionActivationCredentialGate,
+                        ),
+                        &request.scope.user_id,
+                    )
                     .await
                     .map_err(lifecycle_error)
             }

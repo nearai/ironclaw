@@ -45,7 +45,7 @@ Not generic yet — the work:
 | Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, composition `product_auth/**` |
 | Installed records persist raw TOML and reproject from it | `crates/ironclaw_extensions/src/installations.rs` |
 | Hosted MCP mutates capabilities from live `tools/list` | `crates/ironclaw_extensions/src/hosted_mcp_discovery.rs` |
-| Lifecycle emits Slack-specific connection copy; workflow has Slack cleanup literals | `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
+| Lifecycle emits channel connection copy; workflow has cleanup literals | `crates/ironclaw_extension_host/src/product_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
 | Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
@@ -194,13 +194,13 @@ already exists.
     (adapter-supplied `Authorization` rejected where injection is declared),
     response size caps, redirect denial across hosts, private-IP/DNS-rebind
     denial (reuse existing network policy), deadlines.
-- Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` (Slack,
-  Telegram) and passes it into composition; composition constructs
-  `ExtensionHost` with stores + loaders and injects resolver handles into
-  dispatcher/workflow/engine/router. The existing
-  `extension_host/extension_lifecycle.rs` facade delegates to the new host and
-  shrinks to wiring; `slack_host_beta.rs` manual graph construction is deleted
-  in P6 after its callers cut over.
+- Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` and passes it
+  into composition; composition constructs `ExtensionHost` with stores +
+  loaders and injects resolver handles into dispatcher/workflow/engine/router.
+  `ironclaw_extension_host::ExtensionLifecycleManager` owns durable lifecycle
+  mutation; composition's `extension_host/extension_lifecycle.rs` module is the
+  product-auth cleanup adapter and compatibility alias. Manual channel graph
+  construction is deleted in P6 after its callers cut over.
 
 **Tests first:** `binding_contract.rs` (missing/extra/undeclared binding,
 declared-but-`None`, auth-never-binds); `lifecycle_contract.rs` (caller
