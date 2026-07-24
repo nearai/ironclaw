@@ -21,7 +21,7 @@ const preview: Preview = {
       storySort: {
         order: [
           "Docs",
-          ["Getting started", "Brand principles", "Voice & copy", "Contributing", "Brand token spec"],
+                  ["Getting started", "Generative UI", "Brand principles", "Voice & copy", "Contributing", "Brand token spec"],
           "Tokens",
           "Components",
           "Compositions",

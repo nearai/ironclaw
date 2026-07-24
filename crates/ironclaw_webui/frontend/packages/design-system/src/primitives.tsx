@@ -7,9 +7,11 @@
  * Re-exports: StatusPill (→ Badge), Panel (→ Card)
  * New exports: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel
  */
+import type { ReactNode } from "react";
 import { cn } from "./cn";
 import { Card } from "./card";
 import { Badge } from "./badge";
+import type { BadgeTone } from "./badge";
 
 /* ── Re-exports ────────────────────────────────────────────────────── */
 
@@ -49,6 +51,17 @@ export function cx(...classes) {
  *     concatenates (no tailwind-merge), so this REPLACES the size classes
  *     rather than appending to them.
  */
+export interface StatCardProps {
+  label: ReactNode;
+  value: ReactNode;
+  tone?: BadgeTone;
+  badgeLabel?: ReactNode;
+  detail?: ReactNode;
+  showDivider?: boolean;
+  className?: string;
+  valueClassName?: string;
+}
+
 export function StatCard({
   label,
   value,
@@ -58,7 +71,7 @@ export function StatCard({
   showDivider = true,
   className = "",
   valueClassName = "text-[1.75rem] md:text-[2rem]",
-}) {
+}: StatCardProps) {
   return (
     <div
       className={cn(

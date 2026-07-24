@@ -11,6 +11,7 @@
  *   size     "sm" (default) | "md"
  *   className string
  */
+import type { ReactNode } from "react";
 import { cn } from "./cn";
 
 /* ── Tone maps ────────────────────────────────────────────────────────── */
@@ -41,7 +42,18 @@ const sizeClasses = {
   md: "h-7 gap-2 rounded-full px-2.5 text-[length:var(--v2-font-size-label)]",
 };
 
-export function Badge({ tone = "muted", label, dot = true, size = "md", className = "" }) {
+export type BadgeTone = keyof typeof toneClasses;
+export type BadgeSize = keyof typeof sizeClasses;
+
+export interface BadgeProps {
+  tone?: BadgeTone;
+  label: ReactNode;
+  dot?: boolean;
+  size?: BadgeSize;
+  className?: string;
+}
+
+export function Badge({ tone = "muted", label, dot = true, size = "md", className = "" }: BadgeProps) {
   const isLive = tone === "success" || tone === "positive" || tone === "signal";
   return (
     <span

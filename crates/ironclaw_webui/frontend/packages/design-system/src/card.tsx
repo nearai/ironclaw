@@ -19,6 +19,7 @@
  *   <CardFooter>   — bottom section, optional top divider
  *   <CardLabel>    — mono-caps eyebrow label
  */
+import type { ElementType, ReactNode } from "react";
 import { cn } from "./cn";
 
 /* ─── Variant ─────────────────────────────────────────────────────── */
@@ -62,6 +63,20 @@ const PADDINGS = {
 
 /* ─── Card ────────────────────────────────────────────────────────── */
 
+export type CardVariant = keyof typeof VARIANTS;
+export type CardRadius = keyof typeof RADII;
+export type CardPadding = keyof typeof PADDINGS;
+
+export interface CardProps {
+  children?: ReactNode;
+  className?: string;
+  variant?: CardVariant;
+  radius?: CardRadius;
+  padding?: CardPadding;
+  as?: ElementType;
+  [key: string]: unknown;
+}
+
 export function Card({
   children,
   className = "",
@@ -70,8 +85,8 @@ export function Card({
   padding = "none",
   as: Tag = "div",
   ...rest
-}) {
-  const Element: any = Tag;
+}: CardProps) {
+  const Element = Tag as ElementType;
   return (
     <Element
       className={cn(
@@ -89,7 +104,13 @@ export function Card({
 
 /* ─── CardHeader ──────────────────────────────────────────────────── */
 
-export function CardHeader({ children, className = "", divider = false }) {
+export interface CardSectionProps {
+  children?: ReactNode;
+  className?: string;
+  divider?: boolean;
+}
+
+export function CardHeader({ children, className = "", divider = false }: CardSectionProps) {
   return (
     <div
       className={cn(
@@ -105,7 +126,7 @@ export function CardHeader({ children, className = "", divider = false }) {
 
 /* ─── CardBody ────────────────────────────────────────────────────── */
 
-export function CardBody({ children, className = "" }) {
+export function CardBody({ children, className = "" }: Omit<CardSectionProps, "divider">) {
   return (
     <div className={cn("px-5 py-4 md:px-7 md:py-5", className)}>
       {children}
@@ -115,7 +136,7 @@ export function CardBody({ children, className = "" }) {
 
 /* ─── CardFooter ──────────────────────────────────────────────────── */
 
-export function CardFooter({ children, className = "", divider = true }) {
+export function CardFooter({ children, className = "", divider = true }: CardSectionProps) {
   return (
     <div
       className={cn(
@@ -132,7 +153,7 @@ export function CardFooter({ children, className = "", divider = true }) {
 /* ─── CardLabel ───────────────────────────────────────────────────── */
 
 /** Pixel-face eyebrow label — sits above section headings (nux tag language). */
-export function CardLabel({ children, className = "" }) {
+export function CardLabel({ children, className = "" }: Omit<CardSectionProps, "divider">) {
   return (
     <div
       className={cn(

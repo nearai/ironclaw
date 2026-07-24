@@ -10,8 +10,14 @@ export { cn } from "./cn";
 export { DesignSystemI18nProvider, useDesignSystemT } from "./i18n";
 export type { DesignSystemTranslate } from "./i18n";
 export { Badge, StatusPill } from "./badge";
+export type { BadgeProps, BadgeSize, BadgeTone } from "./badge";
 export { Button } from "./button";
+export { Callout } from "./callout";
+export type { CalloutProps, CalloutTone } from "./callout";
 export { Card, CardBody, CardFooter, CardHeader, CardLabel } from "./card";
+export type { CardPadding, CardProps, CardRadius, CardSectionProps, CardVariant } from "./card";
+export { AgentAvatar, ChatMessage } from "./chat";
+export type { ChatMessageProps } from "./chat";
 export { Checkbox } from "./checkbox";
 export { ConfirmDialog } from "./confirm-dialog";
 export {
@@ -29,6 +35,10 @@ export {
 } from "./dropdown-menu";
 export { Icon } from "./icons";
 export { FormField, Input, Label, Select, Textarea } from "./input";
+export { ListRow } from "./list";
+export type { ListRowProps } from "./list";
+export { NavItem, NavList } from "./nav";
+export type { NavItemProps, NavListProps } from "./nav";
 export { Modal, ModalBody, ModalFooter, ModalHeader } from "./modal";
 export {
   MOTION_DURATION,

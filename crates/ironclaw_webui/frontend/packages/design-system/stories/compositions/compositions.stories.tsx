@@ -4,9 +4,12 @@ import { Avatar, AvatarFallback } from "../../src/avatar";
 import { Badge } from "../../src/badge";
 import { Button } from "../../src/button";
 import { Card, CardBody, CardFooter, CardHeader, CardLabel } from "../../src/card";
+import { AgentAvatar, ChatMessage } from "../../src/chat";
 import { Checkbox } from "../../src/checkbox";
 import { Icon } from "../../src/icons";
 import { FormField, Input, Label } from "../../src/input";
+import { ListRow } from "../../src/list";
+import { NavItem, NavList } from "../../src/nav";
 import { StatCard } from "../../src/primitives";
 import { SelectMenu } from "../../src/select-menu";
 import { Separator } from "../../src/separator";
@@ -16,10 +19,12 @@ import { Tabs } from "../../src/tabs";
 /**
  * Applied compositions — real product surfaces built purely from
  * design-system components. The point is to see the primitives inside
- * app-like contexts (a chat thread, a full page with navigation, a run
- * detail, an activity feed), not just isolated fragments. If a
- * composition needs a class the system doesn't provide, that's a gap in
- * the system — not a license for one-off styling.
+ * app-like contexts (the full workspace, a chat thread, an automations
+ * page, a run detail, an activity feed), not just isolated fragments.
+ * If a composition needs a class the system doesn't provide, that's a
+ * gap in the system — not a license for one-off styling. NavItem,
+ * ListRow, ChatMessage, and Callout all exist because these stories
+ * demanded them.
  *
  * Copy in these stories follows the Brand principles page: the agent is
  * proactive (it sets routines up and shows its work), receipts read as
@@ -33,11 +38,14 @@ const meta = {
       description: {
         component:
           "Real product surfaces assembled exclusively from design-system " +
-          "components: the agent chat thread, a full automations page with " +
-          "navigation, a run detail panel, the activity feed of agent " +
-          "receipts, a settings panel, a marketing hero fragment, and the " +
-          "onboarding routine card. Copy follows the Brand principles page " +
-          "(proactive agent, receipts, steering verbs).",
+          "components: the full agent workspace (sidebar, thread, context " +
+          "rail), the chat thread, a full automations page with navigation, " +
+          "a run detail panel, the activity feed of agent receipts, a " +
+          "settings panel, a marketing hero fragment, and the onboarding " +
+          "routine card. Copy follows the Brand principles page (proactive " +
+          "agent, receipts, steering verbs). These double as ground truth " +
+          "for generative UI: every surface is reachable from the published " +
+          "component set alone (see Docs → Generative UI).",
       },
     },
   },
@@ -50,127 +58,271 @@ type Story = StoryObj<typeof meta>;
 
 const mono = "font-mono text-xs text-[var(--v2-text-faint)]";
 
-function AgentAvatar() {
+const NAV_PRIMARY = [
+  { id: "chat", icon: "chat", label: "Chat" },
+  { id: "automations", icon: "bolt", label: "Automations", count: "8" },
+  { id: "runs", icon: "logs", label: "Runs" },
+  { id: "connections", icon: "plug", label: "Connections", count: "3" },
+  { id: "settings", icon: "settings", label: "Settings" },
+] as const;
+
+function WorkspaceSidebar({ active }: { active: string }) {
   return (
-    <Avatar className="h-7 w-7">
-      <AvatarFallback className="text-[var(--v2-accent-text)]">
-        <Icon name="spark" className="h-3.5 w-3.5" />
-      </AvatarFallback>
-    </Avatar>
+    <div className="flex w-56 shrink-0 flex-col border-r border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]">
+      <div className="flex items-center gap-2 px-4 py-4">
+        <Icon name="spark" className="h-4.5 w-4.5 text-[var(--v2-accent-text)]" />
+        <span className="text-sm font-medium text-[var(--v2-text-strong)]">IronClaw</span>
+      </div>
+      <NavList label="Workspace" className="px-2">
+        {NAV_PRIMARY.map((item) => (
+          <NavItem
+            key={item.id}
+            icon={item.icon}
+            label={item.label}
+            count={"count" in item ? item.count : undefined}
+            active={item.id === active}
+          />
+        ))}
+      </NavList>
+      <div className="mt-auto border-t border-[var(--v2-panel-border)] px-4 py-3">
+        <div className="flex items-center gap-2.5">
+          <Avatar className="h-7 w-7">
+            <AvatarFallback>MK</AvatarFallback>
+          </Avatar>
+          <div className="min-w-0">
+            <div className="truncate text-xs font-medium text-[var(--v2-text-strong)]">
+              mira@acme.dev
+            </div>
+            <div className="text-[0.6875rem] text-[var(--v2-text-faint)]">Pro plan</div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
-/* ── 1 · Workspace — chat thread ──────────────────────────────────── */
-/* The core surface: agent narrates what it set up (a receipt card in the
-   thread), the user steers. Composer at the bottom like the real app. */
+/** Inline routine receipt — the agent acted; the user steers. */
+function RoutineReceiptCard() {
+  return (
+    <Card variant="subtle" radius="sm" padding="none">
+      <CardHeader className="!py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Icon name="bolt" className="h-4 w-4 text-[var(--v2-accent-text)]" />
+            <span className="text-sm font-medium text-[var(--v2-text-strong)]">
+              Morning digest
+            </span>
+          </div>
+          <Badge tone="success" label="Scheduled" size="sm" />
+        </div>
+      </CardHeader>
+      <CardBody className="!py-0 text-xs leading-5 text-[var(--v2-text-muted)]">
+        Summarizes newsletters and status emails into one message. First run
+        tomorrow · <span className="font-mono">8:00am</span>.
+      </CardBody>
+      <CardFooter divider={false} className="!pt-3 !pb-3">
+        <div className="flex gap-2">
+          <Button variant="secondary" size="sm">Adjust</Button>
+          <Button variant="ghost" size="sm">Pause</Button>
+          <Button variant="ghost" size="sm">Undo</Button>
+        </div>
+      </CardFooter>
+    </Card>
+  );
+}
+
+function ThreadMessages() {
+  return (
+    <>
+      <ChatMessage role="agent">
+        <p>
+          Morning. While you slept I went through the inbox — 34 newsletter
+          threads and 12 recurring status emails were burying your real mail,
+          so I set up a routine for them.
+        </p>
+        <RoutineReceiptCard />
+      </ChatMessage>
+      <ChatMessage role="user">
+        Move it to 7:30 and include the GitHub release notes too.
+      </ChatMessage>
+      <ChatMessage role="agent">
+        Done — moved to <span className="font-mono text-xs">7:30am</span> and
+        watching 3 repos for releases. You'll see the first digest tomorrow.
+      </ChatMessage>
+    </>
+  );
+}
+
+function Composer() {
+  const [draft, setDraft] = useState("");
+  return (
+    <div className="flex items-center gap-2">
+      <Button variant="ghost" size="icon-sm" aria-label="Attach a file">
+        <Icon name="attach" className="h-4 w-4" />
+      </Button>
+      <Input
+        placeholder="Tell your agent what to take on…"
+        className="flex-1"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <Button size="icon-sm" aria-label="Send" disabled={!draft.trim()}>
+        <Icon name="send" className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+
+/* ── 1 · Agent workspace — full page ──────────────────────────────── */
+/* The whole product in one frame: sidebar navigation, the live thread,
+   and the context rail (agent status, today's receipts, connections).
+   Everything here is a published component; nothing is hand-rolled. */
+
+const TODAY_RECEIPTS = [
+  { icon: "bolt", text: "Sent your morning digest", time: "7:30am" },
+  { icon: "folder", text: "Archived 12 newsletters", time: "7:26am" },
+  { icon: "calendar", text: "Blocked prep time before your board call", time: "6:15am" },
+] as const;
+
+const CONNECTIONS = [
+  { name: "Gmail", status: "success", label: "OK" },
+  { name: "Calendar", status: "success", label: "OK" },
+  { name: "GitHub", status: "warning", label: "Token" },
+] as const;
+
+export const WorkspacePage: Story = {
+  name: "Workspace · Full page",
+  render: () => (
+    <Card padding="none" className="flex h-[40rem] w-[76rem] overflow-hidden">
+      <WorkspaceSidebar active="chat" />
+
+      {/* Thread column */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center justify-between border-b border-[var(--v2-panel-border)] px-6 py-3">
+          <div className="flex items-center gap-2.5">
+            <AgentAvatar />
+            <div>
+              <div className="text-sm font-medium text-[var(--v2-text-strong)]">IronClaw</div>
+              <div className="text-xs text-[var(--v2-text-faint)]">
+                Connected · Gmail, Calendar, GitHub
+              </div>
+            </div>
+          </div>
+          <Badge tone="success" label="Online" size="sm" />
+        </div>
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
+          <ThreadMessages />
+        </div>
+        <div className="border-t border-[var(--v2-panel-border)] px-6 py-3">
+          <Composer />
+        </div>
+      </div>
+
+      {/* Context rail */}
+      <div className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
+        <Card variant="flat" radius="sm" padding="none">
+          <CardHeader className="!py-3">
+            <div className="flex items-center justify-between">
+              <CardLabel>Today</CardLabel>
+              <Badge tone="success" label="All reversible" size="sm" />
+            </div>
+          </CardHeader>
+          <div>
+            {TODAY_RECEIPTS.map((item) => (
+              <ListRow
+                key={item.text}
+                size="sm"
+                truncateTitle={false}
+                align="start"
+                leading={
+                  <span className="mt-0.5 grid h-6 w-6 place-items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
+                    <Icon name={item.icon} className="h-3 w-3" />
+                  </span>
+                }
+                title={<span className="text-xs font-normal leading-5">{item.text}</span>}
+                meta={item.time}
+              />
+            ))}
+          </div>
+          <CardFooter divider className="!py-2.5">
+            <Button variant="ghost" size="sm" className="w-full">
+              Open activity log
+            </Button>
+          </CardFooter>
+        </Card>
+
+        <Card variant="flat" radius="sm" padding="none">
+          <CardHeader className="!py-3">
+            <CardLabel>Connections</CardLabel>
+          </CardHeader>
+          <div>
+            {CONNECTIONS.map((conn) => (
+              <ListRow
+                key={conn.name}
+                size="sm"
+                title={<span className="text-xs">{conn.name}</span>}
+                trailing={<Badge tone={conn.status} label={conn.label} size="sm" />}
+                onClick={() => {}}
+              />
+            ))}
+          </div>
+          <CardFooter divider className="!py-2.5">
+            <Button variant="ghost" size="sm" className="w-full">
+              <Icon name="plus" className="mr-1.5 h-3.5 w-3.5" />
+              Connect a tool
+            </Button>
+          </CardFooter>
+        </Card>
+
+        <Card variant="flat" radius="sm" padding="sm">
+          <div className="flex items-start gap-2.5">
+            <Icon name="shield" className="mt-0.5 h-4 w-4 shrink-0 text-[var(--v2-text-muted)]" />
+            <p className="text-xs leading-5 text-[var(--v2-text-muted)]">
+              Credentials stay sealed in the vault. Outbound traffic is limited
+              to allowlisted endpoints.
+            </p>
+          </div>
+        </Card>
+      </div>
+    </Card>
+  ),
+};
+
+/* ── 2 · Workspace — chat thread ──────────────────────────────────── */
+/* The core surface on its own: agent narrates what it set up (a receipt
+   card in the thread), the user steers. Composer at the bottom. */
 
 export const ChatThread: Story = {
   name: "Workspace · Chat thread",
-  render: function ChatThreadStory() {
-    const [draft, setDraft] = useState("");
-    return (
-      <Card padding="none" className="flex h-[34rem] w-[42rem] flex-col">
-        <CardHeader divider className="!py-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <AgentAvatar />
-              <div>
-                <div className="text-sm font-medium text-[var(--v2-text-strong)]">IronClaw</div>
-                <div className="text-xs text-[var(--v2-text-faint)]">Connected · Gmail, Calendar, GitHub</div>
+  render: () => (
+    <Card padding="none" className="flex h-[34rem] w-[42rem] flex-col">
+      <CardHeader divider className="!py-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <AgentAvatar />
+            <div>
+              <div className="text-sm font-medium text-[var(--v2-text-strong)]">IronClaw</div>
+              <div className="text-xs text-[var(--v2-text-faint)]">
+                Connected · Gmail, Calendar, GitHub
               </div>
             </div>
-            <Badge tone="success" label="Online" size="sm" />
           </div>
-        </CardHeader>
-
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 md:px-7">
-          {/* Agent message */}
-          <div className="flex gap-3">
-            <AgentAvatar />
-            <div className="max-w-[85%] text-sm leading-6 text-[var(--v2-text-muted)]">
-              Morning. While you slept I went through the inbox — 34 newsletter
-              threads and 12 recurring status emails were burying your real
-              mail, so I set up a routine for them.
-            </div>
-          </div>
-
-          {/* Inline receipt card — the agent acted; the user steers */}
-          <div className="pl-10">
-            <Card variant="subtle" radius="sm" padding="none" className="max-w-[85%]">
-              <CardHeader className="!py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Icon name="bolt" className="h-4 w-4 text-[var(--v2-accent-text)]" />
-                    <span className="text-sm font-medium text-[var(--v2-text-strong)]">
-                      Morning digest
-                    </span>
-                  </div>
-                  <Badge tone="success" label="Scheduled" size="sm" />
-                </div>
-              </CardHeader>
-              <CardBody className="!py-0 text-xs leading-5 text-[var(--v2-text-muted)]">
-                Summarizes newsletters and status emails into one message.
-                First run tomorrow · <span className="font-mono">8:00am</span>.
-              </CardBody>
-              <CardFooter divider={false} className="!pt-3 !pb-3">
-                <div className="flex gap-2">
-                  <Button variant="secondary" size="sm">Adjust</Button>
-                  <Button variant="ghost" size="sm">Pause</Button>
-                  <Button variant="ghost" size="sm">Undo</Button>
-                </div>
-              </CardFooter>
-            </Card>
-          </div>
-
-          {/* User message */}
-          <div className="flex justify-end">
-            <div className="max-w-[75%] rounded-[var(--v2-radius-lg)] bg-[var(--v2-surface-muted)] px-4 py-2.5 text-sm leading-6 text-[var(--v2-text-strong)]">
-              Move it to 7:30 and include the GitHub release notes too.
-            </div>
-          </div>
-
-          {/* Agent confirms — past tense, exact numbers */}
-          <div className="flex gap-3">
-            <AgentAvatar />
-            <div className="max-w-[85%] text-sm leading-6 text-[var(--v2-text-muted)]">
-              Done — moved to <span className="font-mono text-xs">7:30am</span> and
-              watching 3 repos for releases. You'll see the first digest tomorrow.
-            </div>
-          </div>
+          <Badge tone="success" label="Online" size="sm" />
         </div>
-
-        <CardFooter divider className="!py-3">
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon-sm" aria-label="Attach a file">
-              <Icon name="attach" className="h-4 w-4" />
-            </Button>
-            <Input
-              placeholder="Tell your agent what to take on…"
-              className="flex-1"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-            />
-            <Button size="icon-sm" aria-label="Send" disabled={!draft.trim()}>
-              <Icon name="send" className="h-4 w-4" />
-            </Button>
-          </div>
-        </CardFooter>
-      </Card>
-    );
-  },
+      </CardHeader>
+      <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 md:px-7">
+        <ThreadMessages />
+      </div>
+      <CardFooter divider className="!py-3">
+        <Composer />
+      </CardFooter>
+    </Card>
+  ),
 };
 
-/* ── 2 · Automations — full page with navigation ──────────────────── */
+/* ── 3 · Automations — full page with navigation ──────────────────── */
 /* The same table as the fragment below, but inside the app shell:
    sidebar nav, page header, stat strip. What the screen actually is. */
-
-const NAV_ITEMS = [
-  { icon: "chat", label: "Chat" },
-  { icon: "bolt", label: "Automations", active: true, count: 8 },
-  { icon: "logs", label: "Runs" },
-  { icon: "plug", label: "Connections", count: 3 },
-  { icon: "settings", label: "Settings" },
-] as const;
 
 const AUTOMATION_ROWS = [
   { name: "Morning digest", schedule: "Weekdays · 8:00am", status: "success", label: "Success" },
@@ -179,50 +331,37 @@ const AUTOMATION_ROWS = [
   { name: "Standup notes", schedule: "Weekdays · 9:30am", status: "danger", label: "Failed" },
 ] as const;
 
+function AutomationRows() {
+  return (
+    <>
+      {AUTOMATION_ROWS.map((row) => (
+        <ListRow
+          key={row.name}
+          leading={<Checkbox aria-label={`Select ${row.name}`} />}
+          title={row.name}
+          description={row.schedule}
+          trailing={
+            <>
+              <Badge tone={row.status} label={row.label} />
+              <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${row.name}`}>
+                <Icon name="more" className="h-4 w-4" />
+              </Button>
+            </>
+          }
+          onClick={() => {}}
+        />
+      ))}
+    </>
+  );
+}
+
 export const AutomationsPage: Story = {
   name: "Automations · Full page",
   render: function AutomationsPageStory() {
     const [status, setStatus] = useState("all");
     return (
       <Card padding="none" className="flex h-[36rem] w-[64rem] overflow-hidden">
-        {/* Sidebar */}
-        <div className="flex w-56 shrink-0 flex-col border-r border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]">
-          <div className="flex items-center gap-2 px-4 py-4">
-            <Icon name="spark" className="h-4.5 w-4.5 text-[var(--v2-accent-text)]" />
-            <span className="text-sm font-medium text-[var(--v2-text-strong)]">IronClaw</span>
-          </div>
-          <nav className="grid gap-0.5 px-2">
-            {NAV_ITEMS.map((item) => (
-              <button
-                key={item.label}
-                type="button"
-                className={
-                  "flex items-center gap-2.5 rounded-[var(--v2-radius-sm)] px-2.5 py-1.5 text-left text-sm " +
-                  ("active" in item && item.active
-                    ? "bg-[var(--v2-surface-muted)] font-medium text-[var(--v2-text-strong)]"
-                    : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]")
-                }
-              >
-                <Icon name={item.icon} className="h-4 w-4 shrink-0" />
-                <span className="flex-1">{item.label}</span>
-                {"count" in item && item.count != null && (
-                  <span className={mono}>{item.count}</span>
-                )}
-              </button>
-            ))}
-          </nav>
-          <div className="mt-auto border-t border-[var(--v2-panel-border)] px-4 py-3">
-            <div className="flex items-center gap-2.5">
-              <Avatar className="h-7 w-7">
-                <AvatarFallback>MK</AvatarFallback>
-              </Avatar>
-              <div className="min-w-0">
-                <div className="truncate text-xs font-medium text-[var(--v2-text-strong)]">mira@acme.dev</div>
-                <div className="text-[0.6875rem] text-[var(--v2-text-faint)]">Pro plan</div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <WorkspaceSidebar active="automations" />
 
         {/* Main column */}
         <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
@@ -259,22 +398,7 @@ export const AutomationsPage: Story = {
 
           <div className="px-6 pb-6 pt-2">
             <Card variant="flat" padding="none">
-              {AUTOMATION_ROWS.map((row) => (
-                <div
-                  key={row.name}
-                  className="flex items-center gap-4 border-b border-[var(--v2-panel-border)] px-5 py-3 last:border-b-0 hover:bg-[var(--v2-surface-soft)]"
-                >
-                  <Checkbox aria-label={`Select ${row.name}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-[var(--v2-text-strong)]">{row.name}</div>
-                    <div className="text-xs text-[var(--v2-text-faint)]">{row.schedule}</div>
-                  </div>
-                  <Badge tone={row.status} label={row.label} />
-                  <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${row.name}`}>
-                    <Icon name="more" className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+              <AutomationRows />
             </Card>
           </div>
         </div>
@@ -283,7 +407,7 @@ export const AutomationsPage: Story = {
   },
 };
 
-/* ── 3 · Runs — run detail ────────────────────────────────────────── */
+/* ── 4 · Runs — run detail ────────────────────────────────────────── */
 /* A single run opened from the runs list: step-by-step receipt with
    exact durations, the failure stated plainly, and the fix offered. */
 
@@ -308,38 +432,42 @@ export const RunDetail: Story = {
           <Badge tone="danger" label="Failed" />
         </div>
       </CardHeader>
-      <CardBody className="!py-0">
-        {RUN_STEPS.map((step, i) => (
-          <div
+      <div>
+        {RUN_STEPS.map((step) => (
+          <ListRow
             key={step.title}
-            className={
-              "flex items-center gap-3 py-3" +
-              (i < RUN_STEPS.length - 1 ? " border-b border-[var(--v2-panel-border)]" : "")
+            size="sm"
+            leading={
+              <span
+                className={
+                  "grid h-7 w-7 shrink-0 place-items-center rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] " +
+                  (step.status === "danger"
+                    ? "text-[var(--v2-danger-text)]"
+                    : "text-[var(--v2-text-muted)]")
+                }
+              >
+                <Icon name={step.icon} className="h-3.5 w-3.5" />
+              </span>
             }
-          >
-            <span
-              className={
-                "grid h-7 w-7 shrink-0 place-items-center rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] " +
-                (step.status === "danger"
-                  ? "text-[var(--v2-danger-text)]"
-                  : "text-[var(--v2-text-muted)]")
-              }
-            >
-              <Icon name={step.icon} className="h-3.5 w-3.5" />
-            </span>
-            <div className="min-w-0 flex-1 text-sm text-[var(--v2-text-strong)]">{step.title}</div>
-            <span className={mono}>{step.duration}</span>
-            <Badge tone={step.status} label={step.label} size="sm" />
-          </div>
+            title={<span className="font-normal">{step.title}</span>}
+            trailing={
+              <>
+                <span className={mono}>{step.duration}</span>
+                <Badge tone={step.status} label={step.label} size="sm" />
+              </>
+            }
+          />
         ))}
-        <Card variant="inset" radius="sm" padding="sm" className="mb-5 mt-2">
+      </div>
+      <div className="px-5 pb-5 pt-2 md:px-7">
+        <Card variant="inset" radius="sm" padding="sm">
           <div className="font-mono text-xs leading-5 text-[var(--v2-text-muted)]">
             SlackDeliveryError: token for #personal has expired.
             <br />
             Generate a new token in Settings → Connections, then retry.
           </div>
         </Card>
-      </CardBody>
+      </div>
       <CardFooter divider>
         <div className="flex items-center justify-between">
           <Button variant="ghost" size="sm">
@@ -359,7 +487,7 @@ export const RunDetail: Story = {
   ),
 };
 
-/* ── 4 · Activity — agent receipts feed ───────────────────────────── */
+/* ── 5 · Activity — agent receipts feed ───────────────────────────── */
 /* The Trust principle wearing UI: everything the agent did on its own,
    past tense + reason + escape hatch. */
 
@@ -403,28 +531,27 @@ export const ActivityFeed: Story = {
           <Badge tone="success" label="All reversible" size="sm" />
         </div>
       </CardHeader>
-      <CardBody className="!py-1">
-        {ACTIVITY.map((item, i) => (
-          <div
+      <div>
+        {ACTIVITY.map((item) => (
+          <ListRow
             key={item.text}
-            className={
-              "flex items-start gap-3 py-3.5" +
-              (i < ACTIVITY.length - 1 ? " border-b border-[var(--v2-panel-border)]" : "")
+            align="start"
+            truncateTitle={false}
+            leading={
+              <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
+                <Icon name={item.icon} className="h-3.5 w-3.5" />
+              </span>
             }
-          >
-            <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
-              <Icon name={item.icon} className="h-3.5 w-3.5" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm leading-6 text-[var(--v2-text-strong)]">{item.text}</p>
-              <span className={mono}>{item.time}</span>
-            </div>
-            <Button variant="ghost" size="sm" className="shrink-0">
-              {item.action}
-            </Button>
-          </div>
+            title={<span className="font-normal">{item.text}</span>}
+            meta={item.time}
+            trailing={
+              <Button variant="ghost" size="sm" className="shrink-0">
+                {item.action}
+              </Button>
+            }
+          />
         ))}
-      </CardBody>
+      </div>
       <CardFooter divider>
         <div className="flex items-center justify-between">
           <span className="text-xs text-[var(--v2-text-faint)]">
@@ -437,7 +564,7 @@ export const ActivityFeed: Story = {
   ),
 };
 
-/* ── 5 · Agent workspace — settings panel ─────────────────────────── */
+/* ── 6 · Agent workspace — settings panel ─────────────────────────── */
 
 export const WorkspaceSettings: Story = {
   name: "Workspace · Settings panel",
@@ -510,7 +637,7 @@ export const WorkspaceSettings: Story = {
   },
 };
 
-/* ── 6 · Automations — table card (fragment) ──────────────────────── */
+/* ── 7 · Automations — table card (fragment) ──────────────────────── */
 
 export const AutomationsTable: Story = {
   name: "Automations · Table card",
@@ -546,22 +673,7 @@ export const AutomationsTable: Story = {
             </div>
           </CardHeader>
           <div>
-            {AUTOMATION_ROWS.map((row) => (
-              <div
-                key={row.name}
-                className="flex items-center gap-4 border-b border-[var(--v2-panel-border)] px-5 py-3 last:border-b-0 hover:bg-[var(--v2-surface-soft)]"
-              >
-                <Checkbox aria-label={`Select ${row.name}`} />
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-[var(--v2-text-strong)]">{row.name}</div>
-                  <div className="text-xs text-[var(--v2-text-faint)]">{row.schedule}</div>
-                </div>
-                <Badge tone={row.status} label={row.label} />
-                <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${row.name}`}>
-                  <Icon name="more" className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
+            <AutomationRows />
           </div>
         </Card>
       </div>
@@ -569,7 +681,7 @@ export const AutomationsTable: Story = {
   },
 };
 
-/* ── 7 · Marketing — hero fragment ────────────────────────────────── */
+/* ── 8 · Marketing — hero fragment ────────────────────────────────── */
 
 export const MarketingHero: Story = {
   name: "Marketing · Hero fragment",
@@ -602,7 +714,7 @@ export const MarketingHero: Story = {
   ),
 };
 
-/* ── 8 · Onboarding — routine card ────────────────────────────────── */
+/* ── 9 · Onboarding — routine card ────────────────────────────────── */
 /* First-session magic moment: the agent already set the routine up.
    The card is a receipt with steering verbs, not a permission prompt. */
 
