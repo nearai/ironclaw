@@ -302,7 +302,6 @@ fn strip_test_module(contents: &str) -> &str {
 }
 
 const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
-    "available_extensions",
     "bundled_skills",
     "extension_activation_credentials",
     "extension_lifecycle",
@@ -317,11 +316,21 @@ const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
 ];
 
 const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
+    "active_publication",
+    "available_extension_import",
+    "available_extensions",
+    "channel_lifecycle",
     "channel_delivery",
     "channel_dm_targets",
     "extension_credential_requirements",
+    "first_party_package",
+    "host_api_contracts",
+    "install_policy",
+    "lifecycle_restore",
+    "lifecycle_vocabulary",
     "mcp",
     "mcp_discovery",
+    "nearai_mcp",
     "provider_instance_readiness",
     "reply_contexts",
 ];

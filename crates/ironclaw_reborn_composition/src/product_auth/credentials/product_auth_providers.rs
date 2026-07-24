@@ -176,7 +176,7 @@ pub(crate) fn compose_provider_client(
     first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
-        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes(
+        ironclaw_extension_host::AvailableExtensionCatalog::bundled_vendor_recipes(
             first_party_bundles,
         )
         .map_err(|error| RebornBuildError::InvalidConfig {

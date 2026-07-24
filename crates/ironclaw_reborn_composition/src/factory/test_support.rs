@@ -753,7 +753,7 @@ pub(crate) async fn active_extension_authority_for_test(
 
 #[cfg(feature = "test-support")]
 fn active_extension_grant_constraints_for_test(
-    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+    capability: &ironclaw_extension_host::ActiveExtensionCapability,
 ) -> GrantConstraints {
     GrantConstraints {
         allowed_effects: capability.effects.clone(),
@@ -776,7 +776,7 @@ fn active_extension_grant_constraints_for_test(
 
 #[cfg(feature = "test-support")]
 fn active_extension_network_policy_for_test(
-    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+    capability: &ironclaw_extension_host::ActiveExtensionCapability,
 ) -> NetworkPolicy {
     // Delegate to the production manifest-egress policy builder (gsuite +
     // web-access declare their egress in their manifests now — no per-provider

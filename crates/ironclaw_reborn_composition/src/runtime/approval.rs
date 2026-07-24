@@ -231,10 +231,10 @@ mod tests {
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
-    use crate::extension_host::extension_lifecycle::ActiveExtensionCapability;
     use crate::runtime::local_dev::extension_surface::{
         ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
+    use ironclaw_extension_host::ActiveExtensionCapability;
 
     use super::*;
 

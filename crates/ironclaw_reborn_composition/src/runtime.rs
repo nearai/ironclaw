@@ -106,12 +106,9 @@ use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
+use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
-use crate::extension_host::{
-    admin_configuration::ComposedAdminConfigurationService,
-    available_extensions::AdminConfigurationCatalogUse,
-};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
     ComposedToolPermissionOverrideStore, builtin_extension_registry,
@@ -130,6 +127,7 @@ use crate::outbound::{
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use ironclaw_extension_host::AdminConfigurationCatalogUse;
 use ironclaw_secrets::SecretStore;
 
 #[cfg(any(test, feature = "test-support"))]

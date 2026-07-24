@@ -83,7 +83,7 @@ use tower::ServiceExt;
 use ironclaw_extension_host::ExtensionHost;
 use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
 
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 use super::{
     ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,

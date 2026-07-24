@@ -59,22 +59,28 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "parse_product_adapter_manifest_record — the registry manifest compiler entry",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         3,
         ReparseCategory::BundledAsset,
         "bundled first-party package + filesystem-root catalog compile",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        3,
-        ReparseCategory::Compiler,
-        "install/activation-time compile of the installed manifest into its resolved record",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extension_import.rs",
+        "crates/ironclaw_extension_host/src/available_extension_import.rs",
         1,
         ReparseCategory::Compiler,
         "install-time compile of an imported (zip-uploaded) manifest into its resolved record",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
+        2,
+        ReparseCategory::Compiler,
+        "install/restore-time compile of the installed manifest into its resolved record",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
+        1,
+        ReparseCategory::Compiler,
+        "activation-time compile of the installed manifest into its resolved record",
     ),
 ];
 

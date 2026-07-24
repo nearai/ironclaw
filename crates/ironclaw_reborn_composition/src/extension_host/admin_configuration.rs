@@ -18,7 +18,7 @@ use ironclaw_product::{
 };
 use ironclaw_secrets::SecretStore;
 
-use crate::extension_host::available_extensions::AdminConfigurationCatalogUse;
+use ironclaw_extension_host::AdminConfigurationCatalogUse;
 
 pub(crate) type ComposedAdminConfigurationService =
     AdminConfigurationService<dyn RootFilesystem, dyn SecretStore>;

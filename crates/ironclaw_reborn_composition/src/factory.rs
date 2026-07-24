@@ -11,7 +11,6 @@ use crate::RebornProductAuthServicePorts;
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::deployment::TrafficPolicy;
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
 use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
@@ -19,11 +18,7 @@ use crate::extension_host::{
         extend_builtin_first_party_package as extend_builtin_admin_configuration_package,
         insert_handler as insert_admin_configuration_handler,
     },
-    available_extensions::{AdminConfigurationCatalogUse, AvailableExtensionCatalog},
-    extension_lifecycle::{
-        ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
-        restore_extension_lifecycle_state,
-    },
+    extension_lifecycle::{ExtensionCredentialCleanup, RebornLocalExtensionManagementPort},
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
@@ -80,9 +75,11 @@ use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
 };
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 use ironclaw_extension_host::{
-    AdminConfigurationService, FilesystemAdminConfigurationStore, ProviderInstanceReadinessInput,
-    hosted_http_mcp_runtime, provider_instance_readiness_map,
+    ActiveExtensionPublisher, AdminConfigurationCatalogUse, AdminConfigurationService,
+    AvailableExtensionCatalog, FilesystemAdminConfigurationStore, ProviderInstanceReadinessInput,
+    hosted_http_mcp_runtime, provider_instance_readiness_map, restore_extension_lifecycle_state,
 };
 use ironclaw_extension_host::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry};
 use ironclaw_extensions::{

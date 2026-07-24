@@ -22,7 +22,7 @@ use ironclaw_product::{LifecycleInstallScope, ProductSurfaceFailure};
 
 /// Derive who a NEW install belongs to (#5459 P1): the tenant operator
 /// installs for the whole tenant; anyone else installs for themselves.
-pub(super) fn derive_owner(caller: &UserId, tenant_operator: &UserId) -> InstallationOwner {
+pub fn derive_owner(caller: &UserId, tenant_operator: &UserId) -> InstallationOwner {
     if caller == tenant_operator {
         InstallationOwner::Tenant
     } else {
@@ -36,7 +36,7 @@ pub(super) fn derive_owner(caller: &UserId, tenant_operator: &UserId) -> Install
 /// The error is deliberately the same "is not installed" shape a missing
 /// installation produces, so a non-member cannot distinguish (or enumerate)
 /// tools other users hold.
-pub(super) fn ensure_caller_may_operate(
+pub fn ensure_caller_may_operate(
     installation: &ExtensionInstallation,
     caller: &UserId,
 ) -> Result<(), ProductSurfaceFailure> {
@@ -55,7 +55,7 @@ pub(super) fn ensure_caller_may_operate(
 /// exists. `Err` is always "already installed": under membership the
 /// outcome of installing never depends on whether OTHER users hold the
 /// tool, so there is no ownership state left to mask on this path.
-pub(super) fn decide_install_on_existing(
+pub fn decide_install_on_existing(
     extension_id: &ironclaw_host_api::ExtensionId,
     existing_owner: &InstallationOwner,
     caller: &UserId,
@@ -91,7 +91,7 @@ pub(super) fn decide_install_on_existing(
 }
 
 /// What a member's remove does to the installation row.
-pub(super) enum RemoveDecision {
+pub enum RemoveDecision {
     /// Other members still hold the tool: the caller leaves the member set
     /// in a single row rewrite; no teardown.
     LeaveMembers(InstallationOwner),
@@ -103,7 +103,7 @@ pub(super) enum RemoveDecision {
 /// Membership rules for removing an installation the caller may operate
 /// (callers must pass [`ensure_caller_may_operate`] first; tenant rows are
 /// additionally operator-only to remove, enforced by the parent module).
-pub(super) fn decide_remove(
+pub fn decide_remove(
     existing_owner: &InstallationOwner,
     caller: &UserId,
 ) -> Result<RemoveDecision, ProductSurfaceFailure> {
@@ -133,7 +133,7 @@ pub(super) fn decide_remove(
 /// Settings/list projection of an installation owner (#5459 P1). Rows are
 /// caller-filtered before projection, so a member-held row shown to a
 /// viewer is by construction one they hold — "mine".
-pub(super) fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallScope {
+pub fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallScope {
     match owner {
         InstallationOwner::Tenant => LifecycleInstallScope::Shared,
         InstallationOwner::Users { .. } => LifecycleInstallScope::Private,

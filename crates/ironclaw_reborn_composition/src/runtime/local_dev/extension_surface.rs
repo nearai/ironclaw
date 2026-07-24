@@ -1,15 +1,14 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
+use ironclaw_extension_host::ActiveExtensionCapability;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind, ExtensionId, GrantConstraints,
     MountView, NetworkPolicy, Principal,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-use crate::extension_host::extension_lifecycle::{
-    ActiveExtensionCapability, RebornLocalExtensionManagementPort,
-};
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product::ProductSurfaceFailure;
 
 #[derive(Clone, Default)]

@@ -31,7 +31,7 @@ use ironclaw_product::{
 use std::time::Duration;
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 #[tokio::test]
 async fn operator_tool_catalog_reads_shared_registry_updates() {
@@ -84,7 +84,7 @@ async fn operator_tool_catalog_reads_shared_registry_updates() {
 /// the confirmed enumeration/metadata-disclosure blocker.
 #[tokio::test]
 async fn operator_tool_catalog_hides_foreign_private_tools() {
-    use crate::extension_host::available_extensions::AvailableExtensionCatalog;
+    use ironclaw_extension_host::AvailableExtensionCatalog;
     use ironclaw_extensions::{ExtensionLifecycleService, ExtensionManifestRef};
     use tokio::sync::Mutex;
 
@@ -171,7 +171,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
         Arc::new(Mutex::new(ExtensionLifecycleService::new(
             ExtensionRegistry::new(),
         ))),
-        crate::extension_host::extension_lifecycle::ActiveExtensionPublisher::new(
+        ironclaw_extension_host::ActiveExtensionPublisher::new(
             Arc::clone(&registry),
             trust_policy,
             Arc::new(ironclaw_trust::InvalidationBus::new()),

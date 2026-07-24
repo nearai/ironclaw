@@ -13,58 +13,13 @@
 use std::sync::Arc;
 
 use ironclaw_auth::{CredentialAccountRecordSource, CredentialAccountService};
-use ironclaw_host_api::{EffectKind, HostApiError};
+pub(crate) use ironclaw_extension_host::first_party_reserved_extension_ids;
+pub use ironclaw_extension_host::{
+    FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOAuthSetup,
+    FirstPartyPackageOnboarding,
+};
+use ironclaw_host_api::HostApiError;
 use ironclaw_host_runtime::{FirstPartyCapabilityRegistry, ProductAuthProviderRuntimePorts};
-
-/// Byte content of one asset shipped inside a first-party package.
-#[derive(Debug, Clone)]
-pub struct FirstPartyPackageAsset {
-    pub path: String,
-    pub bytes: Vec<u8>,
-}
-
-/// A package's user-facing onboarding copy, carried as plain data (mirrors
-/// `ironclaw_first_party_extensions::packages::PackageOnboarding`).
-#[derive(Debug, Clone)]
-pub struct FirstPartyPackageOnboarding {
-    pub instructions: String,
-    pub credential_instructions: Option<String>,
-    pub setup_url: Option<String>,
-    pub credential_next_step: String,
-}
-
-/// A bespoke OAuth-*setup* credential requirement replacing the manifest-derived
-/// one (mirrors `ironclaw_first_party_extensions::packages::PackageOAuthSetup`).
-#[derive(Debug, Clone)]
-pub struct FirstPartyPackageOAuthSetup {
-    pub requirement_name: String,
-    pub provider: String,
-    pub scopes: Vec<String>,
-}
-
-/// An opaque, data-only first-party package the binary hands composition. Host
-/// code consumes this without naming the concrete package; the concrete
-/// identity lives only in the injecting binary.
-#[derive(Debug, Clone)]
-pub struct FirstPartyPackageBundle {
-    pub id: String,
-    pub display_name: String,
-    pub manifest_toml: String,
-    pub assets: Vec<FirstPartyPackageAsset>,
-    /// Bespoke onboarding copy, `None` for packages that need no setup guidance.
-    pub onboarding: Option<FirstPartyPackageOnboarding>,
-    /// A bespoke OAuth-setup credential requirement replacing the
-    /// manifest-derived one, `None` when the derived requirement is correct.
-    pub oauth_setup: Option<FirstPartyPackageOAuthSetup>,
-    /// Host authority effects this package is granted in the built-in trust
-    /// policy (defense in depth; not derived from the manifest). `None` for
-    /// packages whose trust comes from the WASM extension registry.
-    pub trust_effects: Option<Vec<EffectKind>>,
-    /// Extra catalog search aliases folded in by the injecting binary (e.g. the
-    /// GSuite family's "google"/"workspace" terms), so composition search does
-    /// not special-case any concrete id.
-    pub search_aliases: Vec<String>,
-}
 
 /// The context composition supplies to each [`FirstPartyHandlerRegistrar`] so
 /// the binary-owned registrar can build its concrete executor wrappers with the
@@ -88,16 +43,6 @@ pub trait FirstPartyHandlerRegistrar: Send + Sync {
         registry: &mut FirstPartyCapabilityRegistry,
         context: &FirstPartyRegistrarContext,
     ) -> Result<(), HostApiError>;
-}
-
-/// The reserved host-bundled extension ids contributed by the injected first
-/// party bundle set: a filesystem/uploaded extension must never shadow one of
-/// these ids. The NEAR AI host-managed extension id is reserved separately by
-/// the catalog (it is not part of the injected inventory).
-pub(crate) fn first_party_reserved_extension_ids(
-    bundles: &[FirstPartyPackageBundle],
-) -> Vec<String> {
-    bundles.iter().map(|bundle| bundle.id.clone()).collect()
 }
 
 /// Convert the concrete `ironclaw_first_party_extensions` package inventory into

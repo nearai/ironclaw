@@ -1,23 +1,23 @@
 use std::sync::Arc;
 
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extensions::{
+    ExtensionError, ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry,
+};
 use ironclaw_host_api::{EffectKind, PackageSource};
 use ironclaw_product::ProductSurfaceFailure;
 use ironclaw_trust::{
     AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus, TrustError,
 };
 
-use super::{compensation_failure, map_extension_error};
-
 #[derive(Clone)]
-pub(crate) struct ActiveExtensionPublisher {
+pub struct ActiveExtensionPublisher {
     active_registry: Arc<SharedExtensionRegistry>,
     trust_policy: Arc<HostTrustPolicy>,
     trust_invalidation_bus: Arc<InvalidationBus>,
 }
 
 impl ActiveExtensionPublisher {
-    pub(crate) fn new(
+    pub fn new(
         active_registry: Arc<SharedExtensionRegistry>,
         trust_policy: Arc<HostTrustPolicy>,
         trust_invalidation_bus: Arc<InvalidationBus>,
@@ -29,11 +29,11 @@ impl ActiveExtensionPublisher {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Arc<ExtensionRegistry> {
+    pub fn snapshot(&self) -> Arc<ExtensionRegistry> {
         self.active_registry.snapshot()
     }
 
-    pub(crate) fn publish(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+    pub fn publish(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
         self.upsert_trust_policy(package)?;
         if let Err(error) = self
             .active_registry
@@ -52,10 +52,7 @@ impl ActiveExtensionPublisher {
         Ok(())
     }
 
-    pub(crate) fn unpublish(
-        &self,
-        package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    pub fn unpublish(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
         self.remove_trust_policy(package)?;
         self.active_registry.remove(&package.id);
         Ok(())
@@ -106,7 +103,7 @@ impl ActiveExtensionPublisher {
     }
 }
 
-pub(crate) fn extension_trust_policy_input(
+pub fn extension_trust_policy_input(
     package: &ExtensionPackage,
 ) -> Result<ironclaw_trust::TrustPolicyInput, ProductSurfaceFailure> {
     package
@@ -146,5 +143,30 @@ fn extension_allowed_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
 fn map_trust_policy_error(error: TrustError) -> ProductSurfaceFailure {
     ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("extension trust policy update failed: {error}"),
+    }
+}
+
+fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
+    match error {
+        ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
+            ProductSurfaceFailure::Transient {
+                reason: error.to_string(),
+            }
+        }
+        _ => ProductSurfaceFailure::InvalidBindingRequest {
+            reason: error.to_string(),
+        },
+    }
+}
+
+fn compensation_failure(
+    context: &str,
+    original: impl std::fmt::Display,
+    compensation: impl std::fmt::Display,
+) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::Transient {
+        reason: format!(
+            "{context}; original error: {original}; compensation error: {compensation}"
+        ),
     }
 }

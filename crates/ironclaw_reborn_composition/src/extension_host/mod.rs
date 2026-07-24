@@ -11,8 +11,6 @@
 
 pub(crate) mod admin_configuration;
 pub(crate) mod admin_configuration_capability;
-pub(crate) mod available_extension_import;
-pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
 pub(crate) mod channel_connection;
 pub(crate) mod channel_dm_provisioning;
@@ -31,7 +29,6 @@ pub(crate) mod extension_lifecycle_capabilities;
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
 pub(crate) mod first_party;
-pub(crate) mod host_api_contracts;
 #[cfg(test)]
 mod host_remediation_contract_tests;
 pub(crate) mod lifecycle;
@@ -54,7 +51,7 @@ pub(crate) async fn filesystem_installation_store_for_test()
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
         HostPortCatalog::empty(),
-        host_api_contracts::product_extension_host_api_contract_registry()
+        ironclaw_extension_host::product_extension_host_api_contract_registry()
             .expect("extension host API contracts"),
     )
     .await

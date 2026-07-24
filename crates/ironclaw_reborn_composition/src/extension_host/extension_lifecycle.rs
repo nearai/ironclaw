@@ -12,30 +12,26 @@ use ironclaw_auth::{
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, InstallationOwner,
+    canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    InstallationState, NetworkTargetPattern, PermissionMode, ProductSurfaceCaller,
-    ProductSurfaceError, ResourceScope, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
-    VendorId, VirtualPath, sha256_digest_token,
+    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
+    ProductSurfaceError, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    UserId, VendorId, VirtualPath,
 };
-use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product::{
-    ChannelConnectionRequirement, ChannelConnectionService, ExtensionAccountSetupDescriptor,
-    ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductSurfaceFailure,
-    RebornChannelConnectStrategy,
+    ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    LifecycleSearchExtensionSummary, ProductSurfaceFailure, RebornChannelConnectStrategy,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::RebornProductAuthServices;
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
@@ -80,35 +76,35 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
     }
 }
 
-mod active_publication;
 #[cfg(test)]
 pub(crate) mod hosted_mcp_test_support;
-mod install_policy;
 
-use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
-    materialize_available_extension, visible_capability_ids,
-};
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
     RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_host::lifecycle::response_with_payload;
+use ironclaw_extension_host::{
+    ActiveExtensionCapability, AvailableExtensionCatalog, AvailableExtensionPackage,
+    ExtensionActivationMode, ExtensionInstallPlan, imported_extension_package,
+    materialize_available_extension, package_visible_capability_ids, prepare_install,
+    visible_capability_ids,
+};
 use ironclaw_extension_host::{ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry};
 use ironclaw_extension_host::{
-    HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
-    manifest_runtime_credential_auth_requirements, package_runtime_credential_auth_requirements,
+    HostedMcpDiscoveryError, channel_connect_strategy, channel_connection_requirement,
+    discover_hosted_mcp_package, is_hosted_http_mcp_package,
+    manifest_runtime_credential_auth_requirements, package_declares_inbound_product_adapter,
+    package_runtime_credential_auth_requirements,
 };
 
-pub(crate) use active_publication::ActiveExtensionPublisher;
+use ironclaw_extension_host::ActiveExtensionPublisher;
 #[cfg(test)]
-use active_publication::extension_trust_policy_input;
-use install_policy::{
+use ironclaw_extension_host::extension_trust_policy_input;
+use ironclaw_extension_host::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,
 };
-
-const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
@@ -199,199 +195,6 @@ pub(crate) struct RebornLocalExtensionManagementPort {
 /// memory at 128 MiB; imports are a rare admin-only operation, so waiting is
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ActiveExtensionCapability {
-    pub(crate) id: CapabilityId,
-    pub(crate) provider: ExtensionId,
-    pub(crate) effects: Vec<EffectKind>,
-    pub(crate) default_permission: PermissionMode,
-    pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
-    /// Manifest-declared network egress allowlist, independent of credentials.
-    pub(crate) network_targets: Vec<NetworkTargetPattern>,
-    /// Manifest-declared per-capability egress cap (bytes), applied to the
-    /// minted `NetworkPolicy.max_egress_bytes`. `None` = no cap.
-    pub(crate) max_egress_bytes: Option<u64>,
-    /// Who the providing extension's installation belongs to (#5459 P1).
-    /// Tenant-owned capabilities are grant-minted for every user; user-owned
-    /// ones only for their owner (filtered in `ExtensionCapabilitySurface`).
-    pub(crate) owner: InstallationOwner,
-}
-
-#[derive(Clone)]
-pub(crate) enum ExtensionActivationMode {
-    Static,
-    HostedMcpDiscovery {
-        scope: ResourceScope,
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    },
-}
-
-impl ActiveExtensionCapability {
-    fn from_descriptor(descriptor: &CapabilityDescriptor, owner: InstallationOwner) -> Self {
-        Self {
-            id: descriptor.id.clone(),
-            provider: descriptor.provider.clone(),
-            effects: descriptor.effects.clone(),
-            default_permission: descriptor.default_permission,
-            runtime_credentials: descriptor.runtime_credentials.clone(),
-            network_targets: descriptor.network_targets.clone(),
-            max_egress_bytes: descriptor.max_egress_bytes,
-            owner,
-        }
-    }
-}
-
-impl ExtensionActivationMode {
-    pub(crate) fn from_dispatch_context(
-        scope: ResourceScope,
-        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    ) -> Self {
-        match runtime_http_egress {
-            Some(runtime_http_egress) => Self::HostedMcpDiscovery {
-                scope,
-                runtime_http_egress,
-            },
-            None => Self::Static,
-        }
-    }
-}
-
-pub(crate) async fn restore_extension_lifecycle_state(
-    catalog: &AvailableExtensionCatalog,
-    filesystem: &Arc<dyn RootFilesystem>,
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
-    lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
-    active_extensions: &ActiveExtensionPublisher,
-) -> Result<(), ProductSurfaceFailure> {
-    for installation in canonicalize_persisted_installation_rows(installation_store).await? {
-        if remove_retired_internal_installation(installation_store, &installation).await? {
-            continue;
-        }
-        let package_ref = LifecyclePackageRef::new(
-            LifecyclePackageKind::Extension,
-            installation.extension_id().as_str(),
-        )?;
-        // A row whose extension id the catalog does not (yet) materialize a
-        // package for — e.g. a placeholder row written by the standalone
-        // v1->Reborn migration tool ahead of catalog package materialization
-        // — must not abort restore for every other installation (#5499
-        // review). `resolve`'s only realistic failure here is "not found";
-        // skip and keep the row (never delete/rewrite persisted state) so it
-        // restores once the catalog gains the package.
-        let available = match catalog.resolve(&package_ref) {
-            Ok(available) => available,
-            Err(error) => {
-                tracing::warn!(
-                    extension_id = installation.extension_id().as_str(),
-                    installation_id = installation.installation_id().as_str(),
-                    %error,
-                    "skipping extension installation restore: not available in the catalog"
-                );
-                continue;
-            }
-        };
-        if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
-            migrate_host_bundled_manifest_hash(
-                installation_store,
-                &available,
-                &installation,
-                hash_error,
-            )
-            .await?;
-        }
-        materialize_available_extension(filesystem.as_ref(), &available).await?;
-        {
-            let mut lifecycle = lifecycle_service.lock().await;
-            lifecycle
-                .install(available.package.clone())
-                .await
-                .map_err(map_extension_error)?;
-            match installation.activation_state() {
-                ExtensionActivationState::Enabled => {
-                    lifecycle
-                        .enable(&available.package.id)
-                        .await
-                        .map_err(map_extension_error)?;
-                }
-                ExtensionActivationState::Installed | ExtensionActivationState::Disabled => {
-                    lifecycle
-                        .disable(&available.package.id)
-                        .await
-                        .map_err(map_extension_error)?;
-                }
-            }
-        }
-        if installation.activation_state() == ExtensionActivationState::Enabled {
-            active_extensions.publish(&available.package)?;
-        }
-    }
-    Ok(())
-}
-
-async fn canonicalize_persisted_installation_rows(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
-) -> Result<Vec<ExtensionInstallation>, ProductSurfaceFailure> {
-    let persisted = installation_store
-        .list_installations()
-        .await
-        .map_err(map_extension_installation_error)?;
-    let canonical = canonicalize_installation_rows(persisted.clone())
-        .map_err(map_extension_installation_error)?;
-    if persisted == canonical {
-        return Ok(canonical);
-    }
-
-    for installation in &canonical {
-        installation_store
-            .upsert_installation(installation.clone())
-            .await
-            .map_err(map_extension_installation_error)?;
-    }
-
-    let canonical_ids = canonical
-        .iter()
-        .map(|installation| installation.installation_id().clone())
-        .collect::<BTreeSet<_>>();
-    for installation in persisted {
-        if canonical_ids.contains(installation.installation_id()) {
-            continue;
-        }
-        installation_store
-            .delete_installation(installation.installation_id())
-            .await
-            .map_err(map_extension_installation_error)?;
-    }
-
-    Ok(canonical)
-}
-
-async fn remove_retired_internal_installation(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
-    installation: &ExtensionInstallation,
-) -> Result<bool, ProductSurfaceFailure> {
-    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
-        return Ok(false);
-    }
-
-    tracing::info!(
-        extension_id = installation.extension_id().as_str(),
-        installation_id = installation.installation_id().as_str(),
-        "removing retired internal extension installation during lifecycle restore"
-    );
-    installation_store
-        .delete_installation(installation.installation_id())
-        .await
-        .map_err(map_extension_installation_error)?;
-    match installation_store
-        .delete_manifest(installation.extension_id())
-        .await
-    {
-        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
-        Err(error) => return Err(map_extension_installation_error(error)),
-    }
-    Ok(true)
-}
 
 impl RebornLocalExtensionManagementPort {
     pub(crate) fn new(
@@ -2631,165 +2434,6 @@ struct HostedMcpDiscoveryRequest {
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 }
 
-struct ExtensionInstallPlan {
-    manifest_record: ExtensionManifestRecord,
-    installation: ExtensionInstallation,
-}
-
-fn prepare_install(
-    available: &AvailableExtensionPackage,
-    owner: InstallationOwner,
-) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
-    let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected extension install: {error}"),
-        }
-    })?;
-    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host API contract registry rejected extension install: {error}"),
-        }
-    })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
-        &host_ports,
-        Some(manifest_hash.clone()),
-        &contracts,
-    )
-    .map_err(map_extension_installation_error)?
-    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
-    let installation_id = ExtensionInstallationId::new(available.package.id.as_str().to_string())
-        .map_err(map_extension_installation_error)?;
-    let installation = ExtensionInstallation::new(
-        installation_id,
-        available.package.id.clone(),
-        ExtensionActivationState::Installed,
-        ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
-        Vec::new(),
-        chrono::Utc::now(),
-        owner,
-    )
-    .map_err(map_extension_installation_error)?;
-    Ok(ExtensionInstallPlan {
-        manifest_record,
-        installation,
-    })
-}
-
-/// Build an [`ExtensionInstallPlan`] that carries the new manifest hash from `available`
-/// while preserving the activation state and credential bindings from `existing`.
-/// Used during restore to migrate a stored installation when the bundled manifest changes.
-fn prepare_manifest_migration(
-    available: &AvailableExtensionPackage,
-    existing: &ExtensionInstallation,
-) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
-    let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected manifest migration: {error}"),
-        }
-    })?;
-    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
-            reason: format!("host API contract registry rejected manifest migration: {error}"),
-        }
-    })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
-        &host_ports,
-        Some(manifest_hash.clone()),
-        &contracts,
-    )
-    .map_err(map_extension_installation_error)?
-    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
-    let installation = ExtensionInstallation::new(
-        existing.installation_id().clone(),
-        existing.extension_id().clone(),
-        existing.activation_state(),
-        ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
-        existing.credential_bindings().to_vec(),
-        chrono::Utc::now(),
-        // Manifest migration preserves ownership — it changes the manifest
-        // hash, never who the installation belongs to.
-        existing.owner().clone(),
-    )
-    .map_err(map_extension_installation_error)?;
-    Ok(ExtensionInstallPlan {
-        manifest_record,
-        installation,
-    })
-}
-
-async fn migrate_host_bundled_manifest_hash(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
-    available: &AvailableExtensionPackage,
-    installation: &ExtensionInstallation,
-    hash_error: ProductSurfaceFailure,
-) -> Result<(), ProductSurfaceFailure> {
-    let stored_manifest = match installation_store
-        .get_manifest(installation.extension_id())
-        .await
-        .map_err(map_extension_installation_error)?
-    {
-        Some(stored_manifest) => stored_manifest,
-        None => return Err(hash_error),
-    };
-    if stored_manifest.manifest().source != ManifestSource::HostBundled {
-        return Err(hash_error);
-    }
-
-    // For host-bundled (first-party) extensions, a manifest hash mismatch means
-    // the binary was updated and the bundled manifest changed. Migrate the stored
-    // records to the new hash while preserving activation state and bindings.
-    tracing::warn!(
-        extension_id = %installation.extension_id(),
-        "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
-    );
-    let migration_plan = prepare_manifest_migration(available, installation)?;
-    installation_store
-        .upsert_manifest_and_installation(
-            migration_plan.manifest_record,
-            migration_plan.installation,
-        )
-        .await
-        .map_err(map_extension_installation_error)
-}
-
-fn validate_restored_manifest_hash(
-    installation: &ExtensionInstallation,
-    available: &AvailableExtensionPackage,
-) -> Result<(), ProductSurfaceFailure> {
-    let manifest_hash = available_manifest_hash(available)?;
-    match installation.manifest_ref().manifest_hash() {
-        Some(installed_hash) if installed_hash == &manifest_hash => Ok(()),
-        _ => Err(map_extension_installation_error(
-            ExtensionInstallationError::ManifestHashMismatch {
-                extension_id: installation.extension_id().clone(),
-            },
-        )),
-    }
-}
-
-fn available_manifest_hash(
-    available: &AvailableExtensionPackage,
-) -> Result<ManifestHash, ProductSurfaceFailure> {
-    ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
-        .map_err(map_extension_installation_error)
-}
-
-fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
-    package
-        .manifest
-        .capabilities
-        .iter()
-        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
-        .map(|capability| capability.id.as_str().to_string())
-        .collect()
-}
-
 fn activation_success_response(
     package_ref: LifecyclePackageRef,
     package: &ExtensionPackage,
@@ -2959,81 +2603,6 @@ fn map_channel_config_error(
     }
 }
 
-/// The connect strategy for a channel surface, derived from the manifest's
-/// declared auth setup: OAuth when the extension declares an OAuth credential
-/// requirement, otherwise the generic inbound proof-code pairing. There is no
-/// per-extension branch — the manifest is the only input (DEL-4).
-pub(crate) fn channel_connect_strategy(package: &ExtensionPackage) -> RebornChannelConnectStrategy {
-    let uses_oauth = package_runtime_credential_auth_requirements(package)
-        .iter()
-        .any(|requirement| {
-            matches!(
-                requirement.setup,
-                RuntimeCredentialAccountSetup::OAuth { .. }
-            )
-        });
-    if uses_oauth {
-        RebornChannelConnectStrategy::OAuth
-    } else {
-        RebornChannelConnectStrategy::InboundProofCode
-    }
-}
-
-/// The structured connect affordance for a channel surface. Copy is generated
-/// generically from the manifest display name and the derived strategy — no
-/// per-extension branch and no inline vendor copy (DEL-4); the S5 `display_name`
-/// rides the wire so the frontend never re-derives a label from the channel id.
-pub(crate) fn channel_connection_requirement(
-    channel_id: &str,
-    display_name: &str,
-    strategy: RebornChannelConnectStrategy,
-    account_setup: Option<&ExtensionAccountSetupDescriptor>,
-) -> ChannelConnectionRequirement {
-    // An extension-owned account-setup declaration is the authority for its
-    // connect affordance; the generic derivation below is the fallback for
-    // extensions without one.
-    if let Some(setup) = account_setup {
-        return setup.connection_requirement.clone();
-    }
-    let (instructions, input_placeholder, submit_label, error_message) = match strategy {
-        RebornChannelConnectStrategy::OAuth => (
-            format!(
-                "Connect {display_name} with OAuth from the extension configuration, then \
-                 message {display_name} directly."
-            ),
-            String::new(),
-            format!("Connect {display_name}"),
-            format!(
-                "{display_name} OAuth connection failed. Try configuring {display_name} again."
-            ),
-        ),
-        RebornChannelConnectStrategy::InboundProofCode
-        | RebornChannelConnectStrategy::WebGeneratedCode
-        | RebornChannelConnectStrategy::QrCode
-        | RebornChannelConnectStrategy::AdminManagedChannels => (
-            format!("Open {display_name}'s app or bot, get the pairing code, and paste it here."),
-            "Enter pairing code".to_string(),
-            "Connect".to_string(),
-            "Pairing failed. Check the code and try again.".to_string(),
-        ),
-    };
-    ChannelConnectionRequirement {
-        channel: channel_id.to_string(),
-        display_name: display_name.to_string(),
-        strategy,
-        instructions,
-        input_placeholder,
-        submit_label,
-        error_message,
-    }
-}
-
-fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool {
-    package.manifest.host_apis.iter().any(|host_api| {
-        host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID
-            && host_api.section.as_str() == "product_adapter.inbound"
-    })
-}
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductSurfaceFailure> {
@@ -3359,26 +2928,28 @@ mod tests {
 
     use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
-    use crate::extension_host::available_extensions::{
+    use async_trait::async_trait;
+    use ironclaw_extension_host::{
         AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
     };
-    use async_trait::async_trait;
     use ironclaw_extension_host::{
         ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter,
         ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
         ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry,
         ExtensionRemovalCleanupRequirement,
     };
+    use ironclaw_extension_host::{available_manifest_hash, restore_extension_lifecycle_state};
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
-        ExtensionManifest, ExtensionRegistry, FilesystemExtensionInstallationStore,
+        ExtensionManifest, ExtensionManifestRef, ExtensionRegistry,
+        FilesystemExtensionInstallationStore, ManifestHash, ManifestSource,
         SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
         DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend,
     };
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
+        AgentId, CapabilityId, EffectKind, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
         InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
         ProductSurfaceErrorCode, ProjectId, ResourceScope, RuntimeCredentialAccountSetup,
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -3700,9 +3271,8 @@ mod tests {
         // fixture — even one named "slack" — resolves to the generic
         // proof-code pairing. That asymmetry is exactly what proves no name
         // hardcode survives (the retired branch keyed OAuth off `id == "slack"`).
-        let catalog =
-            crate::extension_host::available_extensions::AvailableExtensionCatalog::from_first_party_assets()
-                .expect("first-party catalog");
+        let catalog = ironclaw_extension_host::AvailableExtensionCatalog::from_first_party_assets()
+            .expect("first-party catalog");
         let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .expect("slack package ref");
         let slack = catalog.resolve(&slack_ref).expect("slack package");
@@ -6292,10 +5862,8 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn restore_removes_retired_slack_user_installation_without_catalog_entry() {
         let installation_store = Arc::new(filesystem_installation_store());
-        let extension_id =
-            ExtensionId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid extension id");
-        let installation_id =
-            ExtensionInstallationId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid install");
+        let extension_id = ExtensionId::new("slack_user").expect("valid extension id");
+        let installation_id = ExtensionInstallationId::new("slack_user").expect("valid install");
         let manifest_hash = "sha256:retired-slack-user".to_string();
         installation_store
             .upsert_manifest(fixture_manifest_record_with_source(
@@ -6969,7 +6537,7 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect_err("foreign private credentialed install must be inoperable");
         assert!(
-            error.to_string().contains("is not installed"),
+            error.code == ProductSurfaceErrorCode::InvalidRequest,
             "ownership must mask before the credential preflight: {error}"
         );
     }

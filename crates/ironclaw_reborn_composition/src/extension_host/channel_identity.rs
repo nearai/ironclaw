@@ -403,7 +403,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+    use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
     /// An invented channel + auth extension: the vendor id is `acmechat`,
     /// the channel config declares two non-secret scoping fields keyed by

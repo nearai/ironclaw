@@ -8,21 +8,19 @@ use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use crate::product_extension_host_api_contract_registry;
 
-use super::available_extensions::{
+use crate::available_extensions::{
     AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
     bytes_asset, map_binding_error, reserved_host_bundled_extension_id,
     surface_kinds_from_manifest_record,
 };
-use ironclaw_extension_host::{
-    MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
-};
+use crate::{MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES};
 
 /// Write a catalog package's inline assets to its stable extension root. The
 /// same path is used by restore and upload import, so catalog entries remain
 /// self-contained after a remove deletes the materialized directory.
-pub(crate) async fn materialize_available_extension<F>(
+pub async fn materialize_available_extension<F>(
     fs: &F,
     extension: &AvailableExtensionPackage,
 ) -> Result<(), ProductSurfaceFailure>
@@ -69,7 +67,7 @@ where
     }
 }
 
-pub(crate) fn extension_asset_path(
+pub fn extension_asset_path(
     extension_id: &ExtensionId,
     asset_path: &str,
 ) -> Result<VirtualPath, ProductSurfaceFailure> {
@@ -85,7 +83,7 @@ pub(crate) fn extension_asset_path(
 /// so filesystem discovery produces the same self-contained package shape as
 /// a fresh import. Apply the upload limits here too: restart discovery must
 /// not silently admit an extension directory that the upload boundary rejects.
-pub(crate) async fn inline_extension_dir_assets<F>(
+pub async fn inline_extension_dir_assets<F>(
     fs: &F,
     root: &VirtualPath,
 ) -> Result<Vec<AvailableExtensionAsset>, ProductSurfaceFailure>
@@ -151,7 +149,7 @@ where
 /// validation, runtime restrictions, declared-asset completeness, and WASI
 /// component validation all belong to this import boundary; lifecycle only
 /// coordinates the bounded decode and subsequent catalog/filesystem writes.
-pub(crate) fn imported_extension_package(
+pub fn imported_extension_package(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
 ) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
@@ -285,9 +283,7 @@ mod tests {
     use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::RuntimeKind;
 
-    use crate::extension_host::available_extensions::{
-        AvailableExtensionAssetContent, AvailableExtensionCatalog,
-    };
+    use crate::{AvailableExtensionAssetContent, AvailableExtensionCatalog};
 
     #[tokio::test]
     async fn filesystem_catalog_loads_manifest_and_runtime_assets() {
@@ -606,15 +602,15 @@ prompt_doc_ref = "prompts/run.md"
         for (label, manifest) in [
             (
                 "market-data",
-                include_str!("../../../../test-tools/market-data/manifest.toml"),
+                include_str!("../../../test-tools/market-data/manifest.toml"),
             ),
             (
                 "hacker-news",
-                include_str!("../../../../test-tools/hacker-news/manifest.toml"),
+                include_str!("../../../test-tools/hacker-news/manifest.toml"),
             ),
             (
                 "ascii-renderer",
-                include_str!("../../../../test-tools/ascii-renderer/manifest.toml"),
+                include_str!("../../../test-tools/ascii-renderer/manifest.toml"),
             ),
         ] {
             let host_ports =
@@ -670,11 +666,9 @@ prompt_doc_ref = "prompts/run.md"
         let error = imported_extension_package(
             vec![(
                 "manifest.toml".to_string(),
-                include_str!(
-                    "../../../ironclaw_first_party_extensions/assets/github/manifest.toml"
-                )
-                .as_bytes()
-                .to_vec(),
+                include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml")
+                    .as_bytes()
+                    .to_vec(),
             )],
             &[],
         )

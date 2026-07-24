@@ -412,7 +412,7 @@ impl RebornLocalLifecycleService {
                     };
                     let scope = lifecycle_resource_scope(&context)?;
                     let mode =
-                        crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
+                        ironclaw_extension_host::ExtensionActivationMode::HostedMcpDiscovery {
                             scope,
                             runtime_http_egress,
                         };
@@ -434,8 +434,7 @@ impl RebornLocalLifecycleService {
                         }
                     };
                 }
-                let mode =
-                    crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static;
+                let mode = ironclaw_extension_host::ExtensionActivationMode::Static;
                 match credential_gate {
                     Some(credential_gate) => {
                         extension_management

@@ -523,7 +523,7 @@ mod tests {
     use ironclaw_product::AdapterInstallationId;
 
     use super::*;
-    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+    use ironclaw_extension_host::product_extension_host_api_contract_registry;
     use ironclaw_host_api::{
         RebornUserIdentityBindingError, RebornUserIdentityLookupError,
         installation_scoped_provider_user_id,

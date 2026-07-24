@@ -1127,7 +1127,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google-calendar",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         "google",
     ),
     (
@@ -1149,17 +1149,33 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
         "web-access",
     ),
-    // lane-4: nearai-slice — the last catalog package (nearai_mcp) still assembled in composition because [mcp].server is patched from llm_admin config; DEFERRED — finish per the handoff (move static data to first_party_extensions::packages::nearai_mcp, inject the URL through the with_channel_extension_bindings-style seam)
+    // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
+    // patched from LLM-admin bootstrap config; it now lives with the generic
+    // available-extension catalog in ironclaw_extension_host.
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai-mcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai_mcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
+        "nearaimcp",
+    ),
+    ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
+    ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
+    (
+        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/nearai_mcp.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearaimcp",
     ),
     (

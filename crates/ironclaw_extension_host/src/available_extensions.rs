@@ -18,23 +18,23 @@ use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::sync::Arc;
 use toml::Value;
 
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
-use crate::llm_admin::nearai_mcp::{
+use crate::ExtensionRemovalCleanupRequirement;
+use crate::product_extension_host_api_contract_registry;
+use crate::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
-use ironclaw_extension_host::ExtensionRemovalCleanupRequirement;
-use ironclaw_extension_host::{
-    can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
-    product_auth_credential_source,
+use crate::{
+    can_merge_lifecycle_credential_setup, channel_connect_strategy, channel_connection_requirement,
+    merge_lifecycle_credential_setup, product_auth_credential_source,
 };
 
-pub(crate) use super::available_extension_import::{
+pub use crate::available_extension_import::{
     imported_extension_package, inline_extension_dir_assets, materialize_available_extension,
 };
 
 const NEARAI_MCP_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
+    include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +63,9 @@ impl HostManagedCredentialExtension {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct AvailableExtensionAsset {
-    pub(crate) path: String,
-    pub(crate) content: AvailableExtensionAssetContent,
+pub struct AvailableExtensionAsset {
+    pub path: String,
+    pub content: AvailableExtensionAssetContent,
 }
 
 /// Catalog entries are self-contained: every asset travels as inline bytes so
@@ -73,17 +73,17 @@ pub(crate) struct AvailableExtensionAsset {
 /// path-pointer variant existed before that invariant and dangled after
 /// `remove` deleted the extension dir).
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AvailableExtensionAssetContent {
+pub enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
 }
 
 #[derive(Debug)]
-pub(crate) struct AvailableExtensionPackage {
-    pub(crate) package_ref: LifecyclePackageRef,
-    pub(crate) manifest_toml: String,
+pub struct AvailableExtensionPackage {
+    pub package_ref: LifecyclePackageRef,
+    pub manifest_toml: String,
     /// The validated runtime contract compiled alongside `manifest_toml`.
     /// Catalog projections read this value directly and never reparse raw TOML.
-    pub(crate) resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
+    pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
     /// The loader-supplied [`ManifestSource`] this package was validated
     /// under. Carried so install/migration re-parses (`prepare_install`,
     /// `prepare_manifest_migration`) validate with the SAME source the
@@ -91,55 +91,55 @@ pub(crate) struct AvailableExtensionPackage {
     /// `InstalledLocal` must never be re-validated (and persisted) as
     /// `HostBundled`, which is the only source eligible for
     /// first-party/system trust and runtime claims.
-    pub(crate) source: ManifestSource,
-    pub(crate) package: ExtensionPackage,
+    pub source: ManifestSource,
+    pub package: ExtensionPackage,
     /// Trusted host-catalog declarations for mandatory external cleanup before
     /// local removal. Never inferred from manifest presentation metadata.
-    pub(crate) cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    pub cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     /// Surface kinds projected once from the manifest record at construction and
     /// cached here. Deliberately not re-derived in `summary()`: the projection
     /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
     /// each loader parses the manifest exactly once (see
     /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
-    pub(crate) surface_kinds: Vec<CapabilitySurfaceKind>,
+    pub surface_kinds: Vec<CapabilitySurfaceKind>,
     /// Directional shape of the channel surface (from the product-adapter
     /// section's capability flags), present iff `surface_kinds` contains
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
-    pub(crate) channel_directions: Option<LifecycleChannelDirections>,
+    pub channel_directions: Option<LifecycleChannelDirections>,
     /// The channel surface's declared `[channel.presentation]` (markdown +
     /// message cap), cached at construction like `channel_directions`. Fed into
     /// prompt construction via the lifecycle summary (OUT-11).
-    pub(crate) channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
-    pub(crate) assets: Vec<AvailableExtensionAsset>,
+    pub channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
+    pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
     /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
     /// onboarding copy still lives in composition's per-id `onboarding()` match;
     /// as each package migrates, its copy moves here and its match arm is
     /// deleted. See overview §3 (package self-containment).
-    pub(crate) onboarding_override: Option<LifecycleExtensionOnboarding>,
+    pub onboarding_override: Option<LifecycleExtensionOnboarding>,
     /// Bespoke OAuth-setup credential requirement carried down from a migrated
     /// inventory bundle, replacing the manifest-derived requirement. `None` for
     /// packages whose derived requirement is correct. Used by a package whose
     /// connect flow authorizes a shared account with setup scopes distinct from
     /// its per-tool runtime scopes.
-    pub(crate) oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
+    pub oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
     /// Extra catalog search aliases carried down from an injected first-party
     /// bundle (e.g. the GSuite family's "google"/"workspace" terms). Empty for
     /// filesystem/imported packages. Folds the former per-id special-case in
     /// `package_search_terms` into injected data so search names no concrete id.
-    pub(crate) search_aliases: Vec<String>,
+    pub search_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AdminConfigurationCatalogUse {
-    pub(crate) descriptor: ExtensionAdminConfigurationDescriptor,
-    pub(crate) package_id: String,
-    pub(crate) display_name: String,
+pub struct AdminConfigurationCatalogUse {
+    pub descriptor: ExtensionAdminConfigurationDescriptor,
+    pub package_id: String,
+    pub display_name: String,
 }
 
 impl AvailableExtensionPackage {
-    pub(crate) fn summary(&self) -> LifecycleExtensionSummary {
+    pub fn summary(&self) -> LifecycleExtensionSummary {
         let visible_capability_ids = visible_capability_ids(self)
             .map(|id| id.as_str().to_string())
             .collect::<Vec<_>>();
@@ -177,11 +177,11 @@ fn channel_connection_for_package(
     if !directions.inbound {
         return None;
     }
-    let strategy = super::extension_lifecycle::channel_connect_strategy(&package.package);
+    let strategy = channel_connect_strategy(&package.package);
     // Catalog projection: descriptor-owned connect copy applies at
     // activation/status time; the pre-install listing renders the derived
     // fallback.
-    Some(super::extension_lifecycle::channel_connection_requirement(
+    Some(channel_connection_requirement(
         package_ref.id.as_str(),
         &package.package.manifest.name,
         strategy,
@@ -321,7 +321,7 @@ fn credential_requirement_name(
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct AvailableExtensionCatalog {
+pub struct AvailableExtensionCatalog {
     packages: Vec<Arc<AvailableExtensionPackage>>,
     /// The injected first-party bundle id set (extension-runtime DEL-7) this
     /// catalog reserves against filesystem/uploaded shadowing. Carried so the
@@ -332,7 +332,7 @@ pub(crate) struct AvailableExtensionCatalog {
 }
 
 impl AvailableExtensionCatalog {
-    pub(crate) fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
+    pub fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
         Self {
             packages: packages.into_iter().map(Arc::new).collect(),
             reserved_bundled_ids: Vec::new(),
@@ -342,30 +342,30 @@ impl AvailableExtensionCatalog {
     /// Record the injected first-party bundle id set this catalog reserves. Set
     /// once on the composed runtime catalog (after the filesystem + first-party
     /// merge) so the import path can consult it.
-    pub(crate) fn with_reserved_bundled_ids(mut self, reserved_bundled_ids: Vec<String>) -> Self {
+    pub fn with_reserved_bundled_ids(mut self, reserved_bundled_ids: Vec<String>) -> Self {
         self.reserved_bundled_ids = reserved_bundled_ids;
         self
     }
 
     /// The injected first-party bundle id set reserved by this catalog.
-    pub(crate) fn reserved_bundled_ids(&self) -> &[String] {
+    pub fn reserved_bundled_ids(&self) -> &[String] {
         &self.reserved_bundled_ids
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_first_party_assets() -> Result<Self, ProductSurfaceFailure> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_first_party_assets() -> Result<Self, ProductSurfaceFailure> {
         Self::from_first_party_assets_with_nearai_mcp_config(
             None,
-            &crate::extension_host::first_party::first_party_bundles_from_inventory(),
+            &crate::test_support::first_party_bundles_from_inventory(),
         )
     }
 
     /// Build the first-party catalog from the binary-injected neutral bundle set
     /// (extension-runtime DEL-7). Composition never names a concrete first-party
     /// package; the bundles arrive as opaque data on the build input.
-    pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
+    pub fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
-        first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
+        first_party_bundles: &[crate::FirstPartyPackageBundle],
     ) -> Result<Self, ProductSurfaceFailure> {
         let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
         for bundle in first_party_bundles {
@@ -378,8 +378,8 @@ impl AvailableExtensionCatalog {
     /// the recipe catalog behind the auth engine (fallback for extensions not
     /// yet active). Shared vendors unify per overview §3.2 (union scope
     /// ceiling; incompatible recipes are a startup error).
-    pub(crate) fn bundled_vendor_recipes(
-        first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
+    pub fn bundled_vendor_recipes(
+        first_party_bundles: &[crate::FirstPartyPackageBundle],
     ) -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductSurfaceFailure> {
         let catalog =
             Self::from_first_party_assets_with_nearai_mcp_config(None, first_party_bundles)?;
@@ -410,14 +410,14 @@ impl AvailableExtensionCatalog {
             })?;
             resolved.push(record.resolved().clone());
         }
-        ironclaw_extension_host::unified_vendor_recipes(resolved.iter()).map_err(|conflict| {
+        crate::unified_vendor_recipes(resolved.iter()).map_err(|conflict| {
             ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!("bundled vendor recipes conflict: {conflict}"),
             }
         })
     }
 
-    pub(crate) fn extend(&mut self, other: Self) {
+    pub fn extend(&mut self, other: Self) {
         for package in other.packages {
             if let Some(existing) = self
                 .packages
@@ -431,7 +431,7 @@ impl AvailableExtensionCatalog {
         }
     }
 
-    pub(crate) async fn from_filesystem_root<F>(
+    pub async fn from_filesystem_root<F>(
         fs: &F,
         root: &VirtualPath,
         reserved_bundled_ids: &[String],
@@ -451,7 +451,7 @@ impl AvailableExtensionCatalog {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) async fn from_trusted_fixture_filesystem_root<F>(
+    pub async fn from_trusted_fixture_filesystem_root<F>(
         fs: &F,
         root: &VirtualPath,
         reserved_bundled_ids: &[String],
@@ -465,7 +465,7 @@ impl AvailableExtensionCatalog {
         ))
     }
 
-    pub(crate) fn search<'a>(
+    pub fn search<'a>(
         &'a self,
         query: &str,
     ) -> impl Iterator<Item = Arc<AvailableExtensionPackage>> + 'a {
@@ -476,7 +476,7 @@ impl AvailableExtensionCatalog {
             .cloned()
     }
 
-    pub(crate) fn resolve(
+    pub fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
     ) -> Result<Arc<AvailableExtensionPackage>, ProductSurfaceFailure> {
@@ -494,7 +494,7 @@ impl AvailableExtensionCatalog {
     /// manifest, including packages that have not been installed. The package
     /// source stamp is preserved during re-resolution, so an uploaded bundle
     /// cannot gain host-bundled authority through this read-only projection.
-    pub(crate) fn admin_configuration_uses(&self) -> Vec<AdminConfigurationCatalogUse> {
+    pub fn admin_configuration_uses(&self) -> Vec<AdminConfigurationCatalogUse> {
         let mut uses = Vec::new();
         for package in &self.packages {
             uses.extend(
@@ -516,9 +516,7 @@ impl AvailableExtensionCatalog {
     /// Resolved deployment manifests for host-owned surfaces. This is a
     /// read-only projection of the available catalog; it does not install or
     /// activate any package.
-    pub(crate) fn resolved_manifests(
-        &self,
-    ) -> Vec<Arc<ironclaw_extensions::ResolvedExtensionManifest>> {
+    pub fn resolved_manifests(&self) -> Vec<Arc<ironclaw_extensions::ResolvedExtensionManifest>> {
         self.packages
             .iter()
             .map(|package| Arc::clone(&package.resolved_manifest))
@@ -573,7 +571,7 @@ fn nearai_mcp_package(
     )
 }
 
-pub(crate) fn nearai_mcp_manifest_toml_for_config(
+pub fn nearai_mcp_manifest_toml_for_config(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<String, ProductSurfaceFailure> {
     let endpoint = if durable_product_auth_storage_enabled() {
@@ -610,12 +608,12 @@ fn nearai_mcp_manifest_toml_for_endpoint(
 }
 
 /// Build an [`AvailableExtensionPackage`] from a neutral injected
-/// [`crate::extension_host::first_party::FirstPartyPackageBundle`]. The bundle
+/// [`crate::FirstPartyPackageBundle`]. The bundle
 /// carries only data (id, display copy, manifest, assets, search aliases); all
 /// manifest resolution / surface projection stays here (it needs
 /// product_surface + host_runtime types the injecting binary sits below).
 fn package_from_bundle(
-    bundle: &crate::extension_host::first_party::FirstPartyPackageBundle,
+    bundle: &crate::FirstPartyPackageBundle,
 ) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
     let assets = bundle
         .assets
@@ -734,7 +732,7 @@ fn validate_bundled_package_assets(
     let has_asset = |path: &str| assets.iter().any(|asset| asset.path == path);
     let dynamic_schema_prefix = format!("schemas/{}/dynamic/", package.id.as_str());
     let is_inline_dynamic_schema_ref = |field: &str, path: &str| {
-        ironclaw_extension_host::is_hosted_http_mcp_package(package)
+        crate::is_hosted_http_mcp_package(package)
             && matches!(field, "input_schema_ref" | "output_schema_ref")
             && path
                 .strip_prefix(&dynamic_schema_prefix)
@@ -789,7 +787,7 @@ fn validate_bundled_package_assets(
     Ok(())
 }
 
-pub(crate) fn surface_kinds_from_manifest_record(
+pub fn surface_kinds_from_manifest_record(
     record: &ExtensionManifestRecord,
     _label: &str,
 ) -> Result<Vec<CapabilitySurfaceKind>, ProductSurfaceFailure> {
@@ -864,25 +862,25 @@ fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
         bytes_asset(
             "schemas/nearai/web_search.input.v1.json",
             include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.input.v1.json"
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.input.v1.json"
             ),
         ),
         bytes_asset(
             "schemas/nearai/web_search.output.v1.json",
             include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.output.v1.json"
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.output.v1.json"
             ),
         ),
         bytes_asset(
             "prompts/nearai/web_search.md",
             include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/web_search.md"
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/web_search.md"
             ),
         ),
     ]
 }
 
-pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
+pub fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     AvailableExtensionAsset {
         path: path.to_string(),
         content: AvailableExtensionAssetContent::Bytes(bytes.to_vec()),
@@ -1045,7 +1043,7 @@ where
 /// AI host-managed id is reserved separately (it is not part of the injected
 /// inventory). All GSuite family ids are already in the injected bundle ids, so
 /// no separate `is_gsuite_extension_id` check is needed.
-pub(crate) fn reserved_host_bundled_extension_id(
+pub fn reserved_host_bundled_extension_id(
     extension_id: &ExtensionId,
     reserved_bundled_ids: &[String],
 ) -> bool {
@@ -1055,19 +1053,19 @@ pub(crate) fn reserved_host_bundled_extension_id(
         || extension_id.as_str() == NEARAI_EXTENSION_ID
 }
 
-pub(crate) fn map_binding_error(error: impl std::fmt::Display) -> ProductSurfaceFailure {
+pub fn map_binding_error(error: impl std::fmt::Display) -> ProductSurfaceFailure {
     ProductSurfaceFailure::InvalidBindingRequest {
         reason: error.to_string(),
     }
 }
 
-pub(crate) fn visible_capability_ids(
+pub fn visible_capability_ids(
     extension: &AvailableExtensionPackage,
 ) -> impl Iterator<Item = &CapabilityId> {
     visible_capabilities(extension).map(|capability| &capability.id)
 }
 
-pub(crate) fn visible_read_only_capability_ids(
+pub fn visible_read_only_capability_ids(
     extension: &AvailableExtensionPackage,
 ) -> impl Iterator<Item = &CapabilityId> {
     visible_capabilities(extension)
@@ -1118,7 +1116,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::extension_host::available_extension_import::extension_asset_path;
+    use crate::extension_asset_path;
     #[test]
     fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
@@ -1193,7 +1191,7 @@ mod tests {
             // prefix ship no package asset; every other ref remains static.
             let dynamic_schema_prefix = format!("schemas/{extension_id}/dynamic/");
             let is_dynamic_schema_ref = |schema_ref: &str| {
-                ironclaw_extension_host::is_hosted_http_mcp_package(&package.package)
+                crate::is_hosted_http_mcp_package(&package.package)
                     && schema_ref
                         .strip_prefix(&dynamic_schema_prefix)
                         .is_some_and(|suffix| !suffix.is_empty())

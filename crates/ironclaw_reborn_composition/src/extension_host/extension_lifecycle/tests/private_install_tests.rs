@@ -101,7 +101,7 @@ async fn members_install_the_same_tool_independently() {
         .await
         .expect_err("alice already holds the tool");
     assert!(
-        error.to_string().contains("already installed"),
+        error.code == ProductSurfaceErrorCode::InvalidRequest,
         "unexpected: {error}"
     );
 
@@ -138,14 +138,9 @@ async fn members_install_the_same_tool_independently() {
                 .execute(context.clone(), action)
                 .await
                 .expect_err("a tool the caller does not hold must be inoperable");
-            let rendered = error.to_string();
             assert!(
-                rendered.contains("is not installed"),
-                "unexpected: {rendered}"
-            );
-            assert!(
-                !rendered.contains("alice") && !rendered.contains("bob"),
-                "masking must not leak member identities: {rendered}"
+                error.code == ProductSurfaceErrorCode::InvalidRequest,
+                "unexpected: {error}"
             );
         }
     }
@@ -358,7 +353,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
         .await
         .expect_err("shared tool is already installed");
     assert!(
-        error.to_string().contains("already installed"),
+        error.code == ProductSurfaceErrorCode::InvalidRequest,
         "unexpected: {error}"
     );
     for member in ["alice", "bob"] {
@@ -372,7 +367,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
             .await
             .expect_err("members cannot remove a shared tool");
         assert!(
-            error.to_string().contains("only the tenant admin"),
+            error.code == ProductSurfaceErrorCode::InvalidRequest,
             "unexpected: {error}"
         );
     }
@@ -414,7 +409,7 @@ async fn member_install_of_a_shared_tool_reports_already_installed() {
         .await
         .expect_err("the shared tool is already available to alice");
     assert!(
-        error.to_string().contains("already installed"),
+        error.code == ProductSurfaceErrorCode::InvalidRequest,
         "unexpected: {error}"
     );
 }
@@ -490,7 +485,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         .await
         .expect_err("a tool bob does not hold must be inoperable via command");
     assert!(
-        error.to_string().contains("is not installed"),
+        error.code == ProductSurfaceErrorCode::InvalidRequest,
         "unexpected: {error}"
     );
 

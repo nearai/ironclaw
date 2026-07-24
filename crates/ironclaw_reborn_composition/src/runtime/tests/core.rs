@@ -549,7 +549,6 @@ use ironclaw_turns::{
 use rust_decimal_macros::dec;
 
 use crate::RebornRuntimeProcessBinding;
-use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
 use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
@@ -559,6 +558,7 @@ use crate::runtime_input::{
 };
 use crate::webui::service::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
+use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{RebornSkillSourceKind, build_reborn_runtime};

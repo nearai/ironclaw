@@ -212,6 +212,70 @@ pub fn tool_and_channel_manifest() -> ResolvedExtensionManifest {
     resolve(TOOL_AND_CHANNEL_MANIFEST)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_party_bundles_from_inventory() -> Vec<crate::FirstPartyPackageBundle> {
+    use crate::{
+        FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOAuthSetup,
+        FirstPartyPackageOnboarding,
+    };
+    use ironclaw_first_party_extensions::is_gsuite_extension_id;
+    use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
+    use ironclaw_host_api::ExtensionId;
+
+    bundled_packages()
+        .into_iter()
+        .map(|bundle| {
+            let assets = bundle
+                .assets
+                .into_iter()
+                .map(|asset| {
+                    let PackageAssetContent::Bytes(bytes) = asset.content;
+                    FirstPartyPackageAsset {
+                        path: asset.path,
+                        bytes,
+                    }
+                })
+                .collect();
+            let search_aliases = if ExtensionId::new(bundle.id)
+                .map(|id| is_gsuite_extension_id(&id))
+                .unwrap_or(false)
+            {
+                [
+                    "google",
+                    "gsuite",
+                    "g suite",
+                    "workspace",
+                    "google workspace",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            } else {
+                Vec::new()
+            };
+            FirstPartyPackageBundle {
+                id: bundle.id.to_string(),
+                display_name: bundle.display_name.to_string(),
+                manifest_toml: bundle.manifest_toml.into_owned(),
+                assets,
+                onboarding: bundle.onboarding.map(|copy| FirstPartyPackageOnboarding {
+                    instructions: copy.instructions,
+                    credential_instructions: copy.credential_instructions,
+                    setup_url: copy.setup_url,
+                    credential_next_step: copy.credential_next_step,
+                }),
+                oauth_setup: bundle.oauth_setup.map(|setup| FirstPartyPackageOAuthSetup {
+                    requirement_name: setup.requirement_name,
+                    provider: setup.provider,
+                    scopes: setup.scopes,
+                }),
+                trust_effects: bundle.trust_effects,
+                search_aliases,
+            }
+        })
+        .collect()
+}
+
 /// A no-op tool adapter.
 #[derive(Default)]
 pub struct FakeToolAdapter;

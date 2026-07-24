@@ -893,8 +893,10 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                     filesystem,
                     |_scope| {
                         MountView::new(vec![MountGrant::new(
-                            MountAlias::new("/admin-config").expect("valid mount alias"),
-                            VirtualPath::new("/admin-config").expect("valid virtual path"),
+                            MountAlias::new("/extension-admin-configuration")
+                                .expect("valid mount alias"),
+                            VirtualPath::new("/tenants/test/shared/admin-configuration")
+                                .expect("valid virtual path"),
                             MountPermissions::read_write_list_delete(),
                         )])
                     },

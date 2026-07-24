@@ -21,10 +21,9 @@ use ironclaw_product::{
 use serde::Deserialize;
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
-};
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
+use ironclaw_extension_host::ExtensionActivationMode;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
