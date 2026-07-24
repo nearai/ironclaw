@@ -1401,6 +1401,7 @@ registerPack("fr", {
   "chat.history.loadFailed": "Impossible de charger l'historique de la conversation.",
   "chat.failure.connectionLost": "La connexion au serveur a été perdue. Reconnectez-vous et réessayez.",
   "chat.failure.request": "La requête a échoué avant de pouvoir être envoyée.",
+  "chat.failure.requestDetail": "La requête a échoué : {detail}.",
   "chat.failure.runCategory": "L'exécution a échoué : {detail}.",
   "chat.failure.recoveryRequired": "L'exécution attend une récupération ; le backend a signalé `recovery_required`.",
   "chat.failure.run": "L'exécution a échoué avant de produire une réponse.",

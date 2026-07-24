@@ -1401,6 +1401,7 @@ registerPack("ja", {
   "chat.history.loadFailed": "会話履歴を読み込めませんでした。",
   "chat.failure.connectionLost": "サーバーとの接続が切れました。再接続してもう一度お試しください。",
   "chat.failure.request": "リクエストは送信前に失敗しました。",
+  "chat.failure.requestDetail": "リクエストに失敗しました: {detail}。",
   "chat.failure.runCategory": "実行に失敗しました: {detail}。",
   "chat.failure.recoveryRequired": "実行は復旧待ちです。バックエンドから `recovery_required` が報告されました。",
   "chat.failure.run": "返信を生成する前に実行が失敗しました。",

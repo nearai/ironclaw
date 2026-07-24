@@ -1402,6 +1402,7 @@ registerPack("es", {
   "chat.history.loadFailed": "No se pudo cargar el historial de conversación.",
   "chat.failure.connectionLost": "Se perdió la conexión con el servidor. Vuelve a conectarte e inténtalo de nuevo.",
   "chat.failure.request": "La solicitud falló antes de poder enviarse.",
+  "chat.failure.requestDetail": "La solicitud falló: {detail}.",
   "chat.failure.runCategory": "La ejecución falló: {detail}.",
   "chat.failure.recoveryRequired": "La ejecución está esperando recuperación; el backend informó `recovery_required`.",
   "chat.failure.run": "La ejecución falló antes de generar una respuesta.",

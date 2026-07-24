@@ -1401,6 +1401,7 @@ registerPack("ar", {
   "chat.history.loadFailed": "فشل تحميل سجل المحادثة.",
   "chat.failure.connectionLost": "فُقد الاتصال بالخادم. أعد الاتصال وحاول مرة أخرى.",
   "chat.failure.request": "فشل الطلب قبل أن يتم إرساله.",
+  "chat.failure.requestDetail": "فشل الطلب: {detail}.",
   "chat.failure.runCategory": "فشل التشغيل: {detail}.",
   "chat.failure.recoveryRequired": "ينتظر التشغيل الاسترداد؛ أبلغت الواجهة الخلفية عن `recovery_required`.",
   "chat.failure.run": "فشل التشغيل قبل إنتاج رد.",

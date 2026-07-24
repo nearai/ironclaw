@@ -1451,6 +1451,7 @@ registerPack("en", {
   "chat.history.loadFailed": "Failed to load conversation history.",
   "chat.failure.connectionLost": "Connection to the server was lost. Please reconnect and try again.",
   "chat.failure.request": "The request failed before it could be sent.",
+  "chat.failure.requestDetail": "The request failed: {detail}.",
   "chat.failure.runCategory": "The run failed: {detail}.",
   "chat.failure.recoveryRequired": "The run is awaiting recovery — backend reported `recovery_required`.",
   "chat.failure.run": "The run failed before producing a reply.",

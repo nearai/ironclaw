@@ -1401,6 +1401,7 @@ registerPack("ko", {
   "chat.history.loadFailed": "대화 기록을 불러오지 못했습니다.",
   "chat.failure.connectionLost": "서버 연결이 끊어졌습니다. 다시 연결한 후 재시도하세요.",
   "chat.failure.request": "요청을 보내기 전에 실패했습니다.",
+  "chat.failure.requestDetail": "요청에 실패했습니다: {detail}.",
   "chat.failure.runCategory": "실행에 실패했습니다: {detail}.",
   "chat.failure.recoveryRequired": "실행이 복구를 기다리고 있습니다. 백엔드에서 `recovery_required`를 보고했습니다.",
   "chat.failure.run": "응답을 생성하기 전에 실행이 실패했습니다.",

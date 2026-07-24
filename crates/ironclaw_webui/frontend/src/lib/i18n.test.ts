@@ -244,6 +244,7 @@ test("locale packs include client-generated chat failure copy", () => {
   const requiredKeys = [
     "chat.failure.connectionLost",
     "chat.failure.request",
+    "chat.failure.requestDetail",
     "chat.failure.runCategory",
     "chat.failure.recoveryRequired",
     "chat.failure.run",

@@ -1401,6 +1401,7 @@ registerPack("de", {
   "chat.history.loadFailed": "Konversationsverlauf konnte nicht geladen werden.",
   "chat.failure.connectionLost": "Die Verbindung zum Server wurde unterbrochen. Stelle die Verbindung wieder her und versuche es erneut.",
   "chat.failure.request": "Die Anfrage ist fehlgeschlagen, bevor sie gesendet werden konnte.",
+  "chat.failure.requestDetail": "Die Anfrage ist fehlgeschlagen: {detail}.",
   "chat.failure.runCategory": "Die Ausführung ist fehlgeschlagen: {detail}.",
   "chat.failure.recoveryRequired": "Die Ausführung wartet auf Wiederherstellung; das Backend meldete `recovery_required`.",
   "chat.failure.run": "Die Ausführung ist fehlgeschlagen, bevor eine Antwort erzeugt wurde.",

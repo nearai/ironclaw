@@ -127,6 +127,25 @@ function isClientGeneratedRequestMessage(
   return !body || message === statusText || message === "Request failed";
 }
 
+function structuredRequestErrorDetail(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "";
+  const payload = (error as { payload?: unknown }).payload;
+  if (typeof payload !== "object" || payload === null) return "";
+
+  const errorPayload = payload as {
+    validation_code?: unknown;
+    kind?: unknown;
+    error?: unknown;
+    field?: unknown;
+  };
+  const code = normalizeText(
+    errorPayload.validation_code || errorPayload.kind || errorPayload.error,
+  );
+  if (!code) return "";
+  const field = normalizeText(errorPayload.field);
+  return field ? `${code} (${field})` : code;
+}
+
 export function failureMessageForRequestError(
   error: unknown,
   t: Translate,
@@ -135,9 +154,11 @@ export function failureMessageForRequestError(
     typeof (error as { message?: unknown })?.message === "string"
       ? (error as { message: string }).message.trim()
       : "";
-  return isClientGeneratedRequestMessage(error, message)
-    ? t(REQUEST_FAILURE_FALLBACK_KEY)
-    : message;
+  if (!isClientGeneratedRequestMessage(error, message)) return message;
+  const detail = structuredRequestErrorDetail(error);
+  return detail
+    ? t("chat.failure.requestDetail", { detail })
+    : t(REQUEST_FAILURE_FALLBACK_KEY);
 }
 
 export function failureMessageForStreamError(

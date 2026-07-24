@@ -1401,6 +1401,7 @@ registerPack("zh-CN", {
   "chat.history.loadFailed": "加载会话历史失败。",
   "chat.failure.connectionLost": "与服务器的连接已断开。请重新连接后重试。",
   "chat.failure.request": "请求在发送前失败。",
+  "chat.failure.requestDetail": "请求失败：{detail}。",
   "chat.failure.runCategory": "运行失败：{detail}。",
   "chat.failure.recoveryRequired": "运行正在等待恢复——后端报告了 `recovery_required`。",
   "chat.failure.run": "运行在生成回复前失败。",

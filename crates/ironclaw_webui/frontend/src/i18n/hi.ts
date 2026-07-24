@@ -1401,6 +1401,7 @@ registerPack("hi", {
   "chat.history.loadFailed": "वार्तालाप इतिहास लोड करने में विफल।",
   "chat.failure.connectionLost": "सर्वर से कनेक्शन टूट गया। दोबारा कनेक्ट करके फिर प्रयास करें।",
   "chat.failure.request": "अनुरोध भेजे जाने से पहले विफल हो गया।",
+  "chat.failure.requestDetail": "अनुरोध विफल हुआ: {detail}।",
   "chat.failure.runCategory": "रन विफल हुआ: {detail}।",
   "chat.failure.recoveryRequired": "रन रिकवरी की प्रतीक्षा कर रहा है; बैकएंड ने `recovery_required` रिपोर्ट किया।",
   "chat.failure.run": "उत्तर बनने से पहले रन विफल हो गया।",

@@ -1401,6 +1401,7 @@ registerPack("pt-BR", {
   "chat.history.loadFailed": "Falha ao carregar o histórico da conversa.",
   "chat.failure.connectionLost": "A conexão com o servidor foi perdida. Reconecte e tente novamente.",
   "chat.failure.request": "A solicitação falhou antes de ser enviada.",
+  "chat.failure.requestDetail": "A solicitação falhou: {detail}.",
   "chat.failure.runCategory": "A execução falhou: {detail}.",
   "chat.failure.recoveryRequired": "A execução está aguardando recuperação; o backend informou `recovery_required`.",
   "chat.failure.run": "A execução falhou antes de produzir uma resposta.",

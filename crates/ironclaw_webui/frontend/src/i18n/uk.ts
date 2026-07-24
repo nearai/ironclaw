@@ -1401,6 +1401,7 @@ registerPack("uk", {
   "chat.history.loadFailed": "Не вдалося завантажити історію розмови.",
   "chat.failure.connectionLost": "З’єднання із сервером втрачено. Підключіться знову та повторіть спробу.",
   "chat.failure.request": "Не вдалося надіслати запит.",
+  "chat.failure.requestDetail": "Запит завершився помилкою: {detail}.",
   "chat.failure.runCategory": "Виконання завершилося помилкою: {detail}.",
   "chat.failure.recoveryRequired": "Виконання очікує відновлення; сервер повідомив `recovery_required`.",
   "chat.failure.run": "Виконання завершилося помилкою до створення відповіді.",

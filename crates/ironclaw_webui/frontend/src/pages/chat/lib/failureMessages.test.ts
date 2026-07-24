@@ -15,6 +15,7 @@ const ENGLISH_FAILURE_COPY = {
   "chat.failure.connectionLost":
     "Connection to the server was lost. Please reconnect and try again.",
   "chat.failure.request": "The request failed before it could be sent.",
+  "chat.failure.requestDetail": "The request failed: {detail}.",
   "chat.failure.runCategory": "The run failed: {detail}.",
   "chat.failure.recoveryRequired":
     "The run is awaiting recovery — backend reported `recovery_required`.",
@@ -122,7 +123,7 @@ test("failureMessageForRequestError localizes client-derived API errors", () => 
       },
       t,
     ),
-    "The request failed before it could be sent.",
+    "The request failed: service_unavailable.",
   );
   assert.equal(
     failureMessageForRequestError(
