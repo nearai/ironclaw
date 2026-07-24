@@ -9,15 +9,15 @@
 //!
 //! This module lives OUTSIDE `src/runtime/` because the CLI runtime tree is
 //! banned from `use ironclaw_host_runtime::` (a dependency-boundary test); the
-//! host-runtime / host-api / auth types these builders touch are reached through
-//! `ironclaw_reborn_composition` facade re-exports.
+//! host-runtime / host-api types these builders touch are reached through
+//! `ironclaw_reborn_composition` facade re-exports, while auth-owned contracts
+//! are named from `ironclaw_auth`.
 
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use ironclaw_reborn_composition::{
-    FirstPartyHandlerRegistrar, FirstPartyPackageBundle, RuntimeCredentialAccountVisibilityPolicy,
-};
+use ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy;
+use ironclaw_reborn_composition::{FirstPartyHandlerRegistrar, FirstPartyPackageBundle};
 
 mod bundles;
 mod gsuite;

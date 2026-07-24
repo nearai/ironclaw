@@ -369,7 +369,7 @@ Rules — kept short on purpose:
   vendor-conditional in auth crates/composition). — `ironclaw_auth::AuthEngine`
   is the only `AuthProviderClient` composition builds
   (`compose_provider_client`,
-  `crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs`);
+  `crates/ironclaw_reborn_composition/src/factory.rs`);
   the `ironclaw_auth` engine crate carries zero concrete-vendor literals and the
   extension ABI (`wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
   "no vendor-conditional in composition" is not yet literal — the specificity
@@ -387,7 +387,7 @@ Rules — kept short on purpose:
   one transition consumes a callback. — `exactly_one_transition_consumes_a_callback`,
   `cross_flow_callbacks_are_rejected` (`auth_engine_contract.rs`); state-hash /
   PKCE-hash / TTL validation stays in the durable `AuthFlowManager`
-  (`crates/ironclaw_reborn_composition/src/product_auth/durable/tests.rs`).
+  (`crates/ironclaw_auth/src/product_auth/durable/tests.rs`).
 - [x] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
   rejected before the vendor call. —
   `scope_widening_is_rejected_before_any_vendor_call` (`auth_engine_contract.rs`).
@@ -418,7 +418,7 @@ Rules — kept short on purpose:
   `google_manifests_declare_the_keepalive_idle_lifetime_identically`
   (`auth_engine_contract.rs`); vendor-blind candidate enumeration on both
   DB-gated builds (`list_refresh_candidates_covers_agent_and_project_scopes`,
-  composition `product_auth/durable/tests.rs`); recipe-field validation +
+  `crates/ironclaw_auth/src/product_auth/durable/tests.rs`); recipe-field validation +
   shared-vendor conflict coverage in `ironclaw_host_api` `recipe.rs` tests.
 - [x] AUTH-7 Identity extracts from the token response or the declared
   identity endpoint and is validated against the flow before storage. —
@@ -484,7 +484,7 @@ Rules — kept short on purpose:
   route (`VENDOR_OAUTH_CALLBACK_PATH`) resolves `{provider}` through the
   engine's `AuthRecipeResolver`; the Google/Slack URLs are served by the same
   generic route (`vendor_oauth_callback_completes_a_started_flow`,
-  `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`; the
+  `crates/ironclaw_webui/src/product_auth/mod.rs`; the
   google/slack callback tests in `tests/webui_v2_product_auth.rs` drive the
   unchanged URLs end-to-end).
 - [x] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
@@ -492,7 +492,7 @@ Rules — kept short on purpose:
   test). — the generic round trip is proven at the composed-services tier with
   the recipe-driven driver and the `{provider}` callback route
   (`vendor_oauth_callback_resumes_blocked_turn_gate`,
-  `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`), and the
+  `crates/ironclaw_webui/src/product_auth/mod.rs`), and the
   callback→coordinator resume is pinned by
   `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`
   (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`); the full
@@ -1057,7 +1057,7 @@ Rules — kept short on purpose:
   needed) — verified by the route tests. — The
   `/api/reborn/product-auth/oauth/{provider}/callback` shape is unchanged
   (AUTH-13's pins: `vendor_oauth_callback_completes_a_started_flow`,
-  `product_auth/serve/mod.rs`; the google/slack callback URL tests in
+  `crates/ironclaw_webui/src/product_auth/mod.rs`; the google/slack callback URL tests in
   `tests/webui_v2_product_auth.rs`), and the P6 §10 e2e drives the same
   URL against production serve
   (`test_reborn_slack_channel_e2e.py`).

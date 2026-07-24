@@ -20,12 +20,10 @@ use chrono::{Duration, Utc};
 use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
 use ironclaw_auth::{
     AuthErrorCode, AuthFlowStatus, AuthProviderId, AuthorizationCodeHash,
-    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash,
+    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest,
 };
-use ironclaw_reborn_composition::{
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::build_oauth_product_auth_for_test,
-};
+use ironclaw_reborn_composition::test_support::build_oauth_product_auth_for_test;
 
 /// Extension-runtime P6 S3: a CHANNEL extension's OAuth connect must bind
 /// the proven vendor identity to the authenticated caller through the

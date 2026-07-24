@@ -37,9 +37,9 @@ use ironclaw_product::{
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
-use crate::RebornProductAuthServices;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::extension_host::unzip_extension_bundle;
+use ironclaw_auth::RebornProductAuthServices;
 
 /// Narrow lifecycle-cleanup port over product-auth so extension removal can
 /// revoke the removed extension's exclusively-owned reusable credential without
@@ -97,7 +97,7 @@ use crate::extension_host::lifecycle::response_with_payload;
 use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
-use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
+use ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
@@ -9723,7 +9723,7 @@ output_schema_ref = "schemas/search.output.json"
     struct MissingRuntimeCredentialAccounts;
 
     #[async_trait]
-    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for MissingRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -9736,7 +9736,7 @@ output_schema_ref = "schemas/search.output.json"
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             Err(ironclaw_auth::AuthProductError::CredentialMissing)
         }
@@ -9745,7 +9745,7 @@ output_schema_ref = "schemas/search.output.json"
     struct ConfiguredRuntimeCredentialAccounts;
 
     #[async_trait]
-    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for ConfiguredRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -9758,7 +9758,7 @@ output_schema_ref = "schemas/search.output.json"
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             let epoch = chrono::DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
                 .expect("valid fixed credential epoch")
@@ -9772,7 +9772,7 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[async_trait]
-    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for ChangingRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -9785,7 +9785,7 @@ output_schema_ref = "schemas/search.output.json"
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let base = chrono::DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
@@ -9840,7 +9840,7 @@ output_schema_ref = "schemas/search.output.json"
     struct BackendUnavailableRuntimeCredentialAccounts;
 
     #[async_trait]
-    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for BackendUnavailableRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -9853,7 +9853,7 @@ output_schema_ref = "schemas/search.output.json"
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             Err(ironclaw_auth::AuthProductError::BackendUnavailable)
         }

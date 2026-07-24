@@ -28,16 +28,16 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
+use ironclaw_auth::{
+    AuthProductError, AuthProductScope, OAuthProviderIdentity,
+    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
+    OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
+};
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
 use ironclaw_product::AdapterInstallationId;
 
 use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
-use crate::product_auth::api::auth::{
-    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture,
-};
 use crate::provider_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -47,12 +47,6 @@ use crate::provider_identity::{
 /// The identity claims the OAuth token exchange can prove
 /// ([`OAuthProviderIdentity`]'s optional fields).
 const SCOPING_CLAIMS: [&str; 3] = ["team_id", "enterprise_id", "app_id"];
-
-/// Factory producing one post-exchange provider-identity check for a
-/// callback's vendor id and scope (or `None` when nothing needs binding).
-/// Registered on the product-auth route state by composition wiring.
-pub(crate) type ProviderIdentityHookFactory =
-    dyn Fn(&str, &AuthProductScope) -> Option<OAuthProviderIdentityCheck> + Send + Sync;
 
 /// One extension's connection scope: the adapter installation the bindings
 /// key under plus the identity claim values a proven vendor identity must

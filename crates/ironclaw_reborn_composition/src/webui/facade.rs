@@ -20,14 +20,15 @@ use ironclaw_product::{
     RebornSkillTrustLevel, SkillsProductFacade,
 };
 
+use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
-    RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
-    RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
+    RebornAutomationProductFacade, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticStatus, RebornRuntime,
     extension_host::lifecycle::{LifecycleFacade, SkillManagementPort, SkillManagementPortError},
     extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
     observability::OperatorServiceLifecycle,

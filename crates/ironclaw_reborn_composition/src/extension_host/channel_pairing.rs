@@ -32,8 +32,6 @@ use ironclaw_product::{
 };
 
 use crate::extension_host::channel_dm_targets::ChannelDmTargetStore;
-#[cfg(test)]
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 use crate::provider_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,

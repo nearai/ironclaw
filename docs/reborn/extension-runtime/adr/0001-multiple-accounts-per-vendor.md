@@ -39,7 +39,7 @@ resolve_account(user, extension, vendor):
 Implemented at the existing requester-authorization stage in the credential
 selection path (today's single-account behavior is the named fallback
 `select_latest_duplicate_user_reusable_account`,
-`crates/ironclaw_reborn_composition/src/product_auth/credentials/runtime_credentials.rs`);
+`crates/ironclaw_auth/src/product_auth/credentials/runtime_credentials.rs`);
 the selection request already carries the requester
 (`CredentialAccountSelectionRequest.requester_extension`,
 `crates/ironclaw_auth/src/credential.rs`).

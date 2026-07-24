@@ -1,12 +1,12 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
+    fmt,
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::AtomicBool,
 };
 
-use crate::RebornProductAuthServicePorts;
 #[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::builtin_capability_policy::builtin_capability_policy;
@@ -45,8 +45,8 @@ use crate::extension_host::{
     },
 };
 use crate::input::{
-    LibsqlConnectionConfig, PostgresPoolSource, RebornRuntimeProcessBinding, RebornStorageInput,
-    RuntimeOwnerIdentity,
+    LibsqlConnectionConfig, OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
+    RebornRuntimeProcessBinding, RebornStorageInput, RuntimeOwnerIdentity,
 };
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_mounts::{
@@ -61,26 +61,36 @@ use crate::outbound::outbound_preferences_capability::{
 use crate::outbound::{
     outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
 };
-use crate::product_auth::credentials::product_auth_providers::{
-    OAuthProviderComposition, compose_provider_client,
-};
-use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
-use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::root::default_system_prompt::seed_default_system_prompt;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::storage_catalog::validate_reborn_runtime_storage;
 use crate::support::fs::RebornProjectService;
 use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornHostBindings, RebornProductAuthServices, RebornReadiness,
-    RebornWorkerReadiness,
+    RebornBuildError, RebornCompositionProfile, RebornFacadeReadiness, RebornHostBindings,
+    RebornReadiness, RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
     AutoApproveSettingStore, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
 };
-use ironclaw_auth::{AuthProductScope, AuthSurface};
+use ironclaw_auth::RebornProductAuthServicePorts;
+use ironclaw_auth::product_auth::durable::{
+    FilesystemAuthProductServices, UnavailableAuthProviderClient,
+};
+use ironclaw_auth::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
+use ironclaw_auth::{
+    AuthEngine, AuthEngineDeps, AuthProductError, AuthProductScope, AuthProviderClient,
+    AuthRecipeResolver, AuthSurface, CredentialAccountStatus, EngineCallbackBase,
+    EngineClientCredentialsSource, EngineOAuthClientMaterial, OAuthClientId,
+    RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
+    StaticAuthRecipeResolver, map_account_error, runtime_credential_account_selection_request,
+};
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_capabilities::{
+    CapabilityObligationAbortRequest, CapabilityObligationHandler, CapabilityObligationOutcome,
+    CapabilityObligationPhase, CapabilityObligationRequest,
+};
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
@@ -102,14 +112,17 @@ use ironclaw_host_api::runtime_policy::{
     DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     SecretMode,
 };
-use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_api::{
-    HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
-    RuntimeHttpEgress, UserId, VendorId, VirtualPath, sha256_digest_token,
+    CapabilitySet, CorrelationId, ExtensionId, HostPath, InvocationId, MountPermissions, MountView,
+    NetworkPolicy, Obligation, PackageId, RecipeClientCredentials, ResourceEstimate, ResourceScope,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind, TrustClass, UserId, VendorId, VirtualPath, sha256_digest_token,
 };
+use ironclaw_host_api::{CredentialStageError, HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
-    PostEditCheckConfig, ProductAuthProviderRuntimePorts, TriggerCreateHook,
+    PostEditCheckConfig, ProductAuthProviderRuntimePorts, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, TriggerCreateHook,
     builtin_first_party_package, register_outbound_delivery_first_party_handler,
 };
 use ironclaw_host_runtime::{
@@ -150,6 +163,617 @@ use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
     CheckpointStateStorePort, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
 };
+use secrecy::SecretString;
+
+/// Display name sent with RFC 7591 dynamic client registration.
+const DCR_CLIENT_NAME: &str = "Ironclaw";
+
+/// The static vendor-callback base path (`{base}/{vendor}/callback`); the
+/// serve layer mounts the matching `{provider}` route.
+const PRODUCT_AUTH_OAUTH_ROUTE_BASE: &str = "/api/reborn/product-auth/oauth";
+
+#[derive(Clone)]
+struct OAuthProviderComposition {
+    engine: Option<Arc<AuthEngine>>,
+    client: Option<Arc<dyn AuthProviderClient>>,
+    gate_driver: Option<Arc<OAuthGateFlowDriver>>,
+}
+
+/// One resolvable value for a deployment client-credential handle.
+#[derive(Clone)]
+enum ClientCredentialValue {
+    Static(SecretString),
+}
+
+/// Deferred handle source over administrator configuration
+/// (`[admin_configuration]`): the resolver is built after the auth
+/// engine, so the engine holds this slot and resolves handles through it at
+/// request time.
+#[derive(Clone, Default)]
+struct AdminConfigurationCredentialSlot {
+    inner: Arc<std::sync::OnceLock<Arc<ComposedExtensionAdminConfigurationResolver>>>,
+}
+
+impl AdminConfigurationCredentialSlot {
+    fn fill(&self, service: Arc<ComposedExtensionAdminConfigurationResolver>) {
+        let _ = self.inner.set(service);
+    }
+
+    fn get(&self) -> Option<Arc<ComposedExtensionAdminConfigurationResolver>> {
+        self.inner.get().cloned()
+    }
+}
+
+impl fmt::Debug for AdminConfigurationCredentialSlot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdminConfigurationCredentialSlot")
+            .field("filled", &self.inner.get().is_some())
+            .finish()
+    }
+}
+
+/// Handle-keyed deployment client-credential data. Recipes name their
+/// `client_credentials` handles; composition registers values for those
+/// handles from environment/config and falls back to the operator channel
+/// configuration surface for handles saved at runtime.
+#[derive(Clone, Default)]
+struct CompositionClientCredentials {
+    values: BTreeMap<String, ClientCredentialValue>,
+    admin_configuration: Option<AdminConfigurationCredentialSlot>,
+}
+
+impl CompositionClientCredentials {
+    fn register_static(&mut self, handle: impl Into<String>, value: SecretString) {
+        self.values
+            .insert(handle.into(), ClientCredentialValue::Static(value));
+    }
+
+    fn with_admin_configuration(&mut self, slot: AdminConfigurationCredentialSlot) {
+        self.admin_configuration = Some(slot);
+    }
+
+    async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
+        match self.values.get(handle) {
+            Some(ClientCredentialValue::Static(value)) => return Ok(Some(value.clone())),
+            None => {}
+        }
+        let Some(service) = self
+            .admin_configuration
+            .as_ref()
+            .and_then(|slot| slot.get())
+        else {
+            return Ok(None);
+        };
+        service
+            .credential_handle_value(handle)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    handle,
+                    "administrator client-credential lookup failed"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+}
+
+impl fmt::Debug for CompositionClientCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompositionClientCredentials")
+            .field("handles", &self.values.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl EngineClientCredentialsSource for CompositionClientCredentials {
+    async fn resolve(
+        &self,
+        vendor: &str,
+        credentials: &RecipeClientCredentials,
+    ) -> Result<EngineOAuthClientMaterial, AuthProductError> {
+        use secrecy::ExposeSecret as _;
+
+        let Some(client_id) = self
+            .resolve_handle(credentials.client_id_handle.as_str())
+            .await?
+        else {
+            tracing::debug!(
+                vendor,
+                handle = credentials.client_id_handle.as_str(),
+                "vendor OAuth client id is not configured"
+            );
+            return Err(AuthProductError::MalformedConfig);
+        };
+        let client_secret = match &credentials.client_secret_handle {
+            None => None,
+            Some(handle) => self.resolve_handle(handle.as_str()).await?,
+        };
+        Ok(EngineOAuthClientMaterial {
+            client_id: OAuthClientId::new(client_id.expose_secret())?,
+            client_secret,
+        })
+    }
+}
+
+fn compose_provider_client(
+    configs: Vec<OAuthProviderBackendConfig>,
+    dcr_callback: Option<OAuthDcrCallbackConfig>,
+    secret_store: Arc<dyn SecretStorePort>,
+    runtime_ports: ProductAuthProviderRuntimePorts,
+    admin_configuration_credentials: AdminConfigurationCredentialSlot,
+    first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
+) -> Result<OAuthProviderComposition, RebornBuildError> {
+    let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
+        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes(
+            first_party_bundles,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+        })?,
+    ));
+
+    let mut client_credentials = CompositionClientCredentials::default();
+    for config in &configs {
+        register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
+    }
+    client_credentials.with_admin_configuration(admin_configuration_credentials);
+    let callback_base = dcr_callback
+        .map(|dcr| {
+            EngineCallbackBase::new(format!(
+                "{}{PRODUCT_AUTH_OAUTH_ROUTE_BASE}",
+                dcr.callback_origin.trim_end_matches('/')
+            ))
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("OAuth callback origin rejected: {error}"),
+            })
+        })
+        .transpose()?
+        .or_else(|| {
+            configs
+                .iter()
+                .find_map(|config| callback_base_from_redirect(config.client.redirect_uri.as_str()))
+        });
+
+    compose_auth_engine(
+        recipes,
+        client_credentials,
+        callback_base,
+        secret_store,
+        runtime_ports,
+    )
+}
+
+fn register_vendor_client_config(
+    credentials: &mut CompositionClientCredentials,
+    recipes: &dyn AuthRecipeResolver,
+    config: &OAuthProviderBackendConfig,
+) {
+    use secrecy::ExposeSecret as _;
+
+    let Some(resolved) = recipes.recipe_for_vendor(&config.vendor) else {
+        tracing::warn!(
+            vendor = config.vendor,
+            "no bundled recipe for configured OAuth vendor; client material not wired"
+        );
+        return;
+    };
+    let ironclaw_host_api::VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+        tracing::warn!(
+            vendor = config.vendor,
+            "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
+        );
+        return;
+    };
+    let Some(handles) = &recipe.client_credentials else {
+        tracing::debug!(
+            vendor = config.vendor,
+            "vendor recipe uses dynamic client registration; static client material ignored"
+        );
+        return;
+    };
+    credentials.register_static(
+        handles.client_id_handle.as_str(),
+        SecretString::from(config.client.client_id.as_str().to_string()),
+    );
+    if let (Some(secret_handle), Some(secret)) =
+        (&handles.client_secret_handle, &config.client.client_secret)
+    {
+        credentials.register_static(
+            secret_handle.as_str(),
+            SecretString::from(secret.expose_secret().to_string()),
+        );
+    }
+}
+
+fn callback_base_from_redirect(redirect: &str) -> Option<EngineCallbackBase> {
+    let prefix = redirect.strip_suffix("/callback")?;
+    let (base, _vendor) = prefix.rsplit_once('/')?;
+    EngineCallbackBase::new(base).ok()
+}
+
+fn compose_auth_engine(
+    recipes: Arc<dyn AuthRecipeResolver>,
+    client_credentials: CompositionClientCredentials,
+    callback_base: Option<EngineCallbackBase>,
+    secret_store: Arc<dyn SecretStorePort>,
+    runtime_ports: ProductAuthProviderRuntimePorts,
+) -> Result<OAuthProviderComposition, RebornBuildError> {
+    let Some(callback_base) = callback_base else {
+        tracing::debug!("no OAuth callback base configured; auth engine not composed");
+        return Ok(OAuthProviderComposition {
+            engine: None,
+            client: None,
+            gate_driver: None,
+        });
+    };
+    let egress: Arc<dyn RuntimeHttpEgress> = Arc::new(ObligationStagedAuthEgress::new(
+        runtime_ports.runtime_http_egress(),
+        runtime_ports.obligation_handler(),
+    ));
+    let engine = Arc::new(AuthEngine::new(AuthEngineDeps {
+        recipes,
+        client_credentials: Arc::new(client_credentials),
+        egress,
+        secret_store: Arc::clone(&secret_store),
+        callback_base,
+        dcr_client_name: DCR_CLIENT_NAME.to_string(),
+    }));
+    let gate_driver = Arc::new(OAuthGateFlowDriver::new(
+        Arc::clone(&engine),
+        Arc::clone(&secret_store),
+    ));
+    tracing::debug!("product-auth auth engine composed");
+    Ok(OAuthProviderComposition {
+        client: Some(Arc::clone(&engine) as Arc<dyn AuthProviderClient>),
+        engine: Some(engine),
+        gate_driver: Some(gate_driver),
+    })
+}
+
+/// Wraps the production egress so every engine vendor call runs with its
+/// request-carried network policy staged as an invoke obligation.
+struct ObligationStagedAuthEgress {
+    inner: Arc<dyn RuntimeHttpEgress>,
+    obligations: Arc<dyn CapabilityObligationHandler>,
+}
+
+impl ObligationStagedAuthEgress {
+    fn new(
+        inner: Arc<dyn RuntimeHttpEgress>,
+        obligations: Arc<dyn CapabilityObligationHandler>,
+    ) -> Self {
+        Self { inner, obligations }
+    }
+
+    async fn stage(
+        &self,
+        request: &RuntimeHttpEgressRequest,
+    ) -> Result<(), RuntimeHttpEgressError> {
+        authorize_auth_egress(
+            Arc::clone(&self.obligations),
+            &request.scope,
+            &request.capability_id,
+            &request.network_policy,
+        )
+        .await
+        .map_err(|_| RuntimeHttpEgressError::Request {
+            reason: "auth egress network policy could not be staged".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        })
+    }
+
+    async fn discard(&self, request: &RuntimeHttpEgressRequest) {
+        discard_auth_egress_policy(
+            Arc::clone(&self.obligations),
+            &request.scope,
+            &request.capability_id,
+            &request.network_policy,
+        )
+        .await;
+    }
+}
+
+impl fmt::Debug for ObligationStagedAuthEgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObligationStagedAuthEgress")
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for ObligationStagedAuthEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.stage(&request).await?;
+        let result = self.inner.execute(request.clone()).await;
+        self.discard(&request).await;
+        result
+    }
+
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.stage(&request).await?;
+        let result = self
+            .inner
+            .execute_credential_exchange(request.clone())
+            .await;
+        // Success or failure, the staged policy must not outlive the call.
+        self.discard(&request).await;
+        result
+    }
+}
+
+async fn authorize_auth_egress(
+    handler: Arc<dyn CapabilityObligationHandler>,
+    scope: &ResourceScope,
+    capability_id: &ironclaw_host_api::CapabilityId,
+    policy: &NetworkPolicy,
+) -> Result<(), AuthProductError> {
+    let context = auth_execution_context(scope.clone())?;
+    let estimate = ResourceEstimate {
+        network_egress_bytes: policy.max_egress_bytes,
+        ..ResourceEstimate::default()
+    };
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            }],
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target: "ironclaw::reborn::oauth",
+                obligation_error = ?error,
+                "auth egress network policy could not be staged"
+            );
+            AuthProductError::BackendUnavailable
+        })
+}
+
+async fn discard_auth_egress_policy(
+    handler: Arc<dyn CapabilityObligationHandler>,
+    scope: &ResourceScope,
+    capability_id: &ironclaw_host_api::CapabilityId,
+    policy: &NetworkPolicy,
+) {
+    let context = match auth_execution_context(scope.clone()) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(
+                target: "ironclaw::reborn::oauth",
+                ?error,
+                "skipped auth egress-policy discard: execution context unavailable"
+            );
+            return;
+        }
+    };
+    let estimate = ResourceEstimate {
+        network_egress_bytes: policy.max_egress_bytes,
+        ..ResourceEstimate::default()
+    };
+    if let Err(error) = handler
+        .abort(CapabilityObligationAbortRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            }],
+            outcome: &CapabilityObligationOutcome::default(),
+        })
+        .await
+    {
+        tracing::warn!(
+            obligation_error = ?error,
+            "failed to discard staged auth egress policy after vendor call"
+        );
+    }
+}
+
+fn auth_execution_context(
+    resource_scope: ResourceScope,
+) -> Result<ironclaw_host_api::ExecutionContext, AuthProductError> {
+    let context = ironclaw_host_api::ExecutionContext {
+        run_id: None,
+        invocation_id: resource_scope.invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: resource_scope.tenant_id.clone(),
+        user_id: resource_scope.user_id.clone(),
+        authenticated_actor_user_id: None,
+        agent_id: resource_scope.agent_id.clone(),
+        project_id: resource_scope.project_id.clone(),
+        mission_id: resource_scope.mission_id.clone(),
+        thread_id: resource_scope.thread_id.clone(),
+        origin: None,
+        extension_id: ExtensionId::new("ironclaw_auth").map_err(|error| {
+            tracing::warn!(%error, "auth execution-context extension id invalid");
+            AuthProductError::BackendUnavailable
+        })?,
+        runtime: RuntimeKind::System,
+        trust: TrustClass::System,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        resource_scope,
+    };
+    context.validate().map_err(|error| {
+        tracing::warn!(%error, "auth execution-context validation failed");
+        AuthProductError::InvalidRequest {
+            reason: "auth execution context validation failed".to_string(),
+        }
+    })?;
+    Ok(context)
+}
+
+#[derive(Clone)]
+struct ProductAuthRuntimeCredentialResolver {
+    accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    refresher: Arc<dyn RuntimeCredentialAccountRefreshService>,
+}
+
+impl ProductAuthRuntimeCredentialResolver {
+    fn new_with_refresh(
+        accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+        refresher: Arc<dyn RuntimeCredentialAccountRefreshService>,
+    ) -> Self {
+        Self {
+            accounts,
+            refresher,
+        }
+    }
+}
+
+impl fmt::Debug for ProductAuthRuntimeCredentialResolver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProductAuthRuntimeCredentialResolver")
+            .field("accounts", &"<credential_account_service>")
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        let selection_request = runtime_credential_account_selection_request(
+            request.scope,
+            request.provider,
+            request.setup.clone(),
+            request.provider_scopes,
+            request.requester_extension,
+        )?;
+        let account = self
+            .accounts
+            .select_unique_configured_runtime_account(selection_request.clone())
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    provider = %request.provider,
+                    requester_extension = %request.requester_extension,
+                    auth_error = ?error,
+                    "runtime product-auth account selection failed"
+                );
+                map_account_error(error)
+            })?;
+        tracing::debug!(
+            provider = %request.provider,
+            requester_extension = %request.requester_extension,
+            has_access_secret = account.access_secret.is_some(),
+            has_refresh_secret = account.refresh_secret.is_some(),
+            status = ?account.status,
+            "runtime product-auth account selected"
+        );
+        let account = self
+            .refresher
+            .refresh_configured_runtime_account(selection_request, account, self.accounts.as_ref())
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    provider = %request.provider,
+                    requester_extension = %request.requester_extension,
+                    auth_error = ?error,
+                    "runtime product-auth account refresh failed"
+                );
+                map_account_error(error)
+            })?;
+        tracing::debug!(
+            provider = %request.provider,
+            requester_extension = %request.requester_extension,
+            has_access_secret = account.access_secret.is_some(),
+            has_refresh_secret = account.refresh_secret.is_some(),
+            status = ?account.status,
+            "runtime product-auth account refresh resolved"
+        );
+        if account.status != CredentialAccountStatus::Configured {
+            return Err(CredentialStageError::AuthRequired);
+        }
+        let handle = account.access_secret.ok_or(CredentialStageError::Backend)?;
+        Ok(RuntimeCredentialAccessSecret {
+            scope: account.scope.resource,
+            handle,
+        })
+    }
+}
+
+struct ProductContinuationFromAuth {
+    inner: Arc<dyn RebornAuthContinuationDispatcher>,
+}
+
+impl ProductContinuationFromAuth {
+    fn new(inner: Arc<dyn RebornAuthContinuationDispatcher>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_product::ProductAuthContinuationDispatcher for ProductContinuationFromAuth {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_auth_continuation(event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_canceled_auth_continuation(event).await
+    }
+}
+
+pub(crate) fn product_auth_continuation_dispatcher(
+    inner: Arc<dyn RebornAuthContinuationDispatcher>,
+) -> Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher> {
+    Arc::new(ProductContinuationFromAuth::new(inner))
+}
+
+struct AuthContinuationFromProduct {
+    inner: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
+}
+
+impl AuthContinuationFromProduct {
+    fn new(inner: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl RebornAuthContinuationDispatcher for AuthContinuationFromProduct {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_auth_continuation(event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_canceled_auth_continuation(event).await
+    }
+}
 
 /// Output of [`build_local_runtime_root_filesystem`]: the composed local-dev
 /// root filesystem and, when libSQL is the substrate, a clone of the raw
@@ -401,10 +1025,18 @@ pub(crate) struct RebornRuntimeStores {
     /// (`crate::turn_run_snapshot`). Production points it at this runtime's own
     /// turn-state store; a `test-support` harness can repoint it at its own
     /// store so its runs are visible to the trigger subsystem.
+    #[allow(
+        dead_code,
+        reason = "held for test-support rebinding after runtime construction"
+    )]
     pub(crate) trigger_source_turn_state:
         Arc<std::sync::RwLock<Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>>>,
     /// Sibling rebindable slot, `TurnStateStore`-typed, read by the trigger
     /// delivery-target service; repointed together with the snapshot slot.
+    #[allow(
+        dead_code,
+        reason = "held for test-support rebinding after runtime construction"
+    )]
     pub(crate) trigger_source_turn_state_store:
         Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::TurnStateStore>>>,
     pub(crate) extension_management: Arc<ExtensionManagementPort>,
@@ -464,6 +1096,10 @@ pub(crate) struct RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) product_auth_product_continuation_dispatcher:
+        Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
     /// invariant rather than a runtime check. MUST stay private — the worker is
@@ -536,7 +1172,7 @@ pub(crate) enum CredentialRefreshWorkerReady {
         /// Active recipe data — declares which vendors carry an idle lifetime
         /// (`refresh.keepalive_idle_seconds`).
         recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
-        leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+        leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
         refresh_port: Arc<RebornProductAuthServices>,
     },
     /// Deps intentionally absent: local-dev (single-user, no cross-owner
@@ -751,7 +1387,7 @@ struct ProductAuthServicesCompositionInput {
     secret_store: Arc<dyn SecretStorePort>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
     credential_account_visibility_policy: Option<
-        Arc<dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy>,
+        Arc<dyn ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy>,
     >,
     /// Durable auth-flow record projection wired for the builder's OWN durable
     /// product-auth service (filesystem-backed local-dev / production-shaped
@@ -769,7 +1405,7 @@ fn compose_product_auth_services(
 ) -> Result<
     (
         RebornProductAuthServices,
-        Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
+        Arc<dyn RebornAuthContinuationDispatcher>,
     ),
     RebornBuildError,
 > {
@@ -808,7 +1444,11 @@ fn compose_product_auth_services(
         services = services.with_oauth_gate_driver(driver);
     }
     if let Some(scope) = nearai_mcp_host_managed_scope {
-        services = services.with_host_managed_nearai_credential_scope(scope)?;
+        services = services
+            .with_host_managed_nearai_credential_scope(scope)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("host-managed NEAR AI credential scope is invalid: {error}"),
+            })?;
     }
     if let Some(source) = flow_record_source {
         services = services.with_flow_record_source(source);
@@ -2960,9 +3600,10 @@ async fn build_local_storage_production_shaped(
         context,
         stores,
         trigger_repository,
-        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(
-            refresh_lock_pool,
-        ),
+        match refresh_lock_pool {
+            Some(pool) => ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool),
+            None => ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
+        },
     )
     .await
 }
@@ -3004,7 +3645,7 @@ struct RebornProductionBuildContext {
     /// Injected credential-account visibility policy (see the build-input field).
     credential_account_visibility_policy: Option<
         Arc<
-            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
+            dyn ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
         >,
     >,
     workspace_filesystems: Option<WorkspaceFilesystems>,
@@ -3602,7 +4243,7 @@ async fn build_backend_production(
     // Leader lock for the background credential keepalive worker. The worker
     // uses this to elect one process per tick as the sweep leader. `None`
     // pool → always-leader (libsql / single-process). Stays private.
-    leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+    leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
@@ -3943,8 +4584,7 @@ async fn build_backend_production(
     let services = services.try_with_host_http_egress(default_host_http_egress()?)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
-    let admin_configuration_credential_slot =
-        crate::product_auth::credentials::product_auth_providers::AdminConfigurationCredentialSlot::default();
+    let admin_configuration_credential_slot = AdminConfigurationCredentialSlot::default();
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -4297,12 +4937,18 @@ async fn build_backend_production(
                 product_auth_dependencies.runtime_credential_account_selection_service(),
             ),
     );
-    let lifecycle_wrapped_continuation = ironclaw_product::lifecycle_auth_continuation_dispatcher(
-        lifecycle_continuation_facade,
-        base_auth_continuation,
+    let base_product_continuation: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher> =
+        product_auth_continuation_dispatcher(base_auth_continuation);
+    let lifecycle_wrapped_product_continuation =
+        ironclaw_product::lifecycle_auth_continuation_dispatcher(
+            lifecycle_continuation_facade,
+            base_product_continuation,
+        );
+    let lifecycle_wrapped_auth_continuation: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
+        AuthContinuationFromProduct::new(Arc::clone(&lifecycle_wrapped_product_continuation)),
     );
     let product_auth_services = Arc::new(
-        product_auth_core.with_continuation_dispatcher(Arc::clone(&lifecycle_wrapped_continuation)),
+        product_auth_core.with_continuation_dispatcher(lifecycle_wrapped_auth_continuation),
     );
     // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
@@ -4554,7 +5200,7 @@ async fn build_backend_production(
                 // dispatcher here leaves a freshly paired channel extension
                 // stuck at setup_needed until an unrelated reconcile runs
                 // (#6520 live-repro: channel remove → install → pair).
-                let continuation = Arc::clone(&lifecycle_wrapped_continuation);
+                let continuation = Arc::clone(&lifecycle_wrapped_product_continuation);
                 let agent_id = match channel_egress_scope.agent_id.clone() {
                     Some(agent_id) => agent_id,
                     None => ironclaw_host_api::AgentId::new("reborn").map_err(|error| {
@@ -4761,6 +5407,8 @@ async fn build_backend_production(
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
         local_dev_wasm_runtime_credential_provider_captured,
+        #[cfg(any(test, feature = "test-support"))]
+        product_auth_product_continuation_dispatcher: lifecycle_wrapped_product_continuation,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.
@@ -4787,7 +5435,7 @@ async fn finish_production_backend(
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_reborn_event_store::RebornEventStoreConfig,
-    leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+    leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let resource_governor = filesystem_resource_governor(&filesystem);
     let stores = ProductionStoreBundle::new(
@@ -4831,7 +5479,7 @@ async fn build_libsql_production(
             path_or_url,
             auth_token,
         },
-        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
+        ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
     )
     .await
 }
@@ -4873,9 +5521,7 @@ async fn build_postgres_production(
         trigger_repository,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
-        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
-            pool_for_refresh_lock,
-        )),
+        ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
     )
     .await
 }

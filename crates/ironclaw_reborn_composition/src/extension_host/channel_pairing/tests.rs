@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use ironclaw_auth::AuthProductError;
+use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
 use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
@@ -372,7 +372,10 @@ fn fixture_with_prefixes(
                     as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
                 Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
             )),
-            continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
+            continuation: crate::factory::product_auth_continuation_dispatcher(Arc::clone(
+                &dispatcher,
+            )
+                as Arc<dyn RebornAuthContinuationDispatcher>),
             conversation_actor_pairings: Arc::clone(&actor_pairings)
                 as Arc<dyn ConversationActorPairingService>,
             direct_targets: Arc::new(ComposedChannelPairingDirectTargetStore::new(Arc::clone(
@@ -699,9 +702,9 @@ async fn provider_ack_waits_for_generic_fanout_acceptance() {
         .await
         .expect("mint pairing code");
     let fanout = Arc::new(BlockingFanoutAcceptance::default());
-    service.replace_continuation_for_test(
-        Arc::clone(&fanout) as Arc<dyn RebornAuthContinuationDispatcher>
-    );
+    service.replace_continuation_for_test(crate::factory::product_auth_continuation_dispatcher(
+        Arc::clone(&fanout) as Arc<dyn RebornAuthContinuationDispatcher>,
+    ));
     let service = Arc::new(service);
     let sink = pairing_ingress(Arc::clone(&service));
 
@@ -758,9 +761,9 @@ async fn transient_fanout_failure_requests_redelivery_and_reuses_durable_event_i
         .await
         .expect("mint pairing code");
     let fanout = Arc::new(FailOnceIdempotentFanout::default());
-    service.replace_continuation_for_test(
-        Arc::clone(&fanout) as Arc<dyn RebornAuthContinuationDispatcher>
-    );
+    service.replace_continuation_for_test(crate::factory::product_auth_continuation_dispatcher(
+        Arc::clone(&fanout) as Arc<dyn RebornAuthContinuationDispatcher>,
+    ));
     let service = Arc::new(service);
     let sink = pairing_ingress(Arc::clone(&service));
 

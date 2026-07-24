@@ -29,6 +29,8 @@ futures = "0.3"
 hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_common = { path = "../ironclaw_common" }
 # Folded up from the former `ironclaw_webui_v2` crate: the v2 handlers consume
 # only the `ProductSurface` facade + ingress/error vocabulary.
 ironclaw_product = { path = "../ironclaw_product" }
@@ -72,6 +74,8 @@ http-body-util = "0.1"
 # together. The three crates below supply the trait + DTO shapes
 # the stub implements.
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
+ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
 # Handler contract test (moved from ironclaw_webui_v2) constructs
 # `ProductOutboundEnvelope` fixtures through the product facade re-export.
 # The serve/auth integration tests (`tests/serve_loop.rs`, `tests/auth_route_contract.rs`,

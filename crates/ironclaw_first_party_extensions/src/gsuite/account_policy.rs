@@ -86,6 +86,80 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn google_account_visibility_covers_family_and_explicit_binding_cases() {
+        let gsuite_extensions = [
+            "gmail",
+            "google-calendar",
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
+        ];
+        let user_reusable = google_account(CredentialOwnership::UserReusable, None, Vec::new());
+        for extension in gsuite_extensions {
+            assert!(
+                gsuite_google_account_visible_to_requester(
+                    &user_reusable,
+                    &ExtensionId::new(extension).unwrap()
+                ),
+                "{extension} should see reusable Google credentials"
+            );
+        }
+        assert!(!gsuite_google_account_visible_to_requester(
+            &user_reusable,
+            &ExtensionId::new("notion").unwrap()
+        ));
+
+        let extension_owned_by_gsuite = google_account(
+            CredentialOwnership::ExtensionOwned,
+            Some(ExtensionId::new("google-drive").unwrap()),
+            Vec::new(),
+        );
+        assert!(gsuite_google_account_visible_to_requester(
+            &extension_owned_by_gsuite,
+            &ExtensionId::new("google-docs").unwrap()
+        ));
+        assert!(!gsuite_google_account_visible_to_requester(
+            &extension_owned_by_gsuite,
+            &ExtensionId::new("notion").unwrap()
+        ));
+
+        let extension_owned_by_notion = google_account(
+            CredentialOwnership::ExtensionOwned,
+            Some(ExtensionId::new("notion").unwrap()),
+            Vec::new(),
+        );
+        assert!(gsuite_google_account_visible_to_requester(
+            &extension_owned_by_notion,
+            &ExtensionId::new("notion").unwrap()
+        ));
+        assert!(!gsuite_google_account_visible_to_requester(
+            &extension_owned_by_notion,
+            &ExtensionId::new("gmail").unwrap()
+        ));
+
+        let shared_granted_to_calendar = google_account(
+            CredentialOwnership::SharedAdminManaged,
+            None,
+            vec![ExtensionId::new("google-calendar").unwrap()],
+        );
+        assert!(gsuite_google_account_visible_to_requester(
+            &shared_granted_to_calendar,
+            &ExtensionId::new("google-calendar").unwrap()
+        ));
+        assert!(!gsuite_google_account_visible_to_requester(
+            &shared_granted_to_calendar,
+            &ExtensionId::new("gmail").unwrap()
+        ));
+
+        let system_account = google_account(CredentialOwnership::System, None, Vec::new());
+        assert!(!gsuite_google_account_visible_to_requester(
+            &system_account,
+            &ExtensionId::new("gmail").unwrap()
+        ));
+    }
+
     fn google_account(
         ownership: CredentialOwnership,
         owner_extension: Option<ExtensionId>,

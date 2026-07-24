@@ -147,6 +147,17 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   `host_api::BoundProductSurface`, and WebUI-specific ProductSurface DTO names
   were renamed to the neutral `Product*` vocabulary. File/attachment command
   bytes remain JSON/base64 for now.
+- **r16** 2026-07-23 — status-only update for product auth ownership:
+  production product-auth contracts, flows, durable filesystem services,
+  credential account selection/refresh, continuations, cleanup, recipes, and
+  fakes moved to `ironclaw_auth`; HTTP route serving moved to `ironclaw_webui`;
+  `ironclaw_reborn_composition` now wires `AuthEngine`, stores, secrets,
+  network, runtime credential adapters, and product prompt adapters. Source
+  anchors: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
+  `RebornProductAuthServices`, `crates/ironclaw_auth/src/engine/mod.rs`
+  `AuthEngine`, `crates/ironclaw_webui/src/product_auth/mod.rs`
+  `product_auth_route_mount`, and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `auth_execution_context` / `ProductAuthRuntimeCredentialResolver`.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -1271,6 +1282,8 @@ Batch invocation (`LoopRequestBatch`, `stop_on_first_suspension`) is
 resume state, modeled in §11.1 (the #6137 bug class lives there, not in the
 single-invocation vocabulary).
 
+<a id="auth-turn-gate-host-api-port"></a>
+
 ### 5.3.1 Decision: gates arise at dispatch time too — and only `Auth`
 
 `authorize()` pre-flights everything pre-flightable: trust, approval,
@@ -1286,7 +1299,14 @@ lane-originated Approval/Resource gate is a `HostFailure::Permanent`, never a
 gate. "ALL policy, one place" is therefore stated precisely: *all pre-flightable
 policy in `authorize()`; dispatch-time auth discovery re-enters through the
 same gate vocabulary and the same resume path* — one gate model, two points of
-discovery.
+discovery. Current implementation anchors: `ironclaw_host_api/src/resolution.rs`
+defines the neutral `Blocked::Auth` gate vocabulary, composition's
+`extension_host/run_delivery_ports.rs` adapts the product prompt source, and
+`ironclaw_reborn_composition/src/runtime.rs` passes neutral gate/run refs into
+`ironclaw_auth`'s `OAuthGateChallengeRequest`. Cleanup milestone for the current
+`ironclaw_auth` -> `ironclaw_turns` layer exception: move the blocked-gate prompt
+driver to a host-api-owned port so auth continues to receive only neutral
+gate/run refs.
 
 ### 5.3.2 Decision: the `Authorized` lifecycle is part of the contract
 
@@ -1577,10 +1597,18 @@ the core of #6168:
 Plus cross-cutting product concerns currently inside composition that belong to the
 adapters (their deliver / auth side) or the kernel, not the assembler:
 
-- `composition/src/product_auth/` (**~32.7K**) — product-facing auth/onboarding → **recipe
-  data + one host `AuthEngine`**, not per-adapter code (§5.9): vendors differ in parameters,
-  not flow, so this collapses to per-vendor OAuth/api-key recipes behind the kernel
-  `resolve_gate` seam.
+- `composition/src/product_auth/` (**moved in r16**) — product-facing
+  auth/onboarding now lives in `ironclaw_auth` (contracts, durable services,
+  recipes, credential account selection/refresh, continuations, cleanup, and
+  fakes) plus `ironclaw_webui` route serving. Composition keeps only
+  `AuthEngine`/store/secret/network wiring and generic runtime adapters supplied
+  by owning crates; it must not own product-, channel-, or transport-specific
+  auth behavior. Implementation anchors:
+  `crates/ironclaw_auth/src/product_auth/api/auth.rs` `RebornProductAuthServices`,
+  `crates/ironclaw_auth/src/engine/mod.rs` `AuthEngine`,
+  `crates/ironclaw_webui/src/product_auth/mod.rs` `product_auth_route_mount`,
+  and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `ProductAuthRuntimeCredentialResolver`.
 - `composition/src/outbound/` (~1.8K) — delivery → the adapter's deliver path over the
   outbound port.
 - `composition/src/automation/` (~6.1K), `llm_admin/` (~8.5K) — these are *product
@@ -2534,6 +2562,15 @@ loop-facing capability result and every result mirror is deleted.
   transports, and the composition projection helpers use product event-stream
   names instead of WebUI-specific names. WebUI/OpenAI/channel callers now meet
   on the same host vocabulary and differ only at their wire adapters.
+  r17 removed the transitional `product_auth_wiring` subtree from composition:
+  product-auth contracts/flows/accounts/refresh/continuations/cleanup/recipes
+  remain in `ironclaw_auth`, HTTP routes remain in `ironclaw_webui`, and
+  composition keeps direct factory/runtime assembly code plus the retained
+  provider, runtime, and challenge adapters. Anchors:
+  `crates/ironclaw_auth/src/product_auth/api/auth.rs` `RebornProductAuthServices`,
+  `crates/ironclaw_webui/src/product_auth/mod.rs` `product_auth_route_mount`,
+  and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `auth_execution_context` / `ProductAuthRuntimeCredentialResolver`.
 - **§5.2.10 causal routing / product-terminal path** — design added here and
   vocabulary aligned around terminals/channels, but no first-class duct/path
   event contract or conformance suite exists yet. Until that lands, claims in

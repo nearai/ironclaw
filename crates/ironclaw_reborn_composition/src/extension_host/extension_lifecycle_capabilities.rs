@@ -17,7 +17,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductWorkflowError,
+    ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use serde::Deserialize;
 
@@ -25,7 +25,7 @@ use crate::extension_host::extension_activation_credentials::RuntimeExtensionAct
 use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, ExtensionManagementPort,
 };
-use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
+use ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -293,8 +293,10 @@ fn channel_connection_display_preview(
 }
 
 /// Structured channel connection requirements carry render chrome for WebUI.
-/// Strip them from model-visible lifecycle output so static fallback copy is
-/// never mistaken for live connection state.
+/// Strip paste/OAuth-oriented connection chrome from model-visible lifecycle
+/// output so static fallback copy is never mistaken for live connection state.
+/// WebGeneratedCode is the exception: the descriptor-authored instructions are
+/// the product contract telling the model that IronClaw mints the pairing code.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
@@ -305,7 +307,16 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                extension.summary.channel_connection = None;
+                let keep_generated_code_contract = extension
+                    .summary
+                    .channel_connection
+                    .as_ref()
+                    .is_some_and(|connection| {
+                        connection.strategy == RebornChannelConnectStrategy::WebGeneratedCode
+                    });
+                if !keep_generated_code_contract {
+                    extension.summary.channel_connection = None;
+                }
             }
         }
         _ => {}
@@ -441,7 +452,9 @@ mod tests {
     use crate::OAuthClientConfig;
     use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use ironclaw_product::{
-        ChannelConnectionRequirement, LifecyclePublicState, RebornChannelConnectStrategy,
+        ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+        LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState,
+        LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
     };
 
     /// Dummy but well-formed Google OAuth backend config for tests below that
@@ -720,6 +733,79 @@ mod tests {
                 .contains("Slack OAuth connection failed"),
             "static OAuth failure copy must not be presented as live model-visible state"
         );
+    }
+
+    #[test]
+    fn model_visible_extension_search_preserves_only_generated_code_connection_contract() {
+        let response = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePublicState::Active,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionSearch {
+                extensions: vec![
+                    search_summary("generated", RebornChannelConnectStrategy::WebGeneratedCode),
+                    search_summary("oauth", RebornChannelConnectStrategy::OAuth),
+                ],
+                count: 2,
+            }),
+        };
+
+        let filtered = without_model_visible_connection_chrome(response);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = filtered.payload
+        else {
+            panic!("expected extension_search payload");
+        };
+        let generated = extensions
+            .iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "generated")
+            .expect("generated-code summary");
+        assert!(
+            generated.summary.channel_connection.is_some(),
+            "model-visible search must preserve WebGeneratedCode connection contract"
+        );
+        let oauth = extensions
+            .iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "oauth")
+            .expect("OAuth summary");
+        assert!(
+            oauth.summary.channel_connection.is_none(),
+            "model-visible search must strip non-generated-code connection chrome"
+        );
+    }
+
+    fn search_summary(
+        id: &str,
+        strategy: RebornChannelConnectStrategy,
+    ) -> LifecycleSearchExtensionSummary {
+        LifecycleSearchExtensionSummary {
+            summary: LifecycleExtensionSummary {
+                package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)
+                    .expect("package ref"),
+                name: id.to_string(),
+                version: "1.0.0".to_string(),
+                description: format!("{id} channel"),
+                source: LifecycleExtensionSource::HostBundled,
+                runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+                surface_kinds: Vec::new(),
+                channel_directions: None,
+                channel_connection: Some(ChannelConnectionRequirement {
+                    channel: id.to_string(),
+                    display_name: id.to_string(),
+                    strategy,
+                    instructions: "Connect this channel.".to_string(),
+                    input_placeholder: String::new(),
+                    submit_label: "Connect".to_string(),
+                    error_message: "Connection failed.".to_string(),
+                }),
+                channel_presentation: None,
+                visible_capability_ids: Vec::new(),
+                visible_read_only_capability_ids: Vec::new(),
+                credential_requirements: Vec::new(),
+                onboarding: None,
+            },
+            installation_phase: Some(LifecyclePublicState::Uninstalled),
+        }
     }
 
     #[tokio::test]

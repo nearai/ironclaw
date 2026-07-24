@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
@@ -45,10 +46,9 @@ use ironclaw_network::{
 };
 use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn_composition::{
-    AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
-    RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_runtime,
-    local_runtime_build_input_with_options,
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
+    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -851,7 +851,7 @@ impl RebornQaCredentialSource {
 }
 
 async fn select_source_credential_account(
-    product_auth: &ironclaw_reborn_composition::RebornProductAuthServices,
+    product_auth: &ironclaw_auth::RebornProductAuthServices,
     source: &RebornQaCredentialSource,
     source_auth_scope: &AuthProductScope,
     provider: AuthProviderId,

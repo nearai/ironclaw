@@ -14,12 +14,13 @@ use ironclaw_product::{
 };
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::RebornBuildError;
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, ExtensionManagementPort,
 };
 use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
-use crate::{RebornBuildError, RebornProductAuthServices};
+use ironclaw_auth::RebornProductAuthServices;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NearAiMcpEndpoint {

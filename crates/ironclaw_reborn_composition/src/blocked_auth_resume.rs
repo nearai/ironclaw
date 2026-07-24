@@ -28,14 +28,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_auth::{
+    AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
+};
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnPersistenceSnapshot, TurnRunId, TurnStatus,
 };
 use uuid::Uuid;
 
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so

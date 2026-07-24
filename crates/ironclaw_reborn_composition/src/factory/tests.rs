@@ -676,7 +676,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     scope.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("auth-thread").unwrap());
 
     let challenge = product_auth
-        .request_manual_token_setup(crate::RebornManualTokenSetupRequest::new(
+        .request_manual_token_setup(ironclaw_auth::RebornManualTokenSetupRequest::new(
             scope.clone(),
             ironclaw_auth::AuthProviderId::new("github").unwrap(),
             CredentialAccountLabel::new("work github").unwrap(),
@@ -686,7 +686,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
         .await
         .unwrap();
     let submitted = product_auth
-        .submit_manual_token(crate::RebornManualTokenSubmitRequest::new(
+        .submit_manual_token(ironclaw_auth::RebornManualTokenSubmitRequest::new(
             scope.clone(),
             challenge.interaction_id,
             secrecy::SecretString::from("ghp_local_dev_pat"),
@@ -3155,14 +3155,14 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
     );
 }
 
-/// #6520 live-repro regression: a completed channel pairing must run the SAME
-/// lifecycle-wrapped continuation dispatcher product-auth uses — readiness
-/// reconciliation (runtime publication) before the blocked-run fan-out. When
-/// composition handed pairing a bare turn-resume dispatcher instead, a
-/// freshly paired channel extension (telegram: remove → install → pair) sat
-/// at setup_needed forever because nothing re-published it. Pinned by pointer
-/// identity at the composition seam: every pairing service's dispatcher IS
-/// product-auth's composed dispatcher.
+/// #6520 live-repro regression: a completed channel pairing must run the shared
+/// lifecycle-wrapped product continuation dispatcher — readiness reconciliation
+/// (runtime publication) before the blocked-run fan-out. When composition handed
+/// pairing a bare turn-resume dispatcher instead, a freshly paired channel
+/// extension (telegram: remove -> install -> pair) sat at setup_needed forever
+/// because nothing re-published it. Pinned by pointer identity at the
+/// composition seam: every pairing service's dispatcher is the same composed
+/// product dispatcher.
 #[tokio::test]
 async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -3173,25 +3173,33 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
     .await
     .expect("local-dev services build");
 
-    let product_auth_dispatcher = services.product_auth.continuation_dispatcher_for_test();
     let channel_pairing = services
         .channel_pairing
         .as_ref()
         .expect("local-dev build composes the channel pairing registry");
     let mut pairing_services_checked = 0usize;
+    let canonical_dispatcher = Arc::clone(&services.product_auth_product_continuation_dispatcher);
+    let mut shared_dispatcher = None;
     for extension_id in ["telegram", "slack"] {
         let Some(pairing) = channel_pairing.get(extension_id) else {
             continue;
         };
         pairing_services_checked += 1;
+        let dispatcher = pairing.continuation_dispatcher_for_test();
         assert!(
-            Arc::ptr_eq(
-                &pairing.continuation_dispatcher_for_test(),
-                &product_auth_dispatcher,
-            ),
-            "{extension_id} pairing completions must dispatch through product-auth's \
-             lifecycle-wrapped continuation dispatcher, not a bare turn-resume one",
+            Arc::ptr_eq(&dispatcher, &canonical_dispatcher),
+            "{extension_id} pairing completions must dispatch through the authoritative \
+             lifecycle-wrapped continuation dispatcher",
         );
+        if let Some(shared_dispatcher) = &shared_dispatcher {
+            assert!(
+                Arc::ptr_eq(&dispatcher, shared_dispatcher),
+                "{extension_id} pairing completions must dispatch through the shared \
+                 lifecycle-wrapped continuation dispatcher, not a per-channel bare turn-resume one",
+            );
+        } else {
+            shared_dispatcher = Some(dispatcher);
+        }
     }
     assert!(
         pairing_services_checked > 0,

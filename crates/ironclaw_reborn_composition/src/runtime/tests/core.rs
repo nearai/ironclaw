@@ -6700,7 +6700,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
 struct MultiToolConfiguredCredentials;
 
 #[async_trait]
-impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
+impl ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
     for MultiToolConfiguredCredentials
 {
     async fn select_configured_account_for_binding(
@@ -6713,7 +6713,7 @@ impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAcc
 
     async fn select_unique_configured_runtime_account(
         &self,
-        _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        _request: ironclaw_auth::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
     ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
         let now = chrono::Utc::now();
         Ok(ironclaw_auth::CredentialAccount {
