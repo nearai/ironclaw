@@ -49,11 +49,11 @@ def _manifest_provider_journeys() -> set[str]:
     return cases
 
 
-def _cargo_targets(manifest_path: Path) -> dict[str, str]:
+def _cargo_targets(manifest_path: Path) -> dict[str, dict]:
     with manifest_path.open("rb") as manifest_file:
         manifest = tomllib.load(manifest_file)
     return {
-        target["name"]: target["path"]
+        target["name"]: target
         for target in manifest.get("test", [])
         if "path" in target
     }
@@ -77,12 +77,8 @@ def _disabling_pytest_marks(
 
 def _pytest_mark_aliases(tree: ast.Module) -> dict[str, set[str]]:
     aliases: dict[str, set[str]] = {}
-    changed = True
-    while changed:
-        changed = False
-        for statement in tree.body:
-            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
-                continue
+    for statement in tree.body:
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
             targets = (
                 statement.targets
                 if isinstance(statement, ast.Assign)
@@ -90,16 +86,29 @@ def _pytest_mark_aliases(tree: ast.Module) -> dict[str, set[str]]:
             )
             if statement.value is None:
                 continue
-            marks = _disabling_pytest_marks(statement.value, aliases)
+            if isinstance(statement.value, ast.Name):
+                marks = aliases.setdefault(statement.value.id, set())
+            else:
+                marks = _disabling_pytest_marks(statement.value, aliases)
             for target in targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and target.id != "pytestmark"
-                    and marks
-                    and aliases.get(target.id) != marks
-                ):
+                if isinstance(target, ast.Name):
                     aliases[target.id] = marks
-                    changed = True
+        elif isinstance(statement, ast.AugAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            aliases.setdefault(statement.target.id, set()).update(
+                _disabling_pytest_marks(statement.value, aliases)
+            )
+        elif (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr in {"append", "extend"}
+            and isinstance(statement.value.func.value, ast.Name)
+        ):
+            collection = aliases.setdefault(statement.value.func.value.id, set())
+            for argument in statement.value.args:
+                collection.update(_disabling_pytest_marks(argument, aliases))
     return aliases
 
 
@@ -110,29 +119,7 @@ def _assert_python_test_declaration(
 ) -> None:
     tree = ast.parse(source)
     aliases = _pytest_mark_aliases(tree)
-    module_disabling_marks = set()
-    for statement in tree.body:
-        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
-            targets = (
-                statement.targets
-                if isinstance(statement, ast.Assign)
-                else [statement.target]
-            )
-            if statement.value is not None and any(
-                isinstance(target, ast.Name) and target.id == "pytestmark"
-                for target in targets
-            ):
-                module_disabling_marks.update(
-                    _disabling_pytest_marks(statement.value, aliases)
-                )
-        elif (
-            isinstance(statement, ast.AugAssign)
-            and isinstance(statement.target, ast.Name)
-            and statement.target.id == "pytestmark"
-        ):
-            module_disabling_marks.update(
-                _disabling_pytest_marks(statement.value, aliases)
-            )
+    module_disabling_marks = aliases.get("pytestmark", set())
     assert not module_disabling_marks, (
         f"pytest evidence {test_name!r} is disabled by module-level marks "
         f"{sorted(module_disabling_marks)} in {source_label}"
@@ -267,7 +254,13 @@ def _assert_cargo_target(
     )
     targets = _cargo_targets(manifest_path)
     if evidence.target in targets:
-        expected_source = (manifest_path.parent / targets[evidence.target]).resolve()
+        target = targets[evidence.target]
+        required_features = target.get("required-features", [])
+        assert not required_features, (
+            f"{case_id}: Cargo target {evidence.target!r} requires features "
+            f"{required_features} that journey evidence does not enable"
+        )
+        expected_source = (manifest_path.parent / target["path"]).resolve()
         assert expected_source == source_path.resolve(), (
             f"{case_id}: Cargo target {evidence.target!r} points to "
             f"{expected_source}, not {source_path}"
@@ -397,6 +390,19 @@ def test_surface_gate_reports_a_new_uncovered_surface():
             "def test_required_journey():\n"
             "    pass\n"
         ),
+        (
+            "pytestmark = []\n"
+            "pytestmark.append(pytest.mark.skip)\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
+        (
+            "marks = []\n"
+            "marks += [pytest.mark.skip]\n"
+            "pytestmark = marks\n"
+            "def test_required_journey():\n"
+            "    pass\n"
+        ),
     ],
 )
 def test_python_evidence_rejects_disabled_tests(source: str):
@@ -444,5 +450,32 @@ def test_cargo_evidence_rejects_a_misdirected_target(tmp_path: Path):
             "synthetic",
             evidence,
             expected_source,
+            root=tmp_path,
+        )
+
+
+def test_cargo_evidence_rejects_a_feature_gated_target(tmp_path: Path):
+    """A target that CI cannot run cannot satisfy executable evidence."""
+    (tmp_path / "tests").mkdir()
+    manifest_path = tmp_path / "Cargo.toml"
+    manifest_path.write_text(
+        "[[test]]\n"
+        'name = "journey"\n'
+        'path = "tests/journey.rs"\n'
+        'required-features = ["test-support"]\n',
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "tests/journey.rs"
+    source_path.touch()
+    evidence = CargoEvidence(
+        source="tests/journey.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="requires features"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            source_path,
             root=tmp_path,
         )
