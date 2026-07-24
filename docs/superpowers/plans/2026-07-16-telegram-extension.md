@@ -405,7 +405,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 
 **Interfaces:**
 - Produces: `resolve_telegram_config_for_serve(section, tenant_id, agent_id, project_id, user_id) -> anyhow::Result<Option<TelegramHostRuntimeConfig>>` gated on env `IRONCLAW_REBORN_TELEGRAM_ENABLED` override else `section.enabled`; `#[cfg(not(feature))]` stub errors when enabled without the feature (mirror serve_slack.rs L90).
-- Serve: `build_telegram_host_runtime_mounts` → `serve_config.with_public_route_mount(telegram_mounts.events).with_telegram_channel_routes(telegram_mounts.channel_routes)`; connectable/connection facades composed with slack's before the single `build_webui_services_with_connectable_channels` call.
+- Serve: `build_telegram_host_runtime_mounts` → `serve_config.with_public_route_mount(telegram_mounts.events).with_telegram_channel_routes(telegram_mounts.channel_routes)`; connectable/connection facades are exposed through the runtime-backed product surface.
 
 - [ ] **Step 1: Red test**: config-file test for `TelegramSection` parse + env override precedence (mirror existing SlackSection tests); a compile-features matrix check: `cargo check -p ironclaw_reborn_cli` (no features), `--features telegram-v2-host-beta`, `--features slack-v2-host-beta,telegram-v2-host-beta`.
 - [ ] **Steps 2-4:** implement; all three feature combos compile; green. **Step 5:** commit `feat(reborn): serve wiring + config for telegram host`.

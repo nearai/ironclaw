@@ -54,6 +54,7 @@ use ironclaw_host_api::{
     ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
     UserId,
 };
+use ironclaw_host_ingress::SplitRouteMount;
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
     RebornExtensionListResponse, RebornSetupExtensionResponse,
@@ -584,11 +585,7 @@ impl StoredPkceVerifier {
     }
 }
 
-pub struct ProductAuthRouteMount {
-    pub protected: Router,
-    pub public: Router,
-    pub descriptors: Vec<IngressRouteDescriptor>,
-}
+pub type ProductAuthRouteMount = SplitRouteMount;
 
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
@@ -603,8 +600,8 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
             get(oauth::vendor_oauth_callback_handler),
         );
 
-    ProductAuthRouteMount {
-        protected: Router::new()
+    ProductAuthRouteMount::new(
+        Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
             .route(
                 OAUTH_FLOW_STATUS_PATH,
@@ -648,9 +645,9 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 post(lifecycle::lifecycle_cleanup_handler),
             )
             .with_state(state.clone()),
-        public: public.with_state(state),
-        descriptors: product_auth_route_descriptors(),
-    }
+        public.with_state(state),
+        product_auth_route_descriptors(),
+    )
 }
 
 pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {

@@ -34,7 +34,7 @@ use ironclaw_product::{
 };
 use serde::Serialize;
 
-use crate::webui::route_mounts::ProtectedRouteMount;
+use ironclaw_host_ingress::ProtectedRouteMount;
 
 const MINT_PATH: &str = "/api/webchat/v2/extensions/{extension_id}/pairing/mint";
 const STATUS_PATH: &str = "/api/webchat/v2/extensions/{extension_id}/pairing/status";

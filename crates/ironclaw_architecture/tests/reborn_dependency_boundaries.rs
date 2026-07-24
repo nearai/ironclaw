@@ -2857,9 +2857,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through
-            // ironclaw_reborn_composition's facade (Router + WebuiAuthenticator
-            // trait + WebuiServeConfig + mount vocabulary + product-auth mount
-            // builders).
+            // ironclaw_reborn_composition's facade (ProductSurface/runtime
+            // handles + product-auth mount builders) and the neutral
+            // ironclaw_host_ingress Axum mount carriers.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -3649,13 +3649,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_webui",
-        dependency_name: "ironclaw_reborn_composition",
-        introduced: "2026-07-09",
-        removes_in: "W3.6",
-        reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
     },
 ];
 

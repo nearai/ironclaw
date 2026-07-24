@@ -668,8 +668,15 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
     harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn qa_extension_lifecycle_tools_search_install_and_remove_e2e() {
+#[test]
+fn qa_extension_lifecycle_tools_search_install_and_remove_e2e() {
+    run_async_test_with_stack(
+        "qa_extension_lifecycle_tools_search_install_and_remove_e2e",
+        qa_extension_lifecycle_tools_search_install_and_remove_e2e_impl,
+    );
+}
+
+async fn qa_extension_lifecycle_tools_search_install_and_remove_e2e_impl() {
     let search = cap(EXTENSION_SEARCH_CAPABILITY_ID);
     let install = cap(EXTENSION_INSTALL_CAPABILITY_ID);
     let remove = cap(EXTENSION_REMOVE_CAPABILITY_ID);
@@ -762,8 +769,15 @@ async fn qa_extension_lifecycle_tools_search_install_and_remove_e2e() {
     harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn qa_installing_bundled_extensions_exposes_complete_model_surface_e2e() {
+#[test]
+fn qa_installing_bundled_extensions_exposes_complete_model_surface_e2e() {
+    run_async_test_with_stack(
+        "qa_installing_bundled_extensions_exposes_complete_model_surface_e2e",
+        qa_installing_bundled_extensions_exposes_complete_model_surface_e2e_impl,
+    );
+}
+
+async fn qa_installing_bundled_extensions_exposes_complete_model_surface_e2e_impl() {
     let install = cap(EXTENSION_INSTALL_CAPABILITY_ID);
     let install_calls = BUNDLED_EXTENSION_IDS
         .iter()

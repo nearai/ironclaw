@@ -41,8 +41,8 @@ use ironclaw_first_party_extension_ports::{
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
-    InvocationId, MountView, Principal, ProjectId, ResourceScope, RuntimeHttpEgress, TenantId,
-    ThreadId, UserId,
+    InvocationId, MountView, Principal, ProductSurface, ProjectId, ResourceScope,
+    RuntimeHttpEgress, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
@@ -609,17 +609,9 @@ pub struct RebornRuntime {
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
-    /// Generic channel host assembly (extension-runtime P6 S2): the
-    /// per-extension inbound-channel reconcile loop over the generic host's
-    /// active snapshot. `None` when the composition path has no generic
-    /// host. Never read after construction — held purely so the reconcile
-    /// loop lives exactly as long as the runtime (dropping the `Arc` ends
-    /// the loop).
-    #[allow(
-        dead_code,
-        reason = "owned so the reconcile loop lives with the runtime"
-    )]
-    channel_host_assembly:
+    /// Generic channel host assembly (extension-runtime P6 S2), held so the
+    /// reconcile loop lives exactly as long as the runtime.
+    _channel_host_assembly:
         Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>>,
     /// Turn-state row-store flusher, kept so graceful `shutdown` can drain the
     /// write-behind durable tail (awaiting the acks of non-critical transitions
@@ -644,7 +636,7 @@ pub struct RebornRuntime {
     budget_event_projection: Option<crate::observability::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     /// Mints the one-time API bearer on admin user creation. Read by
-    /// `build_webui_services` when wiring the admin surface. `None` leaves the
+    /// `runtime.product_surface` when wiring the admin surface. `None` leaves the
     /// admin create path reporting the token minter unavailable.
     admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     actor_user_id: UserId,
@@ -662,7 +654,7 @@ pub struct RebornRuntime {
     pub(crate) skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     pub(crate) skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     skill_execution_adapter: Option<Arc<ComposedSkillExecutionAdapter>>,
-    /// Operator boot config, carried so the WebUI facade can compose the
+    /// Operator boot config, carried so the product surface can compose the
     /// LLM-config settings service over `providers.json` / `config.toml`.
     boot: Option<ironclaw_reborn_config::RebornBootConfig>,
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
@@ -1282,6 +1274,29 @@ impl RebornRuntime {
         &self.readiness
     }
 
+    /// Build the canonical product surface over this runtime graph.
+    ///
+    /// The returned surface reuses this runtime's thread service, turn
+    /// coordinator, projection stream, product-auth services, lifecycle/admin
+    /// ports, and product capability invoker. Consumers should use this handle
+    /// instead of assembling product-facing services from runtime internals.
+    pub fn product_surface(
+        &self,
+        event_stream: Option<Arc<dyn ProjectionStream>>,
+    ) -> Result<Arc<dyn ProductSurface>, RebornBuildError> {
+        let channel_connection = self.generic_channel_connection_facade();
+        crate::product_surface::build_product_surface_with_channel_connection(
+            self,
+            event_stream,
+            channel_connection,
+            Vec::new(),
+        )
+    }
+
+    pub fn product_auth_services(&self) -> Arc<RebornProductAuthServices> {
+        Arc::clone(&self.product_auth)
+    }
+
     pub fn extension_ingress_parts(
         &self,
     ) -> Option<crate::extension_host::extension_ingress::ExtensionIngressParts> {
@@ -1304,7 +1319,7 @@ impl RebornRuntime {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn product_auth_for_test(&self) -> Arc<RebornProductAuthServices> {
-        Arc::clone(&self.product_auth)
+        self.product_auth_services()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1457,7 +1472,7 @@ impl RebornRuntime {
     /// firing a trigger.
     #[cfg(any(test, feature = "test-support"))]
     pub fn active_channel_preference_codec_ids_for_test(&self) -> Vec<String> {
-        self.channel_host_assembly
+        self._channel_host_assembly
             .as_ref()
             .map(|assembly| {
                 assembly
@@ -1651,7 +1666,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn channel_pairing_route_mount_for_test(
         &self,
-    ) -> Option<crate::webui::route_mounts::ProtectedRouteMount> {
+    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
         self.channel_pairing.as_ref().map(|registry| {
             crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
                 registry,
@@ -1825,7 +1840,7 @@ impl RebornRuntime {
     }
 
     /// Operator boot config, when the runtime was assembled with one. The
-    /// WebUI facade uses it to compose the LLM-config settings service.
+    /// product surface uses it to compose the LLM-config settings service.
     pub(crate) fn webui_boot_config(&self) -> Option<&ironclaw_reborn_config::RebornBootConfig> {
         self.boot.as_ref()
     }
@@ -1853,9 +1868,7 @@ impl RebornRuntime {
     /// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
-    pub fn nearai_login_callback_mount(
-        &self,
-    ) -> Option<crate::webui::route_mounts::PublicRouteMount> {
+    pub fn nearai_login_callback_mount(&self) -> Option<ironclaw_host_ingress::PublicRouteMount> {
         let boot = self.boot.clone()?;
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
@@ -1960,7 +1973,7 @@ impl RebornRuntime {
     /// (`RebornIdentityStore` implements both traits), so admin CRUD
     /// enumerates exactly the users SSO login persists. Synchronous and fold-free
     /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
-    /// directory reads), so `build_webui_services` can call it directly.
+    /// directory reads), so `runtime.product_surface` can call it directly.
     pub(crate) fn reborn_user_directory(
         &self,
     ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
@@ -1973,8 +1986,8 @@ impl RebornRuntime {
         )
     }
 
-    /// Test-only accessor for the admin user directory the WebUI facade wires.
-    /// Mirrors the production call `build_webui_services` makes to
+    /// Test-only accessor for the admin user directory the product surface wires.
+    /// Mirrors the production call `runtime.product_surface` makes to
     /// [`Self::reborn_user_directory`] (`pub(crate)`), which integration tests
     /// in a separate crate cannot reach. Gated behind `test-support` so the
     /// substrate handle never leaks into production builds. For tests only.
@@ -2026,7 +2039,7 @@ impl RebornRuntime {
     }
 
     /// The runtime's turn coordinator — the same `Arc` production wiring hands
-    /// to the WebUI facade and the channel hosts
+    /// to the product surface and the channel hosts
     /// ([`RebornRuntime::product_turn_coordinator`]) — so downstream integration
     /// tests can poll `GetRunStateRequest` for runs submitted through the
     /// composed surfaces (e.g. waiting on a `BlockedAuth` park and its resume).
@@ -2047,7 +2060,7 @@ impl RebornRuntime {
     /// channels), when the composed runtime built any pairing service.
     pub fn channel_pairing_route_mount(
         &self,
-    ) -> Option<crate::webui::route_mounts::ProtectedRouteMount> {
+    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
         self.channel_pairing.as_ref().map(|registry| {
             crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(
                 std::sync::Arc::clone(registry),
@@ -4615,7 +4628,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,
-        channel_host_assembly,
+        _channel_host_assembly: channel_host_assembly,
         turn_state_flush,
         turn_run_snapshot_source,
         turn_tree_store: turn_state_store,

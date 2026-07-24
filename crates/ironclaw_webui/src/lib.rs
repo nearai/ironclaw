@@ -3,13 +3,10 @@
 //! Host-owned listener binding + serve loop for the Reborn WebChat v2
 //! HTTP gateway.
 //!
-//! `ironclaw_reborn_composition::webui_v2_app` returns a fully composed
-//! axum [`Router`] but deliberately stops at the
-//! `reborn_product_api_crates_do_not_bind_http_ingress` boundary — that
-//! crate must not bind sockets or call `axum::serve`. This crate is
-//! the host-owned counterpart: it accepts the `Router` from composition
-//! plus the listen address, binds a `TcpListener`, and runs the serve
-//! loop with graceful shutdown.
+//! `webui_v2_app` returns a fully composed axum [`Router`] but deliberately
+//! stops before listener binding. This crate owns both the WebUI ingress
+//! assembly and the host-owned serve loop helper that binds a `TcpListener`
+//! and runs graceful shutdown.
 //!
 //! Path A (`docs/reborn/how-to-port-channel-to-reborn.md`) native
 //! host-surface invariants:
@@ -31,10 +28,9 @@ mod signed_session_login;
 // composition's `#[cfg(test)]` unit tests, and downstream test crates can
 // reach the route/handler/descriptor items.
 pub mod webui_v2;
-// Reborn WebChat v2 HTTP gateway assembly + middleware, folded up from
-// `ironclaw_reborn_composition::webui`. `webui_v2_app` composes the fully
-// wired axum Router (auth + rate/body limit + CORS + security headers + the
-// v2 route surface); the middleware modules back it.
+// Reborn WebChat v2 HTTP gateway assembly + middleware. `webui_v2_app`
+// composes the fully wired axum Router (auth + rate/body limit + CORS +
+// security headers + the v2 route surface); the middleware modules back it.
 mod webui_body_limit;
 mod webui_operator_auth;
 mod webui_rate_limit;
@@ -42,11 +38,13 @@ mod webui_route_match;
 mod webui_serve;
 mod webui_ws_origin;
 
-// WebChat v2 gateway assembly + the host-auth vocabulary it carries. Folded up
-// from `ironclaw_reborn_composition::webui::webui_serve`. The mount vocabulary
-// (`PublicRouteMount`, `ProtectedRouteMount`) stays in composition;
-// `PublicRouteMount` is already re-exported through the `auth` module above,
-// and `ProtectedRouteMount` callers import it from composition directly.
+// WebChat v2 gateway assembly + the host-auth vocabulary it carries.
+// Route-mount carriers live in `ironclaw_host_ingress`: composition can build
+// mounts and this ingress crate can consume them without a reverse dependency
+// on WebUI.
+pub use ironclaw_host_ingress::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
+};
 pub use webui_rate_limit::RateLimitConfigError;
 pub use webui_serve::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
@@ -58,8 +56,8 @@ pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
-    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
-    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
+    ProviderInitError, UserDirectory, UserDirectoryError, empty_webui_v2_auth_providers_mount,
+    webui_v2_auth_router,
 };
 // Host-owned CLI-token bootstrap login (`GET /login?token=`); shares the
 // OAuth surface's bearer/ticket-exchange contract (`POST

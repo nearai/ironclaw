@@ -22,12 +22,12 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
-use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{ProductSurface, ProductSurfaceCaller};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    build_reborn_runtime, build_webui_services, local_dev_build_input, local_dev_runtime_policy,
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    local_dev_build_input, local_dev_runtime_policy,
 };
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
@@ -229,7 +229,7 @@ async fn legacy_tenant_owned_installation_migrates_to_operator_private_state() {
 struct LifecycleIsolationFixture {
     root: TempDir,
     runtime: RebornRuntime,
-    webui: RebornWebuiBundle,
+    webui: Arc<dyn ProductSurface>,
     storage_root: std::path::PathBuf,
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -290,7 +290,9 @@ impl LifecycleIsolationFixture {
         )
         .await
         .expect("production runtime builds");
-        let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+        let webui = runtime
+            .product_surface(None)
+            .expect("production product surface builds");
         Self {
             root,
             runtime,
@@ -326,15 +328,12 @@ impl LifecycleIsolationFixture {
     }
 
     fn member_router(&self, user_id: UserId) -> Router {
-        mount_webui_v2_router(
-            Arc::clone(&self.webui.product_surface),
-            self.caller(user_id),
-        )
+        mount_webui_v2_router(Arc::clone(&self.webui), self.caller(user_id))
     }
 
     fn operator_router(&self) -> Router {
         webui_v2_router(WebUiV2State::new(
-            Arc::clone(&self.webui.product_surface),
+            Arc::clone(&self.webui),
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
         ))
         .layer(axum::Extension(

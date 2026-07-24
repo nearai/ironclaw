@@ -61,8 +61,8 @@ use ironclaw_loop_host::{
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, RebornWebuiBundle, TriggerPollerSettings, build_reborn_runtime,
-    build_webui_services, local_runtime_build_input_with_options,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -271,8 +271,7 @@ fn make_trigger_record(
 // in the fallback authz check.
 
 fn build_timeline_app(runtime: &RebornRuntime) -> axum::Router {
-    let bundle: RebornWebuiBundle =
-        build_webui_services(runtime, None).expect("build_webui_services");
+    let product_surface = runtime.product_surface(None).expect("product surface");
 
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let owner_user_id = UserId::new(USER).expect("owner user id");
@@ -290,7 +289,7 @@ fn build_timeline_app(runtime: &RebornRuntime) -> axum::Router {
     // NOTE: with_default_project_id intentionally omitted — trigger records
     // use project_id = None and the caller scope must match.
 
-    webui_v2_app(bundle, config).expect("webui_v2_app")
+    webui_v2_app(product_surface, config).expect("webui_v2_app")
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────

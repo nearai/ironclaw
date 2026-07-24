@@ -548,25 +548,6 @@ impl DeploymentConfig {
         })
         .map(Some)
     }
-
-    /// The deployment's capability-policy *data* (§4.4.1 category 1): the
-    /// embedded `builtin_capability_policy.toml` — provider policy, approval
-    /// gates/defaults, and capability grants — parsed once through the
-    /// `OnceLock`-cached loader. Like [`DeploymentConfig::resolve`], this is a
-    /// thin adapter over the owning module's loader, not a second policy
-    /// source.
-    // dead_code allow: config-scoped accessor added by the §4.4 relocation;
-    // existing composition call sites still reach the module loader directly
-    // and migrate here separately.
-    #[allow(dead_code)]
-    pub(crate) fn builtin_capability_policy(
-        &self,
-    ) -> Result<
-        crate::builtin_capability_policy::BuiltinCapabilityPolicy,
-        crate::builtin_capability_policy::BuiltinCapabilityPolicyError,
-    > {
-        crate::builtin_capability_policy::builtin_capability_policy()
-    }
 }
 
 #[derive(Debug, Error)]

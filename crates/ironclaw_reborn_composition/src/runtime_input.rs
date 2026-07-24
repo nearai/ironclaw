@@ -473,7 +473,7 @@ impl TriggerPollerSettings {
 pub struct RebornRuntimeInput {
     pub services: Option<RebornHostBindings>,
     pub llm: Option<ResolvedRebornLlm>,
-    /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
+    /// Operator boot config. When present, the product surface composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
@@ -687,7 +687,7 @@ impl RebornRuntimeInput {
         self
     }
 
-    /// Supply the operator boot config so the WebUI facade can compose the
+    /// Supply the operator boot config so the product surface can compose the
     /// LLM-config settings service.
     pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
         self.boot = Some(boot);

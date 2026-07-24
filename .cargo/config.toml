@@ -9,7 +9,7 @@
 # retry/transport settings here (instead of scattering CARGO_NET_RETRY across
 # individual workflows) means a new workflow can never silently miss them.
 [net]
-retries = 10
+retry = 10
 git-fetch-with-cli = true   # git deps fetch via the git CLI, which retries too
 
 [http]

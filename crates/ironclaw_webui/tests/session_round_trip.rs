@@ -4,7 +4,7 @@
 //!
 //! Per the issue #4116 acceptance criteria — "session use on a
 //! protected WebChat v2 route" — this test composes the full
-//! `webui_v2_app` (`ironclaw_reborn_composition`) with:
+//! `webui_v2_app` with:
 //!
 //! - the OAuth public router from `webui_v2_auth_router` (mints
 //!   sessions),
@@ -37,7 +37,6 @@ use ironclaw_host_api::{
     ThreadId, UserId,
 };
 use ironclaw_product::RebornCreateThreadResponse;
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
     EmailUserDirectory, OAuthProvider, OAuthProviderName, OAuthRouterConfig, OAuthUserProfile,
@@ -206,11 +205,6 @@ fn build_app() -> (
     );
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         bearer_authenticator,
@@ -219,7 +213,7 @@ fn build_app() -> (
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(oauth_mount);
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
     (app, services, session_store)
 }
 

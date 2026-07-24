@@ -30,7 +30,7 @@ use ironclaw_host_api::ingress::{
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_reborn_composition::PublicRouteMount;
+use ironclaw_host_ingress::PublicRouteMount;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 

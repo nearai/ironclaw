@@ -28,7 +28,7 @@ use crate::LlmReloadTrigger;
 use crate::llm_admin::llm_config_service::{
     NEARAI_LOGIN_CALLBACK_PATH, NearAiLoginStateStore, apply_nearai_login,
 };
-use crate::webui::route_mounts::PublicRouteMount;
+use ironclaw_host_ingress::PublicRouteMount;
 
 const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,

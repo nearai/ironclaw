@@ -109,6 +109,18 @@ Reducer rules:
 - product-facing capability activity projections expose only metadata-safe
   lifecycle facts; raw tool arguments, raw output, command strings, host paths,
   and provider payloads stay outside the projection contract
+- parented dispatcher lifecycle events (`dispatch_requested`, `runtime_selected`,
+  `dispatch_succeeded`, and `dispatch_failed`) represent nested capability
+  activity only. They update the child capability activity with its parent run
+  identity and must never create or update a run-status row; unparented
+  dispatcher and process lifecycle events retain their existing run projection
+  behavior. Snapshot and cursor-resume behavior is covered by
+  `runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status` and
+  `runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status` in
+  `crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs`,
+  plus `product_event_stream_snapshot_keeps_nested_dispatch_failure_out_of_run_status`
+  and `product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run_status`
+  in `crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs`.
 - capability activity rows are keyed by stable invocation/activity identity.
   The loop assigns this identity before capability dispatch, and gate
   checkpoints must persist it even when a producer blocks without a resume

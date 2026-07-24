@@ -23,6 +23,7 @@ use ironclaw_host_api::{
     ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId, TerminateHint, ThreadId,
     ToolVerdict, UserId,
 };
+use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePublicState, ProductCreateThreadRequest,
@@ -32,7 +33,6 @@ use ironclaw_product::{
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewQuery,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
 };
-use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{
@@ -89,11 +89,7 @@ fn compose_with_public_descriptor(
     route_id: &str,
     route_pattern: &str,
 ) -> Result<axum::Router, WebuiServeError> {
-    let bundle = RebornWebuiBundle {
-        product_surface: Arc::new(StubServices::default()),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(StubServices::default());
     let descriptor = public_test_descriptor(route_id, route_pattern);
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -104,7 +100,7 @@ fn compose_with_public_descriptor(
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(axum::Router::new(), vec![descriptor]));
 
-    webui_v2_app(bundle, config)
+    webui_v2_app(product_surface.clone(), config)
 }
 
 // ─── stubs ────────────────────────────────────────────────────────────
@@ -224,17 +220,13 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
 
 #[tokio::test]
 async fn health_route_is_public_for_platform_probes() {
-    let bundle = RebornWebuiBundle {
-        product_surface: Arc::new(StubServices::default()),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(StubServices::default());
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![],
     );
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
     let response = app
         .oneshot(
@@ -257,7 +249,6 @@ async fn health_route_is_public_for_platform_probes() {
 mod openai_compat_mount_tests {
     use super::*;
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
-    use ironclaw_reborn_composition::ProtectedRouteMount;
     use ironclaw_reborn_openai_compat::{
         OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
         OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiCompatRefStore,
@@ -298,11 +289,7 @@ mod openai_compat_mount_tests {
             openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
             openai_compat_routes(),
         );
-        let bundle = RebornWebuiBundle {
-            product_surface: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
+        let product_surface = Arc::new(StubServices::default());
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -311,7 +298,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
         let unauthenticated = app
             .clone()
@@ -357,11 +344,7 @@ mod openai_compat_mount_tests {
             openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
             openai_compat_routes(),
         );
-        let bundle = RebornWebuiBundle {
-            product_surface: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
+        let product_surface = Arc::new(StubServices::default());
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -370,7 +353,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
         let timed_out = app
             .clone()
@@ -468,11 +451,7 @@ mod openai_compat_mount_tests {
             openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(responses)),
             openai_compat_routes(),
         );
-        let bundle = RebornWebuiBundle {
-            product_surface: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
+        let product_surface = Arc::new(StubServices::default());
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -481,7 +460,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
         let unauthenticated = app
             .clone()
@@ -1164,11 +1143,7 @@ const PROJECT: &str = "project-default";
 
 fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     // Match the host-installation pattern the CLI's `serve` command
     // uses: stamp trusted default agent_id / project_id onto the auth
     // layer. Without this, every authenticated v2 request would 400
@@ -1180,7 +1155,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -1188,11 +1163,7 @@ fn build_app_with_authenticator(
     authenticator: Arc<dyn WebuiAuthenticator>,
 ) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -1200,7 +1171,7 @@ fn build_app_with_authenticator(
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -1702,17 +1673,13 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
     }
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(AlwaysReject),
         vec![HeaderValue::from_static("http://localhost:1234")],
     );
-    let app = webui_v2_app(bundle, config).expect("app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("app");
     let response = app
         .oneshot(
             Request::builder()
@@ -1977,18 +1944,14 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
     use ironclaw_webui::WebuiServeConfig;
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_canonical_host("app.example.com");
-    let app = ironclaw_webui::webui_v2_app(bundle, config).expect("app");
+    let app = ironclaw_webui::webui_v2_app(product_surface.clone(), config).expect("app");
     let (addr, handle) = spawn_serve(app).await;
 
     // (1) Origin matches Host but NOT canonical_host — fail.
@@ -2183,17 +2146,13 @@ async fn rate_limit_is_independent_per_caller() {
     }
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services.clone();
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(UserSwitch),
         vec![HeaderValue::from_static("http://localhost:1234")],
     );
-    let app = webui_v2_app(bundle, config).expect("app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("app");
 
     let make_request = |token: &str| -> Request<Body> {
         Request::builder()
@@ -3054,11 +3013,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     use std::net::SocketAddr;
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services,
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services;
     let public = axum::Router::new().route(
         "/auth/providers",
         axum::routing::get(|| async { axum::Json(serde_json::json!({ "providers": [] })) }),
@@ -3073,7 +3028,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
     // No Authorization header — `with_public_route_mount` MUST
     // merge outside the bearer-auth layer.
@@ -3125,11 +3080,7 @@ async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
     use std::net::SocketAddr;
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services,
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = services;
     let public = axum::Router::new().route(
         "/future-host/ping",
         axum::routing::get(|| async { StatusCode::NO_CONTENT }),
@@ -3143,7 +3094,7 @@ async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
 
     let mut exact_request = Request::builder()
         .method(Method::GET)

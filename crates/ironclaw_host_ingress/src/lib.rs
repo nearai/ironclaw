@@ -1,18 +1,17 @@
-//! Host-supplied route-mount vocabulary shared between composition's own
-//! route builders (nearai login, OpenAI-compat) and the host-owned WebChat v2
-//! gateway assembly in `ironclaw_webui`.
+//! Host-owned HTTP route mount vocabulary.
 //!
-//! These types carry only `axum::Router` + `IngressRouteDescriptor`; they do
-//! not depend on the WebChat v2 route surface, so they stay in composition
-//! (where nearai/openai/runtime construct them) while `webui_v2_app` and its
-//! middleware live one layer up in the ingress crate.
+//! These types carry prebuilt Axum routers plus their ingress descriptors. They
+//! are intentionally neutral: runtime/composition code may build route mounts,
+//! while host ingress code decides how to layer authentication, rate limits,
+//! body limits, and static routing around them.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Router;
-use ironclaw_host_api::ingress::IngressRouteDescriptor;
+
+use ironclaw_host_api::IngressRouteDescriptor;
 
 /// Async drain hook for public route mounts that schedule work outside the
 /// request/response future.
@@ -20,10 +19,8 @@ pub trait PublicRouteDrain: Send + Sync {
     fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
-/// A host-supplied public sub-router plus the descriptors composition
-/// needs to install the per-route policy middleware around it.
-/// Mirrors the shape `ProductAuthRouteMount` uses internally so the
-/// two public surfaces ride on the same machinery.
+/// A host-supplied public sub-router plus the descriptors ingress uses to
+/// install per-route policy middleware around it.
 #[derive(Clone)]
 pub struct PublicRouteMount {
     pub router: Router,
@@ -31,11 +28,20 @@ pub struct PublicRouteMount {
     pub drain: Option<Arc<dyn PublicRouteDrain>>,
 }
 
-/// A host-supplied protected sub-router plus the descriptors composition
-/// needs to install the shared per-route policy middleware around it.
+/// A host-supplied protected sub-router plus the descriptors ingress uses to
+/// install shared bearer-auth and per-route policy middleware around it.
 #[derive(Clone)]
 pub struct ProtectedRouteMount {
     pub router: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
+}
+
+/// A route mount with both protected and public sub-routers sharing one
+/// descriptor inventory.
+#[derive(Clone)]
+pub struct SplitRouteMount {
+    pub protected: Router,
+    pub public: Router,
     pub descriptors: Vec<IngressRouteDescriptor>,
 }
 
@@ -60,6 +66,20 @@ impl PublicRouteMount {
     pub fn with_drain(mut self, drain: Arc<dyn PublicRouteDrain>) -> Self {
         self.drain = Some(drain);
         self
+    }
+}
+
+impl SplitRouteMount {
+    pub fn new(
+        protected: Router,
+        public: Router,
+        descriptors: Vec<IngressRouteDescriptor>,
+    ) -> Self {
+        Self {
+            protected,
+            public,
+            descriptors,
+        }
     }
 }
 

@@ -103,7 +103,7 @@ impl PostAdmissionObserver for RecordingAdmissionObserver {
 
 struct AcmeIngress {
     parts: ExtensionIngressParts,
-    mount: ironclaw_reborn_composition::PublicRouteMount,
+    mount: ironclaw_host_ingress::PublicRouteMount,
     observer: Arc<RecordingAdmissionObserver>,
 }
 
