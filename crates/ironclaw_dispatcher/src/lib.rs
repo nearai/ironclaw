@@ -15,8 +15,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_host_api::{
-    Actor, CapabilityId, ExtensionId, InvocationOrigin, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind, RuntimeLane,
+    Actor, CapabilityId, ExtensionId, InvocationId, InvocationOrigin, ResourceReceipt,
+    ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind, RuntimeLane,
 };
 pub use ironclaw_host_api::{
     Authorized, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
@@ -199,6 +199,7 @@ where
             }
             _ => None,
         };
+        let parent_invocation_id = run_id.map(|run_id| InvocationId::from_uuid(run_id.as_uuid()));
         let mut request = CapabilityDispatchRequest {
             capability_id: invocation.capability,
             scope: invocation.scope,
@@ -214,43 +215,63 @@ where
             self.governor.as_ref(),
             request.resource_reservation.take(),
         );
-        self.emit_event(RuntimeEvent::dispatch_requested(
-            scope.clone(),
-            capability_id.clone(),
-        ))
-        .await?;
+        let mut event = RuntimeEvent::dispatch_requested(scope.clone(), capability_id.clone());
+        event.parent_invocation_id = parent_invocation_id;
+        self.emit_event(event).await?;
 
         let Some(resolved) = self.resolver.as_ref().resolve(&request.capability_id) else {
             let error = DispatchError::UnknownCapability {
                 capability: capability_id.clone(),
             };
-            self.emit_dispatch_failure(scope, capability_id, None, None, &error)
-                .await?;
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                None,
+                None,
+                parent_invocation_id,
+                &error,
+            )
+            .await?;
             return Err(error);
         };
         let provider = resolved.provider.clone();
         let runtime = resolved.runtime;
         if RuntimeLane::from_runtime_kind(runtime) != Some(lane) {
             let error = DispatchError::MissingRuntimeBackend { runtime };
-            self.emit_dispatch_failure(scope, capability_id, Some(provider), Some(runtime), &error)
-                .await?;
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(provider),
+                Some(runtime),
+                parent_invocation_id,
+                &error,
+            )
+            .await?;
             return Err(error);
         }
 
         if let Err(error) = reservation_guard.validate() {
             let error = dispatch_resource_error(runtime, error);
-            self.emit_dispatch_failure(scope, capability_id, Some(provider), Some(runtime), &error)
-                .await?;
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(provider),
+                Some(runtime),
+                parent_invocation_id,
+                &error,
+            )
+            .await?;
             return Err(error);
         }
 
-        self.emit_event(RuntimeEvent::runtime_selected(
+        let mut event = RuntimeEvent::runtime_selected(
             scope.clone(),
             capability_id.clone(),
             provider.clone(),
             runtime,
-        ))
-        .await?;
+        );
+        event.parent_invocation_id = parent_invocation_id;
+        self.emit_event(event).await?;
 
         let execution = match resolved
             .adapter
@@ -267,6 +288,7 @@ where
                     capability_id,
                     Some(provider),
                     Some(runtime),
+                    parent_invocation_id,
                     &error,
                 )
                 .await?;
@@ -274,14 +296,15 @@ where
             }
         };
 
-        self.emit_event(RuntimeEvent::dispatch_succeeded(
+        let mut event = RuntimeEvent::dispatch_succeeded(
             scope,
             capability_id.clone(),
             provider.clone(),
             runtime,
             execution.output_bytes,
-        ))
-        .await?;
+        );
+        event.parent_invocation_id = parent_invocation_id;
+        self.emit_event(event).await?;
 
         Ok(CapabilityDispatchResult {
             capability_id,
@@ -300,16 +323,18 @@ where
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
+        parent_invocation_id: Option<InvocationId>,
         error: &DispatchError,
     ) -> Result<(), DispatchError> {
-        self.emit_event(RuntimeEvent::dispatch_failed(
+        let mut event = RuntimeEvent::dispatch_failed(
             scope,
             capability_id,
             provider,
             runtime,
             error.event_kind(),
-        ))
-        .await
+        );
+        event.parent_invocation_id = parent_invocation_id;
+        self.emit_event(event).await
     }
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), DispatchError> {
