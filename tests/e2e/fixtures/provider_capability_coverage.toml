@@ -205,17 +205,6 @@ assertion = "_assert_slack_provider_outcome"
 
 
 [[coverage_backlog]]
-rule = "write_requires_operation_case"
-owner = "@serrrfirat"
-reason = "qa_7e issues rename_sheet, write_values and append_values against one spreadsheet, then asserts a single row in the Bugs!A1:E10 range. That row cannot isolate which call committed it, and no assertion reads the sheet title back, so neither capability has evidence of its own."
-issue = "#6524"
-review_condition = "Add a ProviderOperationCase per capability with provider-side readback that isolates it from its sibling writes."
-capabilities = [
-  "google-sheets.rename_sheet",
-  "google-sheets.write_values",
-]
-
-[[coverage_backlog]]
 rule = "read_requires_outcome_classes"
 owner = "@serrrfirat"
 reason = "Has a seeded success case but no empty-result case; the runtime is unproven to distinguish no results from a failed call."
@@ -272,7 +261,6 @@ capabilities = [
   "google-drive.download_file",
   "google-drive.list_files",
   "google-sheets.get_spreadsheet",
-  "google-sheets.read_values",
   "slack.get_conversation_history",
   "slack.get_conversation_info",
   "slack.get_thread_replies",
