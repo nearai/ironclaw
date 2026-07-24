@@ -30,7 +30,7 @@ blake3 = "1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_hooks = { path = "../ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
@@ -39,7 +39,7 @@ ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", default-features =
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
-ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.3" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
@@ -65,7 +65,7 @@ ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", featur
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
-ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
+ironclaw_skills = { path = "../ironclaw_skills", version = "0.4.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 rust_decimal = "1"

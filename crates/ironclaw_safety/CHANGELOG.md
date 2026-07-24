@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/nearai/ironclaw/compare/ironclaw_safety-v0.2.2...ironclaw_safety-v0.2.3) - 2026-07-24
+
+### Added
+
+- *(reborn)* land Slack personal OAuth and WebUI v2 Slack remodel ([#5643](https://github.com/nearai/ironclaw/pull/5643))
+
+### Fixed
+
+- *(ci)* stop safety ReDoS timing guards flaking under coverage [skip-regression-check] ([#6181](https://github.com/nearai/ironclaw/pull/6181))
+- *(safety)* relax provider-output validation to stop give-up loops (B+C+D) ([#5001](https://github.com/nearai/ironclaw/pull/5001))
+- *(reborn)* show sanitized command details ([#4858](https://github.com/nearai/ironclaw/pull/4858))
+- *(reborn)* repair oversized provider tool arguments ([#4805](https://github.com/nearai/ironclaw/pull/4805))
+- *(reborn)* strengthen host runtime publication gates ([#3444](https://github.com/nearai/ironclaw/pull/3444))
+
+### Other
+
+- recoverable errors reach the model, never kill the run — hardened detail channel + fail-soft summary gates ([#5965](https://github.com/nearai/ironclaw/pull/5965))
+- Add Reborn crate layer allowlist gate ([#5852](https://github.com/nearai/ironclaw/pull/5852))
+- [codex] Refactor Reborn composition internals ([#5585](https://github.com/nearai/ironclaw/pull/5585))
+- [codex] Harden Slack pairing activation flows ([#5362](https://github.com/nearai/ironclaw/pull/5362))
+- upgrade Rust version to 1.96 ([#5405](https://github.com/nearai/ironclaw/pull/5405))
+- *(deps)* bump the everything-else group across 1 directory with 47 updates ([#5271](https://github.com/nearai/ironclaw/pull/5271))
+- PR 18.5a: type-seal trusted trigger ingress ([#4406](https://github.com/nearai/ironclaw/pull/4406))
+- [codex] Preserve provider reasoning summaries ([#4230](https://github.com/nearai/ironclaw/pull/4230))
+- Refactor host runtime HTTP egress pipeline ([#4214](https://github.com/nearai/ironclaw/pull/4214))
+- Add Reborn context compaction phase one ([#4110](https://github.com/nearai/ironclaw/pull/4110))
+- Allow multiline provider tool arguments ([#3999](https://github.com/nearai/ironclaw/pull/3999))
+- *(safety)* share pure sensitive path checks
+- *(reborn)* add crate agent maps ([#3308](https://github.com/nearai/ironclaw/pull/3308))
+
 ## [0.2.2](https://github.com/nearai/ironclaw/compare/ironclaw_safety-v0.2.1...ironclaw_safety-v0.2.2) - 2026-04-29
 
 ### Added

@@ -35,8 +35,8 @@ ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_process_sandbox = { path = "../ironclaw_process_sandbox", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
-ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
-ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.3" }
+ironclaw_skills = { path = "../ironclaw_skills", version = "0.4.0", default-features = false }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }

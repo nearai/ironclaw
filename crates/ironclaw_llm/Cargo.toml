@@ -25,8 +25,8 @@ registry-provider-factory = []
 test-support = []
 
 [dependencies]
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
-ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.5.0" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.3" }
 
 async-trait = "0.1"
 anyhow = "1"
