@@ -3,21 +3,69 @@ import React from "react";
 import { useT } from "../lib/i18n";
 import { useAuthSession } from "./auth";
 import { defaultRoute } from "./routes";
-import { GatewayLayout } from "../layout/gateway-layout";
 import { LoginPage as LoginView } from "../pages/login/login-page";
-import { ChatPage } from "../pages/chat/chat-page";
-import { OnboardingPage } from "../pages/onboarding/onboarding-page";
-import { WorkspacePage } from "../pages/workspace/workspace-page";
-import { ProjectsPage } from "../pages/projects/projects-page";
-import { MissionsPage } from "../pages/missions/missions-page";
-import { JobsPage } from "../pages/jobs/jobs-page";
-import { RoutinesPage } from "../pages/routines/routines-page";
-import { AutomationsPage } from "../pages/automations/automations-page";
-import { ExtensionsPage } from "../pages/extensions/extensions-page";
-import { SettingsPage } from "../pages/settings/settings-page";
-import { AdminPage } from "../pages/admin/admin-page";
-import { LogsPage } from "../pages/logs/logs-page";
 import { Button } from "../design-system/button";
+import { RouteLoadBoundary } from "./route-load-boundary";
+
+const GatewayLayout = React.lazy(() =>
+  import("../layout/gateway-layout").then(({ GatewayLayout }) => ({ default: GatewayLayout }))
+);
+const ChatPage = React.lazy(() =>
+  import("../pages/chat/chat-page").then(({ ChatPage }) => ({ default: ChatPage }))
+);
+const OnboardingPage = React.lazy(() =>
+  import("../pages/onboarding/onboarding-page").then(({ OnboardingPage }) => ({
+    default: OnboardingPage,
+  }))
+);
+const WorkspacePage = React.lazy(() =>
+  import("../pages/workspace/workspace-page").then(({ WorkspacePage }) => ({
+    default: WorkspacePage,
+  }))
+);
+const ProjectsPage = React.lazy(() =>
+  import("../pages/projects/projects-page").then(({ ProjectsPage }) => ({
+    default: ProjectsPage,
+  }))
+);
+const MissionsPage = React.lazy(() =>
+  import("../pages/missions/missions-page").then(({ MissionsPage }) => ({
+    default: MissionsPage,
+  }))
+);
+const JobsPage = React.lazy(() =>
+  import("../pages/jobs/jobs-page").then(({ JobsPage }) => ({ default: JobsPage }))
+);
+const RoutinesPage = React.lazy(() =>
+  import("../pages/routines/routines-page").then(({ RoutinesPage }) => ({
+    default: RoutinesPage,
+  }))
+);
+const AutomationsPage = React.lazy(() =>
+  import("../pages/automations/automations-page").then(({ AutomationsPage }) => ({
+    default: AutomationsPage,
+  }))
+);
+const ExtensionsPage = React.lazy(() =>
+  import("../pages/extensions/extensions-page").then(({ ExtensionsPage }) => ({
+    default: ExtensionsPage,
+  }))
+);
+const SettingsPage = React.lazy(() =>
+  import("../pages/settings/settings-page").then(({ SettingsPage }) => ({
+    default: SettingsPage,
+  }))
+);
+const AdminPage = React.lazy(() =>
+  import("../pages/admin/admin-page").then(({ AdminPage }) => ({ default: AdminPage }))
+);
+const LogsPage = React.lazy(() =>
+  import("../pages/logs/logs-page").then(({ LogsPage }) => ({ default: LogsPage }))
+);
+
+function LazyRoute({ children }) {
+  return (<RouteLoadBoundary>{children}</RouteLoadBoundary>);
+}
 
 function AuthLoading() {
   const t = useT();
@@ -138,15 +186,17 @@ function RequireAuth({ auth, children }) {
 function AuthenticatedLayout({ auth }) {
   return (
     <RequireAuth auth={auth}>
-      <GatewayLayout
-        token={auth.token}
-        profile={auth.profile}
-        isChecking={auth.isChecking}
-        isAdmin={auth.isAdmin}
-        rebornProjectsEnabled={auth.rebornProjectsEnabled}
-        globalAutoApproveEnabled={auth.globalAutoApproveEnabled}
-        onSignOut={auth.signOut}
-      />
+      <LazyRoute>
+        <GatewayLayout
+          token={auth.token}
+          profile={auth.profile}
+          isChecking={auth.isChecking}
+          isAdmin={auth.isAdmin}
+          rebornProjectsEnabled={auth.rebornProjectsEnabled}
+          globalAutoApproveEnabled={auth.globalAutoApproveEnabled}
+          onSignOut={auth.signOut}
+        />
+      </LazyRoute>
     </RequireAuth>
   );
 }
@@ -168,29 +218,47 @@ export function App() {
         <Route path="/" element={(<AuthenticatedLayout auth={auth} />)}>
           <Route index element={(<Navigate to={defaultRoute} replace />)} />
           <Route path="overview" element={(<Navigate to={defaultRoute} replace />)} />
-          <Route path="welcome" element={(<OnboardingPage />)} />
-          <Route path="chat" element={(<ChatPage />)} />
-          <Route path="chat/:threadId" element={(<ChatPage />)} />
-          <Route path="workspace" element={(<WorkspacePage />)} />
-          <Route path="workspace/*" element={(<WorkspacePage />)} />
-          <Route path="projects" element={(<ProjectsPage />)} />
-          <Route path="projects/:projectId" element={(<ProjectsPage />)} />
-          <Route path="projects/:projectId/missions/:missionId" element={(<ProjectsPage />)} />
-          <Route path="projects/:projectId/threads/:threadId" element={(<ProjectsPage />)} />
-          <Route path="missions" element={(<MissionsPage />)} />
-          <Route path="missions/:missionId" element={(<MissionsPage />)} />
-          <Route path="jobs" element={(<JobsPage />)} />
-          <Route path="jobs/:jobId" element={(<JobsPage />)} />
-          <Route path="routines" element={(<RoutinesPage />)} />
-          <Route path="routines/:routineId" element={(<RoutinesPage />)} />
-          <Route path="automations" element={(<AutomationsPage />)} />
-          <Route path="extensions" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
-          <Route path="extensions/:tab" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
-          <Route path="logs" element={(<LogsPage />)} />
-          <Route path="settings" element={(<SettingsPage />)} />
-          <Route path="settings/:tab" element={(<SettingsPage />)} />
-          <Route path="admin" element={(<AdminRoute auth={auth} />)} />
-          <Route path="admin/:tab" element={(<AdminRoute auth={auth} />)} />
+          <Route path="welcome" element={(<LazyRoute><OnboardingPage /></LazyRoute>)} />
+          <Route path="chat" element={(<LazyRoute><ChatPage /></LazyRoute>)} />
+          <Route path="chat/:threadId" element={(<LazyRoute><ChatPage /></LazyRoute>)} />
+          <Route path="workspace" element={(<LazyRoute><WorkspacePage /></LazyRoute>)} />
+          <Route path="workspace/*" element={(<LazyRoute><WorkspacePage /></LazyRoute>)} />
+          <Route path="projects" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
+          <Route path="projects/:projectId" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
+          <Route
+            path="projects/:projectId/missions/:missionId"
+            element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
+          />
+          <Route
+            path="projects/:projectId/threads/:threadId"
+            element={(<LazyRoute><ProjectsPage /></LazyRoute>)}
+          />
+          <Route path="missions" element={(<LazyRoute><MissionsPage /></LazyRoute>)} />
+          <Route path="missions/:missionId" element={(<LazyRoute><MissionsPage /></LazyRoute>)} />
+          <Route path="jobs" element={(<LazyRoute><JobsPage /></LazyRoute>)} />
+          <Route path="jobs/:jobId" element={(<LazyRoute><JobsPage /></LazyRoute>)} />
+          <Route path="routines" element={(<LazyRoute><RoutinesPage /></LazyRoute>)} />
+          <Route path="routines/:routineId" element={(<LazyRoute><RoutinesPage /></LazyRoute>)} />
+          <Route path="automations" element={(<LazyRoute><AutomationsPage /></LazyRoute>)} />
+          <Route
+            path="extensions"
+            element={(<LazyRoute><ExtensionsPage isAdmin={auth.isAdmin} /></LazyRoute>)}
+          />
+          <Route
+            path="extensions/:tab"
+            element={(<LazyRoute><ExtensionsPage isAdmin={auth.isAdmin} /></LazyRoute>)}
+          />
+          <Route path="logs" element={(<LazyRoute><LogsPage /></LazyRoute>)} />
+          <Route path="settings" element={(<LazyRoute><SettingsPage /></LazyRoute>)} />
+          <Route path="settings/:tab" element={(<LazyRoute><SettingsPage /></LazyRoute>)} />
+          <Route
+            path="admin"
+            element={(<LazyRoute><AdminRoute auth={auth} /></LazyRoute>)}
+          />
+          <Route
+            path="admin/:tab"
+            element={(<LazyRoute><AdminRoute auth={auth} /></LazyRoute>)}
+          />
         </Route>
         <Route path="*" element={(<Navigate to={defaultRoute} replace />)} />
       </Routes>

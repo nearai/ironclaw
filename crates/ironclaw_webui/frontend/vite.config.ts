@@ -3,26 +3,19 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rustStaticDir = resolve(here, "..", "static");
-const require = createRequire(import.meta.url);
 
 export default defineConfig({
   base: "/",
   plugins: [tailwindcss(), react()],
   publicDir: "public",
   resolve: {
-    alias: [
-      { find: /^@tanstack\/react-query$/, replacement: require.resolve("@tanstack/react-query") },
-      { find: /^react$/, replacement: require.resolve("react") },
-      { find: /^react\/jsx-runtime$/, replacement: require.resolve("react/jsx-runtime") },
-      { find: /^react-dom$/, replacement: require.resolve("react-dom") },
-      { find: /^react-dom\/client$/, replacement: require.resolve("react-dom/client") },
-      { find: /^react-hook-form$/, replacement: require.resolve("react-hook-form") },
-      { find: /^react-router$/, replacement: require.resolve("react-router") },
-    ],
+    // Keep one React runtime without rewriting package ids through Node's
+    // CommonJS resolver. Bare imports can now select each dependency's ESM
+    // export, which lets Rolldown tree-shake unused code.
+    dedupe: ["react", "react-dom"],
   },
   server: {
     host: "127.0.0.1",

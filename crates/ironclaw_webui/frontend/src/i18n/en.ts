@@ -1413,6 +1413,11 @@ registerPack("en", {
 
 registerPack("en", {
   "app.checkingSession": "Checking session...",
+  "app.loadingPage": "Loading page...",
+  "app.pageLoadFailedTitle": "This page couldn't be loaded",
+  "app.pageLoadFailedDescription":
+    "A new version may be available or the connection was interrupted. Reload the page to try again.",
+  "app.reloadPage": "Reload page",
   "app.sessionCheckFailedTitle": "Couldn't verify your session",
   "app.sessionCheckFailedDescription":
     "We couldn't verify your session right now. Your sign-in is still saved. Try again in a moment.",
