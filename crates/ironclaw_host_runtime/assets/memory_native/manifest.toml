@@ -24,12 +24,21 @@ operations = ["document_store", "context_retrieval", "interaction_log"]
 # read/write model tools + native-only search/tree conveniences. All four are
 # routed to the bound MemoryService by the host; their input/output schemas are
 # served inline from the bundled asset files (the single source of truth).
+#
+# The origin_gate_matrix values preserve the gating these tools had as
+# `builtin.memory_*` members of the builtin package (§5.3 S3 seed): the
+# read-like tools are Ungated for LoopRun via the reviewed
+# UNGATED_LOOP_RUN_CAPABILITIES allowlist, memory write stays
+# gated_unless_granted (arbitrary-path write), and Product/Automation are
+# deny-by-default. A missing matrix is NOT "no gate": the S4 authorize fold
+# fails closed to Forbidden for every origin-stamped invocation.
 [[tools]]
 id = "ironclaw.memory.read"
 description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
 effects = ["read_filesystem"]
 default_permission = "allow"
 visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/document-read.input.v1.json"
 output_schema_ref = "schemas/memory/document-read.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/read.md"
@@ -40,6 +49,7 @@ description = "Write, append, or patch Reborn persistent memory documents in the
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/document-write.input.v1.json"
 output_schema_ref = "schemas/memory/document-write.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/write.md"
@@ -50,6 +60,7 @@ description = "Search only Reborn internal persistent memory documents in the cu
 effects = ["read_filesystem"]
 default_permission = "allow"
 visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/search.input.v1.json"
 output_schema_ref = "schemas/memory/search.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/search.md"
@@ -60,6 +71,7 @@ description = "List Reborn persistent memory documents as a compact tree."
 effects = ["read_filesystem"]
 default_permission = "allow"
 visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/tree.input.v1.json"
 output_schema_ref = "schemas/memory/tree.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/tree.md"

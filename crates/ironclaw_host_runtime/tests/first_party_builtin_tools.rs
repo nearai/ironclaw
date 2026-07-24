@@ -290,6 +290,68 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
     }
 }
 
+/// §5.3 S3 for the always-on `ironclaw.memory` package: every memory tool
+/// descriptor carries a declared `origin_gate_matrix` preserving the gating the
+/// tools had as `builtin.memory_*` members of the builtin package (read-like
+/// tools Ungated for `LoopRun` via the reviewed allowlist, `memory_write`
+/// GatedUnlessGranted, `Product`/`Automation` deny-by-default). A missing
+/// matrix is not "no gate" — the S4 authorize fold fails closed to Forbidden
+/// for every origin-stamped invocation, denying all model memory dispatch.
+#[tokio::test]
+async fn native_memory_package_declares_behavior_neutral_origin_gate_matrix() {
+    let package = native_memory_first_party_package().unwrap();
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_eq!(
+            matrix.product,
+            OriginGatePolicy::Forbidden,
+            "{} product must be deny-by-default",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{} automation must be deny-by-default",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(
+            matrix.loop_run, expected_loop_run,
+            "{} loop_run must match its allowlist membership",
+            descriptor.id
+        );
+    }
+
+    let loop_run = |id: &str| {
+        package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == id)
+            .and_then(|descriptor| descriptor.origin_gate_matrix.as_ref())
+            .map(|matrix| matrix.loop_run)
+            .unwrap_or_else(|| panic!("{id} descriptor with matrix"))
+    };
+    for ungated in [
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ] {
+        assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
+    }
+    assert_eq!(
+        loop_run(MEMORY_WRITE_CAPABILITY_ID),
+        OriginGatePolicy::GatedUnlessGranted,
+        "{MEMORY_WRITE_CAPABILITY_ID}"
+    );
+}
+
 fn product_surface_builtin_capabilities() -> &'static [&'static str] {
     &[
         SKILL_INSTALL_CAPABILITY_ID,

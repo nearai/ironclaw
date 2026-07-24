@@ -93,12 +93,20 @@ pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str =
     crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;
 
 /// The registry-lane provider allowlist once activated extension dispatch
-/// resolves from the extension host's active snapshot: only the synthetic
-/// built-in package keeps resolving through the registry.
+/// resolves from the extension host's active snapshot: only the always-on
+/// registry-lane packages — the synthetic built-in package and the
+/// `ironclaw.memory` native memory package — keep resolving through the
+/// registry. Neither is ever published in the extension host's active
+/// snapshot, so omitting one here makes its capabilities unresolvable
+/// (`UnknownCapability`) in every composition that installs an extension
+/// host.
 pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
     let mut allowlist = std::collections::BTreeSet::new();
     if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
         allowlist.insert(builtin);
+    }
+    if let Ok(memory) = ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(memory);
     }
     allowlist
 }
