@@ -1546,7 +1546,7 @@ impl ExtensionManagementPort {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn activate_with_prechecked_credentials_for_test(
         &self,
         package_ref: LifecyclePackageRef,

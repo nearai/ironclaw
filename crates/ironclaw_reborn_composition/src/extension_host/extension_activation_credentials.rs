@@ -121,10 +121,10 @@ impl ExtensionActivationCredentialGate for UnavailableExtensionActivationCredent
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct PrecheckedExtensionActivationCredentialGate;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ExtensionActivationCredentialGate for PrecheckedExtensionActivationCredentialGate {
     async fn ensure_credentials(

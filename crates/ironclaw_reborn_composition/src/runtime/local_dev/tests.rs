@@ -2381,10 +2381,48 @@ mod tests {
         assert!(descriptor.provider.is_none());
         assert!(
             descriptor
+                .safe_description
+                .contains("Call this before answering when a listed skill could help"),
+            "skill_activate description must tell the model when to use the capability"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("Ambiguous names fail without loading a skill"),
+            "skill_activate description must not imply every visible bare name is actionable"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("at most four active skills total per run"),
+            "skill_activate description must advertise the selector's activation limit"
+        );
+        assert!(
+            descriptor
                 .parameters_schema
                 .get("properties")
                 .and_then(|properties| properties.get("names"))
                 .is_some()
+        );
+        assert_eq!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|properties| properties.get("names"))
+                .and_then(|names| names.get("description"))
+                .and_then(serde_json::Value::as_str),
+            Some(
+                "Exact skill names copied from the available-skills list; at most four total per run"
+            )
+        );
+        assert_eq!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|properties| properties.get("names"))
+                .and_then(|names| names.get("maxItems"))
+                .and_then(serde_json::Value::as_u64),
+            Some(4)
         );
         let tool_definition = port
             .tool_definitions()
@@ -2392,6 +2430,7 @@ mod tests {
             .into_iter()
             .find(|definition| definition.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
             .expect("skill_activate tool definition");
+        assert_eq!(tool_definition.description, descriptor.safe_description);
         let call = ProviderToolCall {
             provider_id: "test-provider".to_string(),
             provider_model_id: "test-model".to_string(),
