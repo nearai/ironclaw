@@ -305,7 +305,17 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
-                extension.summary.channel_connection = None;
+                if !extension
+                    .summary
+                    .channel_connection
+                    .as_ref()
+                    .is_some_and(|connection| {
+                        connection.strategy
+                            == ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
+                    })
+                {
+                    extension.summary.channel_connection = None;
+                }
             }
         }
         _ => {}
