@@ -22,7 +22,7 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_package,
+    builtin_first_party_package, native_memory_first_party_package,
 };
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -87,10 +87,18 @@ fn host_runtime_tool_wait() -> HarnessWaitConfig {
 
 #[test]
 fn reborn_builtin_first_party_capability_e2e_coverage_is_complete() {
+    // The always-on first-party surface is the union of the `builtin` package
+    // and the sibling `ironclaw.memory` package (issue #3537), which now
+    // owns the memory_* capabilities on the same always-on first-party lane.
     let declared = builtin_first_party_package()
         .expect("built-in first-party package builds")
         .capabilities
         .into_iter()
+        .chain(
+            native_memory_first_party_package()
+                .expect("native memory first-party package builds")
+                .capabilities,
+        )
         .map(|capability| capability.id.as_str().to_string())
         .collect::<BTreeSet<_>>();
     let covered = REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES
@@ -100,7 +108,7 @@ fn reborn_builtin_first_party_capability_e2e_coverage_is_complete() {
 
     assert_eq!(
         declared, covered,
-        "each built-in first-party capability must have Reborn e2e coverage"
+        "each always-on first-party capability (builtin + native memory) must have Reborn e2e coverage"
     );
 }
 

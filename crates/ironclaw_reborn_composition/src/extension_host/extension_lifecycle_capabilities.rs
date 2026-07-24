@@ -96,7 +96,6 @@ fn lifecycle_manifest(
     let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
-        implements: Vec::new(),
         description: description.to_string(),
         effects,
         default_permission,

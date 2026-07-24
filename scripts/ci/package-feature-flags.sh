@@ -40,7 +40,11 @@ case "${package}" in
     printf '%s\n' "--features test-support,host-auth-mint"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support"
+    # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider
+    # so its factory + swap tests run here; the feature-off build stays covered
+    # by every other CI lane (memory-mem0 is in no default set). Database
+    # backends compile unconditionally now, so no libsql feature is selected.
+    printf '%s\n' "--features test-support,memory-mem0"
     ;;
   ironclaw_runner)
     ;;

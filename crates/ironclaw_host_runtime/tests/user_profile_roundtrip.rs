@@ -244,8 +244,9 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
 /// - Write dispatched with `ResourceScope { agent_id: Some("test-agent"), project_id: Some("test-project"), … }`.
 /// - Inside the handler, `profile_merge_write` calls `profile_scope_and_path(tenant, user)`,
 ///   which passes `agent=None, project=None` to `MemoryDocumentScope/Path` constructors.
-/// - `MemoryBackedUserProfileSource::resolve_user_profile` also calls `profile_scope_and_path(tenant, user)`,
-///   reading the SAME narrowed scope path.
+/// - `MemoryBackedUserProfileSource::resolve_user_profile` reads through
+///   `MemoryService::profile_read`, whose native provider narrows to the SAME
+///   user-only scope/path.
 /// - Both paths share the same `InMemoryBackend` Arc, so the round trip only
 ///   succeeds if both call sites agree on the scope key.
 #[tokio::test]
@@ -296,16 +297,21 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
 
     // ── Step 2: read back via MemoryBackedUserProfileSource ──
     //
-    // The reader uses `profile_scope_and_path(tenant, user)` → same narrowed
-    // key as the writer. It reads from the SAME `InMemoryBackend` Arc.
-    // This is the scope-narrowing round-trip proof.
+    // The reader reads through `MemoryService::profile_read`, whose native
+    // provider narrows to the same user-only scope/path the writer used. It reads
+    // from the SAME `InMemoryBackend` Arc. This is the scope-narrowing round-trip
+    // proof.
     //
     // Note: `resolve_user_profile` is called as a direct method on
     // `MemoryBackedUserProfileSource` rather than through the
     // `HostUserProfileSource` trait, because the trait impl lives in the
     // composition crate. The method body called is identical; no production
     // logic is bypassed.
-    let source = MemoryBackedUserProfileSource::new(shared_fs.clone());
+    //
+    // The reader builds the native memory provider over the SAME shared
+    // filesystem the runtime's profile_set writer used, so the round trip exercises
+    // the real `MemoryService::profile_read` path against the same store.
+    let source = MemoryBackedUserProfileSource::from_filesystem(shared_fs.clone());
     let run_ctx = loop_run_context_with_user("tenant-roundtrip", "user-roundtrip").await;
     let resolved = source
         .resolve_user_profile(&run_ctx)
@@ -397,7 +403,10 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
     );
 
     // Read for user-B — must return None (no cross-user contamination).
-    let source = MemoryBackedUserProfileSource::new(shared_fs.clone());
+    // The reader builds the native memory provider over the SAME shared
+    // filesystem the runtime's profile_set writer used, so the round trip exercises
+    // the real `MemoryService::profile_read` path against the same store.
+    let source = MemoryBackedUserProfileSource::from_filesystem(shared_fs.clone());
     let run_ctx_b = loop_run_context_with_user("tenant-isolation", "user-B").await;
     let result = source.resolve_user_profile(&run_ctx_b).await;
     assert!(

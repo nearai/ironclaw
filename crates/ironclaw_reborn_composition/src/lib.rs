@@ -34,6 +34,8 @@ mod input;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
+mod memory_binding;
+mod memory_provider_factory;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
@@ -179,6 +181,11 @@ pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
+pub use memory_provider_factory::{
+    Mem0ConnectionConfig, MemoryProviderDeps, build_memory_service_resolver,
+    create_document_store_provider,
+};
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must

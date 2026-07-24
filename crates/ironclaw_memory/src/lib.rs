@@ -36,12 +36,13 @@ pub use safety::{
     PromptWriteSource,
 };
 pub use service::{
-    MEMORY_DISABLED_CONTEXT_ALIASES, MemoryContextProfileId, MemoryInvocation,
-    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
-    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
-    MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse, MemoryServiceReadRequest,
-    MemoryServiceReadResponse, MemoryServiceSearchRequest, MemoryServiceSearchResponse,
-    MemoryServiceSearchResult, MemoryServiceTreeRequest, MemoryServiceTreeResponse,
-    MemoryServiceWriteRequest, MemoryServiceWriteResponse, MemoryWriteStatus,
-    memory_context_disabled,
+    MEMORY_DISABLED_CONTEXT_ALIASES, MemoryContextProfileId, MemoryInteractionMessage,
+    MemoryInteractionRole, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
+    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
+    MemoryServiceErrorKind, MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
+    MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
+    MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
+    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
+    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
+    MemoryWriteStatus, memory_context_disabled,
 };

@@ -1,10 +1,5 @@
 use crate::HostApiError;
 
-pub(crate) enum VersionRule {
-    Versioned,
-    Unversioned,
-}
-
 pub(crate) enum PrefixRule {
     Any,
     Required(&'static str),
@@ -20,7 +15,6 @@ pub(crate) fn validate_dotted_id(
     min_segments: usize,
     min_segments_reason: &'static str,
     prefix: PrefixRule,
-    version: VersionRule,
 ) -> Result<(), HostApiError> {
     if value.is_empty() {
         return Err(HostApiError::invalid_id(kind, value, "must not be empty"));
@@ -66,24 +60,6 @@ pub(crate) fn validate_dotted_id(
                 kind,
                 value,
                 "only lowercase ASCII letters, digits, '_', '-', and '.' are allowed",
-            ));
-        }
-    }
-
-    if let VersionRule::Versioned = version {
-        let version = segments[segments.len() - 1];
-        let Some(rest) = version.strip_prefix('v') else {
-            return Err(HostApiError::invalid_id(
-                kind,
-                value,
-                "last segment must be a version like v1",
-            ));
-        };
-        if rest.is_empty() || rest.bytes().any(|byte| !byte.is_ascii_digit()) {
-            return Err(HostApiError::invalid_id(
-                kind,
-                value,
-                "last segment must be a version like v1",
             ));
         }
     }

@@ -41,9 +41,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, CapabilitySurfaceKind,
-    EffectKind, ExtensionId, HostApiError, HostPortCatalog, HostPortId, NetworkScheme,
-    NetworkTargetPattern, OriginGateMatrix, PermissionMode, RequestedTrustClass, ResourceProfile,
+    CapabilityId, CapabilityProfileSchemaRef, CapabilitySurfaceKind, EffectKind, ExtensionId,
+    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
+    OriginGateMatrix, PermissionMode, RequestedTrustClass, ResourceProfile,
     RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
     TrustClass, VendorId,
@@ -455,7 +455,6 @@ struct ProjectedManifestV2 {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct CapabilityDeclV2 {
     pub id: CapabilityId,
-    pub implements: Vec<CapabilityProfileId>,
     pub description: String,
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
@@ -725,11 +724,6 @@ pub enum ManifestV2Error {
     DuplicateRequiredHostPort {
         capability: CapabilityId,
         port: HostPortId,
-    },
-    #[error("capability {capability} implements profile '{profile}' more than once")]
-    DuplicateImplementedProfile {
-        capability: CapabilityId,
-        profile: CapabilityProfileId,
     },
     #[error("invalid wasm module ref '{value}': {reason}")]
     InvalidWasmModuleRef { value: String, reason: String },
@@ -1096,19 +1090,6 @@ impl CapabilityDeclV2 {
             }
         }
 
-        let mut implements_seen = BTreeSet::new();
-        let mut implements = Vec::with_capacity(raw.implements.len());
-        for profile in raw.implements {
-            let profile = CapabilityProfileId::new(profile)?;
-            if !implements_seen.insert(profile.clone()) {
-                return Err(ManifestV2Error::DuplicateImplementedProfile {
-                    capability: id,
-                    profile,
-                });
-            }
-            implements.push(profile);
-        }
-
         let input_schema_ref =
             CapabilityProfileSchemaRef::new(raw.input_schema_ref).map_err(|err| {
                 ManifestV2Error::InvalidSchemaRef {
@@ -1241,7 +1222,6 @@ impl CapabilityDeclV2 {
 
         Ok(Self {
             id,
-            implements,
             description: raw.description,
             effects: raw.effects,
             default_permission: raw.default_permission,
@@ -1776,8 +1756,6 @@ impl RawRuntimeV2 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCapabilityV2 {
     pub(crate) id: String,
-    #[serde(default)]
-    pub(crate) implements: Vec<String>,
     pub(crate) description: String,
     #[serde(default)]
     pub(crate) effects: Vec<EffectKind>,

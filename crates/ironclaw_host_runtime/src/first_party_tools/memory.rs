@@ -3,12 +3,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::AuditSink;
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, CorrelationId,
-    DecisionSummary, EffectKind, ExtensionId, PermissionMode, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    DecisionSummary, EffectKind, ExtensionId, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_memory::{
     MemoryEventSinkError, MemoryInvocation, MemoryService, MemoryServiceError,
@@ -18,17 +16,21 @@ use ironclaw_memory::{
     MemoryWriteStatus, PromptSafetyReasonCode, PromptWriteOperation, PromptWriteSafetyEvent,
     PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
 };
-use ironclaw_memory_native::NativeMemoryService;
 use serde_json::{Value, json};
 
+use crate::memory_provider::MemoryServiceResolver;
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
-use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
+use super::{input_error, operation_error};
 
-pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "builtin.memory_search";
-pub const MEMORY_WRITE_CAPABILITY_ID: &str = "builtin.memory_write";
-pub const MEMORY_READ_CAPABILITY_ID: &str = "builtin.memory_read";
-pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
+// The memory extension rides the always-on first-party lane (like `builtin`),
+// as the `ironclaw.memory` extension (backed by the native provider by default,
+// swappable via the document-store binding). The model-facing tool names derive
+// from these ids (`.` -> `__`): `ironclaw__memory__{read,write,search,tree}`.
+pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.search";
+pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
+pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.read";
+pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
 
@@ -39,6 +41,11 @@ struct MemoryServices {
 
 #[derive(Default)]
 pub(super) struct MemoryCapabilityState {
+    /// Single construction point for the memory provider (issue #3537). The
+    /// tools build their `MemoryService` only through this resolver; `Default`
+    /// is native, preserving pre-binding behavior until composition hands down a
+    /// config-resolved resolver.
+    resolver: MemoryServiceResolver,
     cached_memory_service: Mutex<Option<CachedMemoryService>>,
     #[cfg(test)]
     memory_service_for_test: Option<Arc<dyn MemoryService>>,
@@ -57,39 +64,6 @@ struct CachedMemoryService {
     filesystem: Arc<dyn RootFilesystem>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     service: Arc<dyn MemoryService>,
-}
-
-pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
-    Ok(vec![
-        first_party_capability_manifest(
-            MEMORY_SEARCH_CAPABILITY_ID,
-            "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope. This does not search connected app or extension data.",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_READ_CAPABILITY_ID,
-            "Read a Reborn persistent memory document in the current tenant/user/agent/project scope",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_TREE_CAPABILITY_ID,
-            "List Reborn persistent memory documents as a compact tree",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-    ])
 }
 
 pub(super) async fn dispatch(
@@ -127,6 +101,14 @@ fn memory_services(
 }
 
 impl MemoryCapabilityState {
+    /// Construct with a resolved memory provider resolver (issue #3537).
+    pub(crate) fn with_resolver(resolver: MemoryServiceResolver) -> Self {
+        Self {
+            resolver,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn service_for(
         &self,
         request: &FirstPartyCapabilityRequest,
@@ -156,10 +138,16 @@ impl MemoryCapabilityState {
             Arc::new(AuditPromptWriteSafetyEventSink { audit_sink })
                 as Arc<dyn PromptWriteSafetyEventSink>
         });
-        let service: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
-            Arc::clone(&filesystem),
-            prompt_write_safety_event_sink,
-        ));
+        // Single construction point: the resolver builds the bound provider over
+        // this request's filesystem, or returns `None` (document store disabled
+        // or bound to an unimplemented third party) → fail closed with a
+        // model-visible error instead of silently using native.
+        let Some(service) = self
+            .resolver
+            .resolve_document_store(Arc::clone(&filesystem), prompt_write_safety_event_sink)
+        else {
+            return Err(binding_unavailable_error());
+        };
         *cached = Some(CachedMemoryService {
             filesystem,
             audit_sink,
@@ -171,10 +159,23 @@ impl MemoryCapabilityState {
     #[cfg(test)]
     pub(super) fn with_memory_service_for_test(memory_service: Arc<dyn MemoryService>) -> Self {
         Self {
+            resolver: MemoryServiceResolver::native(),
             cached_memory_service: Mutex::new(None),
             memory_service_for_test: Some(memory_service),
         }
     }
+}
+
+/// Fail-closed error when the document-store binding is disabled or bound to a
+/// provider that is not constructable here (e.g. an unimplemented third party).
+///
+/// Host-authored fixed text — no binding/extension id is interpolated, so the
+/// safe-summary validator cannot reject it (see `agent-loop-capabilities.md`).
+fn binding_unavailable_error() -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::with_safe_summary(
+        RuntimeDispatchErrorKind::OperationFailed,
+        "memory is unavailable for the configured provider binding",
+    )
 }
 
 fn audit_sinks_match(
@@ -500,6 +501,7 @@ mod tests {
         MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
     };
 
+    use crate::memory_binding::MEMORY_DISABLED_BINDING_SENTINEL;
     use crate::{FirstPartyCapabilityRequest, HostProcessPort, InvocationServices};
 
     use super::*;
@@ -578,7 +580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_memory_search_dispatches_through_memory_service_facade() {
+    async fn native_memory_search_dispatches_through_memory_service_facade() {
         let memory_service = Arc::new(RecordingMemoryService::default());
         let state = MemoryCapabilityState::with_memory_service_for_test(memory_service.clone());
         let request = memory_request(
@@ -609,5 +611,97 @@ mod tests {
         assert_eq!(seen[0].0.scope.user_id.as_str(), "user-memory-service");
         assert_eq!(seen[0].1.query, "search marker");
         assert_eq!(seen[0].1.limit, 3);
+    }
+
+    #[tokio::test]
+    async fn disabled_binding_fails_closed_at_dispatch() {
+        // Drive the real caller (dispatch -> service_for -> resolver) with a
+        // resolver whose document store is disabled (no test-override service),
+        // proving it fails closed instead of silently building native.
+        let state = MemoryCapabilityState::with_resolver(document_store_resolver(
+            MEMORY_DISABLED_BINDING_SENTINEL,
+        ));
+        let request = memory_request(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            json!({"query": "search marker", "limit": 3}),
+        );
+
+        let err = dispatch(&state, &request)
+            .await
+            .expect_err("disabled binding must fail closed");
+        assert_eq!(
+            err.kind(),
+            Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+        );
+        assert_eq!(
+            err.safe_summary(),
+            Some("memory is unavailable for the configured provider binding")
+        );
+    }
+
+    #[tokio::test]
+    async fn third_party_binding_fails_closed_at_dispatch() {
+        let state = MemoryCapabilityState::with_resolver(document_store_resolver("acme.honcho"));
+        let request = memory_request(MEMORY_READ_CAPABILITY_ID, json!({"path": "notes/alpha.md"}));
+
+        let err = dispatch(&state, &request)
+            .await
+            .expect_err("unimplemented third-party binding must fail closed");
+        assert_eq!(
+            err.kind(),
+            Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn third_party_binding_dispatches_to_registered_provider() {
+        // The third-party binding is permitted, and a provider instance is
+        // registered for its id, so the *model-facing memory tool* dispatches
+        // through to that provider rather than failing closed — proving a mem0
+        // (or any third-party) binding transparently swaps the service behind the
+        // same `ironclaw.memory.*` tools, through the real resolver path.
+        let provider = Arc::new(RecordingMemoryService::default());
+        let resolver = document_store_resolver("acme.honcho")
+            .with_third_party_document_store_provider(
+                "acme.honcho",
+                provider.clone() as Arc<dyn MemoryService>,
+            );
+        let state = MemoryCapabilityState::with_resolver(resolver);
+        let request = memory_request(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            json!({"query": "search marker", "limit": 3}),
+        );
+
+        let result = dispatch(&state, &request)
+            .await
+            .expect("registered third-party provider must dispatch");
+        assert_eq!(
+            result.output["results"][0]["content"],
+            "captured through IronClaw memory"
+        );
+        // The dispatch actually reached the registered third-party provider.
+        assert_eq!(
+            provider
+                .seen
+                .lock()
+                .expect("recording memory service lock should not be poisoned")
+                .len(),
+            1
+        );
+    }
+
+    /// A resolver whose document-store profile is bound to `extension_id`
+    /// (e.g. `memory.disabled` or a third party), for driving fail-closed
+    /// dispatch through the real resolver path.
+    fn document_store_resolver(extension_id: &str) -> MemoryServiceResolver {
+        use crate::memory_binding::{
+            MemoryBindingInput, MemoryBindingPolicy, MemoryDeploymentProfile,
+        };
+        let policy = MemoryBindingPolicy::resolve(MemoryBindingInput {
+            provider: Some(extension_id.to_string()),
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
+        })
+        .expect("policy resolves");
+        MemoryServiceResolver::from_policy(policy)
     }
 }

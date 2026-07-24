@@ -1335,39 +1335,8 @@ fn host_port_catalog_equality_is_order_independent() {
 }
 
 #[test]
-fn capability_profile_contract_equality_is_order_independent() {
-    let profile_id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
-    let op1 = CapabilityProfileOperationContract::new(
-        CapabilityProfileOperationId::new("memory.context.retrieve.v1").unwrap(),
-        "schemas/memory/context-retrieve.input.v1.json",
-        "schemas/memory/context-retrieve.output.v1.json",
-    )
-    .unwrap();
-    let op2 = CapabilityProfileOperationContract::new(
-        CapabilityProfileOperationId::new("memory.context.touch.v1").unwrap(),
-        "schemas/memory/context-touch.input.v1.json",
-        "schemas/memory/context-touch.output.v1.json",
-    )
-    .unwrap();
-
-    let a =
-        CapabilityProfileContract::new(profile_id.clone(), vec![op1.clone(), op2.clone()]).unwrap();
-    let b = CapabilityProfileContract::new(profile_id, vec![op2, op1]).unwrap();
-
-    assert_eq!(a, b);
-    assert_eq!(
-        serde_json::to_value(&a).unwrap(),
-        serde_json::to_value(&b).unwrap(),
-    );
-}
-
-#[test]
 fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     let storage = "host.storage.sql_transaction.first_party";
-    let op_id = "memory.context.retrieve.v1";
-    let profile_id = "memory.context_retrieval.v1";
-    let in_ref = "schemas/memory/context-retrieve.input.v1.json";
-    let out_ref = "schemas/memory/context-retrieve.output.v1.json";
     let ingress_policy = json!({
         "listener_class": "local_gateway",
         "auth": {
@@ -1403,25 +1372,6 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     );
     assert!(
         serde_json::from_value::<HostPortView>(json!({ "grants": [{ "id": storage }] })).is_ok()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileOperationContract>(json!({
-            "id": op_id,
-            "input_schema_ref": in_ref,
-            "output_schema_ref": out_ref,
-        }))
-        .is_ok()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileContract>(json!({
-            "id": profile_id,
-            "required_operations": [{
-                "id": op_id,
-                "input_schema_ref": in_ref,
-                "output_schema_ref": out_ref,
-            }],
-        }))
-        .is_ok()
     );
     assert!(serde_json::from_value::<IngressPolicy>(ingress_policy.clone()).is_ok());
     assert!(
@@ -1465,27 +1415,6 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     assert!(
         serde_json::from_value::<HostPortView>(json!({ "grants": [{ "id": storage, "oops": 1 }] }))
             .is_err()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileOperationContract>(json!({
-            "id": op_id,
-            "input_schema_ref": in_ref,
-            "output_schema_ref": out_ref,
-            "oops": 1,
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileContract>(json!({
-            "id": profile_id,
-            "required_operations": [{
-                "id": op_id,
-                "input_schema_ref": in_ref,
-                "output_schema_ref": out_ref,
-            }],
-            "oops": 1,
-        }))
-        .is_err()
     );
     assert!(serde_json::from_value::<IngressPolicy>(ingress_policy_with_unknown).is_err());
     assert!(
@@ -1547,67 +1476,6 @@ fn host_port_catalog_validates_required_ports_without_creating_implementations()
         ])
         .is_err(),
         "duplicate host port catalog entries must fail closed"
-    );
-}
-
-#[test]
-fn capability_profile_ids_are_versioned_portable_contract_names() {
-    let id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
-    assert_eq!(id.as_str(), "memory.context_retrieval.v1");
-    assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));
-    assert_eq!(
-        serde_json::from_value::<CapabilityProfileId>(json!(id.as_str())).unwrap(),
-        id
-    );
-
-    for invalid in [
-        "",
-        "memory",
-        "memory.context_retrieval",
-        "memory.context_retrieval.version1",
-        "Memory.context_retrieval.v1",
-        "memory/context_retrieval/v1",
-        "memory..context_retrieval.v1",
-        "memory.context_retrieval.v1\n",
-        "1memory.context_retrieval.v1",
-        "memory.2context_retrieval.v1",
-    ] {
-        assert!(
-            CapabilityProfileId::new(invalid).is_err(),
-            "{invalid:?} should be rejected"
-        );
-        assert!(
-            serde_json::from_value::<CapabilityProfileId>(json!(invalid)).is_err(),
-            "{invalid:?} should also be rejected when deserialized"
-        );
-    }
-}
-
-#[test]
-fn capability_profile_contract_rejects_empty_or_duplicate_operations() {
-    let profile_id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
-    let operation = CapabilityProfileOperationContract::new(
-        CapabilityProfileOperationId::new("memory.context.retrieve.v1").unwrap(),
-        "schemas/memory/context-retrieve.input.v1.json",
-        "schemas/memory/context-retrieve.output.v1.json",
-    )
-    .unwrap();
-
-    let contract = CapabilityProfileContract::new(profile_id.clone(), vec![operation.clone()])
-        .expect("single-operation profile is valid");
-    assert_eq!(contract.id(), &profile_id);
-    assert_eq!(
-        contract.required_operations(),
-        std::slice::from_ref(&operation)
-    );
-
-    assert!(
-        CapabilityProfileContract::new(profile_id.clone(), Vec::new()).is_err(),
-        "profiles without required operations should fail closed"
-    );
-    assert!(
-        CapabilityProfileContract::new(profile_id, vec![operation.clone(), operation]).is_err(),
-        "duplicate profile operation contracts should fail closed"
     );
 }
 

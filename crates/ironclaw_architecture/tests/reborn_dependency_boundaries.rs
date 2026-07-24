@@ -237,11 +237,16 @@ fn reborn_crate_dependency_boundaries_hold() {
     );
 
     // Provider-neutral memory contract: among internal ironclaw crates it may
-    // depend ONLY on `ironclaw_host_api`. Enforced as an allowlist (forbid every
-    // other workspace ironclaw crate) so future deps — e.g. `ironclaw_turns`,
-    // `ironclaw_product`, `ironclaw_runner` — cannot silently slip past a
-    // blocklist that only names today's offenders.
-    let memory_contract_allowed = ["ironclaw_memory", "ironclaw_host_api"];
+    // depend only on `ironclaw_host_api` plus `ironclaw_prompt_envelope`, because
+    // it owns prompt-safe wrapping for retrieved memory context (#5327). Enforced
+    // as an allowlist (forbid every other workspace ironclaw crate) so future
+    // deps — e.g. `ironclaw_turns`, `ironclaw_product`, `ironclaw_runner`
+    // — cannot silently slip past a blocklist that only names today's offenders.
+    let memory_contract_allowed = [
+        "ironclaw_memory",
+        "ironclaw_host_api",
+        "ironclaw_prompt_envelope",
+    ];
     assert_no_normal_workspace_deps(
         &dependencies,
         "ironclaw_memory",
@@ -293,6 +298,49 @@ fn reborn_crate_dependency_boundaries_hold() {
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+#[test]
+fn host_runtime_stays_memory_provider_neutral_and_only_composition_names_mem0() {
+    // The `ironclaw_memory_mem0` boundary rule's comment states that
+    // `ironclaw_host_runtime` must stay provider-agnostic and must NOT name the
+    // concrete mem0 provider crate; only the composition layer may depend on it
+    // (it is the one layer allowed to name concrete provider crates, building the
+    // `Arc<dyn MemoryService>` that the provider-neutral `MemoryServiceResolver`
+    // stores). That comment was previously unenforced. This test fails loudly if a
+    // future edit adds `ironclaw_memory_mem0` to `host_runtime/Cargo.toml` — or to
+    // any crate other than composition.
+    const MEM0: &str = "ironclaw_memory_mem0";
+
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+
+    // host_runtime must not name the concrete mem0 provider.
+    assert_no_normal_workspace_deps(&dependencies, "ironclaw_host_runtime", [MEM0]);
+
+    // Only the composition layer (the mem0 crate itself aside) may take a normal
+    // dependency on the concrete mem0 provider.
+    let mut dependents = dependencies
+        .iter()
+        .filter(|(crate_name, deps)| {
+            crate_name.as_str() != MEM0 && deps.iter().any(|dependency| dependency == MEM0)
+        })
+        .map(|(crate_name, _)| crate_name.as_str())
+        .collect::<Vec<_>>();
+    dependents.sort_unstable();
+    assert_eq!(
+        dependents,
+        vec!["ironclaw_reborn_composition"],
+        "only ironclaw_reborn_composition may take a normal dependency on {MEM0}; \
+         ironclaw_host_runtime and every other crate must resolve memory through the \
+         provider-neutral MemoryServiceResolver"
+    );
 }
 
 #[test]

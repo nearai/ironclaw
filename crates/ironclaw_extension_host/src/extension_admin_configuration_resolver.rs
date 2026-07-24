@@ -593,6 +593,7 @@ mod tests {
             mcp: None,
             tools: Vec::new(),
             channel: None,
+            memory: None,
             admin_configuration: descriptors,
             auth: Vec::new(),
             host_apis: Vec::new(),

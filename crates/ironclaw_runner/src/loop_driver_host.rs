@@ -125,10 +125,11 @@ use ironclaw_turns::{
         LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
         LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -1052,6 +1053,14 @@ where
     /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
     /// profile source degrade gracefully rather than failing.
     user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// Per-run proactive-memory source. Resolved once at the first prompt build
+    /// of the run; its admitted snippets are surfaced into the prompt's "memory"
+    /// section every turn. Optional; production wires `None` pending #5013, so a
+    /// composition without a memory backend degrades gracefully. (Unlike
+    /// `user_profile_source` — a non-optional null-object defaulting to
+    /// `EmptyUserProfileSource` — this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
+    memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -1118,6 +1127,7 @@ where
             safety_context,
             identity_context_source: None,
             user_profile_source: Arc::new(EmptyUserProfileSource),
+            memory_context_service: None,
             communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -1406,6 +1416,18 @@ where
         self
     }
 
+    /// Installs the proactive-memory source. When wired, the loop context port
+    /// fetches both memory lanes ONCE at the first prompt build of the run and
+    /// surfaces the admitted snippets into the prompt's "memory" section every
+    /// turn. When not called the loop carries no memory (graceful default).
+    pub fn with_memory_context_service(
+        mut self,
+        service: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_service = Some(service);
+        self
+    }
+
     pub fn with_communication_context_provider(
         mut self,
         provider: Arc<dyn CommunicationContextProvider>,
@@ -1555,6 +1577,9 @@ where
         }
         if let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
+        }
+        if let Some(service) = self.memory_context_service.as_ref() {
+            context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);

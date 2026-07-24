@@ -1,0 +1,44 @@
+[package]
+name = "ironclaw_memory_mem0"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "mem0-backed memory provider adapter for IronClaw Reborn (third-party provider lane for issue #3537 / #5264)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[features]
+default = []
+# Exposes the in-memory mock `Mem0Transport` so downstream crates (e.g. the
+# composition-level provider-swap test) can drive the provider without a live
+# mem0 endpoint. Off by default so the mock is not part of the production
+# surface. The mock is panic-free, so it is safe to compile outside `cfg(test)`.
+test-support = []
+
+[dependencies]
+# Internal IronClaw crates: the neutral memory contract + the host-api id/scope
+# substrate ONLY. This is the same internal-dependency boundary as the contract
+# crate `ironclaw_memory_native`, enforced by the architecture boundary test.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
+# External crates (unrestricted by the boundary test, which only inspects
+# `ironclaw_*` workspace edges). `reqwest` powers the real HTTP transport the
+# same way the embedding providers make their outbound calls.
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+# Self dev-dependency enables `test-support` for the crate's integration tests
+# in `tests/`, which import the mock transport.
+ironclaw_memory_mem0 = { path = ".", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt"] }

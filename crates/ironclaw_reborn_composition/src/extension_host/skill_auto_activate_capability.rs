@@ -42,7 +42,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set the authenticated user's learned-skill auto-activation default."
             .to_string(),
         effects: vec![EffectKind::WriteFilesystem],

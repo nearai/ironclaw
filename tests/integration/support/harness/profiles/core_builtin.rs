@@ -25,8 +25,8 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
     HTTP_SAVE_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    TIME_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, TIME_CAPABILITY_ID,
 };
 
 /// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
@@ -259,6 +259,17 @@ fn core_builtin_tools_from_runtime(
         // like the four memory_* capabilities above.
         CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
     ];
+    let effect_kinds = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
+        // must include it or the authorizer denies the capability before
+        // it reaches the process port.
+        EffectKind::ExecuteCode,
+    ];
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
@@ -280,21 +291,14 @@ fn core_builtin_tools_from_runtime(
             .collect(),
         capability_ids: core_builtin_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
-        effect_kinds: vec![
-            EffectKind::DispatchCapability,
-            EffectKind::ReadFilesystem,
-            EffectKind::WriteFilesystem,
-            EffectKind::Network,
-            EffectKind::SpawnProcess,
-            // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
-            // must include it or the authorizer denies the capability before
-            // it reaches the process port.
-            EffectKind::ExecuteCode,
-        ],
+        effect_kinds: effect_kinds.clone(),
         network_policy,
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-        additional_provider_trust: Vec::new(),
+        additional_provider_trust: vec![(
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+            effect_kinds,
+        )],
         user_id,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),

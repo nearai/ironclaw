@@ -37,6 +37,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", default-features = false }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
+ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
@@ -61,6 +62,7 @@ ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0", feat
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
 ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
+ironclaw_memory_native = { path = "../ironclaw_memory_native", version = "0.1.0" }
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }

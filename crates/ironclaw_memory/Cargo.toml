@@ -22,9 +22,18 @@ async-trait = "0.1"
 chrono-tz = "0.10"
 hex = "0.4"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+# The memory service is the sole producer of prompt-safe memory context: its
+# `read_long_term`/`read_thread` defaults wrap retrieved text in the untrusted
+# envelope here so no provider can return unsafe context. Leaf crate (no ironclaw
+# deps), so this introduces no cycle.
+ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 # Required only by `DocumentMetadata::from_value`, which logs a diagnostic on
 # deserialize failure; preserved to keep behavior identical to the impl crate.
 tracing = "0.1"
+
+[dev-dependencies]
+# Test substrate only: drives the async `MemoryService` default-impl unit test.
+tokio = { version = "1", features = ["macros", "rt"] }

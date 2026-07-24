@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["cleared", "patched", "written"],
+      "description": "Write outcome"
+    },
+    "path": { "type": "string", "description": "Relative memory document path that was written" },
+    "message": { "type": "string", "description": "Human-readable note (cleared status)" },
+    "replacements": { "type": "integer", "description": "Number of replacements made (patched status)" },
+    "content_length": { "type": "integer", "description": "Resulting content length in bytes" },
+    "append": { "type": "boolean", "description": "Whether the write appended (written status)" }
+  },
+  "required": ["status", "path"],
+  "additionalProperties": false
+}

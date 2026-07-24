@@ -10,10 +10,10 @@ use ironclaw_extensions::{
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    CapabilityProfileId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry,
-    HostPortId, NetworkScheme, NetworkTargetPattern, OriginGatePolicy, PermissionMode,
-    RequestedTrustClass, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass, VendorId,
+    CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+    NetworkScheme, NetworkTargetPattern, OriginGatePolicy, PermissionMode, RequestedTrustClass,
+    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, TrustClass, VendorId,
 };
 
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";
@@ -713,7 +713,7 @@ fn host_bundled_source_may_assert_first_party_and_reserved_id() {
     let toml = format!(
         r#"
 schema_version = "{schema}"
-id = "ironclaw.memory.native"
+id = "ironclaw.memory"
 name = "Reborn Native Memory"
 version = "0.1.0"
 description = "host-bundled"
@@ -730,8 +730,7 @@ section = "capability_provider.tools"
 [capability_provider.tools]
 
 [[capability_provider.tools.capabilities]]
-id = "ironclaw.memory.native.context.retrieve"
-implements = ["memory.context_retrieval.v1"]
+id = "ironclaw.memory.context.retrieve"
 description = "Retrieve bounded provider-neutral memory context."
 default_permission = "allow"
 visibility = "host_internal"
@@ -761,10 +760,6 @@ required_host_ports = [
         ExtensionRuntimeV2::FirstParty { .. }
     ));
     let cap = &manifest.capabilities[0];
-    assert_eq!(
-        cap.implements,
-        vec![CapabilityProfileId::new("memory.context_retrieval.v1").unwrap()]
-    );
     assert_eq!(cap.required_host_ports.len(), 2);
 }
 
@@ -1251,51 +1246,6 @@ required_host_ports = ["host.events.audit", "host.events.audit"]
 }
 
 #[test]
-fn rejects_duplicate_implements_in_one_capability() {
-    let toml = format!(
-        r#"
-schema_version = "{schema}"
-id = "acme-tools"
-name = "x"
-version = "0.1"
-description = "x"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "wasm/echo.wasm"
-
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
-
-[capability_provider.tools]
-
-[[capability_provider.tools.capabilities]]
-id = "acme-tools.echo"
-implements = ["memory.context_retrieval.v1", "memory.context_retrieval.v1"]
-description = "echo"
-default_permission = "allow"
-visibility = "host_internal"
-input_schema_ref = "schemas/acme/echo.input.v1.json"
-output_schema_ref = "schemas/acme/echo.output.v1.json"
-"#,
-        schema = MANIFEST_SCHEMA_VERSION,
-    );
-    let err = ExtensionManifestV2::parse(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &contracts(),
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, ManifestV2Error::DuplicateImplementedProfile { .. }),
-        "{err:?}"
-    );
-}
-
-#[test]
 fn capability_rejects_unknown_fields_on_deserialize() {
     let toml = format!(
         r#"
@@ -1415,7 +1365,7 @@ fn host_bundled_accepts_non_reserved_id() {
 }
 
 #[test]
-fn parses_multi_capability_manifest_with_distinct_implements() {
+fn parses_multi_capability_manifest_with_distinct_capabilities() {
     let toml = format!(
         r#"
 schema_version = "{schema}"
@@ -1437,7 +1387,6 @@ section = "capability_provider.tools"
 
 [[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
-implements = ["acme.echo.v1"]
 description = "echo"
 default_permission = "allow"
 visibility = "host_internal"
@@ -1446,7 +1395,6 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 
 [[capability_provider.tools.capabilities]]
 id = "acme-tools.reverse"
-implements = ["acme.reverse.v1", "acme.string_ops.v1"]
 description = "reverse a string"
 default_permission = "ask"
 visibility = "model"
@@ -1464,17 +1412,10 @@ prompt_doc_ref = "prompt/acme/reverse.md"
     )
     .unwrap();
     assert_eq!(manifest.capabilities.len(), 2);
-    assert_eq!(
-        manifest.capabilities[0].implements,
-        vec![CapabilityProfileId::new("acme.echo.v1").unwrap()]
-    );
-    assert_eq!(
-        manifest.capabilities[1].implements,
-        vec![
-            CapabilityProfileId::new("acme.reverse.v1").unwrap(),
-            CapabilityProfileId::new("acme.string_ops.v1").unwrap(),
-        ]
-    );
+    assert_eq!(manifest.capabilities[0].id.as_str(), "acme-tools.echo");
+    assert_eq!(manifest.capabilities[0].description, "echo");
+    assert_eq!(manifest.capabilities[1].id.as_str(), "acme-tools.reverse");
+    assert_eq!(manifest.capabilities[1].description, "reverse a string");
 }
 
 #[test]

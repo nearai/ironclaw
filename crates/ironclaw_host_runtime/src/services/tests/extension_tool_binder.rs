@@ -30,7 +30,6 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
             host_api_surfaces: Vec::new(),
             capabilities: vec![ironclaw_extensions::CapabilityManifest {
                 id: CapabilityId::new(capability_id).unwrap(),
-                implements: Vec::new(),
                 description: "binder fixture capability".to_string(),
                 effects: vec![EffectKind::DispatchCapability],
                 network_targets: Vec::new(),

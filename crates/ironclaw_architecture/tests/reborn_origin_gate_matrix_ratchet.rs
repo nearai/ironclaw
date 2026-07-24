@@ -34,7 +34,12 @@
 //!      per-descriptor self-consistency check, applied to the TOML source);
 //!    - any `ungated` `loop_run` has its id in the reviewed allowlist.
 //!
-//!    Today zero extension capabilities are ungated, so this also pins that fact.
+//!    The scan covers both the first-party extension assets and the
+//!    host-bundled always-on package assets (`ironclaw_host_runtime/assets`,
+//!    the `ironclaw.memory` manifests). Today the only `ungated` TOML
+//!    capabilities are the allowlisted read-only memory tools
+//!    (`ironclaw.memory.read`/`search`/`tree`); every installable extension
+//!    capability remains gated.
 //!
 //! ## Behavior-preserving grandfathered seed (deviates from §10 "starts empty")
 //!
@@ -87,9 +92,13 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "builtin.trace_commons.credits",
     "builtin.trace_commons.onboard",
     "builtin.profile_set",
-    "builtin.memory_search",
-    "builtin.memory_read",
-    "builtin.memory_tree",
+    // Reviewed rename, not an addition: the memory tools moved from the builtin
+    // package (`builtin.memory_*`) to the always-on `ironclaw.memory` package
+    // (#3537) with the same read-only effect posture; `ironclaw.memory.write`
+    // stays off the list (gated, arbitrary-path write).
+    "ironclaw.memory.search",
+    "ironclaw.memory.read",
+    "ironclaw.memory.tree",
     "builtin.read_file",
     "builtin.list_dir",
     "builtin.glob",
@@ -110,6 +119,15 @@ fn workspace_root() -> PathBuf {
 
 fn first_party_assets_dir() -> PathBuf {
     workspace_root().join("crates/ironclaw_first_party_extensions/assets")
+}
+
+/// Host-bundled always-on packages (the `ironclaw.memory` native/mem0
+/// manifests) are hand-authored TOML exactly like the first-party extension
+/// assets, so the same matrix scan applies. Missing coverage here let the
+/// memory manifests ship with no `origin_gate_matrix`, which the S4 fold
+/// fail-closes to Forbidden for every origin-stamped dispatch.
+fn host_runtime_assets_dir() -> PathBuf {
+    workspace_root().join("crates/ironclaw_host_runtime/assets")
 }
 
 fn collect_manifest_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -210,6 +228,14 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
          assets directory move? ({})",
         manifests.len(),
         first_party_assets_dir().display()
+    );
+    let first_party_manifest_count = manifests.len();
+    collect_manifest_tomls(&host_runtime_assets_dir(), &mut manifests);
+    assert!(
+        manifests.len() > first_party_manifest_count,
+        "expected host-bundled manifest assets (ironclaw.memory native/mem0) under {} — did the \
+         assets directory move?",
+        host_runtime_assets_dir().display()
     );
 
     let allowlist: BTreeSet<&str> = UNGATED_LOOP_RUN_CAPABILITIES.iter().copied().collect();

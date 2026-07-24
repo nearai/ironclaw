@@ -55,11 +55,22 @@ use std::path::{Path, PathBuf};
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
 ///
 /// Sorted; entries are `src/`-relative with `/` separators.
-const ALLOWLIST: &[(&str, &str)] = &[(
-    "deployment.rs",
-    "TARGET STATE — `DeploymentConfig::for_profile` is the one place a \
+const ALLOWLIST: &[(&str, &str)] = &[
+    (
+        "deployment.rs",
+        "TARGET STATE — `DeploymentConfig::for_profile` is the one place a \
          profile name becomes deployment data (§4.4). This entry stays.",
-)];
+    ),
+    (
+        "memory_binding.rs",
+        "Maps the composition profile to a typed `MemoryDeploymentProfile` for \
+         the fail-closed memory profile-binding certification policy (#3537): \
+         production rejects unverified third-party bindings absent an admin \
+         override; local-dev permits them. The branch produces a typed \
+         memory-deployment axis, not a raw label. Retires into `DeploymentConfig` \
+         when it grows a memory-binding axis (#5264).",
+    ),
+];
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

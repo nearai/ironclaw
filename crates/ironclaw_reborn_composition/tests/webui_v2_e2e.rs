@@ -517,7 +517,7 @@ impl HostManagedModelGateway for MemoryWriteGateway {
         }
 
         let memory_write_id =
-            CapabilityId::new("builtin.memory_write").expect("memory_write capability id");
+            CapabilityId::new("ironclaw.memory.write").expect("memory_write capability id");
         let memory_write_tool = capabilities
             .tool_definitions()
             .map_err(|err| {
@@ -528,7 +528,7 @@ impl HostManagedModelGateway for MemoryWriteGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == memory_write_id)
-            .expect("builtin.memory_write must be visible in local-dev capability surface");
+            .expect("ironclaw.memory.write must be visible in local-dev capability surface");
         let write = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "e2e-provider".to_string(),

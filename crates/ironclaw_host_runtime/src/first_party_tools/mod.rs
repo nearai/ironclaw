@@ -40,12 +40,15 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
+use crate::memory_provider::MemoryServiceResolver;
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
+pub(crate) use self::schemas::{
+    resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+};
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
@@ -77,17 +80,36 @@ pub use trigger_management::{
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 
+/// Provider id of the always-on native memory extension. It rides the same
+/// host-bundled, always-on first-party lane as `builtin` (not the
+/// catalog/lifecycle extension lane), so its model-facing memory tools are
+/// unconditionally available — preserving the former `builtin.memory_*`
+/// behavior. Provider-swapping stays on the document-store profile binding.
+///
+/// Aliases the canonical id owned by [`crate::memory_native_extension`] (which
+/// also owns the bundled v2 manifest + the registrable package builder), so the
+/// surface/trust seams here and the binding layer share one identity string.
+pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str =
+    crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;
+
 /// The registry-lane provider allowlist once activated extension dispatch
-/// resolves from the extension host's active snapshot: only the synthetic
-/// built-in package keeps resolving through the registry.
+/// resolves from the extension host's active snapshot: only the always-on
+/// registry-lane packages — the synthetic built-in package and the
+/// `ironclaw.memory` native memory package — keep resolving through the
+/// registry. Neither is ever published in the extension host's active
+/// snapshot, so omitting one here makes its capabilities unresolvable
+/// (`UnknownCapability`) in every composition that installs an extension
+/// host.
 pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
     let mut allowlist = std::collections::BTreeSet::new();
     if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
         allowlist.insert(builtin);
     }
+    if let Ok(memory) = ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(memory);
+    }
     allowlist
 }
-
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
 pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
@@ -201,7 +223,6 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     profile_set::manifest()?,
                     outbound_delivery::manifest()?,
                 ];
-                capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities.extend(trigger_management::manifests()?);
@@ -403,8 +424,59 @@ pub fn builtin_first_party_handlers_with_trigger_clock(
     Ok(registry)
 }
 
+/// Like [`builtin_first_party_handlers_with_trigger_create_hook`] but routes the
+/// memory capabilities through an explicit memory provider resolver (issue
+/// #3537) instead of hardwiring the native provider. Used by the local-dev
+/// composition path (no process-backend filtering).
+pub fn builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    memory_resolver: MemoryServiceResolver,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry_with_memory_resolver(memory_resolver)?;
+    trigger_management::insert_handlers_with_create_hook(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+    )?;
+    Ok(registry)
+}
+
+/// Like
+/// [`builtin_first_party_handlers_with_trigger_create_hook_for_process_backend`]
+/// but routes the memory capabilities through an explicit memory provider
+/// resolver (issue #3537). Used by the production composition path.
+pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    process_backend: ProcessBackendKind,
+    memory_resolver: MemoryServiceResolver,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        memory_resolver,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
 fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let handler = Arc::new(BuiltinFirstPartyTools::default());
+    builtin_first_party_base_registry_with_memory_resolver(MemoryServiceResolver::default())
+}
+
+fn builtin_first_party_base_registry_with_memory_resolver(
+    memory_resolver: MemoryServiceResolver,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let handler = Arc::new(BuiltinFirstPartyTools::with_memory_resolver(
+        memory_resolver,
+    ));
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
@@ -487,7 +559,6 @@ fn first_party_capability_manifest(
     let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
-        implements: Vec::new(),
         description: description.to_string(),
         effects,
         default_permission,
@@ -578,6 +649,17 @@ impl BuiltinFirstPartyTools {
             object.insert("post_edit_check".to_string(), check);
         }
         true
+    }
+}
+
+impl BuiltinFirstPartyTools {
+    /// Build with a memory provider resolver (issue #3537). The default
+    /// (`MemoryServiceResolver::native()`) preserves pre-binding behavior.
+    fn with_memory_resolver(memory_resolver: MemoryServiceResolver) -> Self {
+        Self {
+            memory_state: memory::MemoryCapabilityState::with_resolver(memory_resolver),
+            ..Default::default()
+        }
     }
 }
 

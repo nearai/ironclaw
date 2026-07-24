@@ -21,10 +21,10 @@ use std::collections::BTreeMap;
 
 use ironclaw_host_api::{
     ChannelDescriptor, ChannelDescriptorError, EffectKind, ExtensionId,
-    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, NetworkScheme,
-    NetworkTargetPattern, OriginGateMatrix, PermissionMode, RecipeValidationError,
-    RequestedTrustClass, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-    RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
+    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, MemoryDescriptor,
+    MemoryOperationKind, NetworkScheme, NetworkTargetPattern, OriginGateMatrix, PermissionMode,
+    RecipeValidationError, RequestedTrustClass, RuntimeCredentialAccountSetup,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -60,6 +60,8 @@ pub enum ManifestV3Error {
     },
     #[error("[channel] is invalid: {error}")]
     InvalidChannel { error: ChannelDescriptorError },
+    #[error("[memory] is invalid: {reason}")]
+    InvalidMemory { reason: String },
     #[error(
         "credential vendor `{vendor}` has no [auth.{vendor}] recipe; v3 manifests must declare \
          one for every referenced vendor"
@@ -101,6 +103,8 @@ struct RawManifestV3 {
     tools: Vec<RawToolV3>,
     #[serde(default)]
     channel: Option<ChannelDescriptor>,
+    #[serde(default)]
+    memory: Option<MemoryDescriptor>,
     #[serde(default)]
     auth: BTreeMap<String, VendorAuthRecipe>,
     #[serde(default)]
@@ -307,6 +311,27 @@ pub(crate) fn parse_v3(
             reason: "first_party runtime requires a host-bundled manifest source".to_string(),
         });
     }
+    // A `[memory]` surface declares the extension a backend for the host memory
+    // adapter. It is host-bundled + first_party only (the host owns the memory
+    // tool surface and the compose-time provider binding), and must back the
+    // mandatory document-store family.
+    if let Some(memory) = &raw.memory {
+        if !matches!(runtime, ExtensionRuntimeV2::FirstParty { .. }) {
+            return Err(ManifestV3Error::InvalidMemory {
+                reason: "[memory] requires a first_party runtime".to_string(),
+            });
+        }
+        if memory.operations.is_empty() {
+            return Err(ManifestV3Error::InvalidMemory {
+                reason: "[memory].operations must not be empty".to_string(),
+            });
+        }
+        if !memory.backs(MemoryOperationKind::DocumentStore) {
+            return Err(ManifestV3Error::InvalidMemory {
+                reason: "[memory].operations must include \"document_store\"".to_string(),
+            });
+        }
+    }
     let sandboxed_runtime = matches!(
         runtime,
         ExtensionRuntimeV2::Wasm { .. } | ExtensionRuntimeV2::Mcp { .. }
@@ -388,7 +413,6 @@ pub(crate) fn parse_v3(
             id: format!("{id}.mcp_server"),
             network_targets: Vec::new(),
             max_egress_bytes: None,
-            implements: Vec::new(),
             description: format!(
                 "Hosted MCP server connection for {} (discovery template; never model-visible)",
                 raw.name
@@ -444,7 +468,6 @@ pub(crate) fn parse_v3(
                     id: tool.id,
                     network_targets: Vec::new(),
                     max_egress_bytes: None,
-                    implements: Vec::new(),
                     description: tool.description,
                     effects: with_dispatch_effect(mcp.effects.clone()),
                     default_permission: tool.default_permission,
@@ -462,7 +485,6 @@ pub(crate) fn parse_v3(
                 id: tool.id,
                 network_targets: tool.network_targets,
                 max_egress_bytes: tool.max_egress_bytes,
-                implements: Vec::new(),
                 description: tool.description,
                 effects: with_dispatch_effect(tool.effects.clone()),
                 default_permission: tool.default_permission,
@@ -577,6 +599,7 @@ pub(crate) fn parse_v3(
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,
+        memory: raw.memory,
         admin_configuration: raw.admin_configuration.into_iter().collect(),
         auth,
         host_apis: Vec::new(),

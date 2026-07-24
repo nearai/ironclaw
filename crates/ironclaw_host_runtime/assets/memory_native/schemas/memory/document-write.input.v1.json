@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "content": {
+      "type": "string",
+      "description": "Full content to write or append"
+    },
+    "target": {
+      "type": "string",
+      "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path. A reserved name or non-blank relative path is allowed; it must not be blank, absolute (no leading '/'), contain '..' traversal, or use backslash separators. The configured document-store provider owns final storage resolution.",
+      "default": "daily_log",
+      "not": { "pattern": "(^\\s*$)|(^/)|(\\.\\.)|(\\\\)" }
+    },
+    "append": {
+      "type": "boolean",
+      "description": "Append to existing content when true; replace when false",
+      "default": true
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional document metadata such as skip_indexing or skip_versioning"
+    },
+    "old_string": {
+      "type": "string",
+      "description": "Exact text to replace; switches to patch mode"
+    },
+    "new_string": {
+      "type": "string",
+      "description": "Replacement text for patch mode"
+    },
+    "replace_all": {
+      "type": "boolean",
+      "description": "Replace every old_string occurrence in patch mode",
+      "default": false
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone used only for daily_log target date resolution"
+    }
+  },
+  "additionalProperties": false
+}

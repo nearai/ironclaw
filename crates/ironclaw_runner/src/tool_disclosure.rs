@@ -36,6 +36,7 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "memory_search",
     "memory_read",
     "memory_write",
+    "memory_tree",
     // web
     "http",
     "web_search",
@@ -61,6 +62,25 @@ pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 const MAX_KEYWORD_SCORE: u32 = 30;
+
+const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
+    (
+        ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
+        "memory_search",
+    ),
+    (
+        ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID,
+        "memory_read",
+    ),
+    (
+        ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID,
+        "memory_write",
+    ),
+    (
+        ironclaw_host_runtime::MEMORY_TREE_CAPABILITY_ID,
+        "memory_tree",
+    ),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolTier {
@@ -291,6 +311,9 @@ pub(crate) fn definition_matches_provider_name(
     {
         return definition_matches_core_name(definition, builtin_name);
     }
+    if is_memory_core_tool_name(provider_name) {
+        return definition_matches_core_name(definition, provider_name);
+    }
     capability_id
         .strip_prefix("builtin.")
         .is_some_and(|name| name == provider_name)
@@ -307,10 +330,25 @@ fn definition_matches_core_name(definition: &ProviderToolDefinition, core_name: 
     {
         return true;
     }
+    if memory_core_tool_name_for_capability(capability_id).is_some_and(|name| name == core_name) {
+        return true;
+    }
     matches!(
         (capability_id, core_name),
         ("web-access.search", "web_search") | ("web-access.get_content", "web_fetch")
     ) || capability_id.ends_with(&format!(".{core_name}"))
+}
+
+fn memory_core_tool_name_for_capability(capability_id: &str) -> Option<&'static str> {
+    MEMORY_CORE_TOOL_ALIASES
+        .iter()
+        .find_map(|(id, name)| (*id == capability_id).then_some(*name))
+}
+
+fn is_memory_core_tool_name(name: &str) -> bool {
+    MEMORY_CORE_TOOL_ALIASES
+        .iter()
+        .any(|(_, core_name)| *core_name == name)
 }
 
 impl PromotedSet {
@@ -900,6 +938,10 @@ mod tests {
                 ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID,
             ),
             (
+                "memory_tree",
+                ironclaw_host_runtime::MEMORY_TREE_CAPABILITY_ID,
+            ),
+            (
                 "skill_list",
                 ironclaw_host_runtime::SKILL_LIST_CAPABILITY_ID,
             ),
@@ -938,10 +980,16 @@ mod tests {
                 CORE_TOOL_NAMES.contains(&name),
                 "known builtin core tool {name} is missing from CORE_TOOL_NAMES"
             );
-            assert_eq!(
-                capability_id.strip_prefix("builtin."),
-                Some(name),
-                "builtin core tool {name} must map to builtin.{name}"
+            let definition = ProviderToolDefinition {
+                capability_id: CapabilityId::new(capability_id).expect("valid capability id"),
+                name: ProviderToolName::new(encode_provider_tool_name(capability_id))
+                    .expect("valid provider tool name"),
+                description: format!("Core loop primitive for {name}."),
+                parameters: small_no_arg_schema(),
+            };
+            assert!(
+                definition_matches_core_name(&definition, name),
+                "core tool {name} must map to {capability_id}"
             );
             assert!(
                 covered_names.insert(name),
@@ -989,6 +1037,47 @@ mod tests {
                 .map(|entry| entry.tier),
             Some(ToolTier::Core)
         );
+    }
+
+    #[test]
+    fn memory_capability_ids_keep_legacy_core_aliases() {
+        for (capability_id, legacy_name) in MEMORY_CORE_TOOL_ALIASES {
+            let definition = ProviderToolDefinition {
+                capability_id: CapabilityId::new(*capability_id).expect("valid capability id"),
+                name: ProviderToolName::new(encode_provider_tool_name(capability_id))
+                    .expect("valid provider tool name"),
+                description: format!("Memory tool {legacy_name}."),
+                parameters: medium_schema(0),
+            };
+
+            assert!(
+                definition_matches_core_name(&definition, legacy_name),
+                "{capability_id} must stay in the core {legacy_name} disclosure tier"
+            );
+            assert!(
+                definition_matches_provider_name(&definition, legacy_name),
+                "bare legacy call {legacy_name} must resolve to {capability_id}"
+            );
+            assert!(
+                definition_matches_provider_name(&definition, &format!("builtin.{legacy_name}")),
+                "dotted builtin legacy call must resolve to {capability_id}"
+            );
+            assert!(
+                definition_matches_provider_name(&definition, &format!("builtin__{legacy_name}")),
+                "encoded builtin legacy call must resolve to {capability_id}"
+            );
+            assert!(
+                definition_matches_provider_name(&definition, capability_id),
+                "new dotted memory capability id must resolve"
+            );
+            assert!(
+                definition_matches_provider_name(
+                    &definition,
+                    &encode_provider_tool_name(capability_id)
+                ),
+                "new encoded memory capability name must resolve"
+            );
+        }
     }
 
     #[test]

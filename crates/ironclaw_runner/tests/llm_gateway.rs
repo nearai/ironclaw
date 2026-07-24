@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -29,18 +32,20 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
+    LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId,
+    TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, CapabilitySurfaceVersion,
-        EphemeralInstructionMaterializationStore, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopCapabilityPort,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
+        InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
+        LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopContextSnippet,
         LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
         LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort,
         LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRuntimeContext, ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
+        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
@@ -3219,6 +3224,234 @@ impl ThreadFixture {
             run_context,
         }
     }
+}
+
+/// Fake memory source that counts fetches and echoes the request query, so a
+/// caller-level test can prove (a) memory reaches the bundle and (b) it is
+/// fetched exactly once per run (the rest of the run reuses the cache).
+#[derive(Default)]
+struct CountingMemoryContextService {
+    fetches: AtomicUsize,
+    last_query: Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl MemoryPromptContextService for CountingMemoryContextService {
+    async fn load_memory_snippets(
+        &self,
+        request: MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        *self.last_query.lock().unwrap() = Some(request.query.clone());
+        let content = format!("Untrusted memory content: {}", request.query);
+        Ok(vec![LoopContextSnippet {
+            snippet_ref: "memory-snippet:caller-test".to_string(),
+            model_content: content.clone(),
+            safe_summary: content,
+            metadata: None,
+        }])
+    }
+}
+
+/// Caller-level coverage (`.claude/rules/testing.md` — `load_loop_context` gates
+/// whether memory reaches the model): a `ThreadBackedLoopContextPort` wired with
+/// a memory source must return NON-empty `memory_snippets`, derive the query from
+/// the latest user message, and fetch exactly once per run — a second
+/// `load_loop_context` reuses the per-run cache (fetch count stays 1).
+#[tokio::test]
+async fn load_loop_context_surfaces_memory_and_fetches_once_per_run() {
+    let fixture = ThreadFixture::new().await;
+    let memory_service = Arc::new(CountingMemoryContextService::default());
+    // Production run contexts carry the authenticated actor; memory is keyed to
+    // that user, so the port needs an actor to scope a request.
+    let run_context = fixture.run_context.clone().with_actor(TurnActor::new(
+        UserId::new("user-production-gateway").unwrap(),
+    ));
+    let context_port =
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            run_context,
+            16,
+        )
+        .with_memory_context_service(
+            Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>
+        );
+
+    let request = LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    };
+
+    let first = context_port
+        .load_loop_context(request.clone())
+        .await
+        .expect("first prompt build should succeed");
+    assert!(
+        !first.memory_snippets.is_empty(),
+        "memory must reach the loop context bundle when a service is wired"
+    );
+    assert_eq!(memory_service.fetches.load(Ordering::SeqCst), 1);
+    // The query is the seeded latest user message ("hello production gateway").
+    assert_eq!(
+        memory_service.last_query.lock().unwrap().as_deref(),
+        Some("hello production gateway"),
+        "the memory query must derive from the latest user message"
+    );
+
+    // A second prompt build within the same run reuses the cached snippets and
+    // must NOT issue another fetch.
+    let second = context_port
+        .load_loop_context(request)
+        .await
+        .expect("second prompt build should succeed");
+    assert_eq!(second.memory_snippets, first.memory_snippets);
+    assert_eq!(
+        memory_service.fetches.load(Ordering::SeqCst),
+        1,
+        "memory is fetched once per run; later prompt builds reuse the cache"
+    );
+}
+
+/// Without a memory source wired, `load_loop_context` returns empty
+/// `memory_snippets` (graceful default — no memory backend, no memory).
+#[tokio::test]
+async fn load_loop_context_without_memory_service_returns_empty_memory() {
+    let fixture = ThreadFixture::new().await;
+    let context_port = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    );
+
+    let bundle = context_port
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .expect("prompt build should succeed without a memory service");
+    assert!(bundle.memory_snippets.is_empty());
+}
+
+/// Regression (adversarial audit M1): when the FIRST prompt build of a run has no
+/// user message yet (so no query can be derived), memory retrieval must return
+/// empty WITHOUT seeding the per-run cache. The prior code seeded the `OnceCell`
+/// with an empty vec on the `None` request, freezing memory to empty for the rest
+/// of the run — so a later build that DOES carry a user message could never fetch.
+/// The fix builds the request first and only `get_or_try_init`s when a request
+/// exists, so the empty first build does not poison the cache.
+#[tokio::test]
+async fn load_loop_context_without_user_message_does_not_freeze_memory_cache() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let tenant_id = TenantId::new("tenant-cache-freeze").unwrap();
+    let agent_id = AgentId::new("agent-cache-freeze").unwrap();
+    let project_id = ProjectId::new("project-cache-freeze").unwrap();
+    let user_id = UserId::new("user-cache-freeze").unwrap();
+    let thread_id = ThreadId::new("thread-cache-freeze").unwrap();
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: Some(user_id.clone()),
+        mission_id: None,
+    };
+    // The thread exists but carries NO user message yet.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let turn_scope = TurnScope::new(
+        tenant_id,
+        Some(agent_id),
+        Some(project_id),
+        thread_id.clone(),
+    );
+    let resolved = InMemoryRunProfileResolver::default()
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let run_context = LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+        .with_actor(TurnActor::new(user_id.clone()));
+
+    let memory_service = Arc::new(CountingMemoryContextService::default());
+    let context_port =
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&thread_service),
+            thread_scope.clone(),
+            run_context,
+            16,
+        )
+        .with_memory_context_service(
+            Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>
+        );
+
+    let request = LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    };
+
+    // First build: no user message -> no derivable query -> empty memory and,
+    // crucially, NO fetch and NO cache seed.
+    let first = context_port
+        .load_loop_context(request.clone())
+        .await
+        .expect("first prompt build should succeed");
+    assert!(
+        first.memory_snippets.is_empty(),
+        "no user message means no memory snippets"
+    );
+    assert_eq!(
+        memory_service.fetches.load(Ordering::SeqCst),
+        0,
+        "with no user message there is no query, so memory must not be fetched"
+    );
+
+    // A user message now arrives in the thread.
+    thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: user_id.as_str().to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some("event-cache-freeze-1".to_string()),
+            content: MessageContent::text("remember the gate code is 4242"),
+        })
+        .await
+        .unwrap();
+
+    // Second build: a user message now exists, so memory MUST fetch. If the first
+    // (None) build had frozen the cache, this would still be empty.
+    let second = context_port
+        .load_loop_context(request)
+        .await
+        .expect("second prompt build should succeed");
+    assert!(
+        !second.memory_snippets.is_empty(),
+        "a later build carrying a user message must fetch memory; the empty first \
+         build must not freeze the per-run cache"
+    );
+    assert_eq!(
+        memory_service.fetches.load(Ordering::SeqCst),
+        1,
+        "memory is fetched exactly once, on the first build that has a user message"
+    );
+    assert_eq!(
+        memory_service.last_query.lock().unwrap().as_deref(),
+        Some("remember the gate code is 4242"),
+        "the memory query must derive from the user message that finally arrived"
+    );
 }
 
 async fn production_loop_request(

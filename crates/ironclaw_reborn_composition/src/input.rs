@@ -10,6 +10,7 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
@@ -19,6 +20,7 @@ use secrecy::SecretString;
 use ironclaw_reborn_config::StorageBackend;
 use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
+use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
 use crate::deployment::DeploymentConfig;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
@@ -210,6 +212,17 @@ pub struct RebornHostBindings {
             dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
         >,
     >,
+    /// Resolved memory profile binding policy (issue #3537). `None` means the
+    /// behavior-preserving default: every required memory profile binds to the
+    /// host-bundled native provider. The CLI resolves this from the `[memory]`
+    /// config section + deployment profile (fail-closed) before building.
+    pub(crate) memory_binding_policy: Option<MemoryBindingPolicy>,
+    /// Connection settings for the configured third-party memory provider
+    /// (issue #5264). Empty unless `memory_binding_policy` binds a third-party
+    /// provider (e.g. mem0); carries that provider's base URL + API key so the
+    /// build-time wiring can construct and register it. Selection stays in the
+    /// binding policy; this only carries the chosen provider's connection.
+    pub(crate) memory_provider_connection: Mem0ConnectionConfig,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -357,6 +370,25 @@ impl RebornHostBindings {
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.deployment.owner_id = owner_id.into();
+        self
+    }
+
+    /// Attach a resolved memory profile binding policy (issue #3537). The CLI
+    /// resolves this from the `[memory]` config section + deployment profile,
+    /// failing closed before composition is built. The factory reads the
+    /// resolved policy via the `memory_binding_policy` field when destructuring
+    /// the build input.
+    pub fn with_memory_binding_policy(mut self, policy: MemoryBindingPolicy) -> Self {
+        self.memory_binding_policy = Some(policy);
+        self
+    }
+
+    /// Attach connection settings for the configured third-party memory provider
+    /// (issue #5264). The CLI resolves these from the `[memory]` config section +
+    /// env (e.g. `MEMORY_MEM0_BASE_URL` / `MEMORY_MEM0_API_KEY`). Only consulted
+    /// when the binding policy binds a third-party provider; otherwise inert.
+    pub fn with_memory_provider_connection(mut self, connection: Mem0ConnectionConfig) -> Self {
+        self.memory_provider_connection = connection;
         self
     }
 
@@ -876,6 +908,8 @@ impl RebornHostBindings {
             channel_extension_bindings: Vec::new(),
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
+            memory_binding_policy: None,
+            memory_provider_connection: Mem0ConnectionConfig::default(),
         }
     }
 
