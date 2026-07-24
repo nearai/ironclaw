@@ -241,7 +241,6 @@ async fn trigger_targets_validate_current_authority_and_inherit_the_exact_source
             destination: RunFinalReplyDestination::External {
                 reply_target_binding_ref: external_binding.clone(),
             },
-            downgrade: None,
         })
         .await
         .expect("external destination seals");
@@ -253,7 +252,6 @@ async fn trigger_targets_validate_current_authority_and_inherit_the_exact_source
             destination: RunFinalReplyDestination::External {
                 reply_target_binding_ref: removed_binding,
             },
-            downgrade: None,
         })
         .await
         .expect("removed destination seals");
@@ -263,7 +261,6 @@ async fn trigger_targets_validate_current_authority_and_inherit_the_exact_source
             scope: turn_scope,
             actor,
             destination: RunFinalReplyDestination::WebApp,
-            downgrade: None,
         })
         .await
         .expect("web app destination seals");

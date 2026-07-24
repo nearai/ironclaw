@@ -48,9 +48,7 @@ pub(crate) mod prompts;
 mod trigger_router;
 mod triggered;
 
-pub use lifecycle_events::{
-    RetiredChannelRouteAuthority, RunDeliveryEventHandler, RunDeliveryEventRouter,
-};
+pub use lifecycle_events::{RunDeliveryEventHandler, RunDeliveryEventRouter};
 pub use observer::RunDeliveryObserver;
 pub use trigger_router::{TriggeredRunDeliveryChannel, TriggeredRunDeliveryRouter};
 pub use triggered::{
