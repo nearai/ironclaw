@@ -1,5 +1,6 @@
 """Completeness gate for shipped first-party provider capabilities."""
 
+import ast
 import json
 from pathlib import Path
 import re
@@ -203,43 +204,39 @@ def test_tested_capabilities_have_executable_evidence_at_the_correct_seam():
     assert operation_case_tools <= EMULATE_SUPPORTED_TOOLS
 
 
-def _assert_python_symbol_exists(
+def _python_function(
     source: str, symbol: str, source_label: str, role: str
-) -> None:
-    declaration = re.compile(
-        rf"^[ \t]*(?:async[ \t]+)?def[ \t]+{re.escape(symbol)}[ \t]*\(",
-        re.MULTILINE,
-    ).search(source)
-    assert declaration, f"{role} {symbol!r} is missing from {source_label}"
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Locate a module-level function definition, or fail with `role` context.
 
-
-def _python_function_body(source: str, name: str) -> str:
-    """Source of a module-level function, up to the next module-level def."""
-    lines = source.splitlines()
-    declaration = re.compile(
-        rf"^(?:async[ \t]+)?def[ \t]+{re.escape(name)}[ \t]*\("
-    )
-    start = next(
-        (index for index, line in enumerate(lines) if declaration.match(line)),
-        None,
-    )
-    assert start is not None, f"function {name!r} is not defined at module level"
-    following = re.compile(r"^(?:async[ \t]+)?def[ \t]")
-    end = next(
-        (
-            index
-            for index in range(start + 1, len(lines))
-            if following.match(lines[index])
-        ),
-        len(lines),
-    )
-    return "\n".join(lines[start:end])
+    Parsed rather than pattern-matched: the checks built on this must reason
+    about executable code, and text matching cannot tell a real definition or
+    call from one inside a comment or a string literal.
+    """
+    tree = ast.parse(source)
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == symbol
+        ):
+            return node
+    raise AssertionError(f"{role} {symbol!r} is missing from {source_label}")
 
 
 def _assert_python_symbol_called(
-    body: str, symbol: str, caller: str, source_label: str
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    symbol: str,
+    caller: str,
+    source_label: str,
 ) -> None:
-    called = re.search(rf"\b{re.escape(symbol)}[ \t]*\(", body)
+    called = any(
+        isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == symbol)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == symbol)
+        )
+        for node in ast.walk(function)
+    )
     assert called, (
         f"journey evidence assertion helper {symbol!r} is never called by "
         f"{caller!r} in {source_label}; declaring it is not evidence that the "
@@ -257,12 +254,12 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
         f"journey evidence source is missing: {evidence['source']}"
     )
     source = source_path.read_text()
-    _assert_python_symbol_exists(
+    test = _python_function(
         source, evidence["test"], evidence["source"], "journey evidence test"
     )
     # The assertion helper is the part that actually reads provider state back.
     # Without it the named test still runs but proves nothing about the write.
-    _assert_python_symbol_exists(
+    _python_function(
         source,
         evidence["assertion"],
         evidence["source"],
@@ -272,7 +269,7 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
     # leave both symbols and the recorded tool names intact, and the write
     # would still be credited. Bind the evidence to an actual invocation.
     _assert_python_symbol_called(
-        _python_function_body(source, evidence["test"]),
+        test,
         evidence["assertion"],
         evidence["test"],
         evidence["source"],
@@ -308,31 +305,64 @@ def test_journey_evidence_rejects_a_vanished_symbol(
 ):
     """Deleting the readback helper must turn the gate red, not stay green."""
     with pytest.raises(AssertionError, match=rf"{missing_symbol}.* is missing"):
-        _assert_python_symbol_exists(
+        _python_function(
             remaining_source, missing_symbol, "synthetic.py", "journey evidence"
         )
 
 
-def test_journey_evidence_rejects_a_declared_but_uncalled_helper():
+@pytest.mark.parametrize(
+    ("label", "test_body"),
+    [
+        ("uncalled", "    await _something_else(world)\n"),
+        # A text search for "_assert_readback(" is satisfied by both of these
+        # while the helper never runs, which would re-admit exactly the
+        # declaration-only evidence this gate exists to reject.
+        (
+            "commented out",
+            "    await _something_else(world)\n"
+            "    # await _assert_readback(url)\n",
+        ),
+        ("inside a string", '    note = "_assert_readback(url)"\n'),
+    ],
+)
+def test_journey_evidence_rejects_a_helper_that_never_runs(
+    label: str, test_body: str
+):
     """Both symbols present is not evidence; the test must invoke the readback."""
     source = (
-        "async def test_journey(world):\n"
-        "    await _something_else(world)\n"
+        f"async def test_journey(world):\n{test_body}"
         "\n"
         "async def _assert_readback(url):\n"
         "    ...\n"
     )
     # The declaration check passes — this is exactly the hole it cannot see.
-    _assert_python_symbol_exists(
-        source, "_assert_readback", "synthetic.py", "journey evidence"
+    test = _python_function(
+        source, "test_journey", "synthetic.py", "journey evidence test"
+    )
+    _python_function(
+        source, "_assert_readback", "synthetic.py", "journey evidence helper"
     )
     with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
         _assert_python_symbol_called(
-            _python_function_body(source, "test_journey"),
-            "_assert_readback",
-            "test_journey",
-            "synthetic.py",
+            test, "_assert_readback", "test_journey", "synthetic.py"
         )
+
+
+def test_journey_evidence_accepts_a_genuinely_invoked_helper():
+    """The call check must still pass on real code, including via a wrapper."""
+    source = (
+        "async def test_journey(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    _assert_python_symbol_called(
+        _python_function(source, "test_journey", "synthetic.py", "test"),
+        "_assert_readback",
+        "test_journey",
+        "synthetic.py",
+    )
 
 
 def _covered_capability_outcomes() -> dict[str, set[str]]:
