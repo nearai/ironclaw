@@ -737,7 +737,9 @@ async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
             "Visible while filtering"
         )
 
-        completed_filter = page.get_by_role("button", name="Completed", exact=True)
+        completed_filter = page.locator(
+            SEL_V2["automation_filter_for"].format(filter="completed")
+        )
         await completed_filter.click()
         await asyncio.wait_for(completed_request_started.wait(), timeout=10)
 

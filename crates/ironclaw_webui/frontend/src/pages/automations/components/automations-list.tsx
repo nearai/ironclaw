@@ -59,6 +59,8 @@ export function AutomationsList({
                 <button
                   key={item.value}
                   type="button"
+                  data-testid="automation-filter"
+                  data-filter={item.value}
                   aria-pressed={filter === item.value}
                   onClick={() => onFilterChange(item.value)}
                   className={cn(

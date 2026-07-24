@@ -399,6 +399,9 @@ SEL_V2 = {
     "automation_name_button_for": (
         "[data-testid='automation-name-button'][data-automation-id='{id}']"
     ),
+    "automation_filter_for": (
+        "[data-testid='automation-filter'][data-filter='{filter}']"
+    ),
     "automation_detail": "[data-testid='automation-detail-panel']",
     "automation_detail_title": "[data-testid='automation-detail-title']",
     "automation_rename_button": "[data-testid='automation-rename-button']",
