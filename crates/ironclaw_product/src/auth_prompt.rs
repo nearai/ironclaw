@@ -57,7 +57,8 @@ impl AuthChallengeView {
                 channel: connection.channel.clone(),
                 strategy: Some(connection.strategy.as_str().to_string()),
                 instructions: Some(connection.instructions.clone()),
-                input_placeholder: Some(connection.input_placeholder),
+                input_placeholder: (!connection.input_placeholder.is_empty())
+                    .then_some(connection.input_placeholder),
                 submit_label: Some(connection.submit_label),
                 error_message: Some(connection.error_message),
             });

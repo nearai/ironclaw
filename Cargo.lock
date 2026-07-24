@@ -4321,6 +4321,7 @@ dependencies = [
  "ironclaw_turns",
  "ironclaw_wasm",
  "ironclaw_webui",
+ "libc",
  "libsql",
  "pretty_assertions",
  "regex",

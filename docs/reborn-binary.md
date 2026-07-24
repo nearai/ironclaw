@@ -329,19 +329,22 @@ state or seed config files.
 
 ### `doctor`
 
-Validates and reports Reborn boot configuration without creating state directories or starting runtime services.
+Validates and reports IronClaw boot configuration without creating state
+directories or starting runtime services.
 
 ```bash
 cargo run -q -p ironclaw --bin ironclaw -- doctor
 ```
 
-Expected fields include:
+Human-readable output uses the canonical `ironclaw_home` label. In
+`doctor --json`, the corresponding check keeps its established
+`name: "reborn_home"` machine-readable ID so existing automation continues to
+work; display labels do not replace check IDs.
 
-- `reborn_home`
-- `home_source`
-- `profile`
-- `v1_state: not-used`
-- `driver_registry: initialized`
+`status --json` likewise emits canonical `ironclaw_home` and compatibility
+`reborn_home` fields from one path value. The compatibility field remains
+available throughout the 0.x release line and may only be removed in a
+documented breaking release.
 
 ### `hooks list` — disabled
 

@@ -464,33 +464,11 @@ async fn vendor_oauth_callback_attempt(
                 return Err(error);
             }
         };
-    // Vendor-echoed granted scopes: when the redirect carries a scope list it
-    // must include everything requested (else the user narrowed the consent —
-    // denied); when absent the requested scopes ride to the exchange, where
-    // the token-response scope extraction applies the recipe's rule.
-    let callback_scopes =
-        match resolve_callback_scopes(callback_state.requested_scopes(), query.scopes.as_deref()) {
-            Ok(CallbackScopeOutcome::Scopes(scopes)) => scopes,
-            Ok(CallbackScopeOutcome::ProviderDenied) => {
-                state
-                    .forget_pkce_verifier_everywhere(callback_scope, flow_id)
-                    .await;
-                let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
-                    RebornOAuthCallbackRequest {
-                        scope: callback_scope.clone(),
-                        flow_id,
-                        opaque_state_hash: state_hash.clone(),
-                        outcome: RebornOAuthCallbackOutcome::ProviderDenied,
-                    },
-                ))
-                .await;
-                return oauth_callback_route_result_response(headers, response);
-            }
-            Err(error) => {
-                state.remove_pkce_verifier(flow_id);
-                return Err(error);
-            }
-        };
+    // The redirect's optional `scope` echo is non-authoritative: providers may
+    // omit, normalize, or return a cumulative grant there. The token response
+    // is the authoritative granted-scope source; the auth engine clamps it to
+    // the unified recipe ceiling before storing it.
+    let requested_scopes = callback_state.requested_scopes().to_vec();
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
@@ -508,7 +486,7 @@ async fn vendor_oauth_callback_attempt(
                 pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
                     .map_err(ProductAuthRouteFailure::from)?,
                 pkce_verifier_hash,
-                scopes: callback_scopes,
+                scopes: requested_scopes,
             },
         },
     };
@@ -542,45 +520,6 @@ async fn vendor_oauth_callback_attempt(
     };
 
     Ok(oauth_callback_response(headers, response))
-}
-
-enum CallbackScopeOutcome {
-    Scopes(Vec<ProviderScope>),
-    ProviderDenied,
-}
-
-/// Generic scope-echo rule: a vendor that echoes granted scopes on the
-/// redirect must have granted everything requested; a vendor that echoes
-/// nothing leaves scope resolution to the token response (recipe-driven).
-fn resolve_callback_scopes(
-    requested_scopes: &[ProviderScope],
-    query_scopes: Option<&str>,
-) -> Result<CallbackScopeOutcome, ProductAuthRouteFailure> {
-    let Some(raw) = query_scopes else {
-        return Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()));
-    };
-    if raw.trim() != raw {
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    }
-    if raw.is_empty() {
-        return Ok(CallbackScopeOutcome::ProviderDenied);
-    }
-    let echoed = raw
-        .split([' ', ','])
-        .filter(|scope| !scope.is_empty())
-        .map(|scope| {
-            ProviderScope::new(scope.to_string())
-                .map_err(|_| ProductAuthRouteFailure::malformed_callback())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if requested_scopes
-        .iter()
-        .all(|requested| echoed.iter().any(|scope| scope == requested))
-    {
-        Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()))
-    } else {
-        Ok(CallbackScopeOutcome::ProviderDenied)
-    }
 }
 
 // Formats the success shape only; `Err` propagates so the handler wrapper
