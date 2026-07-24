@@ -11,7 +11,7 @@ pub(crate) use ironclaw_turns::run_profile::{
 };
 use thiserror::Error;
 
-use crate::SkillSourceKind;
+use crate::SkillBundleId;
 
 /// Host-owned source for production skill context candidates.
 ///
@@ -130,10 +130,10 @@ impl HostSkillContextCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HostSkillContextBuildError {
-    #[error("ambiguous skill context activation for '{name}': {sources:?}")]
+    #[error("ambiguous skill context activation for '{name}': {alternatives:?}")]
     AmbiguousSkill {
         name: String,
-        sources: Vec<SkillSourceKind>,
+        alternatives: Vec<SkillBundleId>,
     },
     #[error("skill context source unavailable")]
     SourceUnavailable,

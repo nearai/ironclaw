@@ -2386,10 +2386,10 @@ mod tests {
             "skill_activate description must tell the model when to use the capability"
         );
         assert!(
-            descriptor
-                .safe_description
-                .contains("Ambiguous names fail without loading a skill"),
-            "skill_activate description must not imply every visible bare name is actionable"
+            descriptor.safe_description.contains(
+                "A bare name remains valid only when it resolves to one visible trusted skill"
+            ),
+            "skill_activate description must define the bare-name compatibility rule"
         );
         assert!(
             descriptor
@@ -2412,7 +2412,7 @@ mod tests {
                 .and_then(|names| names.get("description"))
                 .and_then(serde_json::Value::as_str),
             Some(
-                "Exact skill names copied from the available-skills list; at most four total per run"
+                "Canonical skill identifiers copied from the available-skills list; unique bare names are also accepted; at most four total per run"
             )
         );
         assert_eq!(
