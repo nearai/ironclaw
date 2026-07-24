@@ -675,6 +675,77 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
         assert renamed["automation_id"] == automation_id
 
 
+async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
+    reborn_v2_server, reborn_v2_page
+):
+    """Filtering automations retains the current rows until the response arrives."""
+    active_id = "11111111-2222-3333-4444-555555555555"
+    completed_id = "66666666-7777-8888-9999-000000000000"
+    completed_request_started = asyncio.Event()
+    release_completed_request = asyncio.Event()
+    include_completed_queries: list[bool] = []
+
+    def automation(automation_id: str, name: str, state: str) -> dict:
+        return {
+            "automation_id": automation_id,
+            "name": name,
+            "source": {
+                "type": "schedule",
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+            },
+            "state": state,
+            "next_run_at": "2026-07-25T09:00:00Z",
+            "recent_runs": [],
+        }
+
+    active = automation(active_id, "Visible while filtering", "active")
+    completed = automation(completed_id, "Completed result", "completed")
+
+    async def handle_automations(route) -> None:
+        query = parse_qs(urlparse(route.request.url).query)
+        include_completed = query.get("include_completed") == ["true"]
+        include_completed_queries.append(include_completed)
+        if include_completed:
+            completed_request_started.set()
+            await release_completed_request.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "scheduler_enabled": True,
+                    "automations": [active, completed] if include_completed else [active],
+                }
+            ),
+        )
+
+    page = reborn_v2_page
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    active_row = page.locator(SEL_V2["automation_row_for"].format(id=active_id))
+    completed_row = page.locator(
+        SEL_V2["automation_row_for"].format(id=completed_id)
+    )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(active_row).to_be_visible(timeout=15000)
+
+        completed_filter = page.get_by_role("button", name="Completed", exact=True)
+        await completed_filter.click()
+        await asyncio.wait_for(completed_request_started.wait(), timeout=10)
+
+        await expect(completed_filter).to_have_attribute("aria-pressed", "true")
+        await expect(active_row).to_be_visible()
+
+        release_completed_request.set()
+        await expect(completed_row).to_be_visible(timeout=10000)
+        await expect(active_row).to_have_count(0)
+        assert include_completed_queries[:2] == [False, True]
+    finally:
+        release_completed_request.set()
+
+
 async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry(
     reborn_v2_server, reborn_v2_page
 ):
