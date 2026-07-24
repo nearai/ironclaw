@@ -70,7 +70,7 @@ pub trait PostAdmissionObserver: Send + Sync {
 /// a richer channel payload classification (today: gate-resolution replies like
 /// `approve` / `deny gate:<ref>` / `auth deny <ref>`). Transitional debt:
 /// deleted when gate replies become a host-generic channel concern.
-pub type InboundPayloadClassifier =
+pub(crate) type InboundPayloadClassifier =
     dyn Fn(&NormalizedInboundMessage) -> Option<ChannelInboundClassification> + Send + Sync;
 
 /// How the sink mints the trusted auth claim for admitted messages —

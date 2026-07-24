@@ -626,7 +626,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -2053,9 +2053,10 @@ fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
     let factory =
         std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
             .expect("composition factory source must be readable");
-    let owner_discovery =
-        std::fs::read_to_string(root.join("crates/ironclaw_extension_host/src/mcp_discovery.rs"))
-            .expect("extension-host hosted MCP discovery source must be readable");
+    let owner_transaction = std::fs::read_to_string(
+        root.join("crates/ironclaw_extension_host/src/activation_transaction.rs"),
+    )
+    .expect("extension-host activation transaction source must be readable");
 
     for forbidden in [
         "reconcile_hosted_mcp_runtime_readiness",
@@ -2067,7 +2068,7 @@ fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
              discovery requires a real caller/run ResourceScope"
         );
         assert!(
-            !owner_discovery.contains(forbidden),
+            !owner_transaction.contains(forbidden),
             "extension-host must not expose ambient hosted-MCP startup probing through \
              `{forbidden}`"
         );
@@ -2335,15 +2336,9 @@ fn reborn_product_auth_contract_stays_reborn_native() {
 
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
-    collect_forbidden_reborn_auth_file_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs"),
-        &root,
-        &forbidden,
-        &mut violations,
-    );
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve"),
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve.rs"),
+        &root.join("crates/ironclaw_webui/src/product_auth"),
+        &root.join("crates/ironclaw_webui/src/product_auth.rs"),
         &root,
         &forbidden,
         &mut violations,
@@ -2600,7 +2595,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Product auth is a Reborn contract/service vocabulary plus the
+            // Product auth is a Reborn contract/facade vocabulary plus the
             // recipe-driven auth engine (extension-runtime workstream D). The
             // engine owns token secret storage, so the Reborn-native
             // `ironclaw_secrets` store is allowed; implementation code must
@@ -2616,9 +2611,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
-                "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -2645,7 +2638,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
-                "ironclaw_turns",
                 "ironclaw_wasm",
             ],
         },
@@ -2656,9 +2648,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // invariant is now carried by the `ironclaw_webui`
         // rule's forbidden list.
         BoundaryRule {
-            // OpenAI-compatible route surface is a Reborn product/API service.
+            // OpenAI-compatible route surface is a Reborn product/API facade.
             // It may depend on host ingress vocabulary, product adapter
-            // contracts, and the ProductSurface service, but it must not revive
+            // contracts, and the ProductSurface facade, but it must not revive
             // v1 gateway/LLM proxy paths or reach into runtime/composition
             // services directly.
             crate_name: "ironclaw_reborn_openai_compat",
@@ -2830,7 +2822,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // The standalone CLI reaches runtime and provider/admin UX through
-            // `ironclaw_reborn_composition` services. Adding any of the
+            // `ironclaw_reborn_composition` facades. Adding any of the
             // forbidden deps here re-opens "speculative public API" access to
             // internal Reborn types (turn coordinator, session thread service,
             // loop drivers, LLM registry/auth internals, etc.) and
@@ -2855,13 +2847,17 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // the axum serve loop for the composed v2 Router. Since the
             // `ironclaw_webui_v2` route surface was folded into this crate
             // (as its `webui_v2` module), it now legitimately consumes the
-            // `ironclaw_product` `ProductSurface` service the v2
+            // `ironclaw_product` `ProductSurface` facade the v2
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through
-            // ironclaw_reborn_composition's product-surface/runtime handles
-            // and product-auth mount builders plus the neutral
-            // ironclaw_host_ingress Axum mount carriers.
+            // the ProductSurface/runtime handles it receives from
+            // ironclaw_reborn_composition, the neutral ironclaw_host_ingress
+            // Axum mount carriers, and auth-owned product-auth service
+            // contracts. The direct `ironclaw_common` edge is limited to shared
+            // response/error DTO primitives used by product-auth HTTP routes;
+            // secret storage and durable auth ownership stay behind
+            // `ironclaw_auth`, not `ironclaw_secrets`.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -3651,6 +3647,13 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
+    LayerMatrixException {
+        crate_name: "ironclaw_auth",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-23",
+        removes_in: "plan:docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md#auth-turn-gate-host-api-port",
+        reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
+    },
 ];
 
 fn layer_matrix_exception(
@@ -4128,7 +4131,7 @@ fn collect_forbidden_uses_allows_reborn_tracing_targets() {
         "ironclaw-reborn-auth-boundary-dir-tracing-test-{}",
         std::process::id()
     ));
-    let src = root.join("crates/ironclaw_reborn_composition/src/product_auth_serve");
+    let src = root.join("crates/ironclaw_webui/src/product_auth");
     std::fs::create_dir_all(&src).expect("test source directory must be created");
     let mod_rs = src.join("mod.rs");
     std::fs::write(

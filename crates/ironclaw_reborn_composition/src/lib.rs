@@ -39,7 +39,6 @@ mod memory_provider_factory;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
-mod product_auth;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
@@ -52,7 +51,7 @@ mod runtime_input;
 mod runtime_profile_approval_policy;
 mod storage_catalog;
 mod support;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_fire_access;
 mod turn_run_snapshot;
@@ -68,7 +67,7 @@ pub use extension_host::channel_identity::{
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
 pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
@@ -101,25 +100,26 @@ pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretSto
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
-/// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
-/// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses extension OAuth redirect URIs from env into
-/// `OAuthRedirectUri` when
-/// building the runtime input / OAuth client config. The
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
-/// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
-/// the composition-service set, so adding `ironclaw_auth` there would fail that
-/// test — the type must travel through this service instead.
+/// OAuth redirect-URI newtype re-exported for runtime input construction; the
+/// remaining product-auth contracts are named directly from `ironclaw_auth`.
 pub use ironclaw_auth::OAuthRedirectUri;
 #[cfg(any(test, feature = "test-support"))]
 pub use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
     CredentialAccountStatus, CredentialOwnership, Timestamp,
 };
-/// Product-auth capability-wiring vocabulary re-exported so the assembling
-/// binary (`ironclaw_reborn_cli`) can inject the credential-account visibility
-/// policy without depending on composition-private product-auth modules.
+/// First-party capability-wiring vocabulary re-exported so the assembling
+/// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
+/// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
+/// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
+/// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
+/// allow-list is frozen to the composition facade, so these types travel
+/// through here.
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
+pub use ironclaw_extension_host::{
+    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
+    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
+};
 pub use ironclaw_host_api::{
     CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
@@ -127,6 +127,10 @@ pub use ironclaw_host_api::{
 };
 pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+pub use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 pub use ironclaw_product::PreferenceTargetCodec;
 /// Channel-adapter and codec contracts re-exported for the assembling
@@ -142,9 +146,8 @@ pub use ironclaw_product::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
-// the CLI consumes composition as its service and must not grow a direct
+// the CLI consumes composition as its facade and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
 // classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
 // retry_disposition}` with consumers repointed (no path-preservation shims).
@@ -168,7 +171,7 @@ pub use memory_provider_factory::{
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product` directly (architecture boundary), so
-// it reaches this helper through composition's service.
+// it reaches this helper through composition's facade.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
@@ -177,6 +180,12 @@ pub use deployment::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use ironclaw_host_api::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    installation_scoped_provider_user_id,
+};
 pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
@@ -188,29 +197,6 @@ pub use observability::hooks::{
     tenant_extension_root,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// Composition's service re-exports the continuation dispatcher for its own
-// downstream consumers (root test suites, the CLI) alongside the
-// product-auth service surface that produces it.
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
-pub use product_auth::api::auth::{
-    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
-    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
-};
-// Product-auth WebUI route-mount builders, exposed so the host-owned
-// `ironclaw_webui::webui_v2_app` (moved up from this crate) can
-// compose the Reborn-native product-auth surface into the WebChat v2 router.
-pub use ironclaw_host_api::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    installation_scoped_provider_user_id,
-};
-pub use product_auth::serve::{
-    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
-};
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::ProviderIdentityActorResolver;
 pub use readiness::{
@@ -230,7 +216,8 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime, build_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
@@ -240,11 +227,12 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
+
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose
-/// service-shaped handles only"; these host-api identity types are the
-/// host-identity service.
+/// facade-shaped handles only"; these host-api identity types are the
+/// host-identity facade.
 pub mod host_api {
     pub use ironclaw_host_api::{
         AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -256,7 +244,7 @@ pub mod host_api {
 /// external channel/product actors — to a stable `UserId` before runtime
 /// state is touched. Only the resolver trait, request, surface, and error
 /// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
-/// `UserDirectory` adapter) depends on the service vocabulary, never on
+/// `UserDirectory` adapter) depends on the facade vocabulary, never on
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep
 /// lower substrate handles private").
@@ -296,8 +284,8 @@ pub fn open_reborn_identity_resolver(
     std::sync::Arc::new(ironclaw_reborn_identity::RebornIdentityStore::new(
         filesystem,
         tenant_id.clone(),
-        UserId::new("test-owner").expect("user"),
-        AgentId::new("test-agent").expect("agent"),
+        UserId::new("test-owner").expect("user"), // safety: test-support-only static valid ID
+        AgentId::new("test-agent").expect("agent"), // safety: test-support-only static valid ID
         None,
     ))
 }
@@ -393,7 +381,6 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
-    resource_scope_path_segment,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 use ironclaw_processes::{ProcessResultStore, ProcessStore};
@@ -475,6 +462,14 @@ pub fn invocation_mount_view(
         resource_scope_path_segment(scope.tenant_id.as_str()),
         resource_scope_path_segment(scope.user_id.as_str()),
     )
+}
+
+pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
 }
 
 fn invocation_mount_view_for_segments(
@@ -748,14 +743,14 @@ mod mount_view_tests {
         let view = invocation_mount_view(&scope).unwrap();
         let resolved = view
             .resolve(
-                &ScopedPath::new("/extension-admin-configuration/groups/extension.fixture.json")
+                &ScopedPath::new("/extension-admin-configuration/groups/extension.slack.json")
                     .unwrap(),
             )
             .unwrap();
         assert_eq!(
             resolved.as_str(),
             &format!(
-                "/tenants/{}/shared/extension-admin-configuration/groups/extension.fixture.json",
+                "/tenants/{}/shared/extension-admin-configuration/groups/extension.slack.json",
                 scope.tenant_id.as_str(),
             ),
         );
@@ -879,7 +874,7 @@ mod two_tenant_isolation_tests {
     //! Regression test for the cross-tenant collision finding from the
     //! 2026-05-17 serrrfirat review.
     //!
-    //! Drives the public `SecretStore` surface from two distinct
+    //! Drives the public `SecretStorePort` surface from two distinct
     //! `(tenant, user)` scopes that share identical agent/project/handle,
     //! against the production-shape `wrap_scoped`/`invocation_mount_view`
     //! wiring over an `InMemoryBackend`. Without per-tenant path
@@ -894,14 +889,14 @@ mod two_tenant_isolation_tests {
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
-    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort as _, SecretsCrypto};
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
     use secrecy::ExposeSecret;
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
             user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
-            agent_id: Some(AgentId::new("agent").unwrap()),
+            agent_id: Some(AgentId::new("github").unwrap()),
             project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
             mission_id: None,
             thread_id: None,
@@ -960,7 +955,7 @@ mod two_tenant_isolation_tests {
 #[cfg(test)]
 mod gate_record_production_mount_tests {
     //! Production-shape mount coverage for the `/gate-records` alias: drives the
-    //! `GateRecordStore` seam over the real `wrap_scoped`/`invocation_mount_view`
+    //! `GateRecordStorePort` seam over the real `wrap_scoped`/`invocation_mount_view`
     //! wiring. Pins two things: the alias is actually registered in
     //! [`PER_USER_ALIASES`] (an unregistered alias fails every save with
     //! `MountNotFound`, making the store unusable in production), and the
@@ -971,7 +966,7 @@ mod gate_record_production_mount_tests {
     use ironclaw_host_api::{
         GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
     };
-    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort as _};
+    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {

@@ -118,7 +118,7 @@ pub fn build_channel_connection_for_test(
             Some(runtime.channel_dm_target_store.clone()),
             runtime.channel_pairing.clone(),
         ));
-    let disconnect_slot = &runtime.channel_service_slot;
+    let disconnect_slot = &runtime.channel_facade_slot;
     let service = match disconnect_slot.get() {
         Some(existing) => Arc::clone(existing),
         None => {
@@ -148,7 +148,7 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
-        channel_config: Some(runtime.channel_config.clone()),
+        channel_config: Some(runtime.channel_config_service.clone()),
         binding_store: Arc::clone(&identity_store)
             as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)

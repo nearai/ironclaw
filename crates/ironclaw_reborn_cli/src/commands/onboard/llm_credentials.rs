@@ -900,6 +900,95 @@ mod tests {
         .expect("seed cached master key");
     }
 
+    struct RuntimeEnvMaskGuard {
+        snapshots: Vec<ironclaw_common::env_helpers::RuntimeEnvSnapshot>,
+    }
+
+    impl Drop for RuntimeEnvMaskGuard {
+        fn drop(&mut self) {
+            for snapshot in self.snapshots.drain(..).rev() {
+                ironclaw_common::env_helpers::restore_runtime_env(snapshot);
+            }
+        }
+    }
+
+    fn mask_llm_env_for_test() -> RuntimeEnvMaskGuard {
+        let keys = [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_MODEL",
+            "BEDROCK_MODEL",
+            "CEREBRAS_API_KEY",
+            "CEREBRAS_MODEL",
+            "CLOUDFLARE_API_KEY",
+            "CLOUDFLARE_BASE_URL",
+            "CLOUDFLARE_MODEL",
+            "CODEX_AUTH_PATH",
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_MODEL",
+            "FIREWORKS_API_KEY",
+            "FIREWORKS_MODEL",
+            "GEMINI_API_KEY",
+            "GEMINI_MODEL",
+            "GITHUB_COPILOT_EXTRA_HEADERS",
+            "GITHUB_COPILOT_MODEL",
+            "GITHUB_COPILOT_TOKEN",
+            "GROQ_API_KEY",
+            "GROQ_MODEL",
+            "IONET_API_KEY",
+            "IONET_MODEL",
+            "LLM_API_KEY",
+            "LLM_BACKEND",
+            "LLM_BASE_URL",
+            "LLM_CHEAP_MODEL",
+            "LLM_EXTRA_HEADERS",
+            "LLM_MODEL",
+            "LLM_USE_CODEX_AUTH",
+            "MINIMAX_API_KEY",
+            "MINIMAX_BASE_URL",
+            "MINIMAX_MODEL",
+            "MISTRAL_API_KEY",
+            "MISTRAL_MODEL",
+            "NEARAI_API_KEY",
+            "NEARAI_BASE_URL",
+            "NEARAI_MODEL",
+            "NVIDIA_API_KEY",
+            "NVIDIA_MODEL",
+            "OLLAMA_BASE_URL",
+            "OLLAMA_MODEL",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_CODEX_MODEL",
+            "OPENAI_MODEL",
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_EXTRA_HEADERS",
+            "OPENROUTER_MODEL",
+            "SAMBANOVA_API_KEY",
+            "SAMBANOVA_MODEL",
+            "SMART_ROUTING_CASCADE",
+            "TINFOIL_API_KEY",
+            "TINFOIL_MODEL",
+            "TOGETHER_API_KEY",
+            "TOGETHER_MODEL",
+            "VENICE_API_KEY",
+            "VENICE_MODEL",
+            "YANDEX_API_KEY",
+            "YANDEX_EXTRA_HEADERS",
+            "YANDEX_MODEL",
+            "ZAI_API_KEY",
+            "ZAI_MODEL",
+        ];
+
+        let snapshots = keys
+            .iter()
+            .map(|key| ironclaw_common::env_helpers::snapshot_runtime_env(key))
+            .collect();
+        for key in keys {
+            ironclaw_common::env_helpers::mask_runtime_env(key);
+        }
+        RuntimeEnvMaskGuard { snapshots }
+    }
+
     /// A fake interactive `PromptSource` selecting `openai` (key-requiring)
     /// and answering `"sk-test-value"` must land the provider selection in
     /// `config.toml` and the key in the encrypted secret store, readable back
@@ -912,6 +1001,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -997,6 +1087,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_nearai_requires_and_stores_an_api_key_like_any_other_provider() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1072,6 +1163,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_nearai_slot_without_a_stored_key_is_not_already_configured() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1114,6 +1206,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_fails_loudly_on_a_malformed_config_toml() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1141,6 +1234,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_is_a_noop_when_non_interactive_with_no_env_detected() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1180,6 +1274,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_leaves_config_untouched_when_the_store_put_fails() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1214,6 +1309,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_rejects_a_blank_api_key_without_touching_anything() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1251,6 +1347,7 @@ mod tests {
     fn provision_llm_credentials_rejects_a_menu_excluded_provider_id() {
         for excluded_provider in ["bedrock", "openai_compatible"] {
             let _env_guard = crate::runtime::test_env::lock_runtime_env();
+            let _llm_env = mask_llm_env_for_test();
             let (_tmp, context) = RebornCliContext::test_context();
             let home = context.boot_config().home();
             std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1284,6 +1381,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_empty_model_answer_uses_catalog_default() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1415,11 +1513,8 @@ mod tests {
     #[test]
     fn provision_llm_credentials_seeds_from_env_on_interactive_confirm_yes() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
-        // SAFETY: serialized by the shared crate process-env lock; cleaned up
-        // before the guard drops.
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-env-detected-value");
-        }
+        let _llm_env = mask_llm_env_for_test();
+        ironclaw_common::env_helpers::set_runtime_env("OPENAI_API_KEY", "sk-env-detected-value");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1439,9 +1534,7 @@ mod tests {
             &PanickingProbe,
             false,
         );
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
+        ironclaw_common::env_helpers::remove_runtime_env("OPENAI_API_KEY");
         let outcome = outcome.expect("provision must succeed on confirm-yes");
         assert_eq!(
             outcome,
@@ -1487,11 +1580,8 @@ mod tests {
     #[test]
     fn provision_llm_credentials_falls_through_to_menu_on_interactive_confirm_no() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
-        // SAFETY: serialized by the shared crate process-env lock; cleaned up
-        // before the guard drops.
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-env-detected-value");
-        }
+        let _llm_env = mask_llm_env_for_test();
+        ironclaw_common::env_helpers::set_runtime_env("OPENAI_API_KEY", "sk-env-detected-value");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1511,9 +1601,7 @@ mod tests {
             &StubOkProbe,
             false,
         );
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
+        ironclaw_common::env_helpers::remove_runtime_env("OPENAI_API_KEY");
         let outcome = outcome.expect("provision must succeed after declining the env prompt");
         assert_eq!(
             outcome,
@@ -1535,11 +1623,8 @@ mod tests {
     #[test]
     fn provision_llm_credentials_seeds_from_env_when_headless() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
-        // SAFETY: serialized by the shared crate process-env lock; cleaned up
-        // before the guard drops.
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-env-detected-value");
-        }
+        let _llm_env = mask_llm_env_for_test();
+        ironclaw_common::env_helpers::set_runtime_env("OPENAI_API_KEY", "sk-env-detected-value");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1554,9 +1639,7 @@ mod tests {
             &PanickingProbe,
             false,
         );
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
+        ironclaw_common::env_helpers::remove_runtime_env("OPENAI_API_KEY");
         let outcome = outcome.expect("headless provision with a detected env config must succeed");
         assert_eq!(
             outcome,
@@ -1604,11 +1687,8 @@ mod tests {
     #[test]
     fn provision_llm_credentials_seeds_nothing_when_headless_env_is_partial() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
-        // SAFETY: serialized by the shared crate process-env lock; cleaned up
-        // before the guard drops.
-        unsafe {
-            std::env::set_var("OPENAI_MODEL", "gpt-test-model");
-        }
+        let _llm_env = mask_llm_env_for_test();
+        ironclaw_common::env_helpers::set_runtime_env("OPENAI_MODEL", "gpt-test-model");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1622,9 +1702,7 @@ mod tests {
             &PanickingProbe,
             false,
         );
-        unsafe {
-            std::env::remove_var("OPENAI_MODEL");
-        }
+        ironclaw_common::env_helpers::remove_runtime_env("OPENAI_MODEL");
         let outcome = outcome.expect("a partial env must not fail onboard overall");
         match outcome {
             LlmCredentialProvisionOutcome::SkippedNonInteractivePartialEnv { reason } => {
@@ -1650,6 +1728,7 @@ mod tests {
     #[test]
     fn fresh_home_interactive_with_clean_env_still_invokes_the_provider_menu() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1705,6 +1784,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_probe_failure_then_reprompt_then_accepted() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1780,6 +1860,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_probe_failure_three_times_errors_without_writing() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1831,6 +1912,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_probe_failure_confirm_yes_stores_anyway() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -1898,6 +1980,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_probe_ok_model_not_in_list_still_writes() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let _llm_env = mask_llm_env_for_test();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");

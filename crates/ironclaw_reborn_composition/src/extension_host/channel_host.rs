@@ -156,14 +156,14 @@ pub(crate) trait ChannelWorkflowStateFactory: Send + Sync {
 /// store resolve (`/engine/product_surface/idempotency`, `/conversations`).
 pub(crate) struct FilesystemChannelWorkflowStateFactory<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     filesystem: Arc<F>,
 }
 
 impl<F> FilesystemChannelWorkflowStateFactory<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     pub(crate) fn new(filesystem: Arc<F>) -> Self {
         Self { filesystem }
@@ -173,7 +173,7 @@ where
 #[async_trait]
 impl<F> ChannelWorkflowStateFactory for FilesystemChannelWorkflowStateFactory<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn build(
         &self,

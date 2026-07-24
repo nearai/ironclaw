@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
     ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
@@ -30,8 +31,7 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput,
 };
 use ironclaw_reborn_composition::{
-    RebornHostBindings, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornReadinessDiagnostic, RebornReadinessState, build_reborn_runtime,
+    RebornHostBindings, RebornReadinessDiagnostic, RebornReadinessState, build_reborn_runtime,
 };
 use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,

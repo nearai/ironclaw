@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
+use ironclaw_auth::{
+    CredentialAccount, CredentialAccountSelectionRequest, RuntimeCredentialAccountVisibilityPolicy,
+};
 use ironclaw_first_party_extensions::{
     FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID, FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID,
     FirstPartyWebDispatchError, FirstPartyWebDispatchRequest, FirstPartyWebExecutor,
@@ -34,7 +36,6 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 
-use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
 
 /// The full set of first-party handler registrars a local-dev/test build

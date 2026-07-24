@@ -1218,7 +1218,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
+        "crates/ironclaw_auth/src/product_auth/api/auth.rs",
         "nearai_mcp",
     ),
     (
@@ -1278,20 +1278,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "google",
     ),
+    ("crates/ironclaw_auth/src/product_auth/api/auth.rs", "slack"),
     (
-        "crates/ironclaw_product/src/reborn_services/outbound_delivery_capability_surface.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/credentials/runtime_credentials.rs",
+        "crates/ironclaw_auth/src/product_auth/credentials/runtime_credentials.rs",
         "google",
     ),
+    ("crates/ironclaw_webui/src/product_auth/mod.rs", "slack"),
     (
-        "crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs",
+        "crates/ironclaw_product/src/reborn_services/outbound_delivery_capability_surface.rs",
         "slack",
     ),
     ("crates/ironclaw_product/src/projection.rs", "slack"),

@@ -41,8 +41,8 @@ use ironclaw_product::ChannelConnectionNoticePolicy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
-use ironclaw_extension_host::channel_identity_store::path_segment;
+use ironclaw_auth::RebornAuthContinuationDispatcher;
+use ironclaw_extension_host::channel_identity_path_segment as path_segment;
 use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -1000,6 +1000,52 @@ impl ChannelPairingService {
     ) -> Result<(), ChannelPairingError> {
         self.dispatch_pairing_completion_with(user_id, tenant_id, continuation)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pending_completion_dispatch_ids_for_test(
+        &self,
+    ) -> Result<Vec<()>, ChannelPairingError> {
+        Ok(self
+            .store
+            .read_snapshot()
+            .await?
+            .completions
+            .iter()
+            .map(|_| ())
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn finish_pending_for_user_for_test(
+        &self,
+        user_id: &UserId,
+    ) -> Result<(), ChannelPairingError> {
+        self.dispatch_pairing_completion(user_id).await?;
+        let user_id = user_id.clone();
+        self.store
+            .update_snapshot(move |mut snapshot| {
+                snapshot
+                    .completions
+                    .retain(|completion| completion.user_id != user_id);
+                (snapshot, ())
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_continuation_for_test(
+        &mut self,
+        continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) {
+        self.continuation = continuation;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn continuation_dispatcher_for_test(
+        &self,
+    ) -> Arc<dyn RebornAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation)
     }
 }
 

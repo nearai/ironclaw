@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::{
+    AuthProductError, OAuthClientId, OAuthRedirectUri, RebornProductAuthServicePorts,
+};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
@@ -22,8 +24,8 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
+use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
-use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
@@ -207,11 +209,8 @@ pub struct RebornHostBindings {
     /// Injected credential-account visibility policy (extension-family-aware,
     /// e.g. the GSuite account visibility policy). `None` falls back to the safe
     /// fail-closed default in the product-auth services.
-    pub(crate) credential_account_visibility_policy: Option<
-        Arc<
-            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
-    >,
+    pub(crate) credential_account_visibility_policy:
+        Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     /// Resolved memory profile binding policy (issue #3537). `None` means the
     /// behavior-preserving default: every required memory profile binds to the
     /// host-bundled native provider. The CLI resolves this from the `[memory]`
@@ -938,9 +937,7 @@ impl RebornHostBindings {
     /// Inject the credential-account visibility policy (see the field doc).
     pub fn with_credential_account_visibility_policy(
         mut self,
-        policy: Arc<
-            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
+        policy: Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>,
     ) -> Self {
         self.credential_account_visibility_policy = Some(policy);
         self

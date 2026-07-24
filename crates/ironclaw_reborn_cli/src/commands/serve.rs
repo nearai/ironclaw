@@ -15,9 +15,10 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
-    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
-    deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
+    RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
+    deferred_webui_v2_startup_router, product_auth_route_mount, serve_webui_v2,
+    webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -193,7 +194,7 @@ impl ServeCommand {
         )?);
 
         // Resolve trusted host-installation default agent/project from
-        // `[identity]`. The v2 service builds `ThreadScope` from
+        // `[identity]`. The v2 facade builds `ThreadScope` from
         // `caller.agent_id` on every mutation and read, so an absent
         // default_agent here means every authenticated request would
         // still 400. Mirror the same fallback rule the `run` command
@@ -202,12 +203,12 @@ impl ServeCommand {
 
         // Pin the runtime owner to the authenticated WebUI user so the
         // turn-runner loop host reads thread context from the same
-        // `owners/<user>` subtree the v2 service wrote to. Without this the
+        // `owners/<user>` subtree the v2 facade wrote to. Without this the
         // runtime owner stays at `[identity].default_owner` (a different
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
-        // Carry the boot config so the WebUI service can compose the operator
+        // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
         {
             runtime_input = runtime_input.with_boot_config(boot_config.clone());
@@ -563,7 +564,7 @@ impl ServeCommand {
                 serve_config = serve_config.with_canonical_host(host);
             }
             {
-                let mut state = ironclaw_reborn_composition::ProductAuthRouteState::new(
+                let mut state = ProductAuthRouteState::new(
                     runtime.product_auth_services(),
                     tenant_id.clone(),
                     Some(default_agent_id.clone()),
@@ -577,9 +578,7 @@ impl ServeCommand {
                         ),
                     );
                 }
-                serve_config = serve_config.with_split_route_mount(
-                    ironclaw_reborn_composition::product_auth_route_mount(state).into(),
-                );
+                serve_config = serve_config.with_split_route_mount(product_auth_route_mount(state));
             }
             // Generic extension channel ingress (extension-runtime P4): one
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
@@ -962,7 +961,7 @@ fn resolve_webui_user_id_raw(
 /// Resolve the owner the Reborn runtime must run under for the WebChat v2
 /// serve path.
 ///
-/// The v2 service writes and reads threads under a `ThreadScope` whose
+/// The v2 facade writes and reads threads under a `ThreadScope` whose
 /// `owner_user_id` is the authenticated WebUI user, while the turn-runner
 /// loop host reads thread context under the runtime's composition owner. If
 /// those two identities diverge, `ThreadScope::to_resource_scope` resolves a
@@ -1355,7 +1354,7 @@ mod tests {
     fn webui_runtime_owner_defaults_to_authenticated_user() {
         // With no `[identity].default_owner`, the runtime owner must be the
         // authenticated WebUI user so the turn-runner loop host reads thread
-        // context from the same `owners/<user>` subtree the v2 service wrote.
+        // context from the same `owners/<user>` subtree the v2 facade wrote.
         assert_eq!(
             resolve_webui_runtime_owner(None, "local-user").unwrap(),
             "local-user"
@@ -1375,7 +1374,7 @@ mod tests {
     #[test]
     fn webui_runtime_owner_rejects_divergent_config_owner() {
         // A configured owner that differs from the authenticated WebUI user is
-        // the bug class that silently made every thread invisible: the service
+        // the bug class that silently made every thread invisible: the facade
         // writes under `owners/local-user` while the loop host reads under
         // `owners/reborn-cli`. Fail loud at startup instead.
         let identity = IdentitySection::default().set_default_owner("reborn-cli");
@@ -1600,10 +1599,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1633,10 +1632,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1677,10 +1676,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");

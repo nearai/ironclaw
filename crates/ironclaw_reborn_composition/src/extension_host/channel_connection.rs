@@ -42,7 +42,7 @@ use ironclaw_host_api::{
 /// per-user channel disconnect can revoke the caller's personal vendor
 /// credential without depending on the whole product-auth bundle (and so
 /// tests can record the issued cleanup). Production forwards to
-/// [`crate::RebornProductAuthServices::cleanup_credentials_for_lifecycle`],
+/// [`ironclaw_auth::RebornProductAuthServices::cleanup_credentials_for_lifecycle`],
 /// the guardrail-sanctioned lifecycle cleanup entry point.
 #[async_trait]
 pub(crate) trait ChannelCredentialCleanup: Send + Sync {
@@ -53,12 +53,12 @@ pub(crate) trait ChannelCredentialCleanup: Send + Sync {
 }
 
 #[async_trait]
-impl ChannelCredentialCleanup for crate::RebornProductAuthServices {
+impl ChannelCredentialCleanup for ironclaw_auth::RebornProductAuthServices {
     async fn cleanup_credentials_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, ProductSurfaceError> {
-        crate::RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
+        ironclaw_auth::RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
             .await
             .map_err(|error| {
                 ProductSurfaceError::internal_from(format!(
@@ -74,8 +74,8 @@ impl ChannelCredentialCleanup for crate::RebornProductAuthServices {
 /// §6.3 state (`connected` / `expired` / `disconnected`) instead of the
 /// connected/disconnected collapse the identity-binding bool alone permits.
 /// Production forwards to the product-auth
-/// [`crate::RebornProductAuthServices::credential_account_record_source`]; the
-/// service leaves the live-flow (`authenticating`) axis to the auth-flow
+/// [`ironclaw_auth::RebornProductAuthServices::credential_account_record_source`]; the
+/// facade leaves the live-flow (`authenticating`) axis to the auth-flow
 /// projection that owns thread-scoped setup flows.
 #[async_trait]
 pub(crate) trait ChannelAccountStatusReader: Send + Sync {
@@ -89,7 +89,7 @@ pub(crate) trait ChannelAccountStatusReader: Send + Sync {
 }
 
 #[async_trait]
-impl ChannelAccountStatusReader for crate::RebornProductAuthServices {
+impl ChannelAccountStatusReader for ironclaw_auth::RebornProductAuthServices {
     async fn account_status_for_caller(
         &self,
         caller: &ProductSurfaceCaller,

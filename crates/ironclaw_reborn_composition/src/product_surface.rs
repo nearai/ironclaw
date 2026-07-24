@@ -194,7 +194,8 @@ pub(crate) fn build_product_surface_with_channel_connection(
             RebornLocalLifecycleService::new(Arc::clone(&runtime.skill_management));
         lifecycle_service =
             lifecycle_service.with_extension_management(runtime.extension_management.clone());
-        lifecycle_service = lifecycle_service.with_channel_config(runtime.channel_config.clone());
+        lifecycle_service =
+            lifecycle_service.with_channel_config(runtime.channel_config_service.clone());
         if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_service =
                 lifecycle_service.with_runtime_http_egress(runtime_http_egress.clone());
@@ -211,7 +212,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // through it (extension-runtime §6.4).
     api = api.with_channel_config_product_service(Arc::new(
         ironclaw_extension_host::RebornChannelConfigProductService::new(
-            runtime.channel_config.clone(),
+            runtime.channel_config_service.clone(),
         ),
     ));
     // Share the activation selector's live master switch when the selected skill

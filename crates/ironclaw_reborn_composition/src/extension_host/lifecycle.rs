@@ -21,7 +21,7 @@ use ironclaw_skills::{
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
+use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 

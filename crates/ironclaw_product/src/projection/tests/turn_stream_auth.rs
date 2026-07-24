@@ -594,3 +594,125 @@ async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
         ProductAdapterError::SurfaceTransient { .. }
     ));
 }
+
+#[tokio::test]
+async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
+    struct VendorOAuthChallengeProvider;
+
+    #[async_trait]
+    impl AuthChallengeProvider for VendorOAuthChallengeProvider {
+        async fn challenge_for_gate(
+            &self,
+            _scope: &TurnScope,
+            _owner_user_id: &UserId,
+            _run_id: TurnRunId,
+            _gate_ref: &str,
+            credential_requirements: &[RuntimeCredentialAuthRequirement],
+        ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
+            let Some(requirement) = credential_requirements.first() else {
+                return Ok(None);
+            };
+            if requirement.provider.as_str() != "vendorco"
+                || requirement.provider_scopes != ["items:read"]
+            {
+                return Ok(None);
+            }
+            Ok(Some(AuthChallengeView {
+                kind: AuthPromptChallengeKind::OAuthUrl,
+                provider: AuthProviderId::new("vendorco".to_string()).unwrap(),
+                account_label: None,
+                authorization_url: Some(
+                    OAuthAuthorizationUrl::new(
+                        "https://auth.vendorco.example/authorize?scope=items%3Aread".to_string(),
+                    )
+                    .unwrap(),
+                ),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+                pairing: None,
+            }))
+        }
+    }
+
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-vendor-auth-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let gate_ref = "gate:auth-required";
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let credential_requirements = vec![RuntimeCredentialAuthRequirement {
+        provider: VendorId::new("vendorco").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["items:read".to_string()],
+        },
+        requester_extension: ExtensionId::new("vendorco-tools").unwrap(),
+        provider_scopes: vec!["items:read".to_string()],
+    }];
+
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedAuth,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
+                    credential_requirements: credential_requirements.clone(),
+                }),
+                sanitized_reason: Some("Vendor authentication required".to_string()),
+                detail: None,
+                retryable: None,
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                credential_requirements,
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
+        }),
+    )
+    .with_auth_challenges(Arc::new(VendorOAuthChallengeProvider));
+
+    let events = services
+        .product_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event.payload(),
+            ProductOutboundPayload::AuthPrompt(prompt)
+                if prompt.turn_run_id == turn_run
+                    && prompt.auth_request_ref == gate_ref
+                    && prompt.challenge_kind == Some(AuthPromptChallengeKind::OAuthUrl)
+                    && prompt.provider.as_deref() == Some("vendorco")
+                    && prompt.authorization_url.as_deref().is_some_and(|url|
+                        url.starts_with("https://auth.vendorco.example/authorize")
+                            && url.contains("items%3Aread")
+                    )
+                    && prompt.account_label.is_none()
+        )),
+        "events: {events:#?}"
+    );
+}

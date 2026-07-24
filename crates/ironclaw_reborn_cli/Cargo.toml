@@ -44,7 +44,6 @@ clap_complete = "4.5.0"
 # second terminal-masking dependency.
 crossterm = "0.29"
 dotenvy = "0.15"
-ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_operator = { path = "../ironclaw_operator", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
@@ -54,10 +53,12 @@ ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.
 # DEL-7: the binary is the one generic-side crate allowed to link the concrete
 # first-party extensions; it converts the package inventory into composition's
 # neutral bundle set and supplies the GSuite/web-access capability registrars.
-# Auth is a direct dependency because the composition facades were removed with
-# the extension-host shrink; first-party dispatch vocabulary comes through
-# `ironclaw_extension_host`.
+# Host-runtime types are reached through composition facade re-exports.
+# Host API is direct only for neutral operator DTO contracts; auth-owned
+# credential visibility policy is named directly from ironclaw_auth after the
+# product-auth ownership move.
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", version = "0.1.0" }
+ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
 ironclaw_slack_extension = { path = "../ironclaw_slack_extension", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", version = "0.1.0" }
 ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0" }

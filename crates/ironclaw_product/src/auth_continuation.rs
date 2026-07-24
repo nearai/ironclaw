@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -18,7 +19,81 @@ use uuid::Uuid;
 use crate::binding_ref::{
     AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
-use crate::{AuthContinuationRejectionKind, ProductSurfaceFailure};
+use crate::{
+    AuthContinuationRejectionKind, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
+    LifecycleProductSurfaceContext, ProductSurfaceFailure,
+};
+
+/// Product-surface boundary for completing a durable auth continuation.
+///
+/// Implementations are idempotent on `flow_id`: the auth engine provides
+/// at-least-once delivery until the durable continuation fence is stamped.
+#[async_trait]
+pub trait ProductAuthContinuationDispatcher: Send + Sync {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError>;
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError>;
+}
+
+struct LifecycleAuthContinuationDispatcher {
+    lifecycle: Arc<dyn LifecycleProductService>,
+    inner: Arc<dyn ProductAuthContinuationDispatcher>,
+}
+
+pub fn lifecycle_auth_continuation_dispatcher(
+    lifecycle: Arc<dyn LifecycleProductService>,
+    inner: Arc<dyn ProductAuthContinuationDispatcher>,
+) -> Arc<dyn ProductAuthContinuationDispatcher> {
+    Arc::new(LifecycleAuthContinuationDispatcher { lifecycle, inner })
+}
+
+#[async_trait]
+impl ProductAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        if let AuthContinuationRef::LifecycleActivation { package_ref } = &event.continuation {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_ref.as_str())
+                    .map_err(|_| AuthProductError::LifecycleActivationFailed)?;
+            let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                tenant_id: event.scope.resource.tenant_id.clone(),
+                user_id: event.scope.resource.user_id.clone(),
+                agent_id: event.scope.resource.agent_id.clone(),
+                project_id: event.scope.resource.project_id.clone(),
+            });
+            self.lifecycle
+                .execute(
+                    context,
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .map_err(|error| {
+                    tracing::debug!(
+                        %error,
+                        "product auth lifecycle activation continuation failed"
+                    );
+                    AuthProductError::LifecycleActivationFailed
+                })?;
+        }
+        self.inner.dispatch_auth_continuation(event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_canceled_auth_continuation(event).await
+    }
+}
 
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
@@ -169,6 +244,40 @@ impl ProductAuthTurnGateResumeDispatcher {
     }
 }
 
+#[async_trait]
+impl ProductAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
+    }
+}
+
+#[async_trait]
+impl ironclaw_auth::RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
+    }
+}
+
 fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
     match continuation {
         AuthContinuationRef::SetupOnly => "setup_only",
@@ -273,7 +382,7 @@ fn surface_error_kind(error: &ProductSurfaceFailure) -> &'static str {
             TurnErrorCategory::Conflict => "turn_resume_conflict",
         },
         ProductSurfaceFailure::Transient { .. } => "transient",
-        _ => "workflow_error",
+        _ => "surface_error",
     }
 }
 

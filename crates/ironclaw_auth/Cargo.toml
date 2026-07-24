@@ -25,9 +25,15 @@ test-support = []
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+deadpool-postgres = "0.14"
+futures = "0.3"
+hex = "0.4.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_turns = { path = "../ironclaw_turns" }
 # Compile-time Mozilla Public Suffix List: DCR issuer/resource origin binding
 # needs real eTLD+1 resolution (naive label-splitting treats every `*.co.uk`
 # as one registrable domain — the PR #6116 security-high finding). Static data
@@ -36,6 +42,7 @@ psl = "2"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 subtle = "2"
 thiserror = "2"
 rand = "0.10"
@@ -54,6 +61,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # binaries (which link the lib as an external crate, without `cfg(test)`) can
 # reach `ironclaw_auth::test_support`.
 ironclaw_auth = { path = ".", features = ["test-support"] }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 toml = "1.1"

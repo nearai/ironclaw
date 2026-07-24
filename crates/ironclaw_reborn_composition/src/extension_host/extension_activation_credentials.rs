@@ -5,7 +5,7 @@ use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{CredentialStageError, ResourceScope, RuntimeCredentialAuthRequirement};
 use ironclaw_product::ProductSurfaceFailure;
 
-use crate::product_auth::credentials::runtime_credentials::{
+use ironclaw_auth::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
 };
 use ironclaw_extension_host::{

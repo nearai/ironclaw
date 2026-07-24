@@ -17,8 +17,15 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
-#[tokio::test]
-async fn extension_install_survives_independent_reopen() {
+#[test]
+fn extension_install_survives_independent_reopen() {
+    run_async_test_with_stack(
+        "extension_install_survives_independent_reopen",
+        extension_install_survives_independent_reopen_async,
+    );
+}
+
+async fn extension_install_survives_independent_reopen_async() {
     let group = RebornIntegrationGroup::extension_lifecycle()
         .await
         .expect("extension-lifecycle group builds");
@@ -52,4 +59,25 @@ async fn extension_install_survives_independent_reopen() {
         .assert_extension_install_persists_after_reopen("github")
         .await
         .expect("installed extension survives an independent reopen");
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }

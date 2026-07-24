@@ -20,6 +20,8 @@ use ironclaw_extension_host::AdminConfigurationCatalogUse;
 
 pub(crate) type ComposedAdminConfigurationService =
     AdminConfigurationService<dyn RootFilesystem, dyn ironclaw_secrets::SecretStorePort>;
+pub(crate) type ComposedExtensionAdminConfigurationResolver =
+    ironclaw_extension_host::ChannelConfigService;
 
 #[derive(Clone, Default)]
 pub(crate) struct AdminConfigurationViewProvider {

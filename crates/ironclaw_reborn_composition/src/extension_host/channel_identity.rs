@@ -26,34 +26,25 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
+use ironclaw_auth::{
+    AuthProductError, AuthProductScope, OAuthProviderIdentity,
+    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
+    OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
+};
 use ironclaw_extension_host::{
     ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
 };
 use ironclaw_host_api::{
     ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
-    ChannelIdentityPostBindFactory, ExtensionId, TenantId, UserId,
-};
-
-use crate::product_auth::api::auth::{
-    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture,
-};
-use ironclaw_host_api::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-    RebornUserIdentityBindingStore, installation_scoped_provider_user_id,
+    ChannelIdentityPostBindFactory, ExtensionId, RebornIdentityProviderId,
+    RebornIdentityProviderUserId, RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, TenantId, UserId,
+    installation_scoped_provider_user_id,
 };
 
 /// The identity claims the OAuth token exchange can prove
 /// ([`OAuthProviderIdentity`]'s optional fields).
 const SCOPING_CLAIMS: [&str; 3] = ["team_id", "enterprise_id", "app_id"];
-
-/// Factory producing one post-exchange provider-identity check for a
-/// callback's vendor id and scope (or `None` when nothing needs binding).
-/// Registered on the product-auth route state by composition wiring.
-pub(crate) type ProviderIdentityHookFactory =
-    dyn Fn(&str, &AuthProductScope) -> Option<OAuthProviderIdentityCheck> + Send + Sync;
 
 /// Everything the generic post-OAuth identity binding hook needs.
 ///

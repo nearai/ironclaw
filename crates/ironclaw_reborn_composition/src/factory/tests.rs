@@ -1,18 +1,15 @@
 // arch-exempt: large_file, pre-existing >1500-line factory test module; this PR only adds the mandatory `owner` field to an outbound-target entry fixture for the registry caller-scoping hardening, plan #6389
 use super::*;
-use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStorePort as _};
+use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStorePort};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     NewCredentialAccount, ProviderScope,
 };
-use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStorePort as _, GrantAuthorizer,
-};
+use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -31,9 +28,7 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_outbound::RunFinalReplyDestination;
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
-use ironclaw_secrets::SecretStorePort as _;
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
@@ -44,6 +39,7 @@ use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
 use ironclaw_extension_host::ExtensionActivationMode;
+use ironclaw_host_api::InstallationState;
 
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -76,7 +72,7 @@ async fn production_store_bundle_new_validates_runtime_storage_before_store_asse
 #[tokio::test]
 async fn production_store_bundle_with_secret_credentials_validates_runtime_storage_first() {
     let credential_filesystem = empty_composite_filesystem();
-    let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
+    let secret_credentials = SecretCredentialStores::from_master_key(
         crate::wrap_scoped(Arc::clone(&credential_filesystem)),
         test_secret_master_key(),
     )
@@ -336,7 +332,7 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
             auth_prompts: true,
             modalities: Vec::new(),
         },
-        destination: RunFinalReplyDestination::External {
+        destination: ironclaw_outbound::RunFinalReplyDestination::External {
             reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
                 "reply:registry-validation",
             )
@@ -673,7 +669,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     scope.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("auth-thread").unwrap());
 
     let challenge = product_auth
-        .request_manual_token_setup(crate::RebornManualTokenSetupRequest::new(
+        .request_manual_token_setup(ironclaw_auth::RebornManualTokenSetupRequest::new(
             scope.clone(),
             ironclaw_auth::AuthProviderId::new("github").unwrap(),
             CredentialAccountLabel::new("work github").unwrap(),
@@ -683,7 +679,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
         .await
         .unwrap();
     let submitted = product_auth
-        .submit_manual_token(crate::RebornManualTokenSubmitRequest::new(
+        .submit_manual_token(ironclaw_auth::RebornManualTokenSubmitRequest::new(
             scope.clone(),
             challenge.interaction_id,
             secrecy::SecretString::from("ghp_local_dev_pat"),
@@ -703,7 +699,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let access_secret = account.access_secret.expect("manual token access secret");
     assert!(
         access_secret.as_str().starts_with("product-auth-manual-"),
-        "local-dev default product-auth must create durable SecretStore-backed handles"
+        "local-dev default product-auth must create durable SecretStorePort-backed handles"
     );
 
     let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
@@ -915,7 +911,7 @@ async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_
     // Seed directly (not through the resolver): this test is about
     // empty-env/cached-file precedence, not the keychain step, and this
     // crate can't suppress the OS keychain in-process (`forbid(unsafe_code)`
-    // blocks `set_var`; see the fallthrough test in `tests/service_factory.rs`).
+    // blocks `set_var`; see the fallthrough test in `tests/facade_factory.rs`).
     std::fs::write(
         &key_path,
         ironclaw_secrets::keychain::generate_master_key_hex(),
@@ -1066,7 +1062,7 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
 
 // The keychain-fallthrough + idempotency test for
 // `resolve_local_dev_secret_master_key_with_env` lives in
-// `tests/service_factory.rs`
+// `tests/facade_factory.rs`
 // (`local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile`):
 // proving it needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
 // set, and `set_var` is `unsafe` — blocked here by this crate's
@@ -1089,11 +1085,11 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     let calendar_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
         .expect("valid ref");
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-gsuite-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            gmail_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(gmail_ref.clone(), &caller)
         .await
         .expect("install Gmail");
     extension_management
@@ -1101,10 +1097,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("activate Gmail");
     extension_management
-        .install(
-            calendar_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(calendar_ref.clone(), &caller)
         .await
         .expect("install Google Calendar");
     extension_management
@@ -1232,22 +1225,19 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         ironclaw_extensions::CapabilityVisibility::HostInternal
     );
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-notion-mcp-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            notion_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(notion_ref.clone(), &caller)
         .await
         .expect("install Notion MCP");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             notion_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new("local-dev-notion-mcp-owner").expect("valid user"),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
+                scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
+                    .expect("valid scope"),
                 runtime_http_egress: Arc::new(
                     HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
                 ),
@@ -1294,11 +1284,11 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     let web_access_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").expect("valid ref");
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-web-access-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            web_access_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(web_access_ref.clone(), &caller)
         .await
         .expect("install Web Access");
     extension_management
@@ -1729,11 +1719,12 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
+    // #6520 lifecycle projection is caller-scoped and takes the production
+    // credential gate; the owner is the operator this runtime was built with.
+    let owner_scope =
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
     let projection = extension_management
-        .project(
-            nearai_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref.clone(), &owner_scope.user_id)
         .await
         .expect("NEAR AI MCP projected");
     assert_eq!(projection.phase, InstallationState::Active);
@@ -1990,11 +1981,12 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         outcome,
         ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
     );
+    // #6520 lifecycle projection is caller-scoped and takes the production
+    // credential gate; the owner is the operator this runtime was built with.
+    let owner_scope =
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
     let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref, &owner_scope.user_id)
         .await
         .expect("NEAR AI MCP projected");
     assert_eq!(projection.phase, InstallationState::Active);
@@ -2960,4 +2952,271 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
     )
     .expect("wrong digest gmail identity should evaluate");
     assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
+}
+
+/// Regression (#6520 merge reconciliation): the production factory composes
+/// `lifecycle_auth_continuation_dispatcher` over the base product-auth
+/// dispatcher, so a completed extension-card OAuth (a `LifecycleActivation`
+/// continuation) re-enters the canonical lifecycle install/readiness command
+/// instead of being durably fenced un-activated. Pre-fix the base dispatcher
+/// answered `Ok` ("deferred to follow-up handler"), the fence stamped, and the
+/// extension could never activate.
+#[tokio::test]
+async fn completed_lifecycle_activation_continuation_installs_the_extension() {
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthProductScope, AuthProviderId,
+        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
+        OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
+        OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
+        ProviderScope,
+    };
+    use ironclaw_host_api::SecretHandle;
+
+    fn fake_digest(value: &str) -> String {
+        format!(
+            "{:064x}",
+            value.bytes().fold(0_u64, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+            })
+        )
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owner = "lifecycle-continuation-owner";
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let product_auth = Arc::clone(&services.product_auth);
+    let user = UserId::new(owner).expect("owner user id");
+    let scope = AuthProductScope::new(
+        ironclaw_host_api::ResourceScope::local_default(
+            user.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("owner scope"),
+        AuthSurface::Api,
+    );
+    let provider = AuthProviderId::new("github").expect("provider id");
+    // The auth-flow continuation carries the string-shaped auth package ref;
+    // the lifecycle wrapper converts it to the workflow ref internally.
+    let package_ref =
+        ironclaw_auth::LifecyclePackageRef::new("github").expect("github package ref");
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let state_hash = OpaqueStateHash::new(fake_digest("lifecycle-state")).unwrap();
+    let pkce_hash = PkceVerifierHash::new(fake_digest("lifecycle-pkce")).unwrap();
+
+    let flow = product_auth
+        .flow_manager()
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: package_ref.clone(),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash.clone()),
+            pkce_verifier_hash: Some(pkce_hash.clone()),
+            expires_at,
+        })
+        .await
+        .expect("create lifecycle-activation flow");
+    product_auth
+        .flow_manager()
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash.clone(),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash.clone(),
+            },
+        )
+        .await
+        .expect("claim callback");
+    product_auth
+        .flow_manager()
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider.clone(),
+                        account_label: CredentialAccountLabel::new("GitHub Account").unwrap(),
+                        authorization_code_hash: AuthorizationCodeHash::new(fake_digest(
+                            "lifecycle-code",
+                        ))
+                        .unwrap(),
+                        pkce_verifier_hash: pkce_hash,
+                        access_secret: SecretHandle::new("lifecycle-github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("repo.readonly").unwrap()],
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("complete callback");
+
+    // Reconciling the completed-but-unfenced flow drives the composed
+    // dispatcher: the lifecycle wrapper re-enters the canonical install
+    // command, the just-minted github credential account satisfies the
+    // credential gate, and install auto-advances the extension to Active
+    // before the fan-out settles the flow. Pre-fix the base dispatcher
+    // answered `Ok` without installing anything.
+    let status = product_auth
+        .reconcile_oauth_flow(&scope, flow.id)
+        .await
+        .expect("lifecycle continuation reconciles");
+    assert_eq!(status, ironclaw_auth::AuthFlowStatus::Completed);
+
+    let installation = runtime_surfaces
+        .extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("list installations")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "github")
+        .expect("lifecycle continuation must install the github extension");
+    assert!(
+        installation.owner().visible_to(&user),
+        "the continuation's caller must hold the installation membership"
+    );
+    // Install drove readiness all the way to runtime publication: the github
+    // tool surface is model-visible without any separate Activate action.
+    let capabilities = runtime_surfaces
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capabilities");
+    assert!(
+        capabilities
+            .iter()
+            .any(|capability| capability.provider.as_str() == "github"),
+        "github capabilities must be published after the continuation"
+    );
+
+    // A fanned-out continuation stamps the durable fence exactly once.
+    let record = product_auth
+        .flow_manager()
+        .get_flow(&scope, flow.id)
+        .await
+        .expect("get flow")
+        .expect("flow record exists");
+    assert!(
+        record.continuation_emitted_at.is_some(),
+        "a fanned-out continuation must stamp the durable fence"
+    );
+}
+
+/// #6520 live-repro regression: a completed channel pairing must run the shared
+/// lifecycle-wrapped product continuation dispatcher — readiness reconciliation
+/// (runtime publication) before the blocked-run fan-out. When composition handed
+/// pairing a bare turn-resume dispatcher instead, a freshly paired channel
+/// extension (telegram: remove -> install -> pair) sat at setup_needed forever
+/// because nothing re-published it. Pinned by pointer identity at the
+/// composition seam: every pairing service's dispatcher is the same composed
+/// product dispatcher.
+#[tokio::test]
+async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "local-dev-pairing-continuation-owner",
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+
+    let channel_pairing = services
+        .channel_pairing
+        .as_ref()
+        .expect("local-dev build composes the channel pairing registry");
+    let mut pairing_services_checked = 0usize;
+    let mut shared_dispatcher = None;
+    for extension_id in ["telegram", "slack"] {
+        let Some(pairing) = channel_pairing.get(extension_id) else {
+            continue;
+        };
+        pairing_services_checked += 1;
+        let dispatcher = pairing.continuation_dispatcher_for_test();
+        if let Some(shared_dispatcher) = &shared_dispatcher {
+            assert!(
+                Arc::ptr_eq(&dispatcher, shared_dispatcher),
+                "{extension_id} pairing completions must dispatch through the shared \
+                 lifecycle-wrapped continuation dispatcher, not a per-channel bare turn-resume one",
+            );
+        } else {
+            shared_dispatcher = Some(dispatcher);
+        }
+    }
+    assert!(
+        pairing_services_checked > 0,
+        "expected at least one bundled channel extension with a pairing service",
+    );
+}
+
+/// Live-repro regression (demo-stack defect): removing an installed channel
+/// extension through the lifecycle port with an authenticated actor must
+/// actually delete the caller's durable membership — and must be POSSIBLE in
+/// every composition that can install one (the channel-connection disconnect
+/// slot is filled at factory tier, not only in `build_reborn_runtime`).
+#[tokio::test]
+async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "local-dev-telegram-remove-owner",
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &runtime_surfaces.extension_management;
+    let caller = UserId::new("telegram-remove-user").expect("user id");
+    let telegram_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").expect("valid ref");
+
+    extension_management
+        .install(telegram_ref.clone(), &caller)
+        .await
+        .expect("install telegram");
+
+    let removal_scope =
+        default_runtime_owner_scope(caller.clone()).expect("telegram removal scope");
+    let removed = extension_management
+        .remove(telegram_ref.clone(), &removal_scope, Some(&caller))
+        .await
+        .expect("remove telegram");
+    assert!(
+        matches!(
+            removed.payload.as_ref(),
+            Some(ironclaw_product::LifecycleProductPayload::ExtensionRemove { removed: true })
+        ),
+        "remove must report the membership it deleted, got {:?}",
+        removed.payload
+    );
+
+    let projection = extension_management
+        .project(telegram_ref, &caller)
+        .await
+        .expect("project telegram after remove");
+    assert_eq!(
+        projection.phase,
+        InstallationState::Removed,
+        "removed telegram must project uninstalled for its former member",
+    );
 }

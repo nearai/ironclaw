@@ -333,7 +333,7 @@ impl RebornRuntimeStores {
     pub(crate) fn channel_config_service(
         &self,
     ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
-        let service = self.channel_config.clone();
+        let service = self.channel_config_service.clone();
         Some(Arc::new(
             ironclaw_extension_host::RebornChannelConfigProductService::new(service),
         ))

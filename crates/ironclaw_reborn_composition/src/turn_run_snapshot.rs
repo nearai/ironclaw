@@ -23,10 +23,33 @@
 
 use async_trait::async_trait;
 use ironclaw_turns::{TurnError, TurnPersistenceSnapshot};
+use std::sync::{Arc, RwLock};
 
 #[async_trait]
 pub(crate) trait TurnRunSnapshotSource: Send + Sync {
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError>;
+}
+
+pub(crate) struct RebindableTurnRunSnapshotSource {
+    source: Arc<RwLock<Arc<dyn TurnRunSnapshotSource>>>,
+}
+
+impl RebindableTurnRunSnapshotSource {
+    pub(crate) fn new(source: Arc<RwLock<Arc<dyn TurnRunSnapshotSource>>>) -> Self {
+        Self { source }
+    }
+}
+
+#[async_trait]
+impl TurnRunSnapshotSource for RebindableTurnRunSnapshotSource {
+    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        let source = self
+            .source
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        source.turn_run_snapshot().await
+    }
 }
 
 // The one turn-state store. Generic over any `RootFilesystem` backend, so the
