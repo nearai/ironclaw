@@ -372,6 +372,12 @@ jobs:
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
+      # The QA smoke binaries build a full Reborn runtime and drive whole
+      # turns on the libtest current-thread stack; the combined debug async
+      # frames of that pipeline overflow the 8 MiB default (measured need:
+      # ~10 MiB for reborn_qa_smoke_scenarios_e2e). Same pathology and value
+      # as the documented RUST_MIN_STACK in reborn_qa_recorded_behavior.rs.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:

@@ -43,7 +43,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set or clear the authenticated user's final-reply outbound delivery target."
             .to_string(),
         effects: vec![EffectKind::ExternalWrite],

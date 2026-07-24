@@ -5,7 +5,6 @@
 //! neutral runtime dispatch without depending on concrete runtime crates.
 #![warn(unreachable_pub)]
 
-mod conformance;
 mod dispatch;
 mod error;
 mod helpers;
@@ -18,11 +17,6 @@ mod replay_payload;
 mod requests;
 mod trust;
 
-pub use conformance::{
-    CapabilityProfileClaim, CapabilityProfileClaimedOperation, CapabilityProfileConformanceFinding,
-    CapabilityProfileConformanceFindingKind, CapabilityProfileConformanceReport,
-    evaluate_profile_conformance,
-};
 pub use dispatch::{
     BoundCapabilityAdapter, ChainToolResolver, ResolvedCapability, RuntimeAdapterResult,
     RuntimeDispatcher, ToolResolver,

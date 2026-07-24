@@ -23,6 +23,15 @@ path-guid = "9BB3F0DB-3513-45E6-A23B-CE5A5E5C1759"
 license = false
 eula = false
 
+[features]
+# Compile in the (off-by-default) mem0 third-party memory provider so an
+# `ironclaw-reborn` binary can bind `memory.document_store.v1` to a self-hosted
+# mem0 OSS server. Mirrors the same feature on `ironclaw_reborn_composition`;
+# without it a default binary carries no mem0 code or its reqwest/rustls
+# transport and a mem0 binding fails closed.
+memory-mem0 = [
+    "ironclaw_reborn_composition/memory-mem0",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1" }

@@ -796,6 +796,12 @@ fn capability_matches(capability_id: &str, short_name: &str) -> bool {
     capability_id == short_name
         || capability_id == format!("builtin.{short_name}")
         || capability_id.ends_with(&format!(".{short_name}"))
+        // The native memory tools moved from `builtin.memory_<op>` to
+        // `ironclaw.memory.<op>`; keep the `memory_<op>` short names used
+        // by the input summaries matching the new ids.
+        || short_name
+            .strip_prefix("memory_")
+            .is_some_and(|op| capability_id == format!("ironclaw.memory.{op}"))
 }
 
 fn string_arg<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {

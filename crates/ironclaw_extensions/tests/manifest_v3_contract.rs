@@ -864,3 +864,74 @@ fn resolved_contract_round_trips_through_serde() {
         serde_json::from_str(&json).expect("deserialize");
     assert_eq!(&back, record.resolved());
 }
+
+// ---------------------------------------------------------------------------
+// [memory] surface validation (#3537)
+// ---------------------------------------------------------------------------
+
+/// Minimal well-formed `[memory]` manifest (the mem0-style provider-only
+/// shape: no tools, first_party runtime). Each rejection test perturbs one
+/// axis of this baseline.
+const MEMORY_PROVIDER_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme.memory"
+name = "Acme Memory"
+version = "0.1.0"
+description = "Test memory provider manifest."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acme_memory_provider"
+
+[memory]
+operations = ["document_store"]
+"#;
+
+#[test]
+fn memory_provider_manifest_baseline_parses() {
+    let record = parse_v3(MEMORY_PROVIDER_MANIFEST).expect("memory provider manifest parses");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(!memory.operations.is_empty());
+}
+
+#[test]
+fn memory_surface_on_non_first_party_runtime_fails_closed() {
+    let toml = MEMORY_PROVIDER_MANIFEST.replace(
+        "kind = \"first_party\"\nservice = \"acme_memory_provider\"",
+        "kind = \"wasm\"\nmodule = \"wasm/acme_memory.wasm\"",
+    );
+    let error = parse_v3(&toml).expect_err("[memory] on a wasm runtime must fail closed");
+    assert!(
+        error.contains("[memory]") && error.contains("first_party runtime"),
+        "{error}"
+    );
+}
+
+#[test]
+fn memory_surface_with_empty_operations_fails_closed() {
+    let toml =
+        MEMORY_PROVIDER_MANIFEST.replace("operations = [\"document_store\"]", "operations = []");
+    let error = parse_v3(&toml).expect_err("[memory] with no operations must fail closed");
+    assert!(
+        error.contains("[memory]") && error.contains("must not be empty"),
+        "{error}"
+    );
+}
+
+#[test]
+fn memory_surface_without_document_store_fails_closed() {
+    let toml = MEMORY_PROVIDER_MANIFEST.replace(
+        "operations = [\"document_store\"]",
+        "operations = [\"context_retrieval\"]",
+    );
+    let error = parse_v3(&toml).expect_err("[memory] without document_store must fail closed");
+    assert!(
+        error.contains("[memory]") && error.contains("document_store"),
+        "{error}"
+    );
+}

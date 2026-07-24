@@ -14,11 +14,11 @@ use ironclaw_host_runtime::{
     GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 
 use super::super::{
@@ -82,6 +82,16 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
         CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
     ];
+    let effect_kinds = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::ExternalWrite,
+    ];
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
@@ -103,20 +113,20 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
             .collect(),
         capability_ids: qa_smoke_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
-        effect_kinds: vec![
-            EffectKind::DispatchCapability,
-            EffectKind::ReadFilesystem,
-            EffectKind::WriteFilesystem,
-            EffectKind::DeleteFilesystem,
-            EffectKind::Network,
-            EffectKind::SpawnProcess,
-            EffectKind::ExecuteCode,
-            EffectKind::ExternalWrite,
-        ],
+        effect_kinds,
         network_policy: http_test_policy(),
         secrets: Vec::new(),
         provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-        additional_provider_trust: Vec::new(),
+        // Mirror production's memory-provider trust ceiling (dispatch +
+        // filesystem only) — see core_builtin.rs for the rationale.
+        additional_provider_trust: vec![(
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+        )],
         user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
         invocations: Arc::new(Mutex::new(Vec::new())),
         results: Arc::new(Mutex::new(Vec::new())),

@@ -1,0 +1,77 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "ironclaw.memory"
+name = "Reborn Memory"
+version = "0.1.0"
+description = "Host-bundled native memory backend (issue #3537). Provides the always-on memory adapter surface: the read/write/search/tree model tools plus the host-managed retrieve-before / record-after lifecycle. The native provider is filesystem-backed and is the default memory backend; the active backend is chosen by the compose-time [memory] binding (swappable to a mem0 backend without changing these tools). Registered on the always-on first-party lane, so the tools are unconditionally available with no install/enable step."
+# Requested trust only; the host trust policy computes effective trust. A
+# `first_party` runtime + reserved `ironclaw.*` id are accepted only for the
+# loader-supplied `HostBundled` source, and only when a matching host service
+# (`native_memory_provider`) is registered — the bundled TOML alone is not
+# authority.
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "native_memory_provider"
+
+# The [memory] surface marks this extension a backend for the host memory
+# adapter and declares the operation families it supports. document_store is
+# the model tool surface; context_retrieval / interaction_log gate the
+# host-managed retrieve-before / record-after lifecycle.
+[memory]
+operations = ["document_store", "context_retrieval", "interaction_log"]
+
+# read/write model tools + native-only search/tree conveniences. All four are
+# routed to the bound MemoryService by the host; their input/output schemas are
+# served inline from the bundled asset files (the single source of truth).
+#
+# The origin_gate_matrix values preserve the gating these tools had as
+# `builtin.memory_*` members of the builtin package (§5.3 S3 seed): the
+# read-like tools are Ungated for LoopRun via the reviewed
+# UNGATED_LOOP_RUN_CAPABILITIES allowlist, memory write stays
+# gated_unless_granted (arbitrary-path write), and Product/Automation are
+# deny-by-default. A missing matrix is NOT "no gate": the S4 authorize fold
+# fails closed to Forbidden for every origin-stamped invocation.
+[[tools]]
+id = "ironclaw.memory.read"
+description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-read.input.v1.json"
+output_schema_ref = "schemas/memory/document-read.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/read.md"
+
+[[tools]]
+id = "ironclaw.memory.write"
+description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-write.input.v1.json"
+output_schema_ref = "schemas/memory/document-write.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/write.md"
+
+[[tools]]
+id = "ironclaw.memory.search"
+description = "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope; this does not search connected app or extension data."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/search.input.v1.json"
+output_schema_ref = "schemas/memory/search.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/search.md"
+
+[[tools]]
+id = "ironclaw.memory.tree"
+description = "List Reborn persistent memory documents as a compact tree."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/tree.input.v1.json"
+output_schema_ref = "schemas/memory/tree.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/tree.md"
